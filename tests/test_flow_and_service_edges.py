@@ -8,96 +8,20 @@ pin it (docs/research/2026-09-11-argument-bindings-and-route-calls.md).
 
 from __future__ import annotations
 
-import subprocess
 import sys
 from pathlib import Path
 
 import pytest
 
+from tests.flow_and_service_edges_helpers import (
+    _git,
+    _service,
+    indexed_flows,  # noqa: F401
+)
+
 SCRIPTS_DIR = Path(__file__).resolve().parent.parent / "scripts"
 if str(SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_DIR))
-
-CORE = (
-    "def store(record, index):\n"
-    "    return (record, index)\n"
-    "\n"
-    "\n"
-    "def keep(payload, position):\n"
-    "    return store(payload, index=position)\n"
-    "\n"
-    "\n"
-    "def receive(message):\n"
-    "    return keep(message, 0)\n"
-)
-
-
-SERVICE = (
-    "from fastapi import APIRouter\n"
-    "\n"
-    "from pkg.core import keep\n"
-    "\n"
-    "router = APIRouter()\n"
-    "\n"
-    "\n"
-    '@router.get("/items")\n'
-    "def list_items(limit):\n"
-    "    return keep(limit, 0)\n"
-)
-
-CLIENT = (
-    "import requests\n"
-    "\n"
-    "\n"
-    "def fetch(cursor):\n"
-    '    return requests.get("https://service.example/items", params=cursor)\n'
-)
-
-
-def _git(root: Path, *arguments: str) -> None:
-    subprocess.run(["git", "-C", str(root), *arguments], check=True, capture_output=True)
-
-
-def _make_repository(root: Path) -> Path:
-    root.mkdir(parents=True)
-    _git(root, "init", "-q", ".")
-    _git(root, "config", "user.email", "test@example.invalid")
-    _git(root, "config", "user.name", "test")
-    (root / "pkg").mkdir()
-    (root / "pkg/__init__.py").write_bytes(b"")
-    (root / "pkg/core.py").write_bytes(CORE.encode("utf-8"))
-    (root / "pkg/service.py").write_bytes(SERVICE.encode("utf-8"))
-    (root / "pkg/client.py").write_bytes(CLIENT.encode("utf-8"))
-    _git(root, "add", "-A")
-    _git(root, "commit", "-qm", "initial")
-    return root
-
-
-@pytest.fixture(scope="module")
-def indexed_flows(tmp_path_factory):
-    base = tmp_path_factory.mktemp("flow-edges")
-    root = base / "vault"
-    (root / "knowledge/notes").mkdir(parents=True)
-    (root / "knowledge/projects").mkdir(parents=True)
-    state = base / "state"
-    state.mkdir()
-    patch = pytest.MonkeyPatch()
-    patch.setenv("LLM_WIKI_STATE_ROOT", str(state))
-    patch.setenv("LLM_WIKI_ROOT", str(root))
-    patch.setenv("MEMORY_LLM_PROVIDER", "fake")
-    import evidence_reader_cache
-    import memory_state
-    import repository_index
-
-    patch.setattr(memory_state, "ROOT", root, raising=False)
-    patch.setattr(memory_state, "STATE_ROOT", state, raising=False)
-    evidence_reader_cache.clear()
-    repository = _make_repository(base / "repo")
-    answer = repository_index.index_repository(repository, state_root=state)
-    assert answer["status"] == "indexed", answer
-    yield repository
-    evidence_reader_cache.clear()
-    patch.undo()
 
 
 def _flows(repository: Path, symbol: str, depth: int | None = None) -> dict:
@@ -110,7 +34,7 @@ def _hops(answer: dict) -> list[tuple[int, str, str]]:
     return [(row["depth"], row["to"].rsplit(".", 1)[-1], row["bindings"]) for row in answer["flows"]]
 
 
-def test_one_hop_names_the_argument_and_the_parameter_it_binds(indexed_flows):
+def test_one_hop_names_the_argument_and_the_parameter_it_binds(indexed_flows):  # noqa: F811
     answer = _flows(indexed_flows, "keep", depth=1)
 
     assert _hops(answer) == [(1, "store", "payload->record,position->index")]
@@ -121,7 +45,7 @@ def test_one_hop_names_the_argument_and_the_parameter_it_binds(indexed_flows):
     )
 
 
-def test_a_second_hop_follows_the_binding_further(indexed_flows):
+def test_a_second_hop_follows_the_binding_further(indexed_flows):  # noqa: F811
     answer = _flows(indexed_flows, "receive", depth=2)
 
     assert _hops(answer) == [
@@ -130,7 +54,7 @@ def test_a_second_hop_follows_the_binding_further(indexed_flows):
     ]
 
 
-def test_the_walk_says_how_far_it_went_and_whether_more_lies_past_it(indexed_flows):
+def test_the_walk_says_how_far_it_went_and_whether_more_lies_past_it(indexed_flows):  # noqa: F811
     shallow = _flows(indexed_flows, "receive", depth=1)
     deep = _flows(indexed_flows, "receive", depth=8)
 
@@ -142,13 +66,7 @@ def _hops_of(answer: dict) -> list[tuple[int, str, str]]:
     return [(row["depth"], row["to"].rsplit(".", 1)[-1], row["relation"]) for row in answer["hops"]]
 
 
-def _service(repository: Path, symbol: str, depth: int | None = None) -> dict:
-    from code_graph import find_service_paths
-
-    return find_service_paths(symbol, repository, max_depth=depth)
-
-
-def test_a_client_call_crosses_the_route_into_the_handler(indexed_flows):
+def test_a_client_call_crosses_the_route_into_the_handler(indexed_flows):  # noqa: F811
     answer = _service(indexed_flows, "fetch", depth=1)
 
     assert _hops_of(answer) == [
@@ -158,14 +76,14 @@ def test_a_client_call_crosses_the_route_into_the_handler(indexed_flows):
     assert (answer["routes_crossed"], "route is crossed" in answer["note"]) == (1, True)
 
 
-def test_the_walk_continues_inside_the_service_it_reached(indexed_flows):
+def test_the_walk_continues_inside_the_service_it_reached(indexed_flows):  # noqa: F811
     answer = _service(indexed_flows, "fetch", depth=2)
     reached = {name for _, name, _ in _hops_of(answer)}
 
     assert {"GET /items", "list_items", "keep"} <= reached
 
 
-def test_an_unknown_symbol_answers_nothing_and_says_it_resolved_nothing(indexed_flows):
+def test_an_unknown_symbol_answers_nothing_and_says_it_resolved_nothing(indexed_flows):  # noqa: F811
     answer = _flows(indexed_flows, "no_such_symbol")
 
     assert (answer["flows"], answer["symbol_resolved"], answer["resolved_symbol_nodes"]) == (
@@ -196,7 +114,7 @@ ORDERS_CLIENT = (
 
 
 def _indexed_repository(base: Path, name: str, files: dict[str, str], state: Path) -> Path:
-    import repository_index
+    import repository_indexing
 
     root = base / name
     root.mkdir(parents=True)
@@ -209,7 +127,7 @@ def _indexed_repository(base: Path, name: str, files: dict[str, str], state: Pat
         (root / relative).write_bytes(content.encode("utf-8"))
     _git(root, "add", "-A")
     _git(root, "commit", "-qm", "initial")
-    answer = repository_index.index_repository(root, state_root=state)
+    answer = repository_indexing.index_repository(root, state_root=state)
     assert answer["status"] == "indexed", answer
     return root
 
@@ -228,10 +146,9 @@ def two_services(tmp_path_factory):
     patch.setenv("LLM_WIKI_ROOT", str(root))
     patch.setenv("MEMORY_LLM_PROVIDER", "fake")
     import evidence_reader_cache
-    import memory_state
 
-    patch.setattr(memory_state, "ROOT", root, raising=False)
-    patch.setattr(memory_state, "STATE_ROOT", state, raising=False)
+    patch.setenv("LLM_WIKI_ROOT", str(root))
+    patch.setenv("LLM_WIKI_STATE_ROOT", str(state))
     evidence_reader_cache.clear()
     _indexed_repository(base, "service-repo", {"pkg/api.py": ORDERS_SERVICE}, state)
     client = _indexed_repository(base, "client-repo", {"pkg/report.py": ORDERS_CLIENT}, state)

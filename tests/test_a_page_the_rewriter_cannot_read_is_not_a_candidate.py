@@ -25,7 +25,7 @@ PAGE = (
 def notes(tmp_path, monkeypatch) -> Path:
     directory = tmp_path / "knowledge" / "notes"
     directory.mkdir(parents=True)
-    monkeypatch.setattr(reflection, "KNOWLEDGE", directory)
+    monkeypatch.setenv("LLM_WIKI_ROOT", str(tmp_path))
     (directory / "good.md").write_bytes(PAGE)
     return directory
 

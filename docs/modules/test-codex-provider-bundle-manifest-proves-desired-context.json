@@ -1,0 +1,349 @@
+{
+  "encoding": "o200k_base",
+  "max_tokens": 100000,
+  "serialization": "exact-duplicates/v1",
+  "files": [
+    "AGENTS.md",
+    "CLAUDE.md",
+    "docs/AGENTS.md",
+    "docs/STRUCTURE.md",
+    "docs/modules/context-bundle.md",
+    "docs/modules/context-records.md",
+    "docs/modules/context-tooling.md",
+    "docs/modules/doctor-integrations.md",
+    "docs/modules/generation-descriptors.md",
+    "docs/modules/install-control-helpers.md",
+    "docs/modules/install-provider-files.md",
+    "docs/modules/integration-hook-config.md",
+    "docs/modules/model-choice.md",
+    "docs/modules/product-structure.md",
+    "docs/modules/project-governance.md",
+    "docs/modules/test-codex-provider-bundle-manifest-proves-desired-context.json",
+    "docs/modules/test-codex-provider-bundle-manifest-proves-desired.md",
+    "docs/modules/test-support.md",
+    "rules/development-laws.md",
+    "scripts/__init__.py",
+    "scripts/llm_wiki/__init__.py",
+    "scripts/llm_wiki/context_bundle.py",
+    "scripts/llm_wiki/doctor_integrations.py",
+    "scripts/llm_wiki/generation_descriptors.py",
+    "scripts/llm_wiki/install_provider_files.py",
+    "tests/__init__.py",
+    "tests/codex_installed_provider_bundle_reaches_launch_helpers.py",
+    "tests/conftest.py",
+    "tests/install_control_helpers.py",
+    "tests/module_context.py",
+    "tests/module_context_paths.py",
+    "tests/module_interface.py",
+    "tests/module_interface_render.py",
+    "tests/module_qualification.py",
+    "tests/module_record_context.py",
+    "tests/module_records.py",
+    "tests/shared_fixtures.py",
+    "tests/slow_machine.py",
+    "tests/test_codex_provider_bundle_manifest_proves_desired.py"
+  ],
+  "ownership": {
+    "files": [
+      "docs/modules/test-codex-provider-bundle-manifest-proves-desired-context.json",
+      "docs/modules/test-codex-provider-bundle-manifest-proves-desired.md",
+      "tests/test_codex_provider_bundle_manifest_proves_desired.py"
+    ]
+  },
+  "qualified_dependencies": [
+    {
+      "provider": "scripts/codex_config_state.py",
+      "names": [
+        "codex_mcp_config_state",
+        "mcp_expected_args"
+      ],
+      "contract_sha256": "0f2627163908b33ebaf2b8d9af792f119993775e6cb74cd3d600cfc13a29c439",
+      "integration_tests": [
+        "tests/test_codex_provider_bundle_manifest_proves_desired.py"
+      ]
+    },
+    {
+      "provider": "scripts/codex_hook_identity.py",
+      "names": [
+        "OUR_CODEX_SCRIPTS",
+        "is_our_codex_command"
+      ],
+      "contract_sha256": "01d1079b0ece818fe5260c41842201a2fd8803a407e69ccaca692f83798c0005",
+      "integration_tests": [
+        "tests/test_codex_provider_bundle_manifest_proves_desired.py"
+      ]
+    },
+    {
+      "provider": "scripts/codex_memory.py",
+      "names": [
+        "mcp_block",
+        "replace_codex_mcp_entry"
+      ],
+      "contract_sha256": "2d2c11f06ff87635b15e5b58d9197120fa04749b8db546f5a1de1b97aa10d6d4",
+      "integration_tests": [
+        "tests/test_codex_provider_bundle_manifest_proves_desired.py"
+      ]
+    },
+    {
+      "provider": "scripts/generation_maintenance.py",
+      "names": [
+        "result",
+        "safe_kind"
+      ],
+      "contract_sha256": "e8f6812d4cd47e1e8b8d9466e1ad43733f8a73551de81b159915da12d6f219a9",
+      "integration_tests": [
+        "tests/test_codex_provider_bundle_manifest_proves_desired.py"
+      ]
+    },
+    {
+      "provider": "scripts/install_state.py",
+      "names": [
+        "InstallControlError",
+        "PROVIDER_READ_PROOF",
+        "active_install_health_for_schema",
+        "transaction_resources",
+        "validate_schema"
+      ],
+      "contract_sha256": "bb7b987fe1a261d0c356b9ca8285ad5eda05e541a6afe655cf7cf6d03afda136",
+      "integration_tests": [
+        "tests/test_a_backup_image_carries_what_git_does_not.py",
+        "tests/test_a_backup_snapshots_what_hooks_write.py",
+        "tests/test_a_changed_file_is_named_and_can_be_taken_over.py"
+      ]
+    },
+    {
+      "provider": "scripts/integration_hook_config.py",
+      "names": [
+        "PROVIDER_ENV_KEYS",
+        "codex_command_launch",
+        "codex_hooks_resource",
+        "codex_hooks_template",
+        "codex_launch_args",
+        "codex_projection_bundle",
+        "codex_rendered_template"
+      ],
+      "contract_sha256": "574e720a20809e80de2169ecdb80edbbbd9de3c4982da2f0ca921c7476a668c5",
+      "integration_tests": [
+        "tests/test_codex_provider_bundle_manifest_proves_desired.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/doctor_base.py",
+      "names": [
+        "MAX_CONFIG_BYTES",
+        "RUNTIME_DIRECTORIES",
+        "SCHEMA_VERSION",
+        "read_bounded_json"
+      ],
+      "contract_sha256": "9a79c05948b070fc21b591e4c80be46c770a49646f39f6af6963faf0f53f9d12",
+      "integration_tests": [
+        "tests/test_codex_provider_bundle_manifest_proves_desired.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/doctor_schedule.py",
+      "names": [
+        "PROBE_INCOMPLETE",
+        "codex_app_server_command",
+        "contains_markers"
+      ],
+      "contract_sha256": "0900088a0acba816a4f2199782b3b289ae09111bd28de98c40e7e8b639f3fcc4",
+      "integration_tests": [
+        "tests/test_codex_provider_bundle_manifest_proves_desired.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/generation_catalog_store.py",
+      "names": [
+        "GenerationCatalog"
+      ],
+      "contract_sha256": "b18194ebe04bf988b4474379fcb5243516550d43b745a00eaed1453f7844c983",
+      "integration_tests": [
+        "tests/test_a_build_in_flight_is_not_an_orphan.py",
+        "tests/test_a_code_generation_is_not_abandoned.py",
+        "tests/test_a_flow_walk_stops_when_its_caller_has.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/generation_fields.py",
+      "names": [
+        "check_cancelled",
+        "check_monotonic_deadline"
+      ],
+      "contract_sha256": "dd4c2e6077290f05bc0917ffba160d3f8b8dd2564f1f8868eb16b3bf1deae2f4",
+      "integration_tests": [
+        "tests/test_a_blocked_task_has_a_way_back.py",
+        "tests/test_a_build_in_flight_is_not_an_orphan.py",
+        "tests/test_a_capacity_refusal_does_not_corrupt_a_generation.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/generation_limits.py",
+      "names": [
+        "HASH_CHUNK_BYTES"
+      ],
+      "contract_sha256": "b938fc710f1044883f4d9c11d1821c9250e2e2bddcdecbefcbdcf8bf04623136",
+      "integration_tests": [
+        "tests/test_generation_catalog.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/install_inspection.py",
+      "names": [
+        "unowned_agent_registrations"
+      ],
+      "contract_sha256": "19c011d4090dffda4f5d68967eb54a0f12a3e3abb4b03eeadbe4bc72754585c8",
+      "integration_tests": [
+        "tests/test_an_uninstall_names_what_it_leaves.py",
+        "tests/test_codex_provider_bundle_manifest_proves_desired.py",
+        "tests/test_install_control.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/install_provider_proof.py",
+      "names": [
+        "installed_codex_provider_bundle",
+        "provider_snapshot_proof"
+      ],
+      "contract_sha256": "faccb503b39a55c5ff3891f726b48710935023228ff7d3486a8f990a2ad376a1",
+      "integration_tests": [
+        "tests/test_codex_provider_bundle_manifest_proves_desired.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/install_record_reader.py",
+      "names": [
+        "require_record_roots"
+      ],
+      "contract_sha256": "522c3f790f0eb480f7ce64bebfe9ce4d58f11745953e1e04b49a623effb6da85",
+      "integration_tests": [
+        "tests/test_claude_settings_ownership.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/install_resource_builder.py",
+      "names": [
+        "codex_hooks_destination"
+      ],
+      "contract_sha256": "21f7756c7a0d0eabb158cab376f399433d16ecd577eb932c8c20dd515f6014cc",
+      "integration_tests": [
+        "tests/test_a_rerun_may_ask_for_fewer_things.py",
+        "tests/test_an_uninstall_names_what_it_leaves.py",
+        "tests/test_claude_settings_ownership.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/install_uninstall_rollback.py",
+      "names": [
+        "rollback_resources",
+        "uninstall_resources"
+      ],
+      "contract_sha256": "624562915228514c2dbc18f5860dab5fc810154dc1b8f3ad54c02b3d827e18da",
+      "integration_tests": [
+        "tests/test_a_rollback_undoes_only_what_it_did.py",
+        "tests/test_an_update_honors_explicit_resource_adoption.py",
+        "tests/test_claude_provider_projection_round_trips.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/install_v2_transactions.py",
+      "names": [
+        "install_resources"
+      ],
+      "contract_sha256": "074664d4c33ddcaaa76fbe45b137f8f494dc7de80f4f3c32abd52b035eade17b",
+      "integration_tests": [
+        "tests/test_a_changed_task_setting_reaches_an_installed_machine.py",
+        "tests/test_a_rerun_may_ask_for_fewer_things.py",
+        "tests/test_a_rollback_undoes_only_what_it_did.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/model_choice.py",
+      "names": [
+        "using_root"
+      ],
+      "contract_sha256": "d45f2655cb61963e77617d1dfd7d617b134ad77cc770b59b335d0856e5d65019",
+      "integration_tests": [
+        "tests/test_codex_provider_bundle_manifest_proves_desired.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/monotonic_deadline.py",
+      "names": [
+        "deadline_reached"
+      ],
+      "contract_sha256": "780a284b7c14768802bc81209d0e77dcd0f7a79885a4888eaaca663eda331414",
+      "integration_tests": [
+        "tests/test_a_backup_image_carries_what_git_does_not.py",
+        "tests/test_a_backup_snapshots_what_hooks_write.py",
+        "tests/test_a_backup_takes_what_any_installed_vault_holds.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/runtime_roots.py",
+      "names": [
+        "state_root_for"
+      ],
+      "contract_sha256": "d2e6a394a08b7c76f0106a5558f12c3a65c589172b0ab07bfa32c015904e358a",
+      "integration_tests": [
+        "tests/test_a_continuation_keeps_its_original_entry.py",
+        "tests/test_a_prompt_checkpoint_does_not_outwait_its_host.py",
+        "tests/test_a_session_marker_survives_a_busy_writer.py"
+      ]
+    },
+    {
+      "provider": "scripts/lsp_process_tree.py",
+      "names": [
+        "ProcessTree"
+      ],
+      "contract_sha256": "880a66d117005aa6621dff9c11869822efaa0dfac1221bfafdbd4e10629db3fb",
+      "integration_tests": [
+        "tests/test_codex_provider_bundle_manifest_proves_desired.py"
+      ]
+    },
+    {
+      "provider": "scripts/markdown_transaction.py",
+      "names": [
+        "run_acl_command"
+      ],
+      "contract_sha256": "fd4c3aa023f5ee1ca6712942e0c6efae64481faaa60b6261f887cb507a26d5ed",
+      "integration_tests": [
+        "tests/test_codex_provider_bundle_manifest_proves_desired.py"
+      ]
+    },
+    {
+      "provider": "scripts/reliable_memory.py",
+      "names": [
+        "canonical_json_bytes",
+        "validate_runtime_file",
+        "validate_state_root"
+      ],
+      "contract_sha256": "c3eb9adb7eb6f43017b59dcf88a647f801617edbf743b215465ca1db9201305f",
+      "integration_tests": [
+        "tests/test_codex_provider_bundle_manifest_proves_desired.py"
+      ]
+    },
+    {
+      "provider": "scripts/repository_scope.py",
+      "names": [
+        "sanitized_git_environment"
+      ],
+      "contract_sha256": "fd550ae20761afad50b37fa3a71044a162485b0e4d4b3e2af9b5b22e143c2bec",
+      "integration_tests": [
+        "tests/test_codex_provider_bundle_manifest_proves_desired.py"
+      ]
+    },
+    {
+      "provider": "scripts/windows_workspace.py",
+      "names": [
+        "identity"
+      ],
+      "contract_sha256": "eea4594d179dae7393111a6340168ba899088bcdc388cf8f28e09ae429c047b3",
+      "integration_tests": [
+        "tests/test_codex_provider_bundle_manifest_proves_desired.py",
+        "tests/test_doctor.py",
+        "tests/test_lsp_security.py"
+      ]
+    }
+  ]
+}

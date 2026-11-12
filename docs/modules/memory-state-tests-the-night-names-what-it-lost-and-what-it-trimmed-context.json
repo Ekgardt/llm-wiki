@@ -1,0 +1,132 @@
+{
+  "encoding": "o200k_base",
+  "max_tokens": 100000,
+  "serialization": "exact-duplicates/v1",
+  "files": [
+    "AGENTS.md",
+    "CLAUDE.md",
+    "docs/AGENTS.md",
+    "docs/STRUCTURE.md",
+    "docs/modules/context-bundle.md",
+    "docs/modules/context-records.md",
+    "docs/modules/context-tooling.md",
+    "docs/modules/memory-state-tests-the-night-names-what-it-lost-and-what-it-trimmed-context.json",
+    "docs/modules/memory-state-tests-the-night-names-what-it-lost-and-what-it-trimmed.md",
+    "docs/modules/model-choice.md",
+    "docs/modules/product-structure.md",
+    "docs/modules/project-governance.md",
+    "docs/modules/test-support.md",
+    "rules/development-laws.md",
+    "scripts/__init__.py",
+    "scripts/llm_wiki/__init__.py",
+    "scripts/llm_wiki/context_bundle.py",
+    "tests/__init__.py",
+    "tests/conftest.py",
+    "tests/module_context.py",
+    "tests/module_context_paths.py",
+    "tests/module_interface.py",
+    "tests/module_interface_render.py",
+    "tests/module_qualification.py",
+    "tests/module_record_context.py",
+    "tests/module_records.py",
+    "tests/shared_fixtures.py",
+    "tests/slow_machine.py",
+    "tests/test_the_night_names_what_it_lost_and_what_it_trimmed.py"
+  ],
+  "ownership": {
+    "files": [
+      "docs/modules/memory-state-tests-the-night-names-what-it-lost-and-what-it-trimmed-context.json",
+      "docs/modules/memory-state-tests-the-night-names-what-it-lost-and-what-it-trimmed.md",
+      "tests/test_the_night_names_what_it_lost_and_what_it_trimmed.py"
+    ]
+  },
+  "qualified_dependencies": [
+    {
+      "provider": "scripts/llm_wiki/generation_catalog_store.py",
+      "names": [
+        "GenerationCatalog"
+      ],
+      "contract_sha256": "b18194ebe04bf988b4474379fcb5243516550d43b745a00eaed1453f7844c983",
+      "integration_tests": [
+        "tests/test_a_blocked_task_has_a_way_back.py",
+        "tests/test_a_build_in_flight_is_not_an_orphan.py",
+        "tests/test_a_capacity_refusal_does_not_corrupt_a_generation.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/model_choice.py",
+      "names": [
+        "using_root"
+      ],
+      "contract_sha256": "d45f2655cb61963e77617d1dfd7d617b134ad77cc770b59b335d0856e5d65019",
+      "integration_tests": [
+        "tests/test_the_night_names_what_it_lost_and_what_it_trimmed.py"
+      ]
+    },
+    {
+      "provider": "scripts/maintenance_helpers.py",
+      "names": [
+        "trim_scheduler_logs"
+      ],
+      "contract_sha256": "8b551b86055304e66f9130f0c34ec67895395f4b45b2828172bd2973b8c6c812",
+      "integration_tests": [
+        "tests/test_a_log_many_writers_append_to_is_rotated_not_trimmed.py",
+        "tests/test_a_report_link_outlives_no_report.py",
+        "tests/test_doctor_knows_the_abort_states.py"
+      ]
+    },
+    {
+      "provider": "scripts/memory_state.py",
+      "names": [
+        "load_state",
+        "update_state"
+      ],
+      "contract_sha256": "16766a3a530ab56b9404215b376a871b02f7a40ef6c6346eb23bc5a9f249944d",
+      "integration_tests": [
+        "tests/test_a_corrupt_state_is_not_replaced_by_an_empty_one.py",
+        "tests/test_a_discarded_receipt_reopens_its_day.py",
+        "tests/test_a_lock_is_released_even_while_somebody_is_reading_it.py"
+      ]
+    },
+    {
+      "provider": "scripts/reliable_memory.py",
+      "names": [
+        "validate_state_root"
+      ],
+      "contract_sha256": "8680515cd873056a7c8a36e0057d91f2f83f23c48841263697676ff91f7ff964",
+      "integration_tests": [
+        "tests/test_the_night_names_what_it_lost_and_what_it_trimmed.py"
+      ]
+    },
+    {
+      "provider": "scripts/repository_scope.py",
+      "names": [
+        "sanitized_git_environment"
+      ],
+      "contract_sha256": "fd550ae20761afad50b37fa3a71044a162485b0e4d4b3e2af9b5b22e143c2bec",
+      "integration_tests": [
+        "tests/test_the_night_names_what_it_lost_and_what_it_trimmed.py"
+      ]
+    },
+    {
+      "provider": "scripts/scheduled_nightly.py",
+      "names": [
+        "record_nightly_result"
+      ],
+      "contract_sha256": "830377f28822361bb8f43cbab333ad6ffdf1cdd44db63a7994b01d86bd3afea9",
+      "integration_tests": [
+        "tests/test_the_night_names_what_it_lost_and_what_it_trimmed.py"
+      ]
+    },
+    {
+      "provider": "scripts/weekly_budget.py",
+      "names": [
+        "script_steps"
+      ],
+      "contract_sha256": "4f125536b1c97a722f874e122cc79212b08d3c8ae5384ecab9ece9630d2cfb53",
+      "integration_tests": [
+        "tests/test_the_night_names_what_it_lost_and_what_it_trimmed.py"
+      ]
+    }
+  ]
+}

@@ -14,11 +14,14 @@ OWASP LLM Top 10 (2025) coverage:
 from __future__ import annotations
 
 import ast
+import io
 import re
 from pathlib import Path
-from unittest.mock import patch
 
 import pytest
+
+from tests.compile_paths import compile_pipeline_binds
+from tests.script_sources import script_files, split_module_files, split_module_source
 
 ROOT = Path(__file__).resolve().parent.parent
 SCRIPTS = ROOT / "scripts"
@@ -60,21 +63,39 @@ def _names_daily_archive(line: str) -> bool:
     return "daily" in line and "archive" in line
 
 
-def _assignment_sources(source: str, tree: ast.AST) -> list[str]:
+def _source_lines(source: str) -> list[bytes]:
+    """Prepare physical UTF-8 lines once, preserving CR/LF and form feeds."""
+    return [line.encode("utf-8") for line in io.StringIO(source, newline="").readlines()]
+
+
+def _source_segment(lines: list[bytes], node: ast.AST) -> str | None:
+    positions = tuple(getattr(node, name, None) for name in
+                      ("lineno", "end_lineno", "col_offset", "end_col_offset"))
+    if None in positions:
+        return None
+    first, last, start, end = positions
+    first, last = first - 1, last - 1
+    if first == last:
+        return lines[first][start:end].decode("utf-8")
+    segment = lines[first][start:] + b"".join(lines[first + 1:last]) + lines[last][:end]
+    return segment.decode("utf-8")
+
+
+def _assignment_sources(lines: list[bytes], tree: ast.AST) -> list[str]:
     return [
-        ast.get_source_segment(source, node) or ""
+        _source_segment(lines, node) or ""
         for node in ast.walk(tree)
         if isinstance(node, (ast.Assign, ast.AnnAssign))
     ]
 
 
-def _archive_assignment(source: str, tree: ast.AST) -> bool:
-    return any(_mentions_daily_archive(text) for text in _assignment_sources(source, tree))
+def _archive_assignment(lines: list[bytes], tree: ast.AST) -> bool:
+    return any(_mentions_daily_archive(text) for text in _assignment_sources(lines, tree))
 
 
-def _archive_rename(source: str, renames: list[ast.Call]) -> bool:
+def _archive_rename(lines: list[bytes], renames: list[ast.Call]) -> bool:
     return any(
-        _mentions_daily_archive(ast.get_source_segment(source, call) or "")
+        _mentions_daily_archive(_source_segment(lines, call) or "")
         for call in renames
     )
 
@@ -86,7 +107,59 @@ def _publishes_daily_archive(path: Path) -> bool:
     renames = _rename_calls(tree)
     if not renames:
         return False
-    return _archive_assignment(source, tree) or _archive_rename(source, renames)
+    lines = _source_lines(source)
+    return _archive_assignment(lines, tree) or _archive_rename(lines, renames)
+
+
+def test_archive_guard_does_not_split_the_whole_source_for_every_assignment(tmp_path, monkeypatch):
+    """Whole-module preparation must not grow with its assignment count."""
+    module = tmp_path / "publisher.py"
+    source = "value = 1\n" * 20 + "archive = daily_root / 'archive'\nos.rename(before, archive)\n"
+    module.write_text(source, encoding="utf-8")
+    original = ast._splitlines_no_ff
+    preparations = []
+
+    def split_lines(text):
+        preparations.append(text)
+        return original(text)
+
+    monkeypatch.setattr(ast, "_splitlines_no_ff", split_lines)
+    assert _publishes_daily_archive(module)
+    assert len(preparations) <= 1, "the full source was split again for each assignment"
+
+
+@pytest.mark.parametrize("ending", ["\n", "\r\n", "\r"])
+@pytest.mark.parametrize("source", [
+    "é = 'pré'; target = daily_root / 'archive'\nos.rename(before, target)\n",
+    "target = (\n    daily_root / 'archive'\n)\nos.replace(before, target)\n",
+    "target: str = 'daily\\farchive'\nos.rename(before, target)\n",
+    "target = '''daily\farchive\nсохранённая строка'''\nos.rename(before, target)\n",
+    "target = 'daily\\narchive'\nos.rename(before, target)\n",
+])
+def test_archive_source_spans_match_python_with_unicode_and_physical_endings(source, ending):
+    source = source.replace("\n", ending)
+    lines = _source_lines(source)
+    nodes = (node for node in ast.walk(ast.parse(source))
+             if isinstance(node, (ast.Assign, ast.AnnAssign, ast.Call)))
+    for node in nodes:
+        assert _source_segment(lines, node) == ast.get_source_segment(source, node)
+
+
+def test_an_unlocated_node_keeps_the_original_missing_segment_result():
+    node = ast.Assign(targets=[ast.Name(id="target")], value=ast.Constant(value=1))
+    assert _source_segment(_source_lines("target = 1\n"), node) is None
+
+
+@pytest.mark.parametrize("source,expected", [
+    ("target = daily_root / 'archive'\nos.rename(before, target)\n", True),
+    ("target = ordinary_root / 'archive'\nos.rename(before, target)\n", False),
+    ("target = 'knowledge/daily'\nother = 'knowledge/log-archive'\nos.rename(before, target)\n", False),
+    ("os.replace(before, daily_root / 'archive')\n", True),
+])
+def test_archive_guard_preserves_publication_and_unrelated_path_verdicts(tmp_path, source, expected):
+    module = tmp_path / "publisher.py"
+    module.write_text(source, encoding="utf-8")
+    assert _publishes_daily_archive(module) is expected
 
 
 def _parsed_module(py: Path) -> ast.AST | None:
@@ -108,11 +181,17 @@ def _pattern_hits(py: Path, pattern: str) -> list[str]:
     tree = _parsed_module(py)
     if tree is None:
         return []
+    whole_name = _whole_path_name(pattern)
     return [
         f"{py.name}:{node.lineno}"
         for node in _string_constants(tree)
-        if pattern in node.value
+        if whole_name.search(node.value)
     ]
+
+
+def _whole_path_name(pattern: str) -> re.Pattern[str]:
+    """``wiki/`` names a root directory, not the tail of ``llm_wiki/``."""
+    return re.compile(r"(?<![\w-])" + re.escape(pattern))
 
 
 def _tolerated_hit(hit: str) -> bool:
@@ -155,7 +234,7 @@ class TestTranscriptPathContainment:
         import integration_adapter
 
         with pytest.raises(OSError):
-            integration_adapter._validated_capture_transcript_path(str(Path(sensitive).expanduser()))
+            integration_adapter.validated_capture_transcript_path(str(Path(sensitive).expanduser()))
 
     @pytest.mark.parametrize("ext", (".pem", ".key", ".env", ".db", ".sqlite"))
     def test_transcript_must_have_known_extension(self, ext, tmp_path):
@@ -166,7 +245,7 @@ class TestTranscriptPathContainment:
         candidate.write_text("secret\n", encoding="utf-8")
 
         with pytest.raises(PermissionError, match="extension"):
-            integration_adapter._validated_capture_transcript_path(str(candidate))
+            integration_adapter.validated_capture_transcript_path(str(candidate))
 
 
 # ---------------------------------------------------------------------------
@@ -180,16 +259,16 @@ class TestNoLLMBypass:
 
     def test_skip_evidence_not_in_source(self):
         """No 'skip_evidence' field should exist in compile_memory source."""
-        src = (SCRIPTS / "compile_memory.py").read_text(encoding="utf-8")
+        src = split_module_source("compile_pipeline", "compile_pipeline")
         assert "skip_evidence" not in src, (
-            "skip_evidence found in compile_memory.py — LLM can bypass "
+            "skip_evidence found in compile_pipeline.py — LLM can bypass "
             "evidence verification. This field was removed because it "
             "allows prompt injection to create knowledge without evidence."
         )
 
     def test_grep_no_shell_true(self):
         """No script should use shell=True with subprocess."""
-        for py in SCRIPTS.glob("*.py"):
+        for py in script_files():
             src = py.read_text(encoding="utf-8")
             # Broad patterns: the value may be computed (shell=condition),
             # so context decides whether the flag reaches a subprocess call.
@@ -204,7 +283,7 @@ class TestNoLLMBypass:
     def test_only_daily_archiver_has_directory_publication_exception(self):
         offenders = {
             path.name
-            for path in SCRIPTS.glob("*.py")
+            for path in script_files()
             # Scanner patterns are data, not publication calls.
             if path.name != "check_knowledge_writers.py"
             and _publishes_daily_archive(path)
@@ -213,130 +292,10 @@ class TestNoLLMBypass:
 
 
 # ---------------------------------------------------------------------------
-# INVARIANT 3: Redaction before persistence
-# (would have caught: H-014 bootstrap, L-001 truncation order)
+# INVARIANT 3: pure redaction checks now live in
+# tests/modules/secret_redact/test_security_invariants.py.
+# Persistence integration remains covered by the writer invariants above.
 # ---------------------------------------------------------------------------
-
-
-class TestRedactionBeforePersistence:
-    """All text written to durable storage must pass through redact_secrets."""
-
-    WRITE_FUNCTIONS = [
-        "compile_memory.py",
-        "query_memory.py",
-        "flush_memory.py",
-        "daily_log_append.py",
-        "bootstrap_project.py",
-    ]
-
-    def test_secret_redact_importable(self):
-        """secret_redact must be importable with zero deps."""
-        from secret_redact import redact_secrets
-
-        assert callable(redact_secrets)
-
-    def test_redact_catches_bearer(self):
-        from secret_redact import redact_secrets
-
-        out = redact_secrets("Authorization: Bearer sk-abcdefghijklmnopqrstuvwxyz012345")
-        assert "sk-abcdefghijklmnopqrstuvwxyz012345" not in out
-
-    def test_redact_catches_aws_key(self):
-        from secret_redact import redact_secrets
-
-        out = redact_secrets("AWS_KEY=AKIAIOSFODNN7EXAMPLE")
-        assert "AKIAIOSFODNN7EXAMPLE" not in out
-
-    def test_redact_catches_jwt(self):
-        from secret_redact import redact_secrets
-
-        jwt = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dozjgNryP4J3jVmNHl0w5N_XgL0n3I9PlFUPCTHLak8"  # gitleaks:allow — public example JWT from jwt.io, not a real secret
-        out = redact_secrets(f"token: {jwt}")
-        assert jwt not in out
-
-    def test_entropy_token_redacted(self):
-        from secret_redact import redact_secrets
-
-        out = redact_secrets("entropy=short-secret entropy: another-secret")
-        assert out == "entropy=[REDACTED] entropy: [REDACTED]"
-
-    def test_redact_catches_hyphenated_provider_key(self):
-        """Modern provider keys carry hyphenated prefixes (sk-ant-…, sk-proj-…)."""
-        from secret_redact import redact_secrets
-
-        key = "sk-ant-api03-QWERTYUIOPASDFGHJKLZXCVBNM1234"
-        out = redact_secrets(f"call failed with {key}")
-        assert key not in out
-        assert "[REDACTED_API_KEY]" in out
-
-    def test_redact_keeps_a_key_prefix_that_is_part_of_a_word(self):
-        """`task-` ends in `sk-`, and that blocked every compile this vault ran.
-
-        The page slug `dead-task-retirement-and-restore-decision` contains
-        `sk-retirement-and-restore-decision`, which the provider-key pattern
-        matched. The fail-closed DLP boundary then quarantined the transaction,
-        so the memory pipeline could not write at all. A real key starts a
-        token; a suffix inside a word does not.
-        """
-        from secret_redact import redact_secrets
-
-        for text in (
-            "- [[knowledge/notes/dead-task-retirement-and-restore-decision]] — a page",
-            "Recorded in `dead-task-retirement-and-restore-decision.md`.",
-            "see risk-assessment-and-mitigation-plan for the rest",
-        ):
-            assert redact_secrets(text) == text
-
-    def test_redact_still_catches_a_key_after_punctuation(self):
-        """Boundary means token start, not whitespace: `=`, quotes and `(` count."""
-        from secret_redact import redact_secrets
-
-        key = "sk-ant-api03-QWERTYUIOPASDFGHJKLZXCVBNM1234"
-        for text in (f"OPENAI_API_KEY={key}", f'value "{key}"', f"({key})"):
-            assert key not in redact_secrets(text)
-
-    def test_redact_keeps_hyphenated_prose(self):
-        """A long hyphenated identifier is not a key just because it is long."""
-        from secret_redact import redact_secrets
-
-        text = "branch fix/linux-installer-and-transient-cleanup is ready"
-        assert redact_secrets(text) == text
-
-    def test_redact_keeps_macos_temporary_paths(self):
-        """A macOS temp path is 41 characters of `[A-Za-z0-9/]` at entropy 4.46."""
-        from secret_redact import redact_secrets
-
-        path = (
-            "/private/var/folders/_5/zjnzxgh147qcg3bb5cg2wvqw0000gn/T/"
-            "pytest-of-runner/pytest-0/test_case0/Project With Spaces"
-        )
-        assert redact_secrets(path) == path
-
-    def test_redact_still_catches_base64_with_slashes(self):
-        """A real blob keeps long dense runs between its separators."""
-        from secret_redact import redact_secrets
-
-        blob = "QUJDREVGR0hJSktMTU5PUFFSU1RVVldY/YWJjZGVmZ2hpamtsbW5vcHFyc3R1dnd4"
-        out = redact_secrets(f"payload {blob}")
-        assert blob not in out
-        assert "[REDACTED_TOKEN]" in out
-
-    def test_redact_does_not_redact_sha256(self):
-        """Git SHA hashes (pure hex) must NOT be redacted."""
-        from secret_redact import redact_secrets
-
-        sha = "a" * 64  # 64 hex chars = SHA-256
-        out = redact_secrets(f"commit {sha}")
-        assert sha in out, "SHA-256 hash was incorrectly redacted"
-
-    def test_redact_does_not_redact_normal_text(self):
-        """Normal prose with alphanumeric strings over 40 chars should survive."""
-        from secret_redact import redact_secrets
-
-        text = "The quick brown fox jumps over the lazy dog and then runs away"
-        out = redact_secrets(text)
-        # The text should be unchanged (no high-entropy base64 matches)
-        assert "quick brown fox" in out
 
 
 # ---------------------------------------------------------------------------
@@ -354,13 +313,13 @@ class TestStatusFiltering:
     ACTIVE_FM = "---\ntype: pattern\n---\n\n# Page\n"
 
     def test_search_memory_excludes_superseded(self):
-        """search_memory._collect_pages must skip superseded/archived."""
+        """search_memory.collect_pages must skip superseded/archived."""
 
         # Check that the source code has the status filter
         src = (SCRIPTS / "search_memory.py").read_text(encoding="utf-8")
         assert "superseded" in src, (
             "search_memory.py does not filter superseded pages — "
-            "add status: superseded/archived check in _collect_pages"
+            "add status: superseded/archived check in collect_pages"
         )
 
     def test_rebuild_memory_index_excludes_superseded(self):
@@ -372,10 +331,10 @@ class TestStatusFiltering:
         """
         import rebuild_memory_index
 
-        assert rebuild_memory_index._is_retired(self.SUPERSEDED_FM)
-        assert rebuild_memory_index._is_retired(self.ARCHIVED_FM)
-        assert not rebuild_memory_index._is_retired(self.ACTIVE_FM)
-        assert not rebuild_memory_index._is_retired(
+        assert rebuild_memory_index.is_retired_page(self.SUPERSEDED_FM)
+        assert rebuild_memory_index.is_retired_page(self.ARCHIVED_FM)
+        assert not rebuild_memory_index.is_retired_page(self.ACTIVE_FM)
+        assert not rebuild_memory_index.is_retired_page(
             "---\nstatus: accepted\ntype: decision\n---\n\n# Page\n"
         )
 
@@ -416,28 +375,28 @@ class TestPathSafety:
     @pytest.mark.parametrize("evil", TRAVERSAL_INPUTS)
     def test_compile_category_rejects_traversal(self, evil):
         """compile_memory must reject traversal in category field."""
-        import compile_memory
+        from llm_wiki import compile_pipeline_base
 
-        categories = compile_memory.RAW_PLAN_SCHEMA["properties"]["operations"][
+        categories = compile_pipeline_base.RAW_PLAN_SCHEMA["properties"]["operations"][
             "items"
         ]["properties"]["category"]["enum"]
         assert evil not in categories
-        assert not hasattr(compile_memory, "_execute_plan")
+        assert not compile_pipeline_binds("_execute_plan")
 
-    def test_blackboard_project_rejects_traversal(self, tmp_path):
-        """blackboard must reject traversal in project slug."""
+    def test_blackboard_project_rejects_traversal(self, tmp_path, monkeypatch):
+        """blackboard must keep a traversing project slug inside the vault's projects."""
         import blackboard
+        from llm_wiki import runtime_roots
 
-        with patch.object(blackboard, "PROJECTS_DIR", tmp_path):
-            try:
-                d = blackboard._bb_dir("../../evil")
-                # If we get here, check the path doesn't escape
-                resolved = d.resolve()
-                assert resolved.is_relative_to(tmp_path.resolve()), (
-                    f"Blackboard path escaped projects dir: {resolved}"
-                )
-            except ValueError:
-                pass  # Rejected — good
+        monkeypatch.setenv("LLM_WIKI_ROOT", str(tmp_path))
+        projects = runtime_roots.projects_dir().resolve()
+        try:
+            resolved = blackboard.bb_dir("../../evil").resolve()
+        except ValueError:
+            return
+        assert resolved.is_relative_to(projects), (
+            f"Blackboard path escaped projects dir: {resolved}"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -457,9 +416,9 @@ class TestYAMLSafety:
 
     def test_compile_frontmatter_escapes_quotes(self):
         """compile_memory must escape quotes in title/summary."""
-        src = (SCRIPTS / "compile_memory.py").read_text(encoding="utf-8")
+        src = split_module_source("compile_pipeline", "compile_pipeline")
         assert "chr(34)" in src or '\\"' in src, (
-            "compile_memory.py does not escape quotes in YAML frontmatter"
+            "compile_pipeline.py does not escape quotes in YAML frontmatter"
         )
 
 
@@ -469,33 +428,38 @@ class TestYAMLSafety:
 # ---------------------------------------------------------------------------
 
 
-def _legacy_path_violations(search_dir: str, pattern: str) -> list:
+def _legacy_path_violations(files: list[Path], pattern: str) -> list:
     """Hits of a forbidden path in active code, comments and docstrings aside."""
-    return [
-        hit
-        for py in (ROOT / search_dir).glob("*.py")
-        for hit in _pattern_hits(py, pattern)
-        if not _tolerated_hit(hit)
-    ]
+    return [hit for py in files for hit in _pattern_hits(py, pattern) if not _tolerated_hit(hit)]
 
 
 class TestNoLegacyPaths:
     """Active code must not reference forbidden root directories."""
 
-    FORBIDDEN_IN_CODE = [
-        ("wiki/", "scripts/"),
-        ("memory/", "scripts/"),  # Allow in comments/docstrings only
-        ("outputs/", "scripts/"),
-        ("LLM-wiki-state", "scripts/"),
-        ("memory-state", "scripts/"),
-        ("memory-reports", "scripts/"),
-    ]
+    FORBIDDEN_IN_CODE = ["wiki/", "memory/", "outputs/", "LLM-wiki-state", "memory-state", "memory-reports"]
 
-    @pytest.mark.parametrize("pattern,search_dir", FORBIDDEN_IN_CODE)
-    def test_no_legacy_path_in_active_code(self, pattern, search_dir):
+    def test_a_forbidden_path_in_a_nested_part_is_found(self, tmp_path):
+        part = tmp_path / "llm_wiki" / "a_part.py"
+        part.parent.mkdir()
+        part.write_text('STATE = "memory-state/run"\n', encoding="utf-8")
+
+        assert _legacy_path_violations([part], "memory-state")
+
+    def test_a_forbidden_directory_is_told_from_a_name_ending_in_it(self, tmp_path):
+        part = tmp_path / "a_part.py"
+        part.write_text('OWNED = "scripts/llm_wiki/install_"\nOLD = "root/wiki/page.md"\n',
+                        encoding="utf-8")
+
+        assert _pattern_hits(part, "wiki/") == ["a_part.py:2"]
+
+    def test_the_scan_reads_the_nested_parts(self):
+        assert any(path.parent.name == "llm_wiki" for path in script_files())
+
+    @pytest.mark.parametrize("pattern", FORBIDDEN_IN_CODE)
+    def test_no_legacy_path_in_active_code(self, pattern):
         """Check that forbidden paths don't appear in active code logic
         (comments and docstrings are tolerated for historical context)."""
-        violations = _legacy_path_violations(search_dir, pattern)
+        violations = _legacy_path_violations(script_files(), pattern)
         assert not violations, (
             f"Legacy path '{pattern}' found in active code: {violations[:3]}. "
             "Update to current three-zone paths."
@@ -512,26 +476,46 @@ class TestCompileEvidenceEnforcement:
     """Compile create operations MUST cite at least 1 evidence item."""
 
     def test_create_without_evidence_is_rejected_by_closed_schema(self):
-        import compile_memory
+        from llm_wiki import compile_pipeline_base
 
-        evidence = compile_memory.RAW_PLAN_SCHEMA["properties"]["operations"][
+        evidence = compile_pipeline_base.RAW_PLAN_SCHEMA["properties"]["operations"][
             "items"
         ]["properties"]["evidence"]
         assert evidence["minItems"] == 1
-        assert not hasattr(compile_memory, "_execute_plan")
+        assert not compile_pipeline_binds("_execute_plan")
 
     def test_evidence_requires_exact_quote_and_claim(self):
-        import compile_memory
+        from llm_wiki import compile_pipeline_base
 
-        item = compile_memory.RAW_PLAN_SCHEMA["properties"]["operations"][
+        item = compile_pipeline_base.RAW_PLAN_SCHEMA["properties"]["operations"][
             "items"
         ]["properties"]["evidence"]["items"]
-        assert set(item["required"]) == {
+        legacy, native = item["oneOf"]
+        expected = {
             "daily_date",
             "timestamp",
             "quoted_text",
             "claim",
         }
+        assert set(legacy["required"]) == expected
+        assert set(native["required"]) == expected | {"native_event"}
+        assert legacy["additionalProperties"] is False
+        assert native["additionalProperties"] is False
+
+    @pytest.mark.parametrize("field", ("daily_date", "timestamp", "quoted_text", "claim"))
+    @pytest.mark.parametrize("native", (False, True))
+    def test_neither_evidence_form_admits_a_missing_required_field(self, field, native):
+        import compile_pipeline
+        from llm_wiki import compile_pipeline_base
+
+        item = compile_pipeline_base.RAW_PLAN_SCHEMA["properties"]["operations"]["items"]["properties"]["evidence"]["items"]
+        record = {"daily_date": "2026-07-14", "timestamp": "10:00:00", "quoted_text": "An exact observation.", "claim": "A grounded claim."}
+        if native:
+            record["native_event"] = {"source_path": "knowledge/raw/sessions/2026-07-14/example.md", "byte_start": 0, "line_index": 0}
+        compile_pipeline.validate_rule(record, item, "$evidence")
+        del record[field]
+        with pytest.raises(ValueError):
+            compile_pipeline.validate_rule(record, item, "$evidence")
 
 
 # ---------------------------------------------------------------------------
@@ -552,7 +536,7 @@ class TestSingleDailyWritePath:
     def test_no_direct_daily_file_open_outside_infra(self):
         """No script outside daily_log_append.py should open a daily-log
         file directly with open(... 'a') — it must use locked_append()."""
-        for py in SCRIPTS.glob("*.py"):
+        for py in script_files():
             if py.name in self.DAILY_APPEND_INFRA:
                 continue
             assert not _opens_daily_append(py.read_text(encoding="utf-8")), (
@@ -582,9 +566,8 @@ class TestMarkdownTransactionBoundary:
     """The writer boundary must stay deterministic and fail closed."""
 
     def test_transaction_module_has_no_git_subprocess_or_command(self):
-        source = (SCRIPTS / "markdown_transaction.py").read_text(encoding="utf-8")
-
-        assert _git_command_constants(source) == []
+        for path in split_module_files("markdown_transaction", "markdown"):
+            assert _git_command_constants(path.read_text(encoding="utf-8")) == [], path.name
 
     def test_external_work_fails_closed_while_writer_gate_is_held(self, tmp_path):
         from markdown_transaction import MarkdownCoordinator

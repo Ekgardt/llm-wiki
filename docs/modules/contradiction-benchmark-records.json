@@ -1,0 +1,64 @@
+{
+  "schema": "module-records/v1",
+  "source": "benchmark/contradiction-v1.json",
+  "bytes": 611741,
+  "sha256": "ed70fdf02f7a93f5856b584db056914971e346e493ea1a352d0281e7c1ee05fd",
+  "records": [
+    {
+      "id": "part-1",
+      "label": "{\"cases\":[{\"block_id\":\"00:00:00\",\"category\":\"equality\",\"existing_claim",
+      "start": 0,
+      "end": 87704,
+      "sha256": "69d5cf0eaccce5b064b6b96dab2693c8cf0c76ec9aaf2df1b6acfc8976ac0cd3"
+    },
+    {
+      "id": "part-2",
+      "label": "{\"block_id\":\"00:37:00\",\"category\":\"equality\",\"existing_claim\":{\"author",
+      "start": 87704,
+      "end": 173393,
+      "sha256": "440c6a9687c6908b619b4df4859a97595d489ac2b04559b2ba7cd1e959617c83"
+    },
+    {
+      "id": "part-3",
+      "label": "{\"block_id\":\"01:13:00\",\"category\":\"interval\",\"existing_claim\":{\"author",
+      "start": 173393,
+      "end": 261045,
+      "sha256": "a89a55c49fc5295535e385cfa98842eca74174324bcf185de89b1a72c448ba7f"
+    },
+    {
+      "id": "part-4",
+      "label": "{\"block_id\":\"01:48:00\",\"category\":\"functional-relation\",\"existing_clai",
+      "start": 261045,
+      "end": 347637,
+      "sha256": "8a1d2d4093c78c9cac7059679b89634bfb28a13f67f5f066a5fecfcd68fd2c0b"
+    },
+    {
+      "id": "part-5",
+      "label": "{\"block_id\":\"02:22:00\",\"category\":\"authority-lifecycle\",\"existing_clai",
+      "start": 347637,
+      "end": 435136,
+      "sha256": "45e84fe91a65787c2ad442970dbaf1311b2198c95e0d321b7014ef38899ace78"
+    },
+    {
+      "id": "part-6",
+      "label": "{\"block_id\":\"02:57:00\",\"category\":\"keep-both-refine\",\"existing_claim\":",
+      "start": 435136,
+      "end": 520801,
+      "sha256": "c90f151c20a59e7335a8678886aaa65d3f725252c870a0c263fd7923867d412d"
+    },
+    {
+      "id": "part-7",
+      "label": "{\"block_id\":\"03:32:00\",\"category\":\"quarantine\",\"existing_claim\":{\"auth",
+      "start": 520801,
+      "end": 585115,
+      "sha256": "1526e93fa48a2b7f4fde37d9f1b0f79d39cdf6ad3c7725dd7205273a8bb4cf42"
+    },
+    {
+      "id": "part-8",
+      "label": "{\"block_id\":\"03:59:00\",\"category\":\"quarantine\",\"existing_claim\":{\"auth",
+      "start": 585115,
+      "end": 611741,
+      "sha256": "1915b358fa744fed8c072d37c2c45d7673ac239bf5d4aa038d988b4ff259fd98"
+    }
+  ]
+}

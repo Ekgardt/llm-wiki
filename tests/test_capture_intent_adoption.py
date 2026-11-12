@@ -21,96 +21,19 @@ if str(SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_DIR))
 
 import capture_adoption  # noqa: E402
-import markdown_transaction  # noqa: E402
-import memory_queue  # noqa: E402
-from reliable_memory import (  # noqa: E402
-    canonical_json_bytes,
-    publish_runtime_file,
-    sha256_bytes,
+import queue_core  # noqa: E402
+
+from tests.capture_intent_adoption_helpers import (  # noqa: E402
+    _adopt,
+    _adopted_ids,
+    _coordinator,
+    _damage,
+    _linked_ids,
+    _links,
+    _publish_ready_intent,
+    _queue,
+    _skipped_ids,
 )
-
-
-def _queue(tmp_path: Path):
-    (tmp_path / "run").mkdir(parents=True, exist_ok=True)
-    markdown_transaction.initialize_coordinator_v3_candidate(
-        tmp_path / "run" / "markdown-transactions-v3.candidate.sqlite3", source_v2=None
-    )
-    memory_queue.initialize_queue_v3_candidate(
-        tmp_path / "run" / "queue-v3.candidate.sqlite3", source_v2=None
-    )
-    return memory_queue.MemoryQueue._from_v3_candidate(
-        tmp_path / "run" / "queue-v3.candidate.sqlite3", state_root=tmp_path
-    )
-
-
-def _coordinator(tmp_path: Path):
-    return markdown_transaction.MarkdownCoordinator._from_v3_candidate(
-        tmp_path / "run" / "markdown-transactions-v3.candidate.sqlite3",
-        state_root=tmp_path,
-    )
-
-
-def _publish_ready_intent(tmp_path: Path, queue, coordinator, seed: bytes) -> dict:
-    """Every publication step for real, up to but not including the enqueue."""
-    payload = canonical_json_bytes({"seed": seed.decode()})
-    digest = sha256_bytes(payload)
-    intent_id = sha256_bytes(seed)
-    shard = intent_id[:2]
-    pending = f"run/capture-intents/pending/{shard}/{intent_id}.json"
-    ready = f"run/capture-intents/ready/{shard}/{intent_id}.json"
-    for relative in (pending, ready):
-        (tmp_path / relative).parent.mkdir(parents=True, exist_ok=True)
-
-    registry = queue.ownership_registry()
-    owner = registry.acquire("capture", scope=f"intent:{intent_id}")
-    fence = coordinator.acquire_intent_fence(intent_id, mode="capture", owner=owner)
-    descriptor = {
-        "intent_id": intent_id,
-        "pending_path": pending,
-        "ready_path": ready,
-        "intent_sha256": digest,
-        "byte_size": len(payload),
-    }
-    publish_runtime_file(
-        tmp_path / pending, payload, state_root=tmp_path, create_only=True, mode=0o600
-    )
-    queue.index_capture_intent_pending(**descriptor)
-    publish_runtime_file(
-        tmp_path / ready, payload, state_root=tmp_path, create_only=True, mode=0o600
-    )
-    queue.mark_capture_intent_ready(**descriptor)
-    (tmp_path / pending).unlink()
-    # The loss: the fence and the owner are gone before the task is enqueued.
-    coordinator.release_intent_fence(fence)
-    registry.release(owner)
-    return {
-        "intent_id": intent_id,
-        "ready": ready,
-        "sha256": digest,
-        "fence_token": fence.token,
-        "fence_epoch": fence.epoch,
-    }
-
-
-def _links(queue) -> list[sqlite3.Row]:
-    database = sqlite3.connect(str(queue.db_path))
-    database.row_factory = sqlite3.Row
-    try:
-        return database.execute("SELECT * FROM capture_task_links").fetchall()
-    finally:
-        database.close()
-
-
-def _adopted_ids(result: dict) -> list[str]:
-    return [entry["intent_id"] for entry in result["adopted"]]
-
-
-def _skipped_ids(result: dict) -> list[str]:
-    return [entry["intent_id"] for entry in result["skipped"]]
-
-
-def _linked_ids(queue) -> list[str]:
-    return [row["intent_id"] for row in _links(queue)]
 
 
 def _orphan_ids(queue) -> list[str]:
@@ -118,18 +41,6 @@ def _orphan_ids(queue) -> list[str]:
         str(record["intent_id"])
         for record in queue.ready_capture_intents_without_task(32)
     ]
-
-
-def _adopt(queue, coordinator, tmp_path: Path, **kwargs) -> dict:
-    return capture_adoption.adopt_orphaned_capture_intents(
-        queue, coordinator, state_root=tmp_path, **kwargs
-    )
-
-
-def _damage(tmp_path: Path, orphan: dict) -> None:
-    target = tmp_path / str(orphan["ready"])
-    target.chmod(0o600)
-    target.write_bytes(canonical_json_bytes({"seed": "tampered"}))
 
 
 def test_the_orphan_this_recovers_from_is_real(tmp_path: Path) -> None:
@@ -188,8 +99,8 @@ def test_adopting_the_same_intent_twice_directly_reuses_the_one_task(
     _publish_ready_intent(tmp_path, queue, coordinator, b"adopt-directly-twice")
     records = queue.ready_capture_intents_without_task(32)
 
-    first = capture_adoption._adopt_one(queue, coordinator, tmp_path, records[0])
-    second = capture_adoption._adopt_one(queue, coordinator, tmp_path, records[0])
+    first = capture_adoption.adopt_one(queue, coordinator, tmp_path, records[0])
+    second = capture_adoption.adopt_one(queue, coordinator, tmp_path, records[0])
 
     assert (first == second, len(_links(queue))) == (True, 1)
 
@@ -207,7 +118,7 @@ def _assert_a_dead_fence_is_still_refused(queue, coordinator, orphan: dict) -> N
         "intent_path": orphan["ready"],
         "intent_sha256": orphan["sha256"],
     }
-    with pytest.raises(memory_queue.QueueOperationError, match="intent_fence_lost"):
+    with pytest.raises(queue_core.QueueOperationError, match="intent_fence_lost"):
         queue.enqueue_capture_task_replay_safe(
             "flush",
             1,
@@ -342,7 +253,6 @@ def test_the_capture_worker_adopts_before_it_claims(
     queue = _queue(tmp_path)
     coordinator = _coordinator(tmp_path)
     orphan = _publish_ready_intent(tmp_path, queue, coordinator, b"worker-adopts")
-    monkeypatch.setattr(flush_memory, "STATE_ROOT", tmp_path)
 
     flush_memory.run_capture_worker_once(
         queue, coordinator, process_missing=lambda *args: None
@@ -358,7 +268,6 @@ def test_a_failing_sweeper_never_stops_the_worker(
 
     queue = _queue(tmp_path)
     coordinator = _coordinator(tmp_path)
-    monkeypatch.setattr(flush_memory, "STATE_ROOT", tmp_path)
 
     def _explode(*args, **kwargs):
         raise RuntimeError("sweeper down")

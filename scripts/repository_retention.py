@@ -34,11 +34,13 @@ import time
 from collections.abc import Callable, Iterable, Mapping
 from pathlib import Path
 
-import repository_index as index
+import repository_indexing
+from llm_wiki import runtime_roots
+from llm_wiki.step_budgets import (
+    RETIRE_BUDGET_SECONDS,
+)
 
 SCHEMA_VERSION = "repository-retention/v1"
-# The nightly repository-retention step's budget (scheduled_nightly adds its start margin). basis unknown — value predates measurement; review when the step reports its budget spent.
-RETIRE_BUDGET_SECONDS = 5 * 60.0
 DISCARD_ERRORS = (OSError, ValueError, TimeoutError, RuntimeError, PermissionError)
 
 
@@ -53,9 +55,8 @@ def _scope_of(manifest: Mapping) -> Mapping | None:
 
 
 def _vault_root() -> Path:
-    from memory_state import ROOT
 
-    return Path(ROOT).resolve()
+    return Path(runtime_roots.vault_root()).resolve()
 
 
 def _is_vault(scope: Mapping, vault: Path) -> bool:
@@ -73,7 +74,7 @@ def _vault_memory(identifier: str, manifest: Mapping, scope: Mapping, holds_code
     return _is_vault(scope, _vault_root()) and not holds_code(identifier, manifest)
 
 
-def _foreign_groups(manifests, activated: frozenset[str], holds_code) -> dict[str, dict]:
+def foreign_groups(manifests, activated: frozenset[str], holds_code) -> dict[str, dict]:
     """checkout_id -> {scope, generations newest first}; vault memory and activated excluded.
 
     The vault's code generations are grouped like any checkout's: nothing else
@@ -90,9 +91,11 @@ def _foreign_groups(manifests, activated: frozenset[str], holds_code) -> dict[st
     return groups
 
 
-def _verdict(scope: Mapping) -> str:
+def retention_verdict(scope: Mapping) -> str:
     from ephemeral_paths import is_throwaway_checkout
-    from repository_worktrees import indexing_marked_off
+    from repository_indexing import (
+        indexing_marked_off,
+    )
 
     root = Path(str(scope.get("checkout_root", "")))
     if not root.is_dir():
@@ -108,8 +111,8 @@ def _indexing_verdict(root: Path, indexing_marked_off) -> str:
     return "kept"
 
 
-def _kept_count(verdict: str) -> int:
-    from generation_catalog import RETAINED_ANCESTOR_GENERATIONS
+def kept_count(verdict: str) -> int:
+    from llm_wiki.generation_limits import RETAINED_ANCESTOR_GENERATIONS
 
     if verdict != "kept":
         return 0
@@ -118,8 +121,8 @@ def _kept_count(verdict: str) -> int:
 
 def _planned(checkout_id: str, group: dict) -> dict:
     scope = group["scope"]
-    verdict = _verdict(scope)
-    keep = _kept_count(verdict)
+    verdict = retention_verdict(scope)
+    keep = kept_count(verdict)
     return {
         "checkout_id": checkout_id,
         "repository_id": scope.get("repository_id"),
@@ -133,7 +136,7 @@ def _planned(checkout_id: str, group: dict) -> dict:
 def plan_retention(catalog, *, deadline: float | None = None) -> list[dict]:
     """What each foreign checkout keeps and retires; nothing is removed here."""
     manifests = catalog.registered_manifests(deadline=deadline)
-    groups = _foreign_groups(
+    groups = foreign_groups(
         manifests, catalog.activated_generation_ids(deadline=deadline), catalog.holds_code
     )
     return [_planned(checkout_id, group) for checkout_id, group in sorted(groups.items())]
@@ -173,8 +176,8 @@ def _retire_repository(catalog, repository_id: str, entries: list[dict], state_r
     def work(bound: float, _stop: Callable[[], bool]) -> dict:
         return {"entries": [_retired_checkout(catalog, entry, state_root, bound) for entry in entries]}
 
-    outcome = index.run_fenced(repository_id, state_root, deadline, None, work)
-    if outcome.get(index.FENCE_REFUSED):
+    outcome = repository_indexing.run_fenced(repository_id, state_root, deadline, None, work)
+    if outcome.get(repository_indexing.FENCE_REFUSED):
         return [{**entry, "retired": [], "status": outcome["status"]} for entry in entries]
     return outcome["entries"]
 
@@ -183,7 +186,7 @@ def _has_work(entry: dict) -> bool:
     return bool(entry["retire"]) or not entry["kept"]
 
 
-def _orphan_hints(state_root: Path, plan: list[dict]) -> list[str]:
+def orphan_hints(state_root: Path, plan: list[dict]) -> list[str]:
     """Hint tables whose checkout holds no generation any more."""
     from code_hints import hinted_checkout_ids, remove_hints
 
@@ -194,9 +197,9 @@ def _orphan_hints(state_root: Path, plan: list[dict]) -> list[str]:
 
 def _existing_catalog(root: Path):
     """A writable catalog, but only one that already exists: retention never creates one."""
-    if index._open_catalog(root, read_only=True) is None:  # noqa: SLF001
+    if repository_indexing.open_catalog(root, read_only=True) is None:  # noqa: SLF001
         return None
-    return index._open_catalog(root, read_only=False)  # noqa: SLF001
+    return repository_indexing.open_catalog(root, read_only=False)  # noqa: SLF001
 
 
 def retire_repositories(
@@ -206,7 +209,7 @@ def retire_repositories(
     budget_seconds: float = RETIRE_BUDGET_SECONDS,
 ) -> dict[str, object]:
     """The nightly retention pass; `apply=False` reports the plan only."""
-    root = index.state_root_path(state_root)
+    root = repository_indexing.state_root_path(state_root)
     catalog = _existing_catalog(root)
     if catalog is None:
         return {"schema_version": SCHEMA_VERSION, "status": "ok", "checkouts": [], "orphan_hints_removed": []}
@@ -226,7 +229,7 @@ def _applied(catalog, plan: list[dict], root: Path, deadline: float) -> dict[str
         "schema_version": SCHEMA_VERSION,
         "status": "ok",
         "checkouts": checkouts,
-        "orphan_hints_removed": _orphan_hints(root, plan),
+        "orphan_hints_removed": orphan_hints(root, plan),
     }
 
 

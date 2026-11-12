@@ -1,0 +1,355 @@
+{
+  "encoding": "o200k_base",
+  "max_tokens": 100000,
+  "serialization": "exact-duplicates/v1",
+  "files": [
+    "AGENTS.md",
+    "CLAUDE.md",
+    "docs/AGENTS.md",
+    "docs/STRUCTURE.md",
+    "docs/modules/context-bundle.md",
+    "docs/modules/context-records.md",
+    "docs/modules/context-tooling.md",
+    "docs/modules/model-choice.md",
+    "docs/modules/product-structure.md",
+    "docs/modules/project-governance.md",
+    "docs/modules/retrieval-optional-stages.md",
+    "docs/modules/retrieval-tests-retrieval-stage-deadline.md",
+    "docs/modules/retrieval.md",
+    "docs/modules/test-retrieval-review-round2-context.json",
+    "docs/modules/test-retrieval-review-round2.md",
+    "docs/modules/test-support.md",
+    "rules/development-laws.md",
+    "scripts/__init__.py",
+    "scripts/llm_wiki/__init__.py",
+    "scripts/llm_wiki/context_bundle.py",
+    "scripts/llm_wiki/retrieval_optional_stages.py",
+    "scripts/retrieval.py",
+    "tests/__init__.py",
+    "tests/conftest.py",
+    "tests/module_context.py",
+    "tests/module_context_paths.py",
+    "tests/module_interface.py",
+    "tests/module_interface_render.py",
+    "tests/module_qualification.py",
+    "tests/module_record_context.py",
+    "tests/module_records.py",
+    "tests/retrieval_stage_deadline.py",
+    "tests/shared_fixtures.py",
+    "tests/slow_machine.py",
+    "tests/test_retrieval_review_round2.py"
+  ],
+  "ownership": {
+    "files": [
+      "docs/modules/test-retrieval-review-round2-context.json",
+      "docs/modules/test-retrieval-review-round2.md",
+      "tests/test_retrieval_review_round2.py"
+    ]
+  },
+  "qualified_dependencies": [
+    {
+      "provider": "scripts/evidence_graph.py",
+      "names": [
+        "EvidenceGraph"
+      ],
+      "contract_sha256": "86b2ba92cf9a77f847977e49ffeaa884e7b4a54eec2b32d9a0fe040a4be6f6b9",
+      "integration_tests": [
+        "tests/test_retrieval_review_round2.py"
+      ]
+    },
+    {
+      "provider": "scripts/generation_fts_validation.py",
+      "names": [
+        "GENERATION_TOKENIZER_CONFIG_SHA256",
+        "GENERATION_TOKENIZER_VERSION"
+      ],
+      "contract_sha256": "41a5ba6fcba2b0852a5187a5c47402f077682f14e1f983941f7647502022a803",
+      "integration_tests": [
+        "tests/test_retrieval_review_round2.py"
+      ]
+    },
+    {
+      "provider": "scripts/generation_search.py",
+      "names": [
+        "active_generation_catalog",
+        "apply_hard_filters",
+        "generation_artifact",
+        "generation_connection",
+        "generation_consumption_seal",
+        "generation_consumption_unchanged",
+        "generation_fts_search",
+        "generation_vectors_search",
+        "markdown_hits"
+      ],
+      "contract_sha256": "09f40bf341c2ed19e914ba281f3e6da9011076af210bb3e619b24854fb83033f",
+      "integration_tests": [
+        "tests/test_a_fallback_names_its_cause.py",
+        "tests/test_a_hit_is_named_by_its_page.py",
+        "tests/test_a_journal_is_readable_by_every_reader.py"
+      ]
+    },
+    {
+      "provider": "scripts/graph_neighbors.py",
+      "names": [
+        "boost_graph_neighbors"
+      ],
+      "contract_sha256": "eeb34d237d5822d1b538b9df0fa8e0afda6b4fd1eb383ebda6bc9a1d08b1c259",
+      "integration_tests": [
+        "tests/test_retrieval_review_round2.py"
+      ]
+    },
+    {
+      "provider": "scripts/inference_threads.py",
+      "names": [
+        "start"
+      ],
+      "contract_sha256": "e2723a5bc9c80b72b73294de72f11f8a97926962f803a87843e1e245a27f58c4",
+      "integration_tests": [
+        "tests/test_retrieval_review_round2.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/generation_catalog_store.py",
+      "names": [
+        "GenerationCatalog"
+      ],
+      "contract_sha256": "b18194ebe04bf988b4474379fcb5243516550d43b745a00eaed1453f7844c983",
+      "integration_tests": [
+        "tests/test_a_blocked_task_has_a_way_back.py",
+        "tests/test_a_build_in_flight_is_not_an_orphan.py",
+        "tests/test_a_capacity_refusal_does_not_corrupt_a_generation.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/model_choice.py",
+      "names": [
+        "using_root"
+      ],
+      "contract_sha256": "d45f2655cb61963e77617d1dfd7d617b134ad77cc770b59b335d0856e5d65019",
+      "integration_tests": [
+        "tests/test_retrieval_review_round2.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/retrieval_backends.py",
+      "names": [
+        "call_dense"
+      ],
+      "contract_sha256": "39d72d8b95ead44c010f7f2fee5cb9d583fd05170b2fd6b75681c6025c7456b2",
+      "integration_tests": [
+        "tests/test_a_blocked_task_has_a_way_back.py",
+        "tests/test_a_committed_source_resolves_an_older_compile_plan.py",
+        "tests/test_a_count_that_reached_the_edge_looks_again.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/retrieval_execution.py",
+      "names": [
+        "maybe_rerank",
+        "rerank_failure",
+        "retrieve"
+      ],
+      "contract_sha256": "c685f9250ffb6df59101afc914181eefbe8eef7474b04c1c13917c677a9895fa",
+      "integration_tests": [
+        "tests/test_a_blocked_task_has_a_way_back.py",
+        "tests/test_a_committed_source_resolves_an_older_compile_plan.py",
+        "tests/test_a_count_that_reached_the_edge_looks_again.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/retrieval_fusion.py",
+      "names": [
+        "fuse_rrf"
+      ],
+      "contract_sha256": "e45ef928560e469d83aa7eb67887f749a107acfb01272093c0ca310a3c499026",
+      "integration_tests": [
+        "tests/test_a_blocked_task_has_a_way_back.py",
+        "tests/test_a_committed_source_resolves_an_older_compile_plan.py",
+        "tests/test_a_count_that_reached_the_edge_looks_again.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/retrieval_generation_hits.py",
+      "names": [
+        "candidate_backend_limit",
+        "candidate_pool",
+        "dense_filtered_hits",
+        "generation_connection_for",
+        "record_impressions",
+        "reported_mode"
+      ],
+      "contract_sha256": "35c4897188d53ab021fed8b3d94f95ef8a100a2a0689a94003e32a24715798f1",
+      "integration_tests": [
+        "tests/test_a_blocked_task_has_a_way_back.py",
+        "tests/test_a_committed_source_resolves_an_older_compile_plan.py",
+        "tests/test_a_count_that_reached_the_edge_looks_again.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/retrieval_graph.py",
+      "names": [
+        "expand_evidence_graph",
+        "neighbour_rows",
+        "weigh_by_trust"
+      ],
+      "contract_sha256": "990a83eca845734558c218b4e63d94685596d326028b610767c5f7bf1eb63c21",
+      "integration_tests": [
+        "tests/test_a_blocked_task_has_a_way_back.py",
+        "tests/test_a_committed_source_resolves_an_older_compile_plan.py",
+        "tests/test_a_count_that_reached_the_edge_looks_again.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/retrieval_legacy.py",
+      "names": [
+        "candidates_to_legacy"
+      ],
+      "contract_sha256": "4bc9af8a9c5231d7cb45eeea7fabd59e99e5564e198b9e23e94e429bc65230a7",
+      "integration_tests": [
+        "tests/test_a_blocked_task_has_a_way_back.py",
+        "tests/test_a_committed_source_resolves_an_older_compile_plan.py",
+        "tests/test_a_count_that_reached_the_edge_looks_again.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/retrieval_query.py",
+      "names": [
+        "CANDIDATE_FANOUT",
+        "GRAPH_EDGE_DECAY",
+        "GRAPH_PROFILE_EDGE_TYPES",
+        "MAX_CANDIDATE_POOL",
+        "MIN_CANDIDATE_POOL",
+        "PROFILES",
+        "PROFILE_SIGNALS",
+        "QueryAnalysis",
+        "RetrievalCandidate",
+        "RetrievalResult",
+        "RetrievalTrace",
+        "analyze_query",
+        "check_deadline",
+        "source_sha256"
+      ],
+      "contract_sha256": "698cc81b0d63aef69771491e20e013c1bbea549b91ecfd5f8caeb134eefbda28",
+      "integration_tests": [
+        "tests/test_a_blocked_task_has_a_way_back.py",
+        "tests/test_a_committed_source_resolves_an_older_compile_plan.py",
+        "tests/test_a_count_that_reached_the_edge_looks_again.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/retrieval_rerank.py",
+      "names": [
+        "RerankTrace",
+        "apply_reranking",
+        "candidate_from_rerank_row",
+        "rerank_scored",
+        "rerank_worker_deadline",
+        "run_reranker",
+        "source_rerank_deadline"
+      ],
+      "contract_sha256": "c82f3667338058804ee67f986cc500959460625061c39fe1abf649b5269752f4",
+      "integration_tests": [
+        "tests/test_a_blocked_task_has_a_way_back.py",
+        "tests/test_a_committed_source_resolves_an_older_compile_plan.py",
+        "tests/test_a_count_that_reached_the_edge_looks_again.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/retrieval_search_memory.py",
+      "names": [
+        "active_manifest_for",
+        "planned_request",
+        "resolved_query_encoder",
+        "retrieve_via_search_memory"
+      ],
+      "contract_sha256": "74af48ab23ecfa1f63b45cd2d5da8ee06e628c0d2b4d43ae3d5e76c5d70afe82",
+      "integration_tests": [
+        "tests/test_a_blocked_task_has_a_way_back.py",
+        "tests/test_a_committed_source_resolves_an_older_compile_plan.py",
+        "tests/test_a_count_that_reached_the_edge_looks_again.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/retrieval_selection.py",
+      "names": [
+        "cover_then_fill",
+        "evidence_ordered",
+        "page_diverse"
+      ],
+      "contract_sha256": "cea9dd47ac31d32bc60bac9510992eaa5e1e57b54bfa68b41900d668a7787dc2",
+      "integration_tests": [
+        "tests/test_a_blocked_task_has_a_way_back.py",
+        "tests/test_a_committed_source_resolves_an_older_compile_plan.py",
+        "tests/test_a_count_that_reached_the_edge_looks_again.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/retrieval_stages.py",
+      "names": [
+        "filtered_hits"
+      ],
+      "contract_sha256": "1dfb567ffd1da0d421fb71b8642cef896104c2094224444782d39628e24380e2",
+      "integration_tests": [
+        "tests/test_a_blocked_task_has_a_way_back.py",
+        "tests/test_a_committed_source_resolves_an_older_compile_plan.py",
+        "tests/test_a_count_that_reached_the_edge_looks_again.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/runtime_roots.py",
+      "names": [
+        "vault_root"
+      ],
+      "contract_sha256": "35ea768c9fd09097366a2ded61783ec66ac8997f3f02255c744c8443405a706b",
+      "integration_tests": [
+        "tests/test_a_continuation_keeps_its_original_entry.py",
+        "tests/test_a_prompt_checkpoint_does_not_outwait_its_host.py",
+        "tests/test_a_session_marker_survives_a_busy_writer.py"
+      ]
+    },
+    {
+      "provider": "scripts/reliable_memory.py",
+      "names": [
+        "validate_state_root"
+      ],
+      "contract_sha256": "8680515cd873056a7c8a36e0057d91f2f83f23c48841263697676ff91f7ff964",
+      "integration_tests": [
+        "tests/test_retrieval_review_round2.py"
+      ]
+    },
+    {
+      "provider": "scripts/repository_scope.py",
+      "names": [
+        "resolve_repository_scope",
+        "sanitized_git_environment"
+      ],
+      "contract_sha256": "983dd096d99bafff98ca0aaa2cd722477333e30eed4bfa9297d1830c635e8d90",
+      "integration_tests": [
+        "tests/test_retrieval_review_round2.py"
+      ]
+    },
+    {
+      "provider": "scripts/reranker.py",
+      "names": [
+        "rerank",
+        "should_rerank"
+      ],
+      "contract_sha256": "06b2e719667b21eefa7bc18dace6e0afb33532a228b7c09e5478ae85d4735f36",
+      "integration_tests": [
+        "tests/test_retrieval_review_round2.py"
+      ]
+    },
+    {
+      "provider": "scripts/search_memory.py",
+      "names": [
+        "search"
+      ],
+      "contract_sha256": "efe0ddba8dce468d10c7eeff2eb2fbf29bc71d796b221d57d352be2ff915ab46",
+      "integration_tests": [
+        "tests/test_a_fallback_names_its_cause.py",
+        "tests/test_an_answer_says_how_old_its_index_is.py",
+        "tests/test_an_answer_uses_the_published_corpus.py"
+      ]
+    }
+  ]
+}

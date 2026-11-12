@@ -8,7 +8,7 @@ weekly check. See docs/research/2026-09-24-the-weekly-pass-has-its-own-record.md
 from __future__ import annotations
 
 import sys
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -18,17 +18,20 @@ if str(SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_DIR))
 
 import doctor  # noqa: E402
+import nightly_budget  # noqa: E402
 import scheduled_nightly  # noqa: E402
 import scheduled_weekly  # noqa: E402
+import weekly_budget  # noqa: E402
+from llm_wiki import doctor_lsp  # noqa: E402
 
-from tests.test_doctor import (  # noqa: E402
-    _build_root,
+from tests.doctor_helpers import (  # noqa: E402
+    _build_root,  # noqa: E402
     _check,
     _nightly_state,
     _qualified_pyright_check,
 )
 
-NOW = datetime(2026, 9, 27, 9, 0, tzinfo=timezone.utc)
+NOW = datetime(2026, 9, 27, 9, 0, tzinfo=UTC)
 FRESH_NIGHTLY = {
     "last_nightly_status": "success",
     "last_nightly_date": "2026-09-27",
@@ -38,7 +41,7 @@ FRESH_NIGHTLY = {
 
 def _scheduler(tmp_path: Path, monkeypatch, weekly: dict) -> dict:
     root, state_root, home = _build_root(tmp_path)
-    monkeypatch.setattr(doctor, "_pyright_check", _qualified_pyright_check)
+    monkeypatch.setattr(doctor_lsp, "pyright_check", _qualified_pyright_check)
     _nightly_state(state_root, {**FRESH_NIGHTLY, **weekly})
     report = doctor.run_doctor(root=root, state_root=state_root, home=home, now=NOW)
     return _check(report, "scheduler")
@@ -113,8 +116,8 @@ def test_the_step_log_numbers_steps_in_the_order_they_run():
 
 
 def test_no_nightly_or_weekly_message_carries_a_hand_written_number():
-    nightly = [scheduled_nightly._capture_adoption_step(), *scheduled_nightly._post_compile_steps()]
+    nightly = [nightly_budget.capture_adoption_step(), *nightly_budget.post_compile_steps()]
     messages = [step.message for step in nightly]
-    messages += [message for message, *_rest in scheduled_weekly._script_steps()]
+    messages += [message for message, *_rest in weekly_budget.script_steps()]
 
     assert [message for message in messages if message.startswith("Step ")] == []

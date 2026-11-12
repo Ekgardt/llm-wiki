@@ -1,0 +1,308 @@
+{
+  "encoding": "o200k_base",
+  "max_tokens": 100000,
+  "serialization": "exact-duplicates/v1",
+  "files": [
+    "AGENTS.md",
+    "CLAUDE.md",
+    "docs/AGENTS.md",
+    "docs/STRUCTURE.md",
+    "docs/modules/breadcrumb-decision-tests.md",
+    "docs/modules/breadcrumb-documents.md",
+    "docs/modules/compile-claims-producer-helpers.md",
+    "docs/modules/compile-paths.md",
+    "docs/modules/compile-pipeline-apply-tests.md",
+    "docs/modules/compile-pipeline-sources-tests-native-compile-uses-whole-container-context.json",
+    "docs/modules/compile-pipeline-sources-tests-native-compile-uses-whole-container.md",
+    "docs/modules/context-bundle.md",
+    "docs/modules/context-records.md",
+    "docs/modules/context-tooling.md",
+    "docs/modules/formats.md",
+    "docs/modules/model-choice.md",
+    "docs/modules/native-event-reader.md",
+    "docs/modules/product-structure.md",
+    "docs/modules/project-governance.md",
+    "docs/modules/reliable-memory-tests-compile-transactions-helpers.md",
+    "docs/modules/script-sources.md",
+    "docs/modules/test-support.md",
+    "rules/development-laws.md",
+    "scripts/__init__.py",
+    "scripts/llm_wiki/__init__.py",
+    "scripts/llm_wiki/context_bundle.py",
+    "scripts/llm_wiki/formats/__init__.py",
+    "tests/__init__.py",
+    "tests/compile_claims_producer_helpers.py",
+    "tests/compile_paths.py",
+    "tests/compile_transactions_helpers.py",
+    "tests/conftest.py",
+    "tests/module_context.py",
+    "tests/module_context_paths.py",
+    "tests/module_interface.py",
+    "tests/module_interface_render.py",
+    "tests/module_qualification.py",
+    "tests/module_record_context.py",
+    "tests/module_records.py",
+    "tests/modules/__init__.py",
+    "tests/modules/breadcrumb_documents/__init__.py",
+    "tests/modules/breadcrumb_documents/contract_helpers.py",
+    "tests/modules/native_event_reader/__init__.py",
+    "tests/modules/native_event_reader/contract_helpers.py",
+    "tests/native_compile_uses_whole_container_helpers.py",
+    "tests/native_user_frames_keep_their_physical_evidence_helpers.py",
+    "tests/script_sources.py",
+    "tests/shared_fixtures.py",
+    "tests/slow_machine.py",
+    "tests/test_native_compile_uses_whole_container.py"
+  ],
+  "ownership": {
+    "files": [
+      "docs/modules/compile-pipeline-sources-tests-native-compile-uses-whole-container-context.json",
+      "docs/modules/compile-pipeline-sources-tests-native-compile-uses-whole-container.md",
+      "tests/test_native_compile_uses_whole_container.py"
+    ]
+  },
+  "qualified_dependencies": [
+    {
+      "provider": "scripts/breadcrumb_decision.py",
+      "names": [
+        "journal_block"
+      ],
+      "contract_sha256": "d9c930484c634bdb57dbd893d182a3cb86d6d5b4893041035de163552c86eebc",
+      "integration_tests": [
+        "tests/test_native_compile_uses_whole_container.py"
+      ]
+    },
+    {
+      "provider": "scripts/breadcrumb_evidence.py",
+      "names": [
+        "read_head"
+      ],
+      "contract_sha256": "ed6e789206b293b2cd7ca3cc716daa242835e10bc7a60103b33b2431c133913f",
+      "integration_tests": [
+        "tests/test_native_compile_uses_whole_container.py"
+      ]
+    },
+    {
+      "provider": "scripts/breadcrumb_protocol.py",
+      "names": [
+        "encode_parts",
+        "make_anchor",
+        "make_manifest"
+      ],
+      "contract_sha256": "d9092eee738a1a4113c9bf87afe3ae4ad27a6f4bb640b6b8040da43b1d304729",
+      "integration_tests": [
+        "tests/test_native_compile_uses_whole_container.py"
+      ]
+    },
+    {
+      "provider": "scripts/claims.py",
+      "names": [
+        "parse_claim_ledger"
+      ],
+      "contract_sha256": "f74ec7fea45303f2fd2b9005a447f0429a997086c08d8229e3263a9abee4a0a8",
+      "integration_tests": [
+        "tests/test_native_compile_uses_whole_container.py"
+      ]
+    },
+    {
+      "provider": "scripts/compile_pipeline.py",
+      "names": [
+        "canonical_json_bytes",
+        "sha256_bytes"
+      ],
+      "contract_sha256": "2e42a7aefcb66ac2515f6665a03feae34e6f7bad4807787a789ce031f9f3a9c1",
+      "integration_tests": [
+        "tests/test_native_compile_uses_whole_container.py"
+      ]
+    },
+    {
+      "provider": "scripts/compile_receipts.py",
+      "names": [
+        "receipt_predicate"
+      ],
+      "contract_sha256": "887d30814e9f2f6621f57885c35ac1be4e5a70685f238ae2fbae29b5a6b4b171",
+      "integration_tests": [
+        "tests/test_native_compile_uses_whole_container.py"
+      ]
+    },
+    {
+      "provider": "scripts/corpus_snapshot.py",
+      "names": [
+        "collect_corpus"
+      ],
+      "contract_sha256": "7ea12368f51c070a84b0754260f0a82db5ac44b0395b95eabcb01e5053c9f0bb",
+      "integration_tests": [
+        "tests/test_native_compile_uses_whole_container.py"
+      ]
+    },
+    {
+      "provider": "scripts/evidence_resolver.py",
+      "names": [
+        "EvidenceRef"
+      ],
+      "contract_sha256": "f9835c0e0382b76f4246786d586f5d0a74bbb8559c4a25efff9110e278b33f8f",
+      "integration_tests": [
+        "tests/test_native_compile_uses_whole_container.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/breadcrumb_documents.py",
+      "names": [
+        "source_documents",
+        "source_path"
+      ],
+      "contract_sha256": "9c32d29ba0229ab4fd59256dd23d9ea9fb8fde486cddde3ce431f64e296ab907",
+      "integration_tests": [
+        "tests/test_native_compile_uses_whole_container.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/compile_pipeline_apply.py",
+      "names": [
+        "apply_compile_plan"
+      ],
+      "contract_sha256": "129ecd76764fbd203f197468ec01d03833729ef205c00c26dd60fb67025303bb",
+      "integration_tests": [
+        "tests/test_native_compile_uses_whole_container.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/compile_pipeline_base.py",
+      "names": [
+        "DRAFT_SYSTEM",
+        "RAW_PLAN_SCHEMA",
+        "compile_budget"
+      ],
+      "contract_sha256": "c551859b27bc3db421236891df7cb05fcc7c192e90697bd65fe01b0694c2eec0",
+      "integration_tests": [
+        "tests/test_native_compile_uses_whole_container.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/compile_pipeline_batches.py",
+      "names": [
+        "group_dailies",
+        "pack_compile_batches"
+      ],
+      "contract_sha256": "1259defd02e4b15d14aa1a6b42bbeb9704917b62d5daeead3764b635f8450f1b",
+      "integration_tests": [
+        "tests/test_native_compile_uses_whole_container.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/compile_pipeline_claims.py",
+      "names": [
+        "verified_claim_quote"
+      ],
+      "contract_sha256": "2109a97be0e99dc606f9a184ff7248372027f8289c780c404f17c743f9e8ebfb",
+      "integration_tests": [
+        "tests/test_native_compile_uses_whole_container.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/compile_pipeline_operations.py",
+      "names": [
+        "derived_claim",
+        "evidence_binding",
+        "with_derived_claims"
+      ],
+      "contract_sha256": "0a150ecd2ba33f1d3adb575f3032e5ec6ef263140cd6e0c078abe34466923505",
+      "integration_tests": [
+        "tests/test_native_compile_uses_whole_container.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/compile_pipeline_prompts.py",
+      "names": [
+        "compile_prompt_fits",
+        "critique_prompt",
+        "draft_prompt",
+        "normalize_plan",
+        "packing_budget"
+      ],
+      "contract_sha256": "373a67d63c65adac55b1275f703ab7a45d78c83bbf097b6a916d232c39a9a177",
+      "integration_tests": [
+        "tests/test_native_compile_uses_whole_container.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/compile_pipeline_sources.py",
+      "names": [
+        "CompileInputs",
+        "daily_parts",
+        "native_part_units",
+        "pending_daily_parts",
+        "snapshot_compile_inputs",
+        "subset_compile_inputs"
+      ],
+      "contract_sha256": "14e22dc71c3bb632380e00d7bb019baa1de7e25efad28084f674708640189547",
+      "integration_tests": [
+        "tests/test_native_compile_uses_whole_container.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/formats/receipts.py",
+      "names": [
+        "require_v4_manifest"
+      ],
+      "contract_sha256": "afc23dd8dfee14d2c71ce5aed63c27f0c95113a1bc043fb4c59acf69b6e78a8d",
+      "integration_tests": [
+        "tests/test_native_compile_uses_whole_container.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/generation_catalog_store.py",
+      "names": [
+        "GenerationCatalog"
+      ],
+      "contract_sha256": "b18194ebe04bf988b4474379fcb5243516550d43b745a00eaed1453f7844c983",
+      "integration_tests": [
+        "tests/test_a_blocked_task_has_a_way_back.py",
+        "tests/test_a_build_in_flight_is_not_an_orphan.py",
+        "tests/test_a_capacity_refusal_does_not_corrupt_a_generation.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/model_choice.py",
+      "names": [
+        "using_root"
+      ],
+      "contract_sha256": "d45f2655cb61963e77617d1dfd7d617b134ad77cc770b59b335d0856e5d65019",
+      "integration_tests": [
+        "tests/test_native_compile_uses_whole_container.py"
+      ]
+    },
+    {
+      "provider": "scripts/markdown_transaction.py",
+      "names": [
+        "MarkdownCoordinator"
+      ],
+      "contract_sha256": "5033973391b97bc338d02eed2a773ad25883e89b8325a9ccc726cd9e537f58ee",
+      "integration_tests": [
+        "tests/test_native_compile_uses_whole_container.py"
+      ]
+    },
+    {
+      "provider": "scripts/reliable_memory.py",
+      "names": [
+        "canonical_json_bytes",
+        "sha256_bytes",
+        "validate_state_root"
+      ],
+      "contract_sha256": "4243e32fa6ecab88fca1a2d2b3214c0a36944fc23129138102dfaebf6d99457f",
+      "integration_tests": [
+        "tests/test_native_compile_uses_whole_container.py"
+      ]
+    },
+    {
+      "provider": "scripts/repository_scope.py",
+      "names": [
+        "sanitized_git_environment"
+      ],
+      "contract_sha256": "fd550ae20761afad50b37fa3a71044a162485b0e4d4b3e2af9b5b22e143c2bec",
+      "integration_tests": [
+        "tests/test_native_compile_uses_whole_container.py"
+      ]
+    }
+  ]
+}

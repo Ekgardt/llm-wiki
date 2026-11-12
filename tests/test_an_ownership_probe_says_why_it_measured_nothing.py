@@ -12,8 +12,8 @@ BENCHMARK_ROOT = Path(__file__).resolve().parent.parent / "benchmark"
 if str(BENCHMARK_ROOT) not in sys.path:
     sys.path.insert(0, str(BENCHMARK_ROOT))
 
-import run_code_navigation as benchmark_runner  # noqa: E402
-from run_code_navigation import _FixtureRun, _RealNavigationRuntime  # noqa: E402
+from navigation_benchmark_ownership import _ProbeRacedError, _RealNavigationRuntime  # noqa: E402
+from run_code_navigation import _FixtureRun  # noqa: E402
 
 
 def _runtime(error: BaseException) -> _RealNavigationRuntime:
@@ -38,14 +38,14 @@ def test_each_way_of_measuring_nothing_has_its_own_name() -> None:
     wrong = RuntimeError("ownership probe reached the wrong terminal")
     wrong.__cause__ = ValueError("not a timeout")
 
-    reasons = [_reason(benchmark_runner._ProbeRacedError("answered first")), _reason(wrong)]
+    reasons = [_reason(_ProbeRacedError("answered first")), _reason(wrong)]
 
     assert reasons == ["raced", "RuntimeError:ValueError"]
 
 
 def test_the_report_names_the_reason_of_an_unavailable_scenario() -> None:
     run = object.__new__(_FixtureRun)
-    run.runtime = _runtime(benchmark_runner._ProbeRacedError("answered first"))
+    run.runtime = _runtime(_ProbeRacedError("answered first"))
     run.runtime._ownership_outcome("timeout", time.monotonic() + 60)
     run.errors = []
     run.ownership = {

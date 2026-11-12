@@ -1,0 +1,248 @@
+{
+  "encoding": "o200k_base",
+  "max_tokens": 100000,
+  "serialization": "exact-duplicates/v1",
+  "files": [
+    "AGENTS.md",
+    "CLAUDE.md",
+    "docs/AGENTS.md",
+    "docs/STRUCTURE.md",
+    "docs/modules/breadcrumb-protocol-tests-breadcrumb-storage-faults-context.json",
+    "docs/modules/breadcrumb-protocol-tests-breadcrumb-storage-faults.md",
+    "docs/modules/breadcrumb-storage.md",
+    "docs/modules/context-bundle.md",
+    "docs/modules/context-records.md",
+    "docs/modules/context-tooling.md",
+    "docs/modules/formats.md",
+    "docs/modules/markdown-transaction-tests-queue-v3-capture-links-helpers.md",
+    "docs/modules/model-choice.md",
+    "docs/modules/product-structure.md",
+    "docs/modules/project-governance.md",
+    "docs/modules/runtime-contracts.md",
+    "docs/modules/runtime-publication.md",
+    "docs/modules/test-support.md",
+    "rules/development-laws.md",
+    "scripts/__init__.py",
+    "scripts/llm_wiki/__init__.py",
+    "scripts/llm_wiki/context_bundle.py",
+    "scripts/llm_wiki/formats/__init__.py",
+    "scripts/llm_wiki/runtime_publication.py",
+    "tests/__init__.py",
+    "tests/breadcrumb_storage_helpers.py",
+    "tests/conftest.py",
+    "tests/module_context.py",
+    "tests/module_context_paths.py",
+    "tests/module_interface.py",
+    "tests/module_interface_render.py",
+    "tests/module_qualification.py",
+    "tests/module_record_context.py",
+    "tests/module_records.py",
+    "tests/queue_v3_capture_links_helpers.py",
+    "tests/shared_fixtures.py",
+    "tests/slow_machine.py",
+    "tests/test_breadcrumb_storage_faults.py"
+  ],
+  "ownership": {
+    "files": [
+      "docs/modules/breadcrumb-protocol-tests-breadcrumb-storage-faults-context.json",
+      "docs/modules/breadcrumb-protocol-tests-breadcrumb-storage-faults.md",
+      "tests/test_breadcrumb_storage_faults.py"
+    ]
+  },
+  "qualified_dependencies": [
+    {
+      "provider": "scripts/breadcrumb_bundle.py",
+      "names": [
+        "load_bundle",
+        "stored_manifest"
+      ],
+      "contract_sha256": "0b8a223de8ff949722e64e3868d16bf8ed953706b9c1811603642540f2f7858b",
+      "integration_tests": [
+        "tests/test_breadcrumb_storage_faults.py"
+      ]
+    },
+    {
+      "provider": "scripts/breadcrumb_protocol.py",
+      "names": [
+        "occurrence_identity"
+      ],
+      "contract_sha256": "895d4b9bc50d9cd7c3462632d0bec08b5cfc8bddd3246365d5856c3805bea417",
+      "integration_tests": [
+        "tests/test_breadcrumb_storage_faults.py"
+      ]
+    },
+    {
+      "provider": "scripts/breadcrumb_storage.py",
+      "names": [
+        "publish_breadcrumb"
+      ],
+      "contract_sha256": "9406dd43a27f72fe241a62c818dffda547146c570d792fd630427347b8a76b86",
+      "integration_tests": [
+        "tests/test_breadcrumb_storage_faults.py"
+      ]
+    },
+    {
+      "provider": "scripts/installed_memory_repair.py",
+      "names": [
+        "repair_installed_vault"
+      ],
+      "contract_sha256": "6ab4497d3ed56413bc24ea5ae9e993acf118980056b046072877a80df4f52a18",
+      "integration_tests": [
+        "tests/test_breadcrumb_storage_faults.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/formats/canonical.py",
+      "names": [
+        "sha256_bytes"
+      ],
+      "contract_sha256": "7d34a853c5a6f1be8b00805b2e865ac2a5ca5a6fe3ca141de97ebda61d2a85cf",
+      "integration_tests": [
+        "tests/test_breadcrumb_storage_faults.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/generation_catalog_store.py",
+      "names": [
+        "GenerationCatalog"
+      ],
+      "contract_sha256": "b18194ebe04bf988b4474379fcb5243516550d43b745a00eaed1453f7844c983",
+      "integration_tests": [
+        "tests/test_a_blocked_task_has_a_way_back.py",
+        "tests/test_a_build_in_flight_is_not_an_orphan.py",
+        "tests/test_a_capacity_refusal_does_not_corrupt_a_generation.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/model_choice.py",
+      "names": [
+        "using_root"
+      ],
+      "contract_sha256": "d45f2655cb61963e77617d1dfd7d617b134ad77cc770b59b335d0856e5d65019",
+      "integration_tests": [
+        "tests/test_breadcrumb_storage_faults.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/runtime_contracts.py",
+      "names": [
+        "RuntimeFileIdentity",
+        "UnsafeStateRoot"
+      ],
+      "contract_sha256": "9868f8f90624ffd75e17d6e6451f57074ee114498d8719cf54e84573a0471476",
+      "integration_tests": [
+        "tests/test_breadcrumb_storage_faults.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/runtime_environment.py",
+      "names": [
+        "harden_runtime_owner_only",
+        "known_network_path",
+        "require_applied_mode",
+        "windows_reparse_point"
+      ],
+      "contract_sha256": "5c4452a5149896725ae91aae39e0b5e751b04be39086a69d32d2c6c8100dd5e4",
+      "integration_tests": [
+        "tests/test_breadcrumb_storage_faults.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/runtime_records.py",
+      "names": [
+        "capture_runtime_file_identity",
+        "read_runtime_bytes"
+      ],
+      "contract_sha256": "8660d68e804edbcd128f105aad9fb43c341be30c1f0c0fbc86af3472c7ee8ab0",
+      "integration_tests": [
+        "tests/test_breadcrumb_storage_faults.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/runtime_sync.py",
+      "names": [
+        "fsync_directory",
+        "fsync_file",
+        "metadata_durability_error"
+      ],
+      "contract_sha256": "f6cd51add441b83c1b0254deab8c2241e23fa6289f3e960006ea6ac4f0d538b1",
+      "integration_tests": [
+        "tests/test_breadcrumb_storage_faults.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/sqlite_contracts.py",
+      "names": [
+        "require_positive_int"
+      ],
+      "contract_sha256": "f146fa9d3d0e09b563e5a1d3a1611731449c3906807306240b3ad04beb478d31",
+      "integration_tests": [
+        "tests/test_breadcrumb_storage_faults.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/windows_acl.py",
+      "names": [
+        "verify_windows_owner_acl"
+      ],
+      "contract_sha256": "98ec10828e3d1b1bf803745cea5efa051fb3c36b892d0a7c1374e522cf4702f2",
+      "integration_tests": [
+        "tests/test_breadcrumb_storage_faults.py"
+      ]
+    },
+    {
+      "provider": "scripts/markdown_transaction.py",
+      "names": [
+        "MarkdownCoordinator",
+        "initialize_coordinator_v3_candidate"
+      ],
+      "contract_sha256": "c90f28cb4198a1b4e5731bc79a575ed3196c6d31c90e6a45902938a1a2cdabb3",
+      "integration_tests": [
+        "tests/test_breadcrumb_storage_faults.py"
+      ]
+    },
+    {
+      "provider": "scripts/queue_core.py",
+      "names": [
+        "MemoryQueue",
+        "initialize_queue_v3_candidate"
+      ],
+      "contract_sha256": "c97a06080973ae3b314fb5227fa32342387600c7954e4de1e5bc9b7f0a575168",
+      "integration_tests": [
+        "tests/test_breadcrumb_storage_faults.py"
+      ]
+    },
+    {
+      "provider": "scripts/reliable_memory.py",
+      "names": [
+        "canonical_json_bytes",
+        "validate_state_root"
+      ],
+      "contract_sha256": "7bba4b535d3f0a73445fece541c540939989b41456c9a79a67f82634748be36b",
+      "integration_tests": [
+        "tests/test_breadcrumb_storage_faults.py"
+      ]
+    },
+    {
+      "provider": "scripts/repository_scope.py",
+      "names": [
+        "sanitized_git_environment"
+      ],
+      "contract_sha256": "fd550ae20761afad50b37fa3a71044a162485b0e4d4b3e2af9b5b22e143c2bec",
+      "integration_tests": [
+        "tests/test_breadcrumb_storage_faults.py"
+      ]
+    },
+    {
+      "provider": "scripts/windows_workspace.py",
+      "names": [
+        "flush_file_path",
+        "move_file_write_through"
+      ],
+      "contract_sha256": "d8e6c454f310773e1a16c1760b5b32878f500b0c7888eae6e164f52b65ab4500",
+      "integration_tests": [
+        "tests/test_breadcrumb_storage_faults.py"
+      ]
+    }
+  ]
+}

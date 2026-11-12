@@ -16,7 +16,8 @@ for directory in (SCRIPTS, TESTS):
     if str(directory) not in sys.path:
         sys.path.insert(0, str(directory))
 
-from test_prune_generations import _catalog, _chain, _present  # noqa: E402
+from tests.generation_catalog_helpers import _catalog  # noqa: E402
+from tests.prune_generations_helpers import _chain, _present  # noqa: E402
 
 
 def test_a_spent_budget_defers_the_removal_and_is_not_a_failure(tmp_path):
@@ -29,7 +30,7 @@ def test_a_spent_budget_defers_the_removal_and_is_not_a_failure(tmp_path):
 
     deferred = [line for line in lines if line.startswith("DEFERRED:")]
     assert (_present(catalog, ["gen-1"]), deferred) == ([True], ["DEFERRED: gen-1: the pass's budget is spent"])
-    assert prune_generations._count_prefixed(lines, "ERROR:") == 0
+    assert prune_generations.count_prefixed(lines, "ERROR:") == 0
 
 
 def _budget_and_timeout(command: list[str], timeout: int) -> tuple[float, int]:
@@ -37,11 +38,11 @@ def _budget_and_timeout(command: list[str], timeout: int) -> tuple[float, int]:
 
 
 def _prune_steps() -> list[tuple[list[str], int]]:
-    import scheduled_nightly
-    import scheduled_weekly
+    import nightly_budget
+    import weekly_budget
 
-    nightly = [(step.command, step.timeout) for step in scheduled_nightly._post_compile_steps()]
-    weekly = [(command, timeout) for _m, _l, command, timeout in scheduled_weekly._script_steps()]
+    nightly = [(step.command, step.timeout) for step in nightly_budget.post_compile_steps()]
+    weekly = [(command, timeout) for _m, _l, command, timeout in weekly_budget.script_steps()]
     return [(command, timeout) for command, timeout in nightly + weekly if "prune_generations.py" in command[1]]
 
 
@@ -60,11 +61,11 @@ def _budget_flag(command: list[str]) -> str | None:
 
 
 def _all_steps() -> list[tuple[list[str], int]]:
-    import scheduled_nightly
-    import scheduled_weekly
+    import nightly_budget
+    import weekly_budget
 
-    nightly = [scheduled_nightly._queue_step(), scheduled_nightly._episode_step(), *scheduled_nightly._post_compile_steps()]
-    weekly = [(command, timeout) for _m, _l, command, timeout in scheduled_weekly._script_steps()]
+    nightly = [nightly_budget.queue_step(), nightly_budget.episode_step(), *nightly_budget.post_compile_steps()]
+    weekly = [(command, timeout) for _m, _l, command, timeout in weekly_budget.script_steps()]
     return [(step.command, step.timeout) for step in nightly] + weekly
 
 
@@ -75,9 +76,9 @@ def _budgeted_steps() -> list[tuple[list[str], int, float]]:
 
 
 def test_every_budgeted_step_leaves_the_start_margin_before_its_kill():
-    import scheduled_nightly
+    import nightly_budget
 
-    margin = scheduled_nightly.STEP_START_MARGIN_SECONDS
+    margin = nightly_budget.STEP_START_MARGIN_SECONDS
     steps = _budgeted_steps()
     short = [command[1] for command, timeout, budget in steps if budget + margin > timeout]
 

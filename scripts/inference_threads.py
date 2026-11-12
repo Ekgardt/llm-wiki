@@ -22,17 +22,17 @@ EXIT_SETTLE_SECONDS = 30.0
 _EXIT_HANDLER: list[bool] = []
 
 
-def _tracked(target: Callable[[], object]) -> Callable[[], None]:
+def tracked(target: Callable[[], object]) -> Callable[[], None]:
     def run() -> None:
         try:
             target()
         finally:
-            _forget(threading.current_thread())
+            forget(threading.current_thread())
 
     return run
 
 
-def _forget(thread: threading.Thread) -> None:
+def forget(thread: threading.Thread) -> None:
     """Stop tracking a thread; when it was the last, a drain in progress is over."""
     with _LOCK:
         _RUNNING.discard(thread)
@@ -42,14 +42,14 @@ def _forget(thread: threading.Thread) -> None:
 
 def start(target: Callable[[], object], *, name: str) -> threading.Thread:
     """Start `target` on a daemon thread that `settle` will wait for."""
-    thread = threading.Thread(target=_tracked(target), name=name, daemon=True)
+    thread = threading.Thread(target=tracked(target), name=name, daemon=True)
     with _LOCK:
         _RUNNING.add(thread)
         _register_exit_settle()
     try:
         thread.start()
     except BaseException:
-        _forget(thread)
+        forget(thread)
         raise
     return thread
 

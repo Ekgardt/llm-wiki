@@ -15,7 +15,7 @@ SCRIPTS = Path(__file__).resolve().parent.parent / "scripts"
 if str(SCRIPTS) not in sys.path:
     sys.path.insert(0, str(SCRIPTS))
 
-from tests.test_knowledge_extractor import _source  # noqa: E402
+from tests.knowledge_extractor_helpers import _source  # noqa: E402
 
 QUOTED = (
     b"---\ntype: concept\n---\n"

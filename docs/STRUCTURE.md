@@ -8,15 +8,56 @@
 
 ## Three-zone layout
 
+The [comparative adapter fixture](modules/comparative-adapter-fixture.md) retains
+the existing deterministic subprocess test protocol in place. Its synthetic
+metrics exercise the benchmark runner; they are not measured product results.
+
+The [BEAM data owner](modules/beam-data.md) keeps the existing Parquet converter
+and its seven original tests. The optional `benchmark-data` extra supplies
+PyArrow 26.0.1; an explicitly selected Parquet suite and a three-OS CI job test
+real file decoding. Base installation and ordinary base-test discovery remain
+unchanged. No benchmark corpus or model is downloaded by these fixture checks.
+
+The [cross-service fixture owner](modules/cross-service-fixture.md) qualifies
+the existing two-repository Git fixture builder and its task/gold JSON in place.
+The parity runner remains a separate consumer; fixture checks do not run a
+model or establish comparative performance.
+
+CI shard costs remain in `tests/shard_weights.json`, maintained by
+`tests/shard_plan.py`. Incremental measurements preserve the slower recorded
+cost; an explicit `--refresh` replaces costs from a reviewed complete
+cross-platform JUnit set. A partial or local run is not a complete refresh.
+This keeps the existing file layout, five shards and job deadlines unchanged.
+
 ```
 llm-wiki/                          ← vault root (= $LLM_WIKI_ROOT)
 │
 ├── scripts/                       CODE — pipeline + hooks + helpers
 │   ├── reliable_memory.py            SQLite durability/default primitives
-│   ├── markdown_transaction.py       recover/undo/prune Markdown transactions
+│   ├── markdown_transaction.py       recover/undo/prune Markdown transactions (facade; code in llm_wiki/markdown_*.py)
 │   ├── project_journal.py            checkpoints + deterministic state projection
-│   ├── memory_queue.py               fenced SQLite priority queue + migration
+│   ├── queue_core.py                 fenced SQLite priority queue (facade; worker, results, failures, purge, sources and v2 migration in llm_wiki/queue_worker.py, llm_wiki/memory_queue_*.py, llm_wiki/queue_v2_migration.py; v3 reader mixins in llm_wiki/queue_reader_*.py)
+│   ├── memory_queue.py               queue operator command; pickle names of queue records
 │   ├── compile_cache.py              content-addressed compile plans + receipts
+│   ├── compile_memory.py             compile command at its documented path
+│   ├── compile_pipeline.py           compile library beneath the command (facade; code in llm_wiki/compile_pipeline_*.py)
+│   ├── compile_receipts.py           compile receipt selection and publication
+│   ├── compile_leased_run.py         one compile task leased from the queue
+│   ├── compile_lock.py               the single compile lock file
+│   ├── repository_index.py           repository index command at its documented path
+│   ├── repository_indexing.py        repository index library beneath the command
+│   ├── generation_search.py          search over the active generation
+│   ├── generation_fts_validation.py  sealed full-text index validation
+│   ├── capture_publication.py        durable publication of a capture intent
+│   ├── capture_intent_records.py     capture decisions, Markdown commit, terminal records
+│   ├── capture_handler_identity.py   capture handler versions
+│   ├── prompt_capture_followup.py    running capture started from the prompt hook
+│   ├── project_checkpoint.py         project checkpoint debounce and drain
+│   ├── breadcrumb_bundle.py          reads a stored breadcrumb bundle back
+│   ├── install_state.py              install state records and provider bundle proof
+│   ├── codex_config_state.py         Codex configuration state
+│   ├── reliability_v3_validation.py  Reliability v3 database validation
+│   ├── weekly_budget.py              worst-case seconds of the weekly pass
 │   ├── archive_daily.py              immutable daily-log BagIt archive
 │   ├── evidence_resolver.py          flat/archive evidence resolution
 │   ├── claims.py                     atomic claims + quarantine
@@ -31,6 +72,7 @@ llm-wiki/                          ← vault root (= $LLM_WIKI_ROOT)
 │   ├── pyright_profile.py            pinned identity discovery and qualification
 │   ├── install_pyright.py            explicit managed-package installer
 │   ├── install_control.py            resumable install/update/rollback ownership
+│   ├── install_takeover.py           keeps and retires copies of replaced owned files, plans drop-ins
 │   ├── integration_hook_config.py    bounded host hook-config projections
 │   ├── pyright_session.py            Pyright readiness, sync, and semantic provider
 │   ├── workspace_revision.py         bounded pre/post freshness proofs
@@ -45,10 +87,13 @@ llm-wiki/                          ← vault root (= $LLM_WIKI_ROOT)
 │   ├── reflection.py                v4.0: A-MEM page consolidation
 │   ├── mcp_server.py                v4.0: MCP server (12 task-shaped tools, stdio)
 │   ├── mcp_supervisor.py            stdio supervisor: reloads the server child on code change
-│   ├── integration_adapter.py       v4.x: thin native lifecycle adapter
+│   ├── integration_adapter.py       v4.x: thin native lifecycle adapter (facade; code in llm_wiki/integration_*.py)
 │   ├── event_envelope.py            v4.x: shared lifecycle event contract
 │   ├── mcp_contract.py              v4.x: uniform MCP response envelope/resources
-│   ├── doctor.py                    v4.x: degraded-only health + safe repair
+│   ├── llm_wiki/mcp_response_values.py Pure MCP schema and response value rules
+│   ├── doctor.py                    v4.x: degraded-only health + safe repair (facade; checks in llm_wiki/doctor_*.py)
+│   ├── generation_maintenance.py    builds and repairs the search generation
+│   ├── nightly_budget.py            time budget of the nightly pass
 │   ├── repair_installed_memory.py   explicit check/apply v3 adoption
 │   ├── code_graph.py                v4.0: tree-sitter code intelligence
 │   ├── impact_analysis.py           v4.0: LINK layer (code→wiki impact)
@@ -131,6 +176,7 @@ llm-wiki/                          ← vault root (= $LLM_WIKI_ROOT)
 │   │   ├── transaction.json            resumable install/upgrade/rollback state
 │   │   ├── install.lock                process-lifetime advisory writer lock
 │   │   ├── preimages/                  verified owned-fragment/value preimages
+│   │   ├── displaced/                  readable copies of owned files an update replaced
 │   │   └── scheduler/                  non-secret native scheduler definitions
 │   └── state.json.lock
 │
@@ -159,9 +205,29 @@ llm-wiki/                          ← vault root (= $LLM_WIKI_ROOT)
 |----------|---------|---------|
 | `$LLM_WIKI_ROOT` | Resolved from `scripts/` location (worktree-aware via `git rev-parse --git-common-dir`) | Vault root — code + knowledge + runtime |
 | `$LLM_WIKI_STATE_ROOT` | **The vault root itself** | Runtime root → `cache/`, `logs/`, `run/` at vault root. Override for multi-disk or hermetic tests. |
+
+Both roots are read from the environment on every call, in one place:
+`scripts/llm_wiki/runtime_roots.py`. No module keeps a copy of a root or of a path
+derived from one at import time, so setting the variables reaches every module at
+once; an empty value names nothing and falls back to the default.
+`tests/test_roots_are_read_at_call_time.py` fails on a module that reads a root
+at import, directly or through one of its own functions. See
+`docs/research/2026-11-10-roots-are-read-at-call-time.md`.
 | `$MEMORY_LLM_PROVIDER` | Auto-detected (`opencode` → `codex` → `claude` → `openai` → `ollama`) | LLM backend for compile/flush/query. `fake` for tests. |
 | `$LLM_WIKI_DLP_POLICY` | Unset | Optional absolute path to an external bounded-literal/fingerprint policy. Invalid or digest-mismatched required policy fails closed. |
 | `$LLM_WIKI_<SECTION>_<KEY>` | Unset | One run's override of a registered limit in `scripts/settings.py` (for example `LLM_WIKI_CORPUS_MAX_FILES`); beats `llm-wiki.toml`. An invalid value stops the caller with its name. |
+
+### SQLite locking probe (approved 2026-10-01)
+
+The temporary two-connection SQLite locking probe belongs in the existing
+`run/` directory of the configured runtime root, on the same filesystem.
+It must not create temporary files at the vault root: doing so changes the
+root identity while the corpus reader verifies its sealed ancestor chain.
+Runtime initialization creates `run/` before probing. A read-only health check
+with no `run/` reports the probe unavailable and creates no directory.
+Unsafe linked/reparse paths or a different filesystem are refused. The probe
+keeps actual SQLite locking verification and removes only its own files.
+No persistent database, runtime directory, setting, daemon, or tool is added.
 
 ### Operator limits (`llm-wiki.toml`, 2026-09-27)
 
@@ -169,7 +235,7 @@ Limits that depend on the vault and the machine are declared once in
 `scripts/settings.py`, each with its default, unit, lower bound and reason, and are
 read only through `settings.setting_value`. An optional `llm-wiki.toml` at the vault
 root overrides them; it is gitignored and absent by default, so a vault without it
-runs on the defaults, which are the constants the registry replaced. Precedence is
+runs on the declared registry defaults. Precedence is
 default < file < `LLM_WIKI_<SECTION>_<KEY>`. An unknown section or key, a non-integer
 or a value below its bound stops the caller naming the key and its source; nothing
 falls back silently. `doctor` has a `settings` check: it lists every value that
@@ -180,366 +246,72 @@ refusal at one names the setting that raises it. Decision and sources:
 `docs/research/2026-09-27-every-limit-states-its-reason.md`; inventory:
 `docs/LIMITS-2026-09-27.md`.
 
-## External integration configuration preimages
+In the uninstalled compile-progress candidate (2026-10-20),
+`compile.max_sources` and `compile.max_total_source_bytes` are optional aggregate
+admission quotas, default 0 (disabled). Positive file/environment values remain
+enforced and negative values are invalid. These quotas control admitted work
+volume or disk/cost policy, not peak memory of the streaming capture. Doctor
+reports configured overrides but does not compute a near-ceiling share for a
+disabled quota. Zero does not disable separate per-file, archive, model-input,
+output, downstream index or ownership checks; their law-9 qualification is
+independent. Existing positive private-vault settings are not rewritten.
 
-Claude and Codex configuration merges may create byte-exact sibling preimages
-outside the vault zones. Claude uses
-`settings.json.bak-llm-wiki-<YYYYMMDD-HHMMSS-ffffff>` beside `settings.json`; Codex
-uses `hooks.json.bak-llm-wiki-<YYYYMMDD-HHMMSS-ffffff>` beside `hooks.json`. The same
-prefix applies to a retired Cursor or Antigravity fragment while `uninstall` takes it
-back. A no-op merge creates no backup.
+The candidate index renderer also reads each source body once, overlays pending
+transaction after-images without changing the caller's base mapping, and retains
+only extracted navigation entries for ordering. Original and resulting page sets
+are both checked against any explicit `index.max_pages` /
+`index.max_total_bytes` quota; both now default to 0 (disabled). Private sources
+remain subject to input checks and are excluded before their text is decoded
+into public index entries. Per-page/output limits remain in force. Standalone
+`rebuild_plan` now captures a digest-only claim manifest and reads note bodies
+through a manifest-bound mapping: a changed body is refused before rendering.
+The existing claim-tree transaction precondition still checks membership and
+content at publication. Manifest-only claim/guardrail readers release bodies;
+explicit content-bearing readers retain their original exact-body contract.
+This adds a second read/hash of index notes instead of retaining the whole tree.
 
-Only files with the destination's exact `.bak-llm-wiki-` prefix are owned by this
-retention contract. After changed configuration is published and verified, each
-integration retains at most 10 backups, no backup older than 90 days when a newer
-restore point exists, and at most 100 MiB in aggregate when older files can be
-removed. The newest verified or sole preimage is never deleted. These files preserve
-bytes only, not owner, ACL, alternate streams, or complete filesystem metadata. They
-are not runtime state and do not replace private-vault backup/restore. See
-`knowledge/notes/integration-config-backup-retention-decision.md`.
+The approved 2026-10-18 compile correction setting is `compile.validation_retries`
+(`LLM_WIKI_COMPILE_VALIDATION_RETRIES` for one run), default 2, minimum 0, no
+additional upper ceiling. It counts correcting passes after the initial
+attempt for each provider; a malformed or incomplete review resumes in the review
+role without redrafting, within that same budget. There is no separate hidden
+missing-verdict retry. Zero disables correction retries. The default is an
+explicit cost/quality compromise: allow a format correction and a semantic
+correction while preventing unlimited model passes. It is not a measured optimum.
+Review it using complete-cycle retained facts, failures, tokens and latency after
+model/prompt or workload changes. Source, citation, completeness and publication
+checks remain mandatory regardless of the chosen value. The owner approved the
+new environment contract before implementation; the decision is retained privately
+as `compile-validation-retry-setting-decision-2026-10-18`.
 
-## Approved audit-closure boundary
+### Generation maintenance windows (decision approved 2026-10-08)
 
-The user approved the security, recovery, install, scheduling, coordination, and
-evidence contract on 2026-08-15. The only new runtime directory is `run/install/`.
-It owns resumable install state, exact-release and external-path manifests, verified
-preimages, and non-secret scheduler definitions. It does not contain backup passwords
-or provider credentials. Restic receives credentials through its standard external
-password command or protected password file.
+The existing settings registry exposes `generation.nightly_seconds` and
+`generation.post_compile_seconds`, including its standard environment overrides
+`LLM_WIKI_GENERATION_NIGHTLY_SECONDS` and
+`LLM_WIKI_GENERATION_POST_COMPILE_SECONDS`. The bounded builder keeps complete
+sources, vectors, validation and catalog CAS activation. Windows task and Linux
+service definitions must outlast the configured pass; persisted definitions keep
+their original values for rollback. Values are qualified from a complete measured
+pass and reconsidered after corpus growth or machine changes. No runtime root,
+directory, database, daemon or MCP tool is added. The defaults are 2131 seconds,
+an estimate from the 2026-10-08 full-build attempt plus independently measured
+validation and collection variation; the complete installed build remains
+unqualified after a kernel OOM. Installation and full-cycle qualification are
+separate checks, and the windows must be remeasured after resource changes.
+Decision: `knowledge/notes/generation-measured-time-budget-decision-20261008.md`.
 
-Cognee is retired from the supported product. The optional package extra, sync script,
-and setup path were removed. Existing `cache/cognee/` content is
-a disposable legacy cache: no supported reader depends on it, and no installer,
-repair, or migration deletes it automatically.
+### Full nightly diagnosis window (approved 2026-10-17)
 
-First-party model calls share one fail-closed DLP boundary. Optional custom literals
-and fingerprint allowlists are loaded only from the absolute external path named by
-`LLM_WIKI_DLP_POLICY`; the policy is not a fourth root zone. Verified local-only mode
-accepts only literal-loopback Ollama and requires verifiable Ollama cloud disablement.
-The implemented strict path uses the existing `MEMORY_LLM_PROVIDER=ollama` override,
-the official `OLLAMA_NO_CLOUD=1` server setting, and an explicit `127.0.0.1` or `::1`
-endpoint. It disables provider fallback and rejects remote model metadata, but reports
-`external_runtime_unverified` because LLM Wiki does not own or inspect the running
-Ollama process and therefore cannot prove that it restarted with cloud disabled.
-
-Private-vault backup is a coherent application snapshot, not a direct copy of live
-SQLite files. The existing maintenance admission fence blocks cooperating writers;
-SQLite online backup, source membership/hash recapture, and a manifest-bound staged
-projection create the Restic input. Unknown or ambiguous owners, source races,
-integrity failures, and schema mismatches block backup. Restore validates into an
-empty staging target before publication and never guesses historical ownership.
-The implemented CLI in `scripts/private_vault_backup.py` requires exact Restic
-`0.19.1`, an external repository-file containing only the repository location, and
-pre-existing empty staging/restore directories. Credentials remain in Restic's
-external environment, password file, or password command. Backup returns an exact
-snapshot ID plus manifest digest; restore requires both, runs `restic check`, and
-keeps a validated `vault/` + `state/` image only on success. It does not publish over
-an installed vault. Restic repositories must be outside the vault and staging tree.
-
-The image carries what Git does not (decided 2026-09-17): the knowledge, the runtime
-half, untracked files, and tracked files modified since `HEAD`. Paths git holds
-identically are skipped, as are `cache/`, `logs/`, `run/`, `.git/`, `.venv/` and
-regenerable tool caches (`__pycache__`, `.pytest_cache`, `.ruff_cache`, `.mypy_cache`,
-`node_modules`); directories left holding nothing are not part of the image. Where git
-cannot answer, nothing is skipped on git's word. This is what lets `publish` — which
-overwrites nothing — land in a fresh clone. See
-`docs/research/2026-09-17-a-backup-image-carries-what-git-does-not.md`.
-
-Windows Task Scheduler remains the native Windows scheduler. macOS uses a per-user
-LaunchAgent and Linux uses a per-user systemd timer; cron is explicit degraded
-fallback only. Blackboard tables reuse `markdown-transactions-v3.sqlite3`, capture
-reuses Queue v3 intents/terminal proof, and the active operational database count
-remains two. No daemon, MCP tool or runtime root is added, and no automatic Git
-operation beyond the nightly fast-forward of the default branch.
-Blackboard adds only `blackboard_claim_epochs` and `blackboard_claims` to the exact
-coordinator-v3 schema. They provide bounded all-or-none resource claims, renewable
-logical leases, expiry/reclaim, and monotonic fencing; authoritative task, conflict,
-and resolution events remain append-only Markdown. Installed databases require the
-existing explicit offline re-adoption path before clients accept the changed schema
-digest. See `knowledge/notes/audit-closure-security-recovery-control-plane-decision.md`
-and `knowledge/notes/blackboard-fenced-resource-claims-decision.md`.
-
-### Install ownership state
-
-The first install-control slice is defined by
-`knowledge/notes/install-ownership-control-plane-decision.md`. The approved managed
-IDE-hook extension is defined by
-`knowledge/notes/managed-ide-hooks-install-update-decision.md`. Version 1 records
-remain readable; validated installs adopt canonical `install-manifest/v2` and
-`install-transaction/v2` for resumable resource-set updates and one retained committed
-update rollback. No `complete.json`, install database, daemon, MCP tool, or
-force-adoption path exists.
-
-The manifest owns recognized LLM-Wiki profile fragments, Windows user root variables,
-native scheduler resources, an explicitly selected cron block, and bounded structural
-fragments in the Claude Code and Codex user configuration files. A fragment written by
-an install before 2026-08-26 in a retired host's file stays removable. It records exact
-source identity and digests but does not claim that a dirty local checkout is an
-immutable release. Other agent configuration, Git push protection, code upgrade, full
-release inventory, and restored-vault publication remain separate follow-up scopes.
-
-Transactions move through `prepared`, `mutating`, `publishing`, and `committed`.
-Failure recovery uses `reverting` and `reverted`; malformed state, ambiguous ownership,
-or external drift uses `quarantined`. A durable prepared transaction and all required
-owned-fragment preimages precede external mutation. Update leaves the prior manifest
-active until target verification and publishes generation +1. The original projection
-is retained for uninstall; the prior installed projection supports only the latest
-committed-update rollback. Restoration requires the exact expected installed value and
-never overwrites a concurrent user edit.
-
-`manifest.json`, `transaction.json`, preimages, and scheduler definitions are bounded,
-digest-verified, and durably published on the supported local-filesystem boundary.
-Whole profiles, whole crontabs, whole user hook files, unrelated task definitions,
-provider credentials, and backup passwords are never copied into `run/install/`. An active manifest,
-nonterminal transaction, quarantine, or unreadable install state blocks the offline
-`run/` deletion snapshot.
-
-## Approved Reliability v3 implementation scope
-
-The user approved the repair direction and delegated the exact architecture decisions
-on 2026-08-05, explicitly approved implementation of the operational database pair
-and offline adoption backend on 2026-08-12, and approved durable capture producer
-activation on 2026-08-16. This scope keeps the three root zones and existing runtime
-environment variables.
-Remote installer bootstrap adds mandatory full-OID input `LLM_WIKI_COMMIT`; the verified
-commit becomes local `main` tracking `origin/main`, so the nightly fast-forward applies. The only
-new runtime directory is `run/capture-intents/`. New create-only
-`capture-intent/v1` records remain there until an immutable terminal record under
-existing `run/queue-results/` proves committed Markdown, validated no-durable-content,
-or explicit operator discard. Queue enqueue alone never permits intent deletion.
-Provider-derived `capture-decision/v1` records are published in `queue-results/`
-before side effects and reused after crashes.
-Legacy `cache/transient-transcripts/` files are recovery input only; new capture work
-is not written to disposable cache.
-
-For supported SessionEnd and PreCompact evidence, `integration_adapter.py` is the one
-synchronous producer boundary. It must publish bounded canonical redacted intent
-evidence before returning. Detached execution may wake processing only: spawn success,
-a process ID, or queue insertion is not ownership transfer and never authorizes source
-deletion. Events without transcript evidence make no successful capture claim and do
-not fabricate no-durable-content terminal outcomes. Recovery checks terminal record,
-decision record, and deterministic transaction adoption before any provider retry.
-Exact replay uses stable source event identity plus complete redacted-input digest;
-an identity collision with different bytes fails closed.
-
-Compile authority is `compile-receipt/v3`. V3 receipt filenames are
-`knowledge/daily/receipts/v3-<source-identity-sha256>.md`; source identity hashes
-canonical logical path plus content digest. Every receipt binds a sorted batch
-manifest and one validated disposition to each source. Historical v2 digest-only
-receipts remain readable as evidence but cannot authorize automatic skip or archive
-under the path-bound v3 contract.
-
-`queue-task/v3` describes production serialization. `input_hash` is SHA-256 over
-the exact canonical stored payload. It is recomputed before every insertion, lease,
-execution, terminal, operator, migration, or deletion transition. A dedupe key aliases
-only the exact same kind, handler version, and payload hash.
-
-Capture, project/Markdown writers, queue workers, compilers, Doctor, nightly, weekly,
-and LSP use `maintenance_owners` in `markdown-transactions-v3.sqlite3` as the
-canonical admission registry. Queue workers project the same token and epoch into
-`queue_ownership` in `queue-v3.sqlite3`; the active database count remains two.
-Expiry permits takeover only with positive process-death proof; unknown liveness
-blocks.
-Since 2026-09-10 the nightly and weekly passes take the `nightly`/`weekly`
-lease through the adopted coordinator's registry (`acquire_scheduled_owner`),
-refresh it with a heartbeat, stop between steps when the fence is lost, and
-record that loss instead of success; `run/maintenance.lock` left by a dead
-owner is reclaimed only with the registry's proof, never by age
-(`knowledge/notes/nightly-takes-the-canonical-fence-decision.md`). On a vault
-without a V3 coordinator the legacy PID marker remains the only fence, and
-`compile.pid` stays the compile's legacy lock: both remain compatibility
-evidence and deletion blockers until a separately approved installed-vault
-migration removes them. Explicit offline repair retains the exact v2 database bytes, publishes two v3
-replacements, and puts immutable JSON tombstones at the legacy active paths. Partial
-adoption disables v3 mutation and requires the vault to remain offline. After complete
-adoption, known v2 queue and transaction clients cannot open active v3 state. Doctor
-reports a protected quiescent snapshot only after complete adoption; before that it
-reports an unconditional legacy-protocol blocker. The snapshot is not a durable deletion permit;
-`run/` deletion remains an offline operator action.
-
-Operational migrations execute individual statements under explicit transactions,
-verify their complete invariant on every startup, and remain restartable after any
-statement. Operational databases remain rollback-journal, `synchronous=FULL`, local
-filesystem only, and no WAL. The listed v3 paths remain unavailable to normal runtime
-mutation until offline adoption, producer, replay, terminal, recovery, purge, and
-complexity verification pass. See
-`knowledge/notes/v4-reliability-contracts-decision.md` and
-`knowledge/notes/reliability-v3-runtime-adoption-implementation-decision.md` and
-`knowledge/notes/durable-capture-producer-activation-decision.md` and
-`docs/superpowers/specs/2026-08-05-v4-reliability-repair-design.md`.
-
-## Implemented corpus-generation checkpoint
-
-The current checkpoint implements one complete `corpus-generation/v2` with
-`evidence-graph/v2` for one
-repository checkout or worktree. `repository_scope` is a closed
-`repository-scope/v1` object containing the repository ID, checkout ID, canonical
-checkout root, Git common directory, and captured commit. Repository identity is
-shared by linked worktrees; checkout identity remains specific to the worktree.
-Readers requesting repository-scoped evidence accept only an active or validated
-fallback generation with the exact same scope. A scope mismatch returns no
-generation rather than reading another checkout's evidence.
-
-Every v2 generation contains `manifest.json`, canonical `source-manifest.json`,
-`evidence.sqlite3`, and `search.sqlite3`. Incremental builds also contain canonical
-`incremental-manifest.json`, which records source deltas, ownership, dependency and
-workspace invalidation metadata, and exact reuse configuration. Optional vectors
-remain an all-or-nothing pair. `source-manifest.json` binds the captured source
-membership, hashes, collection policy, and collector/extractor identity. The
-Evidence Graph and FTS artifacts are both built from that exact immutable
-`CorpusSnapshot`; live membership and hashes are recaptured immediately before
-publication.
-
-`search.sqlite3` also carries the **ledger of things and events** (approved
-2026-09-22): one table, `ledger`, whose rows are posted by the nightly fact-keys
-call into `cache/fact-keys/keys.sqlite3` — kind, canonical thing, event, day,
-quantity, whether the user said it and dated it, and the pointer to the source
-bytes — and copied into the artifact at build time exactly as the keys are. Each
-row is posted once under a digest of its fields and pointer; two rows of one thing
-within 30 days are one event unless a stated quantity contradicts; a count is made
-by code over every row (`scripts/ledger.py: count`, `reconcile`), never by a model
-over retrieved chunks, and costs no provider call. The table is sealed by the
-artifact's digest, disposable and derived like the rest of the generation; an
-artifact built before the table existed carries none and a reader answers "no
-ledger", not zero. A thing seen on two or more days opens the recurrence gate: its
-entity page under `knowledge/notes/ledger-<kind>-<thing>.md` is created or extended
-with dated pointer lines by code, never rewritten by a model. Decision:
-`knowledge/notes/ledger-of-things-and-events-decision.md`; research:
-`docs/research/2026-09-22-a-ledger-of-things-and-events-posted-once.md`.
-
-Publication is complete or absent. The builder writes and fsyncs every required
-artifact, validates canonical manifests, repository scope, artifact hashes, SQLite
-integrity, graph evidence spans, FTS content, and the final directory seal, then
-registers the candidate and compare-and-swap activates it in the catalog. A partial,
-stale, raced, timed-out, or changed candidate is never published as active. The
-previous active generation stays readable. The catalog selects one active
-generation, can register complete orphans without activating them, and repairs a
-corrupt pointer only to a revalidated prior generation in activation history or
-parent lineage.
-
-`doctor.run_generation_maintenance()` is the shared bounded, fenced refresh path.
-It resolves repository/worktree scope, captures knowledge and approved workspace
-code, performs workspace-level extraction, reuses exact parent records when valid,
-and returns `current`, `built`, `deferred`, or `error` without mutating knowledge.
-Nightly maintenance invokes this same path and treats only `current` or `built` as
-success. This checkpoint does not document a native code-index kernel, multi-repo
-portfolio generation, temporal/control-plane services, or an operator console as
-implemented.
-
-## Implemented Python code navigation
-
-This section records the implemented Python/Pyright slice. The runtime path helpers are implemented,
-while the authoritative corpus checkpoint remains
-`corpus-generation/v2` with `evidence-graph/v2`. The whole 2026-07-21 Plan A is
-superseded: its one-shot consent/SCIP/publication Tasks 6-16 were superseded by the
-replacement plan below, and on 2026-09-18 its foundation — the Graph v3 selection
-contracts, the sealed-workspace utilities and the `code_capture` manifest section that
-nothing in production ever filled — was removed from the code
-(`docs/research/2026-09-18-the-superseded-plan-a-seam-leaves-the-code.md`).
-
-The replacement plan implements path derivation, position and URI conversion,
-bounded protocol transport, process startup evidence, platform-qualified lifecycle
-ownership, repository containment, safe diagnostic redaction, pinned profile
-discovery and installation, capability-honest provider requests, document
-synchronization, session-manager capacity, the normalized navigation facade,
-deterministic rendering, MCP routing, doctor diagnostics, and qualification gates.
-
-The implemented Python/Pyright slice keeps the existing structural Evidence Graph
-and adds a Python 3.10-compatible, read-only LSP runtime owned by LLM Wiki. It serves
-precise live navigation through modes of the existing 12 task-shaped MCP tools. It
-adds no Serena runtime dependency, Rust rewrite, second graph, catalog, active
-pointer, runtime root, persistent daemon, semantic result cache, or MCP tool.
-Query-time LSP observations are not written into an active generation.
-
-Structural answers read a repository's generation through a process-local reader
-cache (`scripts/evidence_reader_cache.py`, 2026-09-10): a generation is validated
-once per MCP process and reused while `catalog.sqlite3`, the generation's
-`evidence.sqlite3` and the checkout's Git state keep their stat identity. It holds
-no state on disk and adds no runtime root. A foreign repository's generation is
-refreshed incrementally by `repository_index.py refresh` — spawned detached by the
-MCP server once per checkout and commit when a structural answer finds the
-checkout's commit ahead of the generation's, and by the nightly `refresh-all`
-step — under the ownership registry's `doctor` role scoped
-`repository:<repository_id>`. It is not a daemon: the process exits when the
-refresh does. Answers carry a `freshness` block naming both commits.
-
-The runtime starts a managed language server lazily within the owning MCP process,
-exposes only allowlisted read operations, reports readiness and capability
-limitations, and falls back to existing structural evidence when unavailable. The
-server is chosen by file suffix from the four managed profiles; a file whose suffix
-no profile claims answers `unsupported` before any server is asked. Exact small results
-use a deterministic compact renderer; the Context Compiler remains responsible for
-broad multi-source synthesis. Installation is a separate explicit operator action
-per profile: `scripts/install_pyright.py`, or
-`scripts/install_language_server.py --profile <name>`. See
-`knowledge/notes/read-only-lsp-navigation-engine-decision.md` and
-`docs/superpowers/specs/2026-07-22-read-only-lsp-navigation-design.md`.
-
-The approved managed artifact paths are `cache/code-tools/pyright/1.1.411/`,
-`cache/code-tools/typescript-language-server/6.0.0/`,
-`cache/code-tools/gopls/v0.23.0/` and `cache/code-tools/rust-analyzer/1.98.1/`.
-Live LSP process scratch is bounded under
-`run/lsp/<owner-nonce>/`, which also holds the sealed digest-verified copy of a
-native server that is launched from it; doctor and deletion eligibility must treat a
-live owner or retained failure evidence as protected operational state.
-
-Every startup coordinator enters an eight-entry module registry before its first
-owned mutation. Successful startup hands ownership to the instance's existing
-normal-exit callback and leaves the registry. A higher-level owner may atomically
-adopt `StartupCleanupError`; `PyrightSession` then removes that coordinator from the
-bounded registry, retains the error, installs its own normal-exit cleanup, and retries
-from `start()` or `close()` under the caller deadline. Unadopted incomplete startups
-stay in the module registry. Both paths use the same absolute-deadline cleanup driver.
-
-While lifecycle ownership is live, `run/lsp/<owner-nonce>/lease.json` is a bounded
-mutable live lease distinct from immutable create-only `owner.json` and
-`failure.json`. It contains only canonical process/nonces, timestamps, schema, and
-live-state fields. It is refreshed every 10 seconds and expires after 30 seconds.
-Controlled success or terminal failure stops and joins the heartbeat before lease
-removal; abrupt death leaves the lease to expire. Updates are atomic, owner-only,
-and anchored to the retained owner-directory handle. A Windows replacement retries
-only errors 5, 32, and 33 with stop-aware waits bounded by the caller deadline and
-the previous lease's monotonic expiry. Evidence and lease publication own at most
-one serialized hidden temporary name. On Windows, that name is reserved before the
-create call so post-create validation failure remains recoverable; POSIX records it
-immediately after atomic creation returns and before validation. Failed temp
-deletion keeps the lifecycle in `CLEANUP_PENDING` with its lease and owner, blocking
-evidence success, lease removal, scratch deletion, and owner close. The exact
-handle-relative name is retried before another publication or terminal finalization.
-A successful terminal layout never contains a hidden temp. See
-`knowledge/notes/lsp-live-lease-decision.md`.
-
-LSP process containment is platform-qualified rather than one portable sandbox. A
-Windows Job Object owns the assigned server tree. On Linux and macOS, a POSIX
-process group owns the assigned managed server and its descendants only while they
-remain in that group. A hostile descendant can call `setsid()` and escape; containing
-that case is unsupported. The POSIX runtime is therefore limited to the qualified
-managed servers in trusted repositories and does not use a `/proc` or `ps` ancestry
-scan to claim stronger ownership. Optional delegated cgroup v2 containment is a future Linux-only
-candidate requiring a separate capability-gated design. See
-`knowledge/notes/lsp-process-containment-decision.md`.
-
-Each LSP process generation linearizes expected exits, observed process death, and
-one sticky failure-intent selection under a single generation lock. The exit monitor
-records normal `wait()` completion before invoking protocol callbacks. Therefore an
-unexpected death observed before shutdown remains a failure, an expected shutdown
-marked before death remains successful, and duplicate process/protocol callbacks
-cannot enqueue multiple generation failures. A second fatal intent handled by the
-recovery thread quiesces that thread's tracked role and completes terminal cleanup
-without waiting for a caller action. Retained cleanup diagnostics contain at most
-one sanitized current record for each fixed cleanup step and never retain raw
-exception graphs; successful retries clear the resolved step.
-
-On Windows, a generation retains CPython's direct-process handle until the process
-is reaped and its protocol, stderr, and exit-monitor owners are joined. Cleanup
-closes that handle before releasing the Job Object. A failed close keeps the
-generation, Job, and lease in `CLEANUP_PENDING` for idempotent retry; the retained
-`Popen` object continues to expose its cached return code. POSIX process-group
-release ordering is unchanged. Windows Job bounds and completion use current
-`ActiveProcesses`; lifetime `TotalProcesses` and racing PID-list snapshots are not
-compared. PID capture is a best-effort identity aid. A snapshot error is discarded
-only after direct-process reap and bounded stable active zero; unknown, over-bound,
-or nonzero active state remains fail-closed.
+`doctor.nightly_seconds` and `LLM_WIKI_DOCTOR_NIGHTLY_SECONDS` use the existing
+positive-integer settings registry. The default preserves the previous 60-second
+compatibility profile; its sufficiency requires qualification for each vault.
+Both full nightly diagnosis and the scheduler whole-pass bound read this value
+for the selected vault. Reinstall managed scheduler definitions after changing it.
+Incomplete checks remain deferred and read failures remain failures. Requalify
+the budget after history growth, load, or resource changes; a larger timeout does
+not fix inefficient work. No new dependency, database, or runtime path is added.
+Decision: `knowledge/notes/nightly-full-health-budget-decision-20261017.md`.
 
 ## What lives where
 
@@ -568,14 +340,48 @@ or nonzero active state remains fail-closed.
   MIT notices.
 - `scripts/schemas/` — closed JSON Schemas for transaction, project checkpoint,
   queue task, compile plan/receipt, archive manifest, and claim records.
+  On 2026-10-04 the owner approved a separate `claim-ledger-v2.json` for
+  `claim-ledger/v2` and `claim/v2`. The compatible readers and native compiler
+  are installed; controlled publication/consumer tests and one actual native
+  compile-and-retrieve cycle in the supported base profile are qualified.
+  Installed hybrid retrieval, whole-day compilation and full nightly
+  qualification remain pending.
+  Historical v1 schemas and records remain strict. V2 preserves the complete
+  physical citation, its source range and hash; a transient native logical-line
+  selector is verified against the canonical capture before that citation is
+  bound. All source parts covering the container must participate together.
+  Admission uses existing full-source and full-page byte budgets, without a new
+  literal-length cap. Readers must support both versions before v2 publication;
+  unknown versions refuse explicitly. This adds no runtime root, database,
+  environment variable, daemon or MCP tool. Historical readers remain necessary
+  while retained pages, archives, undo or live consumers require v1.
 - `skills/` — 9 SKILL.md files (knowledge-compile, knowledge-lookup,
   knowledge-review, knowledge-qa-file-back, contradict-check,
   crystallize-playbook, bridge-promote-insight, session-memory-compile,
   session-memory-review).
-- `rules/` — 3 rule files (wiki-files, raw-files, output-files).
+- `rules/` — 4 rule files (wiki-files, raw-files, output-files, development-laws).
+  `development-laws.md` preserves the user's nine mandatory development laws verbatim;
+  both `AGENTS.md` and `CLAUDE.md` require reading and following them.
 - `integrations/` — thin host wiring: claude-code (settings.json) and codex
   (hooks.json). MCP is the common read/action interface.
   Obsidian is an optional Markdown viewer and requires no bundled integration.
+  The owner approved the following launch contract on 2026-10-07; implementation
+  and platform qualification remain pending. Own Codex hooks and MCP commands
+  may carry the existing nonsecret installed provider bundle through a fixed
+  same-process Python bootstrap in the existing uv invocation. Presence of any
+  existing provider key, including an empty value, preserves the entire explicit
+  host environment; otherwise the complete installed bundle applies. Malformed
+  payloads refuse before target execution. The original script, arguments,
+  imports, stdin, output and exit behavior must be qualified. No new environment
+  key, runtime file, storage schema, process or global Codex setting is added.
+  Exact command/root ownership, foreign and disabled registrations, preimages,
+  CAS, uninstall and rollback drift guards remain required. MCP registration
+  remains outside installer transaction ownership. Doctor's expected bundle
+  requires the complete verified manifest/transaction/root/resource/desired
+  snapshot chain and stable read identities; an old manifest without a bundle
+  cannot establish the expected model. Changed native hook commands require
+  normal user trust confirmation; trusted hashes are never written automatically.
+  See `knowledge/notes/codex-installed-provider-bootstrap-decision.md`.
 - `benchmark/` — retrieval and frozen contradiction corpora/runners, including
   `run_benchmark.py`, `run_retrieval_v2.py`, `retrieval-v2.json`,
   `retrieval-v2.schema.json`, `legacy-60-v1.json`,
@@ -597,9 +403,9 @@ or nonzero active state remains fail-closed.
   `observed_at` is that reading converted to UTC (2026-09-27,
   `docs/research/2026-09-27-the-daily-log-keeps-one-clock.md`).
 - `knowledge/daily/receipts/` — authoritative immutable Markdown compile receipts.
-  Current v2 is keyed by source digest. The proposed v3 target above adds logical
-  path identity and commits one source receipt with compile output; v2 then remains
-  historical evidence only.
+  Installed v3 binds logical path plus source-part digest; v2 is historical only.
+  The approved v4 target additionally binds original source context as described
+  above. V4 activation is not implied by recording the decision.
 - `knowledge/notes/` — durable OKF pages, flat `<slug>.md`. All gitignored:
   the repository ships no memory (2026-09-10). The decision pages named in
   this document are the owner's private record; the contracts are stated here.
@@ -619,6 +425,21 @@ or nonzero active state remains fail-closed.
   `compile-receipt-<n>.md` per part, all in the tag manifest. A page quoting one
   part resolves from the bag by that part's digest. See
   `docs/research/2026-09-26-a-split-day-is-archived-with-every-part.md`.
+  Candidate streaming reader: `validate_bag` verifies the complete payload and
+  returns metadata after closing its descriptor. `open_validated_bag` exposes an
+  owned verified range only inside its context; results are provisional until
+  final source verification succeeds on exit. Archive citation resolution scans
+  bags individually, retaining selected evidence rather than a month's payloads.
+  Terminal capture proofs keep the range open through incremental append-hash
+  checks. Historical part discovery hashes candidates incrementally, then returns
+  the matching part's bytes. The candidate archive writer also checks eligibility
+  through owned ranges, consumes compile parts lazily, and copies payloads and
+  quarantine files in chunks. Its source scope must exit successfully inside the
+  hidden-build cleanup boundary before publication. Existing fsync, source fences,
+  post-publication validation and transactional source deletion remain.
+  Transaction undo-image allocation, historical selected-part allocation and
+  remaining byte/member ceilings still need review; this does not establish full
+  streaming of every archive operation or completion of the installed migration.
 - `knowledge/raw/` — immutable sources. Gitignored (personal). One subtree is
   writable by the runtime: `knowledge/raw/sessions/<date>/<session>.md`, the
   session records of the 2026-08-23 retention decision. It is the only part of
@@ -719,64 +540,6 @@ cache/evidence-graph/generations/<generation-id>/
   search, and its index was keyed to a different embedder than the product's — see
   `knowledge/notes/retire-lancedb-decision.md`.
 
-### Evidence-cache migration and rollback
-
-The generation is the only index since 2026-09-23: the four legacy cache paths are
-read by nothing and may be deleted, and nothing deletes them automatically.
-Generation refresh is integrated with `doctor.run_generation_maintenance()`, the
-nightly pass and every successful command-line compile; `doctor --rebuild-generation`
-builds one on demand.
-
-1. Keep authoritative `knowledge/`, Git history, and project journals unchanged.
-2. Switch readers only through catalog CAS activation.
-3. Verify returned generation/fallback fields.
-
-For safe rollback, stop active commands and remove only the derived
-`cache/evidence-graph/` tree, or reactivate a previously validated generation through
-the catalog API. Do not delete `knowledge/`, project journals, Git data, or `run/`.
-Until a generation is active, memory search reads Markdown directly and says
-`no_active_generation`; graph-dependent code tools use bounded live extraction and
-label it incomplete.
-- `logs/` — `lint-YYYY-MM-DD.md`, `compile-last.log`, `session-start-last.txt`,
-  `capture-failures.jsonl` (bounded trail of lost prompt/post-tool captures),
-  and `logs/maintenance/` (owner-only `*.out.log` / `*.err.log` artifacts holding
-  the full output of each nightly and weekly step). Both are disposable and
-  bounded: the trail by size, the artifacts by age, count, and total size.
-- `run/` — `state.json`, `compile.pid`, `run/markdown-transactions.sqlite3`,
-  `run/transactions/`, `run/queue.sqlite3`, `run/queue-results/`, receipts, and
-  locks. The adopted v3 layout adds `run/capture-intents/`, two active `*-v3.sqlite3`
-  files, retained `*-v2-retired.sqlite3` upgrade evidence, legacy-path JSON
-  tombstones, migration/adoption evidence, and explicit compatibility treatment for
-  `maintenance.lock`. `run/lsp/<owner-nonce>/`
-  holds bounded live process scratch created by the
-  owning LSP lifecycle. Its `lease.json` is a bounded mutable live
-  lease with a 10 seconds heartbeat and 30 seconds expiry, separate from immutable
-  `owner.json` and `failure.json`. Existing `run/queue/*.json` is refused and
-  named, never imported (2026-09-23). The approved audit-closure target adds `run/install/` for
-  manifest-owned install, rollback, scheduler, and external-preimage state.
-- `cache/cognee/` — retired disposable legacy cache. It has no supported reader and
-  is never removed automatically.
-
-**Runtime deletion contract.** `cache/` and `logs/` are regenerated on demand.
-The current `run/` contains recoverable but operationally significant transactions
-and queued work. Delete it only after `doctor` reports no nonterminal, conflicted, or
-quarantined transaction, no transaction inside the 2-day undo window, and no
-retained queue task or result, and no live project lease, writer, queue worker, or
-maintenance or LSP owner, and no retained LSP failure evidence. Deleting eligible
-committed artifacts loses undo history.
-Installers and repair commands never remove it silently.
-
-The proposed Reliability v3 target additionally treats every unresolved capture
-intent, compiler, compatibility marker, retired database, missing or mismatched
-tombstone/migration/adoption evidence, and expired owner without positive death proof
-as a blocker. A complete validated
-tombstone/adoption set does not independently block otherwise eligible whole-`run/`
-deletion. Validated capture terminal records survive ordinary purge but cease to be
-independent blockers after 30 days; deleting the whole eligible runtime deliberately
-forfeits their replay suppression. Proposed Doctor acquires an admission gate while
-checking but reports only a quiescent snapshot; it does not authorize a later
-concurrent deletion. Deletion remains an offline operator action.
-
 ## Forbidden at vault root
 
 These directories MUST NOT exist at the vault root (three-zone violation):
@@ -806,3 +569,32 @@ any of these appearing.
 
 Never skip steps 1-2. Architectural improvisation is the root cause of the
 most expensive bugs in this project's history.
+
+### Central model selection (owner requested and installed 2026-10-19)
+
+The existing private `llm-wiki.toml` holds `[llm] model = "provider/model-id"`
+and its reasoning setting. `choose_model.py` is the one selection command;
+`llm_client` reads this choice for CLI, MCP, hooks, queue and scheduled work.
+Saved selection takes precedence over historical model/provider environment
+projections and the host CLI's global model; endpoint credentials and DLP/local-only
+requirements keep their existing boundaries. Explicit fake remains a test mode.
+A resolved request keeps its identity across preparation/dispatch; an update does
+not relabel in-flight calls. No new database, service or runtime root is added.
+
+Provider catalogs are candidates, not proof of subscription entitlement. Selection
+requires a successful short protected call before saving; failure leaves the old
+selection intact. Installed provider model projections are removed after qualified adoption;
+unconfigured installations retain their existing environment-based compatibility.
+The owner request and scope are recorded privately in
+`knowledge/notes/central-memory-model-selection-decision-20261019.md`.
+
+The durable compile controller, its streaming artifacts, batches, repair trees and publication
+checkpoints have their own contract: [durable compile contract](modules/durable-compile-contract.md).
+
+## Where the rest of this reference lives
+
+- [Compile and nightly contracts](contracts/compile-and-nightly.md)
+- [Integration and recovery contracts](contracts/integration-and-recovery.md)
+- [Reliability and capture contracts](contracts/reliability-and-capture.md)
+- [Corpus and code navigation contracts](contracts/corpus-and-navigation.md)
+- [Module map](MODULES.md): the owner guide of every module packet and the boundaries between modules

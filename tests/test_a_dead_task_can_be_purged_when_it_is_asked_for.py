@@ -10,10 +10,10 @@ exported; `quarantine-corrupt` is its route.
 from __future__ import annotations
 
 import sqlite3
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
-import memory_queue
+import queue_core
 
 from tests.adopted_vault import adopt, tamper_payload, task_state
 
@@ -31,7 +31,7 @@ def _kill_and_age(state_root: Path, task_ids: tuple[str, ...]) -> None:
 
 def _purge(queue, tmp_path: Path, *, include_dead: bool, name: str):
     return queue.purge(
-        terminal_before=datetime.now(timezone.utc) - timedelta(days=1),
+        terminal_before=datetime.now(UTC) - timedelta(days=1),
         export_path=tmp_path / name,
         include_dead=include_dead,
     )
@@ -39,7 +39,7 @@ def _purge(queue, tmp_path: Path, *, include_dead: bool, name: str):
 
 def test_a_dead_task_is_retained_until_it_is_asked_for(tmp_path: Path) -> None:
     root, state_root = adopt(tmp_path)
-    queue = memory_queue.active_or_legacy_memory_queue(root, state_root)
+    queue = queue_core.active_or_legacy_memory_queue(root, state_root)
     dead = queue.enqueue("compile", 1, {"daily": "one"})
     _kill_and_age(state_root, (dead,))
 
@@ -51,7 +51,7 @@ def test_a_dead_task_is_retained_until_it_is_asked_for(tmp_path: Path) -> None:
 
 def test_a_corrupt_dead_row_stays_for_the_corruption_route(tmp_path: Path) -> None:
     root, state_root = adopt(tmp_path)
-    queue = memory_queue.active_or_legacy_memory_queue(root, state_root)
+    queue = queue_core.active_or_legacy_memory_queue(root, state_root)
     healthy = queue.enqueue("compile", 1, {"daily": "one"})
     corrupt = queue.enqueue("compile", 1, {"daily": "two"})
     queue.cancel(corrupt)

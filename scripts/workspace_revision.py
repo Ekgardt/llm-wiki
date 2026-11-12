@@ -22,14 +22,14 @@ from pathlib import Path, PurePosixPath, PureWindowsPath
 from types import MappingProxyType
 
 try:
-    import fcntl as _fcntl
+    import fcntl as fcntl
 except ImportError:  # pragma: no cover - Windows has no fcntl module
-    _fcntl = None
+    fcntl = None
 
 from bounded_io import IO_CHUNK_BYTES
 from corpus_snapshot import always_pruned_directory_name
+from llm_wiki.formats.canonical import canonical_json_bytes
 from lsp_profiles import navigable_suffixes, profile_configuration_names
-from reliable_memory import canonical_json_bytes
 from repository_scope import RepositoryScope, sanitized_git_environment
 
 # Which files belong in a checkout's freshness record. Read from the managed
@@ -78,7 +78,7 @@ _PROCESS_CLEANUP_SECONDS = 0.2
 # bytes an entry, so 64 MiB covers well over MAX_REVISION_FILES entries. The two
 # unmatched-file bounds (entries the pass did not hash) predate measurement; review
 # if verification is seen falling back on ordinary checkouts.
-_MAX_PRIVATE_INDEX_BYTES = 64 * 1024 * 1024
+MAX_PRIVATE_INDEX_BYTES = 64 * 1024 * 1024
 _MAX_PRIVATE_UNMATCHED_TRACKED_FILES = 4096
 _MAX_PRIVATE_UNMATCHED_TRACKED_BYTES = 32 * 1024 * 1024
 # Bounded reads of the user's git config, attributes and ignore files, which the proof
@@ -104,11 +104,11 @@ _PRIVATE_WRITE_CHUNK_BYTES = 1024 * 1024
 # The inventory hint is a cache: a hint over either bound is simply not kept, and
 # the next proof rescans. The bounds cap the cache's memory (4096 paths, 1 MiB of
 # names); basis unknown beyond that — review if proofs rescan large checkouts often.
-_MAX_INVENTORY_HINT_ENTRIES = 4096
+MAX_INVENTORY_HINT_ENTRIES = 4096
 _MAX_INVENTORY_HINT_PATH_BYTES = 1024 * 1024
 _UNSUPPORTED_INDEX_EXTENSIONS = frozenset({b"link", b"sdir", b"UNTR", b"FSMN"})
 _SUPPORTED_INDEX_EXTENSIONS = frozenset({b"TREE", b"EOIE", b"IEOT"})
-_PRIVATE_GIT_SELECTOR_ENVIRONMENT = frozenset(
+PRIVATE_GIT_SELECTOR_ENVIRONMENT = frozenset(
     {
         "GIT_ATTR_NOSYSTEM",
         "GIT_ATTR_SOURCE",
@@ -121,8 +121,8 @@ _PRIVATE_GIT_SELECTOR_ENVIRONMENT = frozenset(
         "GIT_EXEC_PATH",
     }
 )
-_SYSTEM_GIT_CONFIG_PATHS: tuple[Path, ...] | None = None
-_SYSTEM_GIT_ATTRIBUTE_PATHS: tuple[Path, ...] | None = None
+SYSTEM_GIT_CONFIG_PATHS: tuple[Path, ...] | None = None
+SYSTEM_GIT_ATTRIBUTE_PATHS: tuple[Path, ...] | None = None
 
 
 class _RevisionStopped(TimeoutError):
@@ -290,7 +290,7 @@ def _inventory_hint_paths(hint: _RevisionInventoryHint) -> tuple[Path, ...]:
 def _inventory_hint_within_bounds(hint: _RevisionInventoryHint) -> bool:
     """Whether this hint is small enough to be worth holding in memory."""
     paths = _inventory_hint_paths(hint)
-    if len(paths) > _MAX_INVENTORY_HINT_ENTRIES:
+    if len(paths) > MAX_INVENTORY_HINT_ENTRIES:
         return False
     retained = sum(len(os.fsencode(path)) for path in paths)
     return retained <= _MAX_INVENTORY_HINT_PATH_BYTES
@@ -336,7 +336,7 @@ def _fresh_hint_identity(path: Path) -> tuple[Path, _StrongIdentity] | None:
     info = path.lstat()
     if _is_reparse(info) or stat.S_ISDIR(info.st_mode):
         return None
-    return path, _strong_identity(info)
+    return path, strong_identity(info)
 
 
 def _revalidated_hint_snapshots(
@@ -352,7 +352,7 @@ def _revalidated_hint_snapshots(
     try:
         for snapshot in hint.directory_snapshots:
             _check_stop(deadline, cancelled)
-            _validate_directory_snapshot(root, snapshot)
+            validate_directory_snapshot(root, snapshot)
         if not want_entry_snapshots:
             return fresh
         return _fresh_hint_identities(hint, fresh, deadline=deadline, cancelled=cancelled)
@@ -527,7 +527,7 @@ def _is_python_configuration(path: str) -> bool:
     return path.startswith("requirements") and path.endswith(".txt")
 
 
-def _is_relevant_path(path: str) -> bool:
+def is_relevant_path(path: str) -> bool:
     return PurePosixPath(path).suffix in NAVIGABLE_SUFFIXES or _is_configuration(path)
 
 
@@ -582,7 +582,7 @@ def _directory_snapshot_matches(
     )
 
 
-def _validate_directory_snapshot(root: Path, snapshot: _DirectorySnapshot) -> None:
+def validate_directory_snapshot(root: Path, snapshot: _DirectorySnapshot) -> None:
     """A directory that is no longer the snapshotted one invalidates the pass."""
     try:
         info = snapshot.path.lstat()
@@ -665,7 +665,7 @@ def _validate_file_identity(snapshot: _FileSnapshot) -> os.stat_result:
 
 def _validate_file_snapshot(root: Path, snapshot: _FileSnapshot) -> None:
     for parent in snapshot.parents:
-        _validate_directory_snapshot(root, parent)
+        validate_directory_snapshot(root, parent)
     _validate_file_identity(snapshot)
 
 
@@ -721,7 +721,7 @@ def _kill_directly(process: subprocess.Popen) -> None:
         pass
 
 
-def _terminate_process_tree(
+def terminate_process_tree(
     process: subprocess.Popen[bytes], *, platform_name: str | None = None
 ) -> None:
     if (platform_name or os.name) == "nt":
@@ -799,7 +799,7 @@ class _GitRun:
             if self._termination_started.is_set():
                 return
             self._termination_started.set()
-        _terminate_process_tree(self.process)
+        terminate_process_tree(self.process)
 
     def _read_output(self) -> None:
         try:
@@ -882,9 +882,7 @@ class _GitRun:
 
     def release(self, *, holds_fds: bool) -> None:
         """Release the process and its pipe, whatever happened."""
-        if holds_fds and not self.terminating:
-            self.terminate()
-        elif self.process.poll() is None:
+        if (holds_fds and not self.terminating) or self.process.poll() is None:
             self.terminate()
         self._close_stdout()
         self._reader.join(timeout=_PROCESS_CLEANUP_SECONDS)
@@ -953,7 +951,7 @@ class GitCommandFailed(ValueError):
     """
 
 
-def _git_output(
+def git_output(
     root: Path,
     arguments: list[str],
     *,
@@ -970,7 +968,7 @@ def _git_output(
     command = _git_command(root, arguments, executable)
     process = subprocess.Popen(command, **_git_popen_options(environment, pass_fds))
     holds_fds = bool(pass_fds) and os.name != "nt"
-    run = _GitRun(process, maximum_bytes, _git_run_deadline(deadline), cancelled)
+    run = _GitRun(process, maximum_bytes, git_run_deadline(deadline), cancelled)
     try:
         run.wait_for_output()
         output = run.output()
@@ -984,7 +982,7 @@ def _git_output(
     )
 
 
-def _git_run_deadline(deadline: float | None) -> float:
+def git_run_deadline(deadline: float | None) -> float:
     """The caller's deadline; `GIT_STATUS_TIMEOUT_SECONDS` only when it gave none.
 
     A 5 s cap under every budget failed a large checkout's `git status` inside a
@@ -1028,14 +1026,14 @@ def _parse_git_state_output(
     return identity.decode("ascii"), output
 
 
-def _git_state(
+def git_state(
     root: Path,
     *,
     allow_missing_head: bool,
     deadline: float | None,
     cancelled: Callable[[], bool] | None,
 ) -> tuple[str | None, bytes]:
-    output = _git_output(
+    output = git_output(
         root,
         [
             "status",
@@ -1053,7 +1051,7 @@ def _git_state(
     return _parse_git_state_output(output, allow_missing_head=allow_missing_head)
 
 
-def _git_state_with_private_index(
+def git_state_with_private_index(
     root: Path,
     descriptor: int,
     *,
@@ -1068,7 +1066,7 @@ def _git_state_with_private_index(
     environment["GIT_CONFIG_GLOBAL"] = os.devnull
     environment["GIT_CONFIG_NOSYSTEM"] = "1"
     environment["GIT_CONFIG_SYSTEM"] = os.devnull
-    output = _git_output(
+    output = git_output(
         root,
         [
             "status",
@@ -1172,7 +1170,7 @@ def _ignored_status_entries(marker: bytes) -> list[tuple[str, str]]:
     return []
 
 
-def _status_paths(output: bytes) -> list[tuple[str, str]]:
+def status_paths(output: bytes) -> list[tuple[str, str]]:
     """Every changed path git reported, with the kind of change it saw."""
     records = _status_records(output)
     result: list[tuple[str, str]] = []
@@ -1193,7 +1191,7 @@ def _normalized_status(git_state: bytes) -> dict[str, str] | None:
     """Git's status by normalized path, or None on a normalization collision."""
     current: dict[str, str] = {}
     raw_inputs: dict[str, str] = {}
-    for raw, kind in _status_paths(git_state):
+    for raw, kind in status_paths(git_state):
         normalized = _normalized_path(raw)
         previous = raw_inputs.get(normalized)
         if previous is not None and previous != raw:
@@ -1397,7 +1395,7 @@ def _scanned_entry(scan: _RelevantScan, entry: os.DirEntry) -> _ScannedEntry:
     path = Path(entry.path)
     relative = path.relative_to(scan.root).as_posix()
     unsafe = entry.is_symlink() or _is_reparse(info)
-    relevant_name = _is_relevant_path(relative)
+    relevant_name = is_relevant_path(relative)
     if unsafe:
         _refuse_unsafe_entry(entry, info, relevant_name, scan.resolved_root)
     relevant = not unsafe and stat.S_ISREG(info.st_mode) and relevant_name
@@ -1515,7 +1513,7 @@ def _collect_subdirectory(item: _ScannedEntry, directories: list[Path]) -> None:
 def _record_entry_identity(scan: _RelevantScan, item: _ScannedEntry) -> None:
     """Remember what this entry looked like, if the pass tracks identities."""
     if scan.entry_snapshots is not None:
-        scan.entry_snapshots[item.path] = _strong_identity(item.info)
+        scan.entry_snapshots[item.path] = strong_identity(item.info)
 
 
 def _record_relevant_path(scan: _RelevantScan, item: _ScannedEntry) -> None:
@@ -1562,7 +1560,7 @@ def _scan_directory(
     """Yield the relevant files in this directory; collect its subdirectories."""
     current_snapshot = _directory_snapshot_for(scan, current)
     items = _scanned_directory_entries(scan, current)
-    _validate_directory_snapshot(scan.root, current_snapshot)
+    validate_directory_snapshot(scan.root, current_snapshot)
     prepared_parents = (
         _prepared_parent_snapshots(scan, current)
         if scan.prepared_files is not None
@@ -1575,7 +1573,7 @@ def _scan_directory(
         )
 
 
-def _relevant_files(
+def relevant_files(
     root: Path,
     *,
     resolved_root: Path,
@@ -1637,7 +1635,7 @@ def ignored_directories(
     Git cannot answer (no repository, a failed command): none is skipped.
     """
     try:
-        output = _git_output(
+        output = git_output(
             root,
             ["ls-files", "--others", "--ignored", "--exclude-standard", "--directory", "-z"],
             maximum_bytes=MAX_GIT_STATUS_BYTES,
@@ -1727,7 +1725,7 @@ def _revalidate_hashed_source(
     _validate_file_identity(snapshot)
 
 
-def _hash_file_for_verification(
+def hash_file_for_verification(
     path: Path,
     *,
     root: Path,
@@ -1768,7 +1766,7 @@ def _hash_file_for_verification(
     )
 
 
-def _hash_file(
+def hash_file(
     path: Path,
     *,
     root: Path,
@@ -1778,7 +1776,7 @@ def _hash_file(
     deadline: float | None,
     cancelled: Callable[[], bool] | None,
 ) -> tuple[str, int, _FileSnapshot]:
-    result = _hash_file_for_verification(
+    result = hash_file_for_verification(
         path,
         root=root,
         resolved_root=resolved_root,
@@ -1832,7 +1830,7 @@ _LINUX_SEAL_CONSTANTS = MappingProxyType(
 
 def _seal_constant(name: str) -> int | None:
     """One file-seal number, from `fcntl` when it has it, else from the ABI."""
-    value = getattr(_fcntl, name, None) if _fcntl is not None else None
+    value = getattr(fcntl, name, None) if fcntl is not None else None
     if isinstance(value, int):
         return value
     if not sys.platform.startswith("linux"):
@@ -1845,20 +1843,20 @@ def _has_all_attributes(module: object, names: Iterable[str]) -> bool:
     return all(hasattr(module, name) for name in names)
 
 
-def _private_index_runtime_available() -> bool:
+def private_index_runtime_available() -> bool:
     """Whether os and fcntl offer the sealing and waiting calls the path needs."""
     if not _has_all_attributes(os, _REQUIRED_OS_NAMES):
         return False
-    if _fcntl is None:
+    if fcntl is None:
         return False
     return all(_seal_constant(name) is not None for name in _REQUIRED_FCNTL_NAMES)
 
 
-def _private_index_platform_supported() -> bool:
+def private_index_platform_supported() -> bool:
     """Whether this machine offers everything the private-index path needs."""
     if os.name != "posix" or not sys.platform.startswith("linux"):
         return False
-    if not _private_index_runtime_available():
+    if not private_index_runtime_available():
         return False
     return Path("/proc/self/fd").is_dir()
 
@@ -1897,7 +1895,7 @@ def _resolved_git_executable(candidate: str) -> tuple[Path, os.stat_result] | No
     return executable, info
 
 
-def _private_git_installation() -> _PrivateGitInstallation | None:
+def private_git_installation() -> _PrivateGitInstallation | None:
     """The git installation this machine offers, if its layout is a known one."""
     candidate = shutil.which("git")
     resolved = None if candidate is None else _resolved_git_executable(candidate)
@@ -1910,9 +1908,9 @@ def _private_git_installation() -> _PrivateGitInstallation | None:
     config_paths, attribute_paths = prefixes
     return _PrivateGitInstallation(
         executable,
-        _strong_identity(info),
-        _overridden(_SYSTEM_GIT_CONFIG_PATHS, config_paths),
-        _overridden(_SYSTEM_GIT_ATTRIBUTE_PATHS, attribute_paths),
+        strong_identity(info),
+        _overridden(SYSTEM_GIT_CONFIG_PATHS, config_paths),
+        _overridden(SYSTEM_GIT_ATTRIBUTE_PATHS, attribute_paths),
     )
 
 
@@ -1928,7 +1926,7 @@ def _plain_entry_stat(path: Path, want_directory: bool) -> os.stat_result | None
     return info if wanted else None
 
 
-def _ordinary_index_path(root: Path) -> Path | None:
+def ordinary_index_path(root: Path) -> Path | None:
     """The checkout's ordinary git index, when `.git` is a real directory."""
     marker = root / ".git"
     if _plain_entry_stat(marker, want_directory=True) is None:
@@ -1939,7 +1937,7 @@ def _ordinary_index_path(root: Path) -> Path | None:
     return index
 
 
-def _strong_identity(info: os.stat_result) -> _StrongIdentity:
+def strong_identity(info: os.stat_result) -> _StrongIdentity:
     return (
         info.st_dev,
         info.st_ino,
@@ -2025,7 +2023,7 @@ def _require_opened_owned_file(opened: os.stat_result, named: os.stat_result) ->
     """The opened descriptor has to be the very entry the name resolved to."""
     if not stat.S_ISREG(opened.st_mode):
         raise PermissionError("workspace revision owned file changed before read")
-    if _strong_identity(opened) != _strong_identity(named):
+    if strong_identity(opened) != strong_identity(named):
         raise PermissionError("workspace revision owned file changed before read")
 
 
@@ -2063,7 +2061,7 @@ def _read_owned_descriptor(
         descriptor, opened.st_size, deadline=deadline, cancelled=cancelled
     )
     _check_stop(deadline, cancelled)
-    if _strong_identity(os.fstat(descriptor)) != _strong_identity(opened):
+    if strong_identity(os.fstat(descriptor)) != strong_identity(opened):
         raise PermissionError("workspace revision owned file changed during read")
     return content, opened
 
@@ -2078,7 +2076,7 @@ def _require_owned_file_stable(
         raise PermissionError(
             "workspace revision owned file changed after read"
         ) from exc
-    if _strong_identity(final_named) != _strong_identity(opened):
+    if strong_identity(final_named) != strong_identity(opened):
         raise PermissionError(
             "workspace revision owned file identity changed after read"
         )
@@ -2107,7 +2105,7 @@ def _read_owned_content(
     return content, opened
 
 
-def _read_owned_file(
+def read_owned_file(
     root: Path,
     path: Path,
     maximum_bytes: int,
@@ -2142,7 +2140,7 @@ def _read_owned_file(
         cancelled=cancelled,
     ).hex()
     return _OwnedFileRead(
-        content, _OwnedFileFence(path, digest, _strong_identity(opened))
+        content, _OwnedFileFence(path, digest, strong_identity(opened))
     )
 
 
@@ -2405,7 +2403,7 @@ def _private_config_line_step(
     return section, allowed or False
 
 
-def _safe_private_git_config(content: bytes, *, hash_name: str) -> bool:
+def safe_private_git_config(content: bytes, *, hash_name: str) -> bool:
     """Whether the repository's own config leaves git's behaviour predictable."""
     text = _decoded_config(content)
     if text is None:
@@ -2474,7 +2472,7 @@ def _ignored_config_line_step(
     return section, _ignored_config_setting_allowed(line, section) or False
 
 
-def _safe_ignored_git_config(content: bytes) -> bool:
+def safe_ignored_git_config(content: bytes) -> bool:
     """Whether an external git config sets nothing that changes what git reads."""
     text = _decoded_config(content)
     if text is None:
@@ -2493,7 +2491,7 @@ def _owned_attributes_are_inert(
     cancelled: Callable[[], bool] | None,
 ) -> bool:
     try:
-        attributes = _read_owned_file(
+        attributes = read_owned_file(
             root,
             path,
             _MAX_PRIVATE_ATTRIBUTES_BYTES,
@@ -2512,7 +2510,7 @@ def _raw_semantics_environment() -> tuple[tuple[str, str], ...]:
         sorted(
             (name, value)
             for name, value in os.environ.items()
-            if name in _PRIVATE_GIT_SELECTOR_ENVIRONMENT
+            if name in PRIVATE_GIT_SELECTOR_ENVIRONMENT
             or name in {"HOME", "XDG_CONFIG_HOME"}
             or name.startswith(("GIT_CONFIG_KEY_", "GIT_CONFIG_VALUE_"))
         )
@@ -2534,7 +2532,7 @@ def _content_unchecked(content: bytes) -> bool:
 
 def _private_git_environment_overridden() -> bool:
     """Whether the environment can steer git's configuration out from under us."""
-    if any(name in os.environ for name in _PRIVATE_GIT_SELECTOR_ENVIRONMENT):
+    if any(name in os.environ for name in PRIVATE_GIT_SELECTOR_ENVIRONMENT):
         return True
     return any(
         name.startswith(("GIT_CONFIG_KEY_", "GIT_CONFIG_VALUE_")) for name in os.environ
@@ -2589,7 +2587,7 @@ def _read_semantics_file(
 ) -> _OwnedFileRead | None:
     """This semantics file's fenced read, or None when it could not be read."""
     try:
-        return _read_owned_file(
+        return read_owned_file(
             owner_root, path, limit, deadline=deadline, cancelled=cancelled
         )
     except _RevisionStopped:
@@ -2670,7 +2668,7 @@ def _semantics_groups(
             _inert_git_attributes,
         ),
         (ignore_pairs, _MAX_PRIVATE_IGNORE_BYTES, _content_unchecked),
-        (config_pairs, _MAX_PRIVATE_CONFIG_BYTES, _safe_ignored_git_config),
+        (config_pairs, _MAX_PRIVATE_CONFIG_BYTES, safe_ignored_git_config),
         (attribute_pairs, _MAX_PRIVATE_ATTRIBUTES_BYTES, _inert_git_attributes),
     )
 
@@ -2702,7 +2700,7 @@ def _fence_private_config(
 ) -> bool:
     """Fence the repository's own config, which must name the expected hash."""
     try:
-        config = _read_owned_file(
+        config = read_owned_file(
             root,
             marker / "config",
             _MAX_PRIVATE_CONFIG_BYTES,
@@ -2713,7 +2711,7 @@ def _fence_private_config(
         raise
     except OSError:
         return False
-    if config is None or not _safe_private_git_config(
+    if config is None or not safe_private_git_config(
         config.content, hash_name=hash_name
     ):
         return False
@@ -3067,7 +3065,7 @@ def _scan_index_entries(
     return True
 
 
-def _parse_git_index(
+def parse_git_index(
     content: bytes | bytearray,
     *,
     hash_name: str,
@@ -3144,7 +3142,7 @@ def _rewrite_index_stat(
     struct.pack_into("!3I", result, entry.offset + 28, *words[6:])
 
 
-def _refresh_private_index(
+def refresh_private_index(
     parsed: _ParsedGitIndex,
     hashes: dict[str, _VerificationHash],
     *,
@@ -3226,7 +3224,7 @@ def _read_head_reference(
     cancelled: Callable[[], bool] | None,
 ) -> tuple[str, _OwnedFileFence | None] | None:
     """The commit the symbolic HEAD points at, read through its own fence."""
-    reference_read = _read_owned_file(
+    reference_read = read_owned_file(
         root,
         marker.joinpath(*pure.parts),
         _MAX_HEAD_FENCE_BYTES,
@@ -3254,7 +3252,7 @@ def _read_direct_head_fence(
     cancelled: Callable[[], bool] | None,
 ) -> _HeadFence | None:
     marker = root / ".git"
-    head_read = _read_owned_file(
+    head_read = read_owned_file(
         root,
         marker / "HEAD",
         _MAX_HEAD_FENCE_BYTES,
@@ -3298,7 +3296,7 @@ def _regular_unmatched_size(
     """The size of an unmatched entry whose file still looks exactly the same."""
     if _is_reparse(info) or not stat.S_ISREG(info.st_mode):
         return None
-    if entry_snapshots.get(path) != _strong_identity(info):
+    if entry_snapshots.get(path) != strong_identity(info):
         return None
     return info.st_size
 
@@ -3433,7 +3431,7 @@ def _private_index_fence_ns(hashes: Mapping[str, _VerificationHash]) -> int:
 
 def _seal_numbers() -> dict[str, int] | None:
     """Every seal number this machine can give, or None when one is missing."""
-    if _fcntl is None:
+    if fcntl is None:
         return None
     numbers = {name: _seal_constant(name) for name in _REQUIRED_FCNTL_NAMES}
     if any(value is None for value in numbers.values()):
@@ -3444,13 +3442,13 @@ def _seal_numbers() -> dict[str, int] | None:
 def _applied_seals(descriptor: int, numbers: dict[str, int], required: int) -> int | None:
     """The seals the kernel reports after the request, or None when it refused."""
     try:
-        _fcntl.fcntl(descriptor, numbers["F_ADD_SEALS"], required)
-        return _fcntl.fcntl(descriptor, numbers["F_GET_SEALS"])
+        fcntl.fcntl(descriptor, numbers["F_ADD_SEALS"], required)
+        return fcntl.fcntl(descriptor, numbers["F_GET_SEALS"])
     except OSError:
         return None
 
 
-def _seal_private_index(descriptor: int) -> bool:
+def seal_private_index(descriptor: int) -> bool:
     """Whether the descriptor could be sealed against every further change."""
     numbers = _seal_numbers()
     if numbers is None:
@@ -3482,7 +3480,7 @@ def _prepared_sealed_index(
     os.lseek(descriptor, 0, os.SEEK_SET)
     fence_ns = _private_index_fence_ns(hashes)
     os.utime(descriptor, ns=(fence_ns, fence_ns))
-    if not _seal_private_index(descriptor):
+    if not seal_private_index(descriptor):
         return None
     return descriptor
 
@@ -3522,7 +3520,7 @@ def _read_git_state_privately(
     cancelled: Callable[[], bool] | None,
 ) -> tuple[str | None, object] | None:
     """Git's head and status, read against a sealed copy of the index."""
-    content = _refresh_private_index(
+    content = refresh_private_index(
         parsed, hashes, hash_name=hash_name, deadline=deadline, cancelled=cancelled
     )
     with _sealed_index_descriptor(
@@ -3530,7 +3528,7 @@ def _read_git_state_privately(
     ) as descriptor:
         if descriptor is None:
             return None
-        return _git_state_with_private_index(
+        return git_state_with_private_index(
             root,
             descriptor,
             git_executable=installation.executable,
@@ -3618,12 +3616,12 @@ def _read_private_index(
     cancelled: Callable[[], bool] | None,
 ) -> tuple[_OwnedFileRead, _ParsedGitIndex] | None:
     """The index file and its parse, when both are ones this reader trusts."""
-    index_read = _read_owned_file(
-        root, index_path, _MAX_PRIVATE_INDEX_BYTES, deadline=deadline, cancelled=cancelled
+    index_read = read_owned_file(
+        root, index_path, MAX_PRIVATE_INDEX_BYTES, deadline=deadline, cancelled=cancelled
     )
     if index_read is None:
         return None
-    parsed = _parse_git_index(
+    parsed = parse_git_index(
         index_read.content, hash_name=hash_name, deadline=deadline, cancelled=cancelled
     )
     if parsed is None:
@@ -3631,7 +3629,7 @@ def _read_private_index(
     return index_read, parsed
 
 
-def _try_private_git_state(
+def try_private_git_state(
     root: Path,
     expected: WorkspaceRevision,
     hashes: dict[str, _VerificationHash],
@@ -3738,10 +3736,10 @@ def _proof_index_unchanged(
     cancelled: Callable[[], bool] | None,
 ) -> bool:
     """Whether the index and HEAD the private read used are still the same."""
-    current_index = _read_owned_file(
+    current_index = read_owned_file(
         root,
         proof.index.path,
-        _MAX_PRIVATE_INDEX_BYTES,
+        MAX_PRIVATE_INDEX_BYTES,
         deadline=deadline,
         cancelled=cancelled,
     )
@@ -3762,7 +3760,7 @@ def _proof_installation_unchanged(proof: _PrivateGitProof) -> bool:
         return False
     if _is_reparse(info) or not stat.S_ISREG(info.st_mode):
         return False
-    if _strong_identity(info) != installation.identity:
+    if strong_identity(info) != installation.identity:
         return False
     return _raw_semantics_environment() == proof.raw_semantics.environment
 
@@ -3776,7 +3774,7 @@ def _proof_semantics_files_unchanged(
     """Whether every fenced semantics file still reads exactly as it did."""
     for semantic_file in proof.raw_semantics.files:
         _check_stop(deadline, cancelled)
-        current = _read_owned_file(
+        current = read_owned_file(
             semantic_file.root,
             semantic_file.file.path,
             semantic_file.maximum_bytes,
@@ -3835,7 +3833,7 @@ def _proof_change_times_unchanged(
     return True
 
 
-def _validate_private_git_proof(
+def validate_private_git_proof(
     proof: _PrivateGitProof,
     *,
     root: Path,
@@ -3902,7 +3900,7 @@ def _refuse_relevant_git_link(
     path: Path, normalized: str, info: os.stat_result
 ) -> None:
     """A link or reparse point git named in a relevant place stops the walk."""
-    if _is_relevant_path(normalized) or path.is_dir() or stat.S_ISDIR(info.st_mode):
+    if is_relevant_path(normalized) or path.is_dir() or stat.S_ISDIR(info.st_mode):
         raise PermissionError(
             "workspace revision Git path is a relevant symlink or reparse directory"
         )
@@ -3935,7 +3933,7 @@ def _add_status_entry(build: _RevisionBuild, raw: str, status: str) -> None:
     `deleted` event reached the server for a file that exists (audit B-42).
     """
     normalized = _normalized_path(raw)
-    if _inside_pruned_directory(normalized) or not _is_relevant_path(normalized):
+    if _inside_pruned_directory(normalized) or not is_relevant_path(normalized):
         return
     path = build.root / PurePosixPath(normalized)
     try:
@@ -3967,13 +3965,13 @@ def _initial_git_state(
     """Git's starting state, with every path it reports as changed recorded."""
     if repository.git_common_dir is None:
         return None, None
-    git_head, git_status = _git_state(
+    git_head, git_status = git_state(
         build.root,
         allow_missing_head=repository.git_commit is None,
         deadline=build.deadline,
         cancelled=build.cancelled,
     )
-    for raw, status in _status_paths(git_status):
+    for raw, status in status_paths(git_status):
         _check_stop(build.deadline, build.cancelled)
         _add_status_entry(build, raw, status)
     return git_head, git_status
@@ -4002,7 +4000,7 @@ def _add_relevant_file(build: _RevisionBuild, path: Path) -> None:
 
 def _add_relevant_files(build: _RevisionBuild) -> None:
     """Record every relevant file the walk finds under the checkout root."""
-    for path in _relevant_files(
+    for path in relevant_files(
         build.root,
         resolved_root=build.resolved_root,
         directory_snapshots=build.directory_snapshots,
@@ -4029,7 +4027,7 @@ def _revision_entries(build: _RevisionBuild) -> list[RevisionEntry]:
         if path is None:
             entries.append(RevisionEntry(relative, "deleted", None, 0))
             continue
-        sha256, size, snapshot = _hash_file(
+        sha256, size, snapshot = hash_file(
             path,
             root=build.root,
             resolved_root=build.resolved_root,
@@ -4053,7 +4051,7 @@ def _require_git_unchanged(
     """Git has to be exactly where it was when the manifest started."""
     if repository.git_common_dir is None:
         return
-    final_head, final_status = _git_state(
+    final_head, final_status = git_state(
         build.root,
         allow_missing_head=git_head is None,
         deadline=build.deadline,
@@ -4309,9 +4307,9 @@ def _private_index_installation(
     """The private git installation this verification may use, if any."""
     if not allow_private or repository.git_common_dir is None:
         return None
-    if not _private_index_platform_supported():
+    if not private_index_platform_supported():
         return None
-    return _private_git_installation()
+    return private_git_installation()
 
 
 def _candidate_index_size(candidate: Path | None) -> int | None:
@@ -4328,7 +4326,7 @@ def _arm_private_index(
     plan: _PrivateIndexPlan, expected: WorkspaceRevision, size: int
 ) -> None:
     """Arm the fast path when the index is small enough and the head is hashable."""
-    if size > _MAX_PRIVATE_INDEX_BYTES:
+    if size > MAX_PRIVATE_INDEX_BYTES:
         return
     hash_name = _object_hash_name(expected.git_head)
     if hash_name is None:
@@ -4348,7 +4346,7 @@ def _private_index_plan(
 ) -> _PrivateIndexPlan:
     """The private-index fast path this verification may use, if any."""
     installation = _private_index_installation(repository, allow_private=allow_private)
-    candidate = _ordinary_index_path(root) if installation is not None else None
+    candidate = ordinary_index_path(root) if installation is not None else None
     size = _candidate_index_size(candidate)
     if size is None:
         return _PrivateIndexPlan(installation, None)
@@ -4408,7 +4406,7 @@ class _HashedEntries:
 
 def _refuse_relevant_link(path: Path, relative: str, info: os.stat_result) -> None:
     """A link or reparse point where it matters is a refusal, not a change."""
-    if _is_relevant_path(relative) or path.is_dir() or stat.S_ISDIR(info.st_mode):
+    if is_relevant_path(relative) or path.is_dir() or stat.S_ISDIR(info.st_mode):
         raise PermissionError(
             "workspace revision expected path is a relevant symlink or reparse directory"
         )
@@ -4437,7 +4435,7 @@ def _hash_direct_entry(
     )
     if _regular_entry_stat(path, relative) is None:
         return None
-    return _hash_file(
+    return hash_file(
         path,
         root=context.root,
         resolved_root=context.resolved_root,
@@ -4469,7 +4467,7 @@ def _hash_prepared_entry(
     if prepared is None:
         return None
     try:
-        return _hash_file_for_verification(
+        return hash_file_for_verification(
             prepared.path,
             root=context.root,
             resolved_root=context.resolved_root,
@@ -4562,7 +4560,7 @@ def _private_git_state(
         return None
     _require_armed_private_plan(plan)
     try:
-        state = _try_private_git_state(
+        state = try_private_git_state(
             root,
             expected,
             verification_hashes,
@@ -4595,7 +4593,7 @@ def _revision_git_state(
     """The head and status this pass compares against, private or ordinary."""
     if private_state is not None:
         return private_state.head, private_state.status
-    return _git_state(
+    return git_state(
         root,
         allow_missing_head=expected.git_head is None,
         deadline=deadline,
@@ -4635,7 +4633,7 @@ def _validate_pass_snapshots(
     """Re-check every directory and file snapshot the pass took."""
     for directory in directory_snapshots.values():
         _check_stop(deadline, cancelled)
-        _validate_directory_snapshot(root, directory)
+        validate_directory_snapshot(root, directory)
     for snapshot in file_snapshots:
         _check_stop(deadline, cancelled)
         _validate_file_snapshot(root, snapshot)
@@ -4654,7 +4652,7 @@ def _tree_entry_unchanged(
         current = path.lstat()
     except OSError as exc:
         raise PermissionError("workspace revision tree entry changed") from exc
-    return _strong_identity(current) == identity
+    return strong_identity(current) == identity
 
 
 def _tree_entries_unchanged(
@@ -4696,7 +4694,7 @@ def _require_private_proof(
     if private_state is None:
         return
     try:
-        proof_valid = _validate_private_git_proof(
+        proof_valid = validate_private_git_proof(
             private_state.proof, root=root, deadline=deadline, cancelled=cancelled
         )
     except _RevisionStopped:
@@ -4801,7 +4799,7 @@ def _walk_relevant_files(
     cancelled: Callable[[], bool] | None,
 ) -> None:
     """Walk the checkout for what it holds now, keyed by normalized path."""
-    for current_path in _relevant_files(
+    for current_path in relevant_files(
         root,
         resolved_root=resolved_root,
         directory_snapshots=directory_snapshots,
@@ -4885,7 +4883,7 @@ def _expected_relevant_paths(entries: Mapping[str, RevisionEntry]) -> set[str]:
     return {
         path
         for path, entry in entries.items()
-        if entry.kind != "deleted" and _is_relevant_path(path)
+        if entry.kind != "deleted" and is_relevant_path(path)
     }
 
 

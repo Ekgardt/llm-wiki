@@ -51,7 +51,7 @@ FINGERPRINT_SUFFIXES = (".py", ".json")
 def code_fingerprint(scripts: Path) -> str:
     """Every server source file by path, size and modification time."""
     digest = hashlib.sha256()
-    for path in sorted(_source_files(scripts)):
+    for path in sorted(source_files(scripts)):
         digest.update(f"{path.relative_to(scripts)}\0{_file_identity(path)}\n".encode())
     return digest.hexdigest()
 
@@ -65,7 +65,7 @@ def _file_identity(path: Path) -> str:
     return f"{stat.st_size}\0{stat.st_mtime_ns}"
 
 
-def _source_files(scripts: Path) -> list[Path]:
+def source_files(scripts: Path) -> list[Path]:
     return [
         path
         for path in scripts.rglob("*")

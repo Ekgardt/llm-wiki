@@ -12,46 +12,46 @@ from pathlib import Path
 
 import yaml
 from session_start_project_state import (
-    _base_slug,
-    _compute_slug,
-    _git_remote_slug,
-    _path_hash_suffix,
-    _render_new_state,
-    _slug_owns_dir,
+    base_slug,
+    compute_slug,
+    git_remote_slug,
+    path_hash_suffix,
+    render_new_state,
+    slug_owns_dir,
 )
 
 # ---------- _base_slug ----------
 
 def test_base_slug_lowercase():
     p = Path("/tmp/My-Project")
-    assert _base_slug(p) == "my-project"
+    assert base_slug(p) == "my-project"
 
 
 def test_base_slug_preserves_cyrillic():
     p = Path("/tmp/Тесты")
-    assert _base_slug(p) == "тесты"
+    assert base_slug(p) == "тесты"
 
 
 def test_base_slug_strips_unsafe_chars():
     # Any Path with weird basename characters
     class P:
         name = "foo:bar*baz"
-    assert _base_slug(P()) == "foo-bar-baz"  # type: ignore[arg-type]
+    assert base_slug(P()) == "foo-bar-baz"  # type: ignore[arg-type]
 
 
 def test_base_slug_fallback_for_empty():
     class P:
         name = ""
-    assert _base_slug(P()) == "root"  # type: ignore[arg-type]
+    assert base_slug(P()) == "root"  # type: ignore[arg-type]
 
 
 def test_base_slug_fallback_for_dotdot():
     class P:
         name = ".."
-    assert _base_slug(P()) == "root"  # type: ignore[arg-type]
+    assert base_slug(P()) == "root"  # type: ignore[arg-type]
 
 
-# ---------- _git_remote_slug ----------
+# ---------- git_remote_slug ----------
 
 def test_git_remote_slug_parses_ssh(tmp_path: Path):
     (tmp_path / ".git").mkdir()
@@ -59,7 +59,7 @@ def test_git_remote_slug_parses_ssh(tmp_path: Path):
         '[remote "origin"]\n\turl = git@github.com:Owner/Repo.git\n',
         encoding="utf-8",
     )
-    assert _git_remote_slug(tmp_path) == "owner-repo"
+    assert git_remote_slug(tmp_path) == "owner-repo"
 
 
 def test_git_remote_slug_parses_https(tmp_path: Path):
@@ -68,36 +68,36 @@ def test_git_remote_slug_parses_https(tmp_path: Path):
         '[remote "origin"]\n\turl = https://github.com/Alice/my-app\n',
         encoding="utf-8",
     )
-    assert _git_remote_slug(tmp_path) == "alice-my-app"
+    assert git_remote_slug(tmp_path) == "alice-my-app"
 
 
 def test_git_remote_slug_none_when_no_git(tmp_path: Path):
-    assert _git_remote_slug(tmp_path) is None
+    assert git_remote_slug(tmp_path) is None
 
 
 def test_git_remote_slug_none_when_no_origin(tmp_path: Path):
     (tmp_path / ".git").mkdir()
     (tmp_path / ".git" / "config").write_text("[core]\n", encoding="utf-8")
-    assert _git_remote_slug(tmp_path) is None
+    assert git_remote_slug(tmp_path) is None
 
 
-# ---------- _path_hash_suffix ----------
+# ---------- path_hash_suffix ----------
 
 def test_path_hash_deterministic(tmp_path: Path):
-    assert _path_hash_suffix(tmp_path) == _path_hash_suffix(tmp_path)
+    assert path_hash_suffix(tmp_path) == path_hash_suffix(tmp_path)
 
 
 def test_path_hash_length():
-    assert len(_path_hash_suffix(Path("/any"))) == 6
+    assert len(path_hash_suffix(Path("/any"))) == 6
 
 
-# ---------- _slug_owns_dir (strict ownership, Round 5 #3) ----------
+# ---------- slug_owns_dir (strict ownership, Round 5 #3) ----------
 
 def test_slug_owns_empty_dir(tmp_path: Path):
     """Unused slug → free to take."""
     projects = tmp_path / "vault" / "knowledge" / "projects"
     projects.mkdir(parents=True)
-    assert _slug_owns_dir("unused", Path("/any/project"), projects) is True
+    assert slug_owns_dir("unused", Path("/any/project"), projects) is True
 
 
 def test_slug_owns_matching_root(tmp_path: Path):
@@ -109,7 +109,7 @@ def test_slug_owns_matching_root(tmp_path: Path):
     (slug_dir / "state.md").write_text(
         f"# mine — State\n- Project root: `{project}`\n", encoding="utf-8"
     )
-    assert _slug_owns_dir("mine", project, projects) is True
+    assert slug_owns_dir("mine", project, projects) is True
 
 
 def test_slug_owns_rejects_different_root(tmp_path: Path):
@@ -123,7 +123,7 @@ def test_slug_owns_rejects_different_root(tmp_path: Path):
     (slug_dir / "state.md").write_text(
         f"# shared — State\n- Project root: `{other}`\n", encoding="utf-8"
     )
-    assert _slug_owns_dir("shared", mine, projects) is False
+    assert slug_owns_dir("shared", mine, projects) is False
 
 
 def test_slug_owns_strict_rejects_missing_source(tmp_path: Path):
@@ -140,7 +140,7 @@ def test_slug_owns_strict_rejects_missing_source(tmp_path: Path):
         "# ambiguous — State\n(no Source section whatsoever)\n",
         encoding="utf-8",
     )
-    assert _slug_owns_dir("ambiguous", tmp_path / "someproj", projects) is False
+    assert slug_owns_dir("ambiguous", tmp_path / "someproj", projects) is False
 
 
 # ---------- _compute_slug end-to-end ----------
@@ -151,7 +151,7 @@ def test_compute_slug_unique(tmp_path: Path):
     projects.mkdir(parents=True)
     proj = tmp_path / "unique"
     proj.mkdir()
-    assert _compute_slug(proj, projects) == "unique"
+    assert compute_slug(proj, projects) == "unique"
 
 
 def test_compute_slug_collision_gets_parent_of_parent(tmp_path: Path):
@@ -164,7 +164,7 @@ def test_compute_slug_collision_gets_parent_of_parent(tmp_path: Path):
     parent_a.mkdir()
     front_a = parent_a / "frontend"
     front_a.mkdir()
-    slug_a = _compute_slug(front_a, projects)
+    slug_a = compute_slug(front_a, projects)
     assert slug_a == "frontend"
     # Simulate SessionStart writing state.md
     (projects / slug_a).mkdir()
@@ -177,7 +177,7 @@ def test_compute_slug_collision_gets_parent_of_parent(tmp_path: Path):
     parent_b.mkdir()
     front_b = parent_b / "frontend"
     front_b.mkdir()
-    slug_b = _compute_slug(front_b, projects)
+    slug_b = compute_slug(front_b, projects)
     assert slug_b != slug_a
     # Must use parent-of-parent
     assert slug_b == "frontend-app-b"
@@ -189,12 +189,12 @@ def test_compute_slug_idempotent(tmp_path: Path):
     projects.mkdir(parents=True)
     proj = tmp_path / "proj"
     proj.mkdir()
-    slug_first = _compute_slug(proj, projects)
+    slug_first = compute_slug(proj, projects)
     (projects / slug_first).mkdir()
     (projects / slug_first / "state.md").write_text(
         f"# {slug_first}\n- Project root: `{proj}`\n", encoding="utf-8"
     )
-    slug_second = _compute_slug(proj, projects)
+    slug_second = compute_slug(proj, projects)
     assert slug_first == slug_second
 
 
@@ -205,7 +205,7 @@ def test_rendered_template_has_no_placeholders_and_preserves_slug_ownership(tmp_
     project.mkdir()
     template = Path(__file__).resolve().parent.parent / "knowledge/projects/_template/state.md"
 
-    rendered = _render_new_state(template, "my-project", project)
+    rendered = render_new_state(template, "my-project", project)
     state_dir = projects / "my-project"
     state_dir.mkdir()
     (state_dir / "state.md").write_text(rendered, encoding="utf-8")
@@ -216,7 +216,7 @@ def test_rendered_template_has_no_placeholders_and_preserves_slug_ownership(tmp_
     assert 'project: "my-project"' in rendered
     assert yaml.safe_load(rendered.split("---")[1])["project"] == "my-project"
     assert f"- Project root: `{project}`" in rendered
-    assert _compute_slug(project, projects) == "my-project"
+    assert compute_slug(project, projects) == "my-project"
 
 
 def test_compute_slug_hash_suffix_last_resort(tmp_path: Path):
@@ -238,6 +238,6 @@ def test_compute_slug_hash_suffix_last_resort(tmp_path: Path):
     # With no parent-of-parent matching, it should still resolve — either
     # via grandparent (tmp_path.name) or via hash. The output must NOT be
     # bare "orphan" (that's taken).
-    slug = _compute_slug(proj, projects)
+    slug = compute_slug(proj, projects)
     assert slug != "orphan"
     assert slug.startswith("orphan") or slug == "root"

@@ -1,6 +1,6 @@
 """Seven of eight wrong answers needed arithmetic the contract forbade.
 
-Every atomic claim had to be carried by a cited span, and `_require_figures_agree`
+Every atomic claim had to be carried by a cited span, and `require_figures_agree`
 refused a claim whose figures appear in none. A sum, a count, a gap between two
 dates and a latest-of-several are in no span by construction, so the only move
 the contract left was to quote an input — which is what the model did, and it was
@@ -47,7 +47,7 @@ def _claim(text: str, ids: list[str], derivation: object = None) -> dict:
 def test_a_total_stated_by_no_span_is_allowed_when_it_is_declared() -> None:
     claim = _claim("Gifts for my sister cost $300 in total: $200 and $100.", ["E1", "E2"], "sum")
 
-    assert query_memory._cited_ids_of_claim(claim, CITED, SUPPLIED) == {"E1", "E2"}
+    assert query_memory.cited_ids_of_claim(claim, CITED, SUPPLIED) == {"E1", "E2"}
 
 
 def test_the_same_total_undeclared_is_still_refused() -> None:
@@ -55,7 +55,7 @@ def test_the_same_total_undeclared_is_still_refused() -> None:
     claim = _claim("Gifts for my sister cost $300 in total.", ["E1", "E2"])
 
     with pytest.raises(query_memory.GroundedQAError, match="different figures"):
-        query_memory._cited_ids_of_claim(claim, CITED, SUPPLIED)
+        query_memory.cited_ids_of_claim(claim, CITED, SUPPLIED)
 
 
 def test_a_derivation_over_one_span_is_not_a_derivation() -> None:
@@ -63,7 +63,7 @@ def test_a_derivation_over_one_span_is_not_a_derivation() -> None:
     claim = _claim("Gifts for my sister cost $300 in total.", ["E1"], "sum")
 
     with pytest.raises(query_memory.GroundedQAError, match="only one"):
-        query_memory._cited_ids_of_claim(claim, CITED, SUPPLIED)
+        query_memory.cited_ids_of_claim(claim, CITED, SUPPLIED)
 
 
 def test_a_derived_claim_still_has_to_share_words_with_every_input() -> None:
@@ -71,21 +71,21 @@ def test_a_derived_claim_still_has_to_share_words_with_every_input() -> None:
     claim = _claim("Gifts for my sister cost $300 in total.", ["E1", "E2"], "sum")
 
     with pytest.raises((query_memory.GroundedQAError, EvidenceResolutionError)):
-        query_memory._cited_ids_of_claim(claim, CITED, supplied)
+        query_memory.cited_ids_of_claim(claim, CITED, supplied)
 
 
 def test_a_derived_claim_still_has_to_cite_evidence_that_was_supplied() -> None:
     claim = _claim("Gifts cost $300 in total.", ["E1", "E9"], "sum")
 
     with pytest.raises(EvidenceResolutionError):
-        query_memory._cited_ids_of_claim(claim, CITED, SUPPLIED)
+        query_memory.cited_ids_of_claim(claim, CITED, SUPPLIED)
 
 
 @pytest.mark.parametrize("kind", query_memory.DERIVATIONS)
 def test_every_named_derivation_is_accepted(kind: str) -> None:
     claim = _claim("Gifts for my sister cost $300, from $200 and $100.", ["E1", "E2"], kind)
 
-    assert query_memory._cited_ids_of_claim(claim, CITED, SUPPLIED) == {"E1", "E2"}
+    assert query_memory.cited_ids_of_claim(claim, CITED, SUPPLIED) == {"E1", "E2"}
 
 
 def test_an_unknown_derivation_word_earns_no_exemption() -> None:
@@ -93,7 +93,7 @@ def test_an_unknown_derivation_word_earns_no_exemption() -> None:
     claim = _claim("Gifts for my sister cost $300 in total.", ["E1", "E2"], "guessed")
 
     with pytest.raises(query_memory.GroundedQAError, match="different figures"):
-        query_memory._cited_ids_of_claim(claim, CITED, SUPPLIED)
+        query_memory.cited_ids_of_claim(claim, CITED, SUPPLIED)
 
 
 def test_the_schema_admits_only_the_named_derivations() -> None:

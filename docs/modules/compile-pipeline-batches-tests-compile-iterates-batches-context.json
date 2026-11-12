@@ -1,0 +1,163 @@
+{
+  "encoding": "o200k_base",
+  "max_tokens": 100000,
+  "serialization": "exact-duplicates/v1",
+  "files": [
+    "AGENTS.md",
+    "CLAUDE.md",
+    "docs/AGENTS.md",
+    "docs/STRUCTURE.md",
+    "docs/modules/breadcrumb-decision-tests.md",
+    "docs/modules/compile-paths.md",
+    "docs/modules/compile-pipeline-batches-tests-compile-iterates-batches-context.json",
+    "docs/modules/compile-pipeline-batches-tests-compile-iterates-batches.md",
+    "docs/modules/compile-pipeline-sources-tests-compile-groups-complete-sources-by-qualified-capacity-helpers.md",
+    "docs/modules/context-bundle.md",
+    "docs/modules/context-records.md",
+    "docs/modules/context-tooling.md",
+    "docs/modules/model-choice.md",
+    "docs/modules/product-structure.md",
+    "docs/modules/project-governance.md",
+    "docs/modules/script-sources.md",
+    "docs/modules/test-support.md",
+    "rules/development-laws.md",
+    "scripts/__init__.py",
+    "scripts/llm_wiki/__init__.py",
+    "scripts/llm_wiki/context_bundle.py",
+    "tests/__init__.py",
+    "tests/compile_groups_complete_sources_by_qualified_capacity_helpers.py",
+    "tests/compile_keeps_complete_tool_lines_helpers.py",
+    "tests/compile_paths.py",
+    "tests/conftest.py",
+    "tests/module_context.py",
+    "tests/module_context_paths.py",
+    "tests/module_interface.py",
+    "tests/module_interface_render.py",
+    "tests/module_qualification.py",
+    "tests/module_record_context.py",
+    "tests/module_records.py",
+    "tests/script_sources.py",
+    "tests/shared_fixtures.py",
+    "tests/slow_machine.py",
+    "tests/test_compile_iterates_batches.py"
+  ],
+  "ownership": {
+    "files": [
+      "docs/modules/compile-pipeline-batches-tests-compile-iterates-batches-context.json",
+      "docs/modules/compile-pipeline-batches-tests-compile-iterates-batches.md",
+      "tests/test_compile_iterates_batches.py"
+    ]
+  },
+  "qualified_dependencies": [
+    {
+      "provider": "scripts/breadcrumb_decision.py",
+      "names": [
+        "journal_block"
+      ],
+      "contract_sha256": "d9c930484c634bdb57dbd893d182a3cb86d6d5b4893041035de163552c86eebc",
+      "integration_tests": [
+        "tests/test_compile_iterates_batches.py"
+      ]
+    },
+    {
+      "provider": "scripts/compile_receipts.py",
+      "names": [
+        "SourceSnapshot",
+        "iter_native_part_units"
+      ],
+      "contract_sha256": "5efd2c2b8b74530183119d014c1b7414e0dfe41312dcf1c929ffb7716abc6cfa",
+      "integration_tests": [
+        "tests/test_compile_iterates_batches.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/compile_pipeline_base.py",
+      "names": [
+        "compile_budget"
+      ],
+      "contract_sha256": "0ad321a6e320be2a17a443a51571ef93bab759c44ed13dcb13b9445aa06277e5",
+      "integration_tests": [
+        "tests/test_compile_iterates_batches.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/compile_pipeline_batches.py",
+      "names": [
+        "compile_batch",
+        "draft_prompt_count",
+        "iter_compile_batches",
+        "pack_compile_batches"
+      ],
+      "contract_sha256": "0b8e2e11a52c1dd7e09cfa9fda73c3bf20d6b15214eb9d17796417ad9320d429",
+      "integration_tests": [
+        "tests/test_compile_iterates_batches.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/compile_pipeline_prompts.py",
+      "names": [
+        "draft_prompt_text"
+      ],
+      "contract_sha256": "cfc4b89d30f00827a974752640b18ebeffa52c5a1fffdc78ac329e9b51367031",
+      "integration_tests": [
+        "tests/test_compile_iterates_batches.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/compile_pipeline_sources.py",
+      "names": [
+        "CompileInputs",
+        "daily_parts",
+        "native_part_units"
+      ],
+      "contract_sha256": "a5c7d6e3252e0e9e6b76ae056896536af942b22f1cdc9cb79b18cbfff4004672",
+      "integration_tests": [
+        "tests/test_compile_iterates_batches.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/generation_catalog_store.py",
+      "names": [
+        "GenerationCatalog"
+      ],
+      "contract_sha256": "b18194ebe04bf988b4474379fcb5243516550d43b745a00eaed1453f7844c983",
+      "integration_tests": [
+        "tests/test_a_blocked_task_has_a_way_back.py",
+        "tests/test_a_build_in_flight_is_not_an_orphan.py",
+        "tests/test_a_capacity_refusal_does_not_corrupt_a_generation.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/model_choice.py",
+      "names": [
+        "using_root"
+      ],
+      "contract_sha256": "d45f2655cb61963e77617d1dfd7d617b134ad77cc770b59b335d0856e5d65019",
+      "integration_tests": [
+        "tests/test_compile_iterates_batches.py"
+      ]
+    },
+    {
+      "provider": "scripts/reliable_memory.py",
+      "names": [
+        "canonical_json_bytes",
+        "sha256_bytes",
+        "validate_state_root"
+      ],
+      "contract_sha256": "4243e32fa6ecab88fca1a2d2b3214c0a36944fc23129138102dfaebf6d99457f",
+      "integration_tests": [
+        "tests/test_compile_iterates_batches.py"
+      ]
+    },
+    {
+      "provider": "scripts/repository_scope.py",
+      "names": [
+        "sanitized_git_environment"
+      ],
+      "contract_sha256": "fd550ae20761afad50b37fa3a71044a162485b0e4d4b3e2af9b5b22e143c2bec",
+      "integration_tests": [
+        "tests/test_compile_iterates_batches.py"
+      ]
+    }
+  ]
+}

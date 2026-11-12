@@ -24,7 +24,7 @@ import sys
 import time
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 if hasattr(sys.stdout, "reconfigure"):
@@ -34,31 +34,30 @@ if hasattr(sys.stdout, "reconfigure"):
         pass
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+from capture_diagnostics import record_hook_error  # noqa: E402
 from context_budget import (  # noqa: E402
     DEFAULT_CONTEXT_BUDGET,
     BudgetExceededError,
     ContextItem,
 )
-from memory_state import (  # noqa: E402
-    HOOK_STATE_LOCK_TIMEOUT,
-    REPORTS_DIR,
-    ROOT,
-    STATE_ROOT,
-    load_state,
-    spawn_detached,
-    update_state,
-)
+from llm_wiki import runtime_roots  # noqa: E402
+from memory_state import HOOK_STATE_LOCK_TIMEOUT, load_state, spawn_detached, update_state
 from reliable_memory import validate_runtime_file  # noqa: E402
-from vault_log import LOG_RELATIVE  # noqa: E402
+from secret_redact import describe_error  # noqa: E402
+from vault_log import LOG_RELATIVE, vault_log_path  # noqa: E402
 
-MEMORY_INDEX = ROOT / "knowledge" / "index.md"
-MEMORY_LOG = ROOT / LOG_RELATIVE
-DAILY_DIR = ROOT / "knowledge" / "daily"
-KNOWLEDGE_DIR = ROOT / "knowledge" / "notes"
-SKILLS_DIR = ROOT / "skills"
-GAPS_DIR = KNOWLEDGE_DIR / "gaps"
-DEBUG_DIR = REPORTS_DIR
-DEBUG_FILE = DEBUG_DIR / "session-start-last.txt"
+
+def skills_dir() -> Path:
+    return runtime_roots.vault_root() / "skills"
+
+
+def gaps_dir() -> Path:
+    return runtime_roots.notes_dir() / "gaps"
+
+
+def debug_file() -> Path:
+    return runtime_roots.reports_dir() / "session-start-last.txt"
+
 
 # Priority classes (low number = high importance, packed first):
 #   1 safety       — guardrails (always mandatory)
@@ -111,15 +110,25 @@ def _claim_is_live(existing: dict, today: str, now: datetime) -> bool:
     return expires_at is not None and expires_at > now
 
 
-def _claim_nightly_catchup(today: str | None = None, now: str | None = None) -> bool:
-    """Atomically reserve today's catchup when no nightly completed today."""
+def _nightly_attempted_today(state: dict, today: str) -> bool:
+    """The daily cadence counts recorded attempts; success stays a separate fact."""
+    dates = (
+        str(state.get("last_nightly_date", ""))[:10],
+        _state_map(state, "last_nightly_result").get("date"),
+        _state_map(state, "last_nightly_failure").get("date"),
+    )
+    return today in dates
+
+
+def claim_nightly_catchup(today: str | None = None, now: str | None = None) -> bool:
+    """Atomically reserve today's catchup when no nightly attempt was recorded."""
     today = _today_iso(today)
-    claimed_at = _parse_iso_safe(now) or datetime.now(timezone.utc)
+    claimed_at = _parse_iso_safe(now) or datetime.now(UTC)
     claimed = False
 
     def _mutate(state: dict) -> None:
         nonlocal claimed
-        if str(state.get("last_nightly_date", ""))[:10] == today:
+        if _nightly_attempted_today(state, today):
             return
         if _claim_is_live(_state_map(state, "nightly_catchup_claim"), today, claimed_at):
             return
@@ -134,12 +143,13 @@ def _claim_nightly_catchup(today: str | None = None, now: str | None = None) -> 
 
     try:
         update_state(_mutate, lock_timeout=HOOK_STATE_LOCK_TIMEOUT)
-    except Exception:  # noqa: BLE001
+    except Exception as error:  # noqa: BLE001
+        record_hook_error(runtime_roots.state_root(), "nightly catch-up claim", describe_error(error))
         return False
     return claimed
 
 
-def _release_nightly_claim(today: str) -> None:
+def release_nightly_claim(today: str) -> None:
     """Give today's claim back when the catchup process never started."""
     def _release(state: dict) -> None:
         if _state_map(state, "nightly_catchup_claim").get("date") == today:
@@ -147,8 +157,8 @@ def _release_nightly_claim(today: str) -> None:
 
     try:
         update_state(_release, lock_timeout=HOOK_STATE_LOCK_TIMEOUT)
-    except Exception:  # noqa: BLE001
-        pass
+    except Exception as error:  # noqa: BLE001
+        record_hook_error(runtime_roots.state_root(), "nightly catch-up release", describe_error(error))
 
 
 def maybe_spawn_nightly_catchup(today: str | None = None) -> None:
@@ -165,7 +175,7 @@ def maybe_spawn_nightly_catchup(today: str | None = None) -> None:
     if os.environ.get("MEMORY_LLM_PROVIDER") == "fake":
         return
     today = _today_iso(today)
-    if _claim_nightly_catchup(today):
+    if claim_nightly_catchup(today):
         _spawn_nightly_catchup(today)
 
 
@@ -173,10 +183,10 @@ def _spawn_nightly_catchup(today: str) -> None:
     """Hand the claim back when the child never started."""
     pid = spawn_detached([
         sys.executable,
-        str(ROOT / "scripts" / "scheduled_nightly.py"),
+        str(runtime_roots.vault_root() / "scripts" / "scheduled_nightly.py"),
     ])
     if pid is None:
-        _release_nightly_claim(today)
+        release_nightly_claim(today)
 
 # Mojibake markers: fragments that almost only appear when UTF-8 Cyrillic
 # has been misdecoded as cp1252 and re-encoded.
@@ -385,9 +395,9 @@ def _is_daily_log(path: Path) -> bool:
 
 
 def latest_daily() -> Path | None:
-    if not DAILY_DIR.exists():
+    if not runtime_roots.daily_dir().exists():
         return None
-    dailies = sorted(p for p in DAILY_DIR.glob("*.md") if _is_daily_log(p))
+    dailies = sorted(p for p in runtime_roots.daily_dir().glob("*.md") if _is_daily_log(p))
     return dailies[-1] if dailies else None
 
 
@@ -461,10 +471,10 @@ def daily_excerpt(daily_path: Path) -> str:
 
 
 def last_log_entries(n: int = 3) -> str:
-    if not MEMORY_LOG.exists():
+    if not vault_log_path(runtime_roots.vault_root()).exists():
         return ""
     entries: list[str] = []
-    for ln in MEMORY_LOG.read_text(encoding="utf-8", errors="replace").splitlines():
+    for ln in vault_log_path(runtime_roots.vault_root()).read_text(encoding="utf-8", errors="replace").splitlines():
         ln = ln.rstrip()
         if ln.startswith("- ") and not is_mojibake(ln):
             entries.append(ln)
@@ -489,42 +499,35 @@ def _is_active_project(path: Path) -> bool:
 
 def _count_active_projects() -> int:
     """Project folders with a state.md file (active = has handoff)."""
-    projects_root = ROOT / "knowledge" / "projects"
+    projects_root = runtime_roots.vault_root() / "knowledge" / "projects"
     if not projects_root.exists():
         return 0
     return sum(1 for d in projects_root.iterdir() if _is_active_project(d))
 
 
-def _iso_text(raw: str) -> str:
-    """`fromisoformat` learned the `Z` suffix only in 3.11; 3.10 is supported."""
-    if raw.endswith("Z"):
-        return raw[:-1] + "+00:00"
-    return raw
-
-
 def _parse_iso_safe(raw: str | None) -> datetime | None:
     """One UTC-aware moment, or None.
 
-    Same normaliser as `doctor._parse_utc`, deliberately: accept the `Z` suffix
+    Same normaliser as `doctor.parse_utc`, deliberately: accept the `Z` suffix
     this runtime writes, read a stamp with no zone as UTC, and always hand back
     an aware value. Two shapes in one module is what made SessionStart raise
     `TypeError: can't subtract offset-naive and offset-aware datetimes` on every
-    vault that had ever compiled -- `compile_memory._utc_now` stamps
+    vault that had ever compiled -- `compile_pipeline_receipts.utc_now` stamps
     `last_compile_at` with `Z`, and it was subtracted from a naive
     `datetime.now()`.
     """
     if not raw:
         return None
     try:
-        parsed = datetime.fromisoformat(_iso_text(raw))
+        parsed = datetime.fromisoformat(raw)
     except (ValueError, TypeError):
         return None
     if parsed.tzinfo is None:
-        parsed = parsed.replace(tzinfo=timezone.utc)
-    return parsed.astimezone(timezone.utc)
+        parsed = parsed.replace(tzinfo=UTC)
+    return parsed.astimezone(UTC)
 
 
-def _compile_backlog_days(state: dict) -> int | None:
+def compile_backlog_days(state: dict) -> int | None:
     """Days since the last compile that committed. None if none ever did.
 
     A run that finished is not a run that wrote anything: `last_compile_at` is
@@ -535,7 +538,7 @@ def _compile_backlog_days(state: dict) -> int | None:
     last = _parse_iso_safe(state.get("last_compile_at"))
     if last is None:
         return None
-    return max(0, (datetime.now(timezone.utc) - last).days)
+    return max(0, (datetime.now(UTC) - last).days)
 
 
 def _state_map(state: dict, key: str) -> dict:
@@ -544,30 +547,30 @@ def _state_map(state: dict, key: str) -> dict:
     return value if isinstance(value, dict) else {}
 
 
-def _load_state_safe() -> dict:
+def load_state_safe() -> dict:
     try:
         return load_state()
     except Exception:  # noqa: BLE001
         return {}
 
 
-def _count_daily_logs() -> int:
+def count_daily_logs() -> int:
     """The top-level daily logs only: `receipts/` and `archive/` are not logs.
 
     `_count_md` recurses, and on the live vault of 2026-09-23 it said "346 daily
     logs" for 25 logs and 320 receipts.
     """
-    if not DAILY_DIR.exists():
+    if not runtime_roots.daily_dir().exists():
         return 0
-    return sum(1 for path in DAILY_DIR.glob("*.md") if path.is_file() and path.name != "README.md")
+    return sum(1 for path in runtime_roots.daily_dir().glob("*.md") if path.is_file() and path.name != "README.md")
 
 
 def _inventory_line() -> str:
     """Quick mental model of vault size."""
     return (
-        f"- **Inventory**: {_count_md(KNOWLEDGE_DIR)} knowledge pages, "
-        f"{_count_daily_logs()} daily logs, {_count_md(SKILLS_DIR)} skills, "
-        f"{_count_md(GAPS_DIR)} gaps, {_count_active_projects()} active project(s)."
+        f"- **Inventory**: {_count_md(runtime_roots.notes_dir())} knowledge pages, "
+        f"{count_daily_logs()} daily logs, {_count_md(skills_dir())} skills, "
+        f"{_count_md(gaps_dir())} gaps, {_count_active_projects()} active project(s)."
     )
 
 
@@ -674,7 +677,7 @@ def capture_tier_counts(state_root: Path) -> dict[str, int]:
     return counts
 
 
-def _flush_line(flush_counts: dict) -> str:
+def flush_line(flush_counts: dict) -> str:
     """Flush-tier distribution — surfaces when the classifier is too strict."""
     ok = flush_counts.get("ok", 0)
     total = ok + flush_counts.get("major", 0) + flush_counts.get("minor", 0)
@@ -705,15 +708,15 @@ def metacognitive_block() -> str:
     it starts working — so it can propose maintenance instead of
     blindly adding more content.
     """
-    state = _load_state_safe()
+    state = load_state_safe()
     body = (
         _inventory_line(),
         _compile_line(
-            _compile_backlog_days(state),
+            compile_backlog_days(state),
             str(state.get("last_compile_status") or ""),
         ),
         _audit_line(_state_map(state, "last_compile_audit")),
-        _flush_line(capture_tier_counts(STATE_ROOT)),
+        flush_line(capture_tier_counts(runtime_roots.state_root())),
         _capture_line(state),
     )
     lines = ["## Your knowledge state (self-awareness)", ""]
@@ -721,7 +724,7 @@ def metacognitive_block() -> str:
     return "\n".join(lines) + "\n"
 
 
-def _latest_heartbeat_slug() -> str | None:
+def latest_heartbeat_slug() -> str | None:
     """The project of the most recent heartbeat — the fallback when none is given.
 
     It is only a fallback: two sessions that start together would otherwise swap
@@ -745,7 +748,7 @@ def _heartbeat_time(entry: object) -> str:
 
 
 def _context_slug(slug: str | None) -> str | None:
-    return slug or _latest_heartbeat_slug()
+    return slug or latest_heartbeat_slug()
 
 
 def advisory_block(slug: str | None = None) -> str:
@@ -794,7 +797,7 @@ def guardrails_block(slug: str | None = None) -> str:
 IMPACT_BUDGET_SECONDS = 1.0
 
 
-def _impact_block() -> str:
+def impact_block() -> str:
     """Code-knowledge impact analysis (v4.0).
 
     Names the pages and decisions the graph proves the uncommitted change reaches.
@@ -811,22 +814,13 @@ def _impact_block() -> str:
         return ""
 
 
-# The suite pins this budget deliberately: session start must not wait on the
-# doctor. Measured against the vault this was written on, the sixteen checks
-# want 1.77 seconds, so at this budget the run is always truncated — see
-# `_deferred_count` for what that means for its findings.
+# Session start retains its existing latency budget. Operational checks may
+# exceed it; completed findings and the count of unmeasured checks are both shown.
 HEALTH_BUDGET_SECONDS = 0.1
 
 
 def _deferred_count(report: dict) -> int:
-    """How many checks never ran because the doctor's budget ran out.
-
-    A truncated run is not a partial answer, it is no answer. Checks that are
-    cut short mid-read report failure without marking themselves: on this vault
-    the queue and the LSP both report their state unreadable at this budget and
-    are fine at a real one. So the count is used to discard the run, not to
-    filter it.
-    """
+    """Count explicitly unmeasured checks; completed findings remain evidence."""
     return sum(
         1
         for check in report.get("checks", [])
@@ -834,25 +828,26 @@ def _deferred_count(report: dict) -> int:
     )
 
 
-# How old the nightly's report may be before session start measures for itself
-# (#23.5): one night plus a late start, so a machine that slept through the
-# night falls back rather than trusting yesterday's morning.
+# Maximum age of supplementary full-diagnosis evidence: one night plus a late
+# start. Current operational health is measured independently on every session.
 HEALTH_REPORT_MAX_AGE_SECONDS = 36 * 3600
 HEALTH_REPORT_NAME = "doctor-report.json"
 
 
-def _stored_health_report() -> tuple[dict, str] | None:
+def stored_health_report() -> tuple[dict, str] | None:
     """The nightly's full report and when it was written, when recent enough."""
     try:
         payload = json.loads(
-            (STATE_ROOT / "logs" / HEALTH_REPORT_NAME).read_text(encoding="utf-8")
+            (runtime_roots.state_root() / "logs" / HEALTH_REPORT_NAME).read_text(encoding="utf-8")
         )
         written = datetime.fromisoformat(str(payload["written_at"]))
-        age = (datetime.now(timezone.utc) - written).total_seconds()
+        age = (datetime.now(UTC) - written).total_seconds()
     except (OSError, ValueError, KeyError, TypeError):
         return None
     report = payload.get("report")
     if age > HEALTH_REPORT_MAX_AGE_SECONDS or not isinstance(report, dict):
+        return None
+    if report.get("scope", "full") != "full":
         return None
     return report, written.strftime("%Y-%m-%d %H:%M")
 
@@ -865,63 +860,62 @@ def _stored_health_block(report: dict, when: str) -> str:
         return ""
     return (
         "## Health\n\n"
-        + _nightly_line()
+        + nightly_line()
         + f"{summary} (measured by the nightly pass at {when} UTC; "
         "`uv run python scripts/doctor.py` for the state now)\n\n"
     )
 
 
 def health_block() -> str:
-    """Return doctor output only when local health is degraded.
-
-    The nightly's report is read first (#23.5); a budgeted run happens only
-    when there is none young enough. A run that ran out of budget reports
-    nothing but the fact that it did: the findings of a truncated run are
-    artefacts of the clock, and naming them teaches the reader to ignore
-    this block.
-    """
-    stored = _stored_health_report()
+    """Current operational findings, followed by dated full-diagnosis evidence."""
+    current = measured_health_block()
+    stored = stored_health_report()
     if stored is not None:
-        return _stored_health_block(*stored)
-    return _measured_health_block()
+        return current + _stored_health_block(*stored)
+    return current
 
 
-def _measured_health_block() -> str:
+def measured_health_block() -> str:
     try:
-        from doctor import degraded_summary, run_doctor
+        from doctor import run_doctor
 
-        report = run_doctor(
-            root=ROOT,
-            state_root=STATE_ROOT,
-            time_budget_seconds=HEALTH_BUDGET_SECONDS,
-        )
-        deferred = _deferred_count(report)
-        summary = degraded_summary(report)
-    except Exception:  # noqa: BLE001
-        return ""
+        report = run_doctor(root=runtime_roots.vault_root(), state_root=runtime_roots.state_root(),
+                            time_budget_seconds=HEALTH_BUDGET_SECONDS, scope="operational")
+    except Exception as error:  # noqa: BLE001 - the context names the failure without blocking startup
+        return f"## Health\n\nOperational health could not be measured: {describe_error(error)}\n\n"
+    return operational_health_block(report)
+
+
+def operational_health_block(report: dict) -> str:
+    from doctor import degraded_summary
+
+    completed = [check for check in report.get("checks", [])
+                 if not check.get("details", {}).get("budget_exhausted")]
+    summary = degraded_summary({**report, "checks": completed})
+    deferred = _deferred_count(report)
     if deferred:
-        return _unmeasured_health_block(deferred, len(report.get("checks", [])))
-    return f"## Health\n\n{summary}\n\n" if summary else ""
+        summary += f"\nOperational checks incomplete: {deferred} of {len(report.get('checks', []))} were not measured."
+    if not summary:
+        return ""
+    return f"## Health\n\n{nightly_line()}Operational scope; retained history not checked.\n{summary.strip()}\n\n"
 
 
 def _nightly_state() -> dict:
     import json
 
     try:
-        raw = (STATE_ROOT / "run" / "state.json").read_text(encoding="utf-8")
+        raw = (runtime_roots.state_root() / "run" / "state.json").read_text(encoding="utf-8")
         state = json.loads(raw)
     except (OSError, ValueError):
         return {}
     return state if isinstance(state, dict) else {}
 
 
-def _nightly_line() -> str:
+def nightly_line() -> str:
     """One line about the nightly pass, read rather than measured.
 
-    The health checks want 1.77 seconds and this block allows 0.1, so every
-    session start reports only that nothing was measured. That is deliberate —
-    session start must not wait on the doctor — but it left the one place a
-    degraded vault could surface saying nothing at all.
+    This durable outcome remains available even when the operational health
+    budget expires before the scheduler check can run.
 
     Measured 2026-09-05: the nightly had failed every night since 2026-08-30, no
     evidence generation was ever activated, and every answer for five days came
@@ -931,6 +925,8 @@ def _nightly_line() -> str:
     """
     state = _nightly_state()
     status = state.get("last_nightly_status")
+    if status == "deferred":
+        return "**Nightly maintenance is deferred; completion is not verified.**\n"
     if status != "failed":
         return ""
     date = state.get("last_nightly_date") or "never"
@@ -940,44 +936,44 @@ def _nightly_line() -> str:
     )
 
 
-def _unmeasured_health_block(deferred: int, total: int) -> str:
-    return (
-        "## Health\n\n"
-        + _nightly_line()
-        + f"Health was not measured: {deferred} of {total} checks did not run "
-        f"inside the {HEALTH_BUDGET_SECONDS}s budget. Run "
-        "`uv run python scripts/doctor.py` for the real state.\n\n"
-    )
-
-
-def _recover_transactions() -> None:
-    """Best-effort bounded recovery before any session context is read."""
-    deadline = time.monotonic() + RECOVERY_LIMIT_SECONDS
-    database = STATE_ROOT / "run" / "markdown-transactions.sqlite3"
+def _recovery_database_available(database: Path) -> bool:
+    """Distinguish a normal first start from a refused recovery database."""
     try:
         validate_runtime_file(
             database,
-            STATE_ROOT,
+            runtime_roots.state_root(),
             max_bytes=MAX_TRANSACTION_DATABASE_BYTES,
             owner_only=True,
         )
-    except (OSError, PermissionError, ValueError):
+    except FileNotFoundError:
+        return False
+    except (OSError, ValueError) as error:
+        record_hook_error(runtime_roots.state_root(), "session-start recovery database", describe_error(error))
+        return False
+    return True
+
+
+def recover_transactions() -> None:
+    """Best-effort bounded recovery before any session context is read."""
+    deadline = time.monotonic() + RECOVERY_LIMIT_SECONDS
+    database = runtime_roots.state_root() / "run" / "markdown-transactions.sqlite3"
+    if not _recovery_database_available(database):
         return
     if time.monotonic() >= deadline:
         return
     try:
         from markdown_transaction import active_or_legacy_coordinator
 
-        active_or_legacy_coordinator(ROOT, STATE_ROOT).recover(
+        active_or_legacy_coordinator(runtime_roots.vault_root(), runtime_roots.state_root()).recover(
             writer_wait_seconds=0,
             max_transactions=RECOVERY_MAX_TRANSACTIONS,
             deadline=deadline,
         )
-    except Exception:  # noqa: BLE001 - SessionStart must remain available
-        pass
+    except Exception as error:  # noqa: BLE001 - SessionStart must remain available
+        record_hook_error(runtime_roots.state_root(), "session-start transaction recovery", describe_error(error))
 
 
-def _section_item(name: str, text: str) -> ContextItem | None:
+def section_item(name: str, text: str) -> ContextItem | None:
     """Build a ContextItem from one SessionStart section, or None if empty."""
     stripped = (text or "").strip()
     if not stripped:
@@ -1013,12 +1009,12 @@ def _context_items(sections: list[tuple[str, str]]) -> list[ContextItem]:
     """Convert named SessionStart sections to semantic context items."""
     return [
         item
-        for item in (_section_item(name, text) for name, text in sections)
+        for item in (section_item(name, text) for name, text in sections)
         if item is not None
     ]
 
 
-def _pack_session_items(items: list[ContextItem]) -> str:
+def pack_session_items(items: list[ContextItem]) -> str:
     """Pack SessionStart items under the shared budget without slicing."""
     from context_compiler import compile_context_items
 
@@ -1036,8 +1032,8 @@ def _pack_session_items(items: list[ContextItem]) -> str:
 
 def _index_section_text() -> str:
     index_txt = (
-        MEMORY_INDEX.read_text(encoding="utf-8", errors="replace")
-        if MEMORY_INDEX.exists() else ""
+        runtime_roots.index_file().read_text(encoding="utf-8", errors="replace")
+        if runtime_roots.index_file().exists() else ""
     )
     trimmed = trim_index(index_txt).strip() or "(knowledge/index.md missing or empty)"
     return f"## knowledge/index.md (trimmed)\n\n{trimmed}"
@@ -1068,7 +1064,7 @@ def build_context_items(slug: str | None = None) -> list[ContextItem]:
         ("metacognitive", metacognitive_block()),
         ("health", health_block()),
         ("advisory", advisory_block(slug)),
-        ("impact", _impact_block()),
+        ("impact", impact_block()),
         ("index", _index_section_text()),
         ("daily", _daily_section_text()),
         ("log", _log_section_text()),
@@ -1076,9 +1072,9 @@ def build_context_items(slug: str | None = None) -> list[ContextItem]:
     return _context_items(sections)
 
 
-def _pack_session_sections(sections: list[tuple[str, str]]) -> str:
+def pack_session_sections(sections: list[tuple[str, str]]) -> str:
     """Pack named sections under the shared SessionStart budget."""
-    return _pack_session_items(_context_items(sections))
+    return pack_session_items(_context_items(sections))
 
 
 def _without_item(items: list[ContextItem], victim: ContextItem) -> list[ContextItem]:
@@ -1116,7 +1112,7 @@ def fit_to_char_ceiling(
 
 
 def _render_session_context(items: list[ContextItem]) -> str:
-    return _pack_session_items(items) + "\n"
+    return pack_session_items(items) + "\n"
 
 
 def build_context() -> str:
@@ -1125,8 +1121,8 @@ def build_context() -> str:
 
 def write_debug(additional: str, daily_name: str) -> None:
     try:
-        DEBUG_DIR.mkdir(parents=True, exist_ok=True)
-        DEBUG_FILE.write_text(
+        runtime_roots.reports_dir().mkdir(parents=True, exist_ok=True)
+        debug_file().write_text(
             f"ts: {datetime.now().isoformat(timespec='seconds')}\n"
             f"daily: {daily_name}\n"
             f"additionalContext_len: {len(additional)}\n"
@@ -1149,7 +1145,7 @@ def main() -> int:
     )
     args = p.parse_args()
 
-    _recover_transactions()
+    recover_transactions()
     maybe_spawn_nightly_catchup()
     additional = build_context()
     daily = latest_daily()

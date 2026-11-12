@@ -7,21 +7,11 @@ from __future__ import annotations
 
 import re
 import sys
-from pathlib import Path
 
-ROOT = Path(__file__).resolve().parents[1]
+from tests.the_scheduler_outlasts_the_pass_helpers import ROOT, SCRIPT, script_limit_hours
+
 if str(ROOT / "scripts") not in sys.path:
     sys.path.insert(0, str(ROOT / "scripts"))
-
-
-SCRIPT = ROOT / "scripts" / "install-scheduled-tasks.ps1"
-_TABLE = re.compile(r"^function Get-LLMWikiLimitHours \{ return @\{ nightly = (\d+); weekly = (\d+) \} \}$", re.MULTILINE)
-
-
-def script_limit_hours() -> dict[str, int]:
-    """The one hours table the Windows script registers and checks its tasks by."""
-    nightly, weekly = _TABLE.findall(SCRIPT.read_text(encoding="utf-8"))[0]
-    return {"nightly": int(nightly), "weekly": int(weekly)}
 
 
 def _nightly_limit_seconds() -> float:
@@ -30,17 +20,17 @@ def _nightly_limit_seconds() -> float:
 
 def test_the_nightly_task_is_not_killed_inside_its_own_bounds(monkeypatch):
     """Measured in auto provider mode, the mode an installed scheduler runs in."""
-    import scheduled_nightly
+    import nightly_budget
 
     monkeypatch.delenv("MEMORY_LLM_PROVIDER", raising=False)
 
-    assert scheduled_nightly.worst_case_seconds() < _nightly_limit_seconds()
+    assert nightly_budget.worst_case_seconds() < _nightly_limit_seconds()
 
 
 def test_the_windows_script_says_the_hours_the_one_table_says():
-    import install_control
+    from llm_wiki import install_scheduler_render
 
-    assert script_limit_hours() == install_control.SCHEDULER_LIMIT_HOURS
+    assert script_limit_hours() == install_scheduler_render.SCHEDULER_LIMIT_HOURS
 
 
 def test_the_windows_script_writes_its_hours_in_one_place():

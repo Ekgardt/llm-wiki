@@ -8,15 +8,15 @@ row with its own task id and link and failed its one second chance with
 from __future__ import annotations
 
 import sqlite3
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 import flush_memory
-import memory_queue
 import operational_ownership
 import pytest
+import queue_core  # noqa: E402
 
-from tests.test_capture_terminal import (  # noqa: F401
+from tests.capture_terminal_helpers import (  # noqa: F401
     _assert_major_daily_file_once,
     _FakeNoContentProvider,
     _NoContentProcessor,
@@ -24,7 +24,7 @@ from tests.test_capture_terminal import (  # noqa: F401
     _ready_intent_binding,
     _TimedCaptureProcessor,
 )
-from tests.test_queue_v3_capture_links import _coordinator, _queue
+from tests.queue_v3_capture_links_helpers import _coordinator, _queue
 
 
 def _crash_after_decision(*_args, **_kwargs):
@@ -33,7 +33,7 @@ def _crash_after_decision(*_args, **_kwargs):
 
 def _major_processor(queue, coordinator):
     provider = _FakeNoContentProvider("FLUSH_MAJOR\n- **Decisions made** - keep this")
-    chosen_at = datetime(2026, 8, 16, 12, 34, 56, tzinfo=timezone.utc)
+    chosen_at = datetime(2026, 8, 16, 12, 34, 56, tzinfo=UTC)
     return _TimedCaptureProcessor(queue, coordinator, provider, chosen_at)
 
 
@@ -45,7 +45,7 @@ def _died_after_indexing(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, text: 
     if major:
         processor = _major_processor(queue, coordinator)
     with monkeypatch.context() as patch, pytest.raises(RuntimeError, match="after the decision"):
-        patch.setattr(flush_memory, "_publish_capture_terminal", _crash_after_decision)
+        patch.setattr(flush_memory, "publish_capture_terminal", _crash_after_decision)
         flush_memory.run_capture_worker_once(queue, coordinator, process_missing=processor)
     with sqlite3.connect(queue.db_path) as database:
         database.execute(
@@ -91,8 +91,8 @@ def test_a_decision_sealed_outside_the_redrive_chain_is_refused(tmp_path, monkey
     with sqlite3.connect(queue.db_path) as database:
         database.row_factory = sqlite3.Row
         active = queue.active_capture_binding(database, child)
-        with pytest.raises(memory_queue.QueueOperationError, match="semantic_decision_conflict"):
-            memory_queue._require_inherited_capture_decision(
+        with pytest.raises(queue_core.QueueOperationError, match="semantic_decision_conflict"):
+            queue_core.require_inherited_capture_decision(
                 database, {"task_id": "a-stranger"}, active,
                 intent_id=binding.intent_id, stage="flush", active_link_digest=active.active_digest,
             )

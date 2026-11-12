@@ -1,0 +1,156 @@
+{
+  "encoding": "o200k_base",
+  "max_tokens": 100000,
+  "serialization": "exact-duplicates/v1",
+  "files": [
+    "AGENTS.md",
+    "CLAUDE.md",
+    "docs/AGENTS.md",
+    "docs/STRUCTURE.md",
+    "docs/modules/context-bundle.md",
+    "docs/modules/context-records.md",
+    "docs/modules/context-tooling.md",
+    "docs/modules/model-choice.md",
+    "docs/modules/product-structure.md",
+    "docs/modules/project-governance.md",
+    "docs/modules/retrieval-rerank-context.json",
+    "docs/modules/retrieval-rerank.md",
+    "docs/modules/test-support.md",
+    "rules/development-laws.md",
+    "scripts/__init__.py",
+    "scripts/llm_wiki/__init__.py",
+    "scripts/llm_wiki/context_bundle.py",
+    "scripts/llm_wiki/retrieval_rerank.py",
+    "tests/__init__.py",
+    "tests/conftest.py",
+    "tests/module_context.py",
+    "tests/module_context_paths.py",
+    "tests/module_interface.py",
+    "tests/module_interface_render.py",
+    "tests/module_qualification.py",
+    "tests/module_record_context.py",
+    "tests/module_records.py",
+    "tests/shared_fixtures.py",
+    "tests/slow_machine.py"
+  ],
+  "ownership": {
+    "files": [
+      "docs/modules/retrieval-rerank-context.json",
+      "docs/modules/retrieval-rerank.md",
+      "scripts/llm_wiki/retrieval_rerank.py"
+    ]
+  },
+  "qualified_dependencies": [
+    {
+      "provider": "scripts/llm_wiki/generation_catalog_store.py",
+      "names": [
+        "GenerationCatalog"
+      ],
+      "contract_sha256": "b18194ebe04bf988b4474379fcb5243516550d43b745a00eaed1453f7844c983",
+      "integration_tests": [
+        "tests/test_a_blocked_task_has_a_way_back.py",
+        "tests/test_a_build_in_flight_is_not_an_orphan.py",
+        "tests/test_a_capacity_refusal_does_not_corrupt_a_generation.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/model_choice.py",
+      "names": [
+        "using_root"
+      ],
+      "contract_sha256": "d45f2655cb61963e77617d1dfd7d617b134ad77cc770b59b335d0856e5d65019",
+      "integration_tests": [
+        "tests/test_central_model_selection.py",
+        "tests/test_compile_execution_inventory.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/retrieval_fusion.py",
+      "names": [
+        "evidence_ids_of"
+      ],
+      "contract_sha256": "04c44883d65397ba71cb8c79f7ac9f51e2dcc7529a579fd28c10b61f2ede6c7a",
+      "integration_tests": [
+        "tests/test_retrieval_review_round2.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/retrieval_optional_stages.py",
+      "names": [
+        "OPTIONAL_STAGE_MAX_SECONDS",
+        "OPTIONAL_STAGE_TAIL_RESERVE_SECONDS",
+        "OptionalStageNotAdmitted",
+        "OptionalStageTimeout",
+        "observed_cost_is_stale",
+        "observed_optional_stage_cost",
+        "optional_stage_deadline",
+        "optional_stage_fits",
+        "require_optional_deadline",
+        "require_optional_not_cancelled",
+        "run_optional_bounded"
+      ],
+      "contract_sha256": "f446e9b7ac151816a4a5fb435d3c45498887539e7433bcdc0e18316cbc4cbce3",
+      "integration_tests": [
+        "tests/test_a_rerank_is_tried_again.py",
+        "tests/test_a_rerank_that_cannot_fit_is_not_started.py",
+        "tests/test_a_stage_not_waited_for_is_not_a_timeout.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/retrieval_query.py",
+      "names": [
+        "QueryAnalysis",
+        "RetrievalCandidate",
+        "as_float",
+        "as_int",
+        "check_stopped",
+        "first_present",
+        "heading_path_of",
+        "note_generation_degradation",
+        "source_sha256"
+      ],
+      "contract_sha256": "d3a611ff8e68c07dbf3c733f6194ff4f3d83ce9ed4f84316426712e3bf93cca6",
+      "integration_tests": [
+        "tests/test_retrieval_expiry_fixture_survives_preflight_scheduling.py",
+        "tests/test_retrieval_review_round2.py"
+      ]
+    },
+    {
+      "provider": "scripts/reliable_memory.py",
+      "names": [
+        "validate_state_root"
+      ],
+      "contract_sha256": "8680515cd873056a7c8a36e0057d91f2f83f23c48841263697676ff91f7ff964",
+      "integration_tests": [
+        "tests/test_a_backup_image_carries_what_git_does_not.py",
+        "tests/test_a_changed_task_setting_reaches_an_installed_machine.py",
+        "tests/test_a_committed_source_resolves_an_older_compile_plan.py"
+      ]
+    },
+    {
+      "provider": "scripts/repository_scope.py",
+      "names": [
+        "sanitized_git_environment"
+      ],
+      "contract_sha256": "fd550ae20761afad50b37fa3a71044a162485b0e4d4b3e2af9b5b22e143c2bec",
+      "integration_tests": [
+        "tests/test_a_code_generation_is_not_abandoned.py",
+        "tests/test_a_directory_link_inside_the_checkout_does_not_refuse_the_revision.py",
+        "tests/test_a_document_is_opened_in_its_own_language.py"
+      ]
+    },
+    {
+      "provider": "scripts/reranker.py",
+      "names": [
+        "rerank",
+        "should_rerank"
+      ],
+      "contract_sha256": "06b2e719667b21eefa7bc18dace6e0afb33532a228b7c09e5478ae85d4735f36",
+      "integration_tests": [
+        "tests/test_a_fallback_names_its_cause.py",
+        "tests/test_a_rerank_is_tried_again.py",
+        "tests/test_a_reranker_that_never_finished.py"
+      ]
+    }
+  ]
+}

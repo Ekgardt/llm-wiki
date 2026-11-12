@@ -51,7 +51,7 @@ def test_get_short_path_rejects_nonlocal_paths_before_bounded_api_call(
         calls.append((path, size))
         return 40_000
 
-    monkeypatch.setattr(windows_workspace._API, "get_short_path", oversized, raising=False)
+    monkeypatch.setattr(windows_workspace.API, "get_short_path", oversized, raising=False)
     for path in (
         Path("relative"),
         Path(r"\\server\share\folder"),
@@ -73,7 +73,7 @@ def test_created_directory_handle_supports_durable_metadata_flush(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     relative_opens: list[tuple[str, dict[str, object]]] = []
-    real_relative_handle = windows_workspace._relative_handle
+    real_relative_handle = windows_workspace.relative_handle
 
     def tracking_relative_handle(
         parent: int,
@@ -83,7 +83,7 @@ def test_created_directory_handle_supports_durable_metadata_flush(
         relative_opens.append((name, options))
         return real_relative_handle(parent, name, **options)
 
-    monkeypatch.setattr(windows_workspace, "_relative_handle", tracking_relative_handle)
+    monkeypatch.setattr(windows_workspace, "relative_handle", tracking_relative_handle)
     writable = windows_workspace.open_writable_directory_path(tmp_path)
     try:
         assert windows_workspace.flush_directory(writable) is True
@@ -160,7 +160,7 @@ def test_shared_readonly_source_file_rejects_reparse_and_closes_handle(
 
     closed: list[int] = []
     real_close = windows_workspace.close_handle
-    real_attributes = windows_workspace._attributes
+    real_attributes = windows_workspace.handle_attributes
 
     def tracking_close(handle: int) -> None:
         real_close(handle)
@@ -172,7 +172,7 @@ def test_shared_readonly_source_file_rejects_reparse_and_closes_handle(
     monkeypatch.setattr(windows_workspace, "close_handle", tracking_close)
     parent = windows_workspace.open_directory_path(tmp_path)
     closed.clear()
-    monkeypatch.setattr(windows_workspace, "_attributes", reparse_attributes)
+    monkeypatch.setattr(windows_workspace, "handle_attributes", reparse_attributes)
     try:
         with pytest.raises(PermissionError, match="reparse"):
             windows_workspace.open_shared_readonly_source_file(parent, target.name)
@@ -205,7 +205,7 @@ def test_flush_file_path_uses_checked_no_follow_handle_and_always_closes(
             calls.append(("close", handle))
             return True
 
-    monkeypatch.setattr(windows_workspace, "_API", FakeApi())
+    monkeypatch.setattr(windows_workspace, "API", FakeApi())
     monkeypatch.setattr(
         windows_workspace,
         "identity",
@@ -245,7 +245,7 @@ def test_flush_file_path_propagates_native_failure_and_closes(
             closed.append(handle)
             return True
 
-    monkeypatch.setattr(windows_workspace, "_API", FakeApi())
+    monkeypatch.setattr(windows_workspace, "API", FakeApi())
     monkeypatch.setattr(windows_workspace, "identity", lambda *_args, **_kwargs: None)
 
     with pytest.raises(OSError) as raised:
@@ -267,7 +267,7 @@ def test_move_file_write_through_uses_only_checked_move_flags(
             calls.append((source, destination, flags))
             return True
 
-    monkeypatch.setattr(windows_workspace, "_API", FakeApi())
+    monkeypatch.setattr(windows_workspace, "API", FakeApi())
     source = tmp_path / "stage.json"
     destination = tmp_path / "state.json"
 

@@ -21,7 +21,7 @@ import query_memory  # noqa: E402
 
 def _refusal(raw: str) -> str:
     with pytest.raises(query_memory.GroundedQAError) as refusal:
-        query_memory._parsed_answer(raw)
+        query_memory.parsed_answer(raw)
     return str(refusal.value)
 
 
@@ -62,4 +62,4 @@ def test_an_empty_answer_is_still_its_own_refusal():
 
 
 def test_a_valid_document_is_returned_unchanged():
-    assert query_memory._parsed_answer('{"status": "ok"}') == {"status": "ok"}
+    assert query_memory.parsed_answer('{"status": "ok"}') == {"status": "ok"}

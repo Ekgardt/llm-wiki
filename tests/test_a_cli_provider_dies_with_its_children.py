@@ -16,6 +16,7 @@ if str(SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_DIR))
 
 import llm_client  # noqa: E402
+import process_tree  # noqa: E402
 
 
 class _Spawned:
@@ -45,15 +46,14 @@ class _Spawned:
 @pytest.fixture
 def slow_cli(monkeypatch: pytest.MonkeyPatch) -> list:
     """Every CLI call meets a child that outlives its deadline."""
-    import sync_memory
 
     events: list = []
     monkeypatch.setattr(
-        sync_memory.subprocess, "Popen", lambda *a, **k: _Spawned(events)
+        process_tree.subprocess, "Popen", lambda *a, **k: _Spawned(events)
     )
-    monkeypatch.setattr(sync_memory, "_kill_process_tree", lambda process: events.append(("tree", process.pid)))
+    monkeypatch.setattr(process_tree, "kill_process_tree", lambda process: events.append(("tree", process.pid)))
     monkeypatch.setattr(llm_client.shutil, "which", lambda name: f"/usr/bin/{name}")
-    monkeypatch.setattr(llm_client, "_claude_cli_flags", lambda: frozenset())
+    monkeypatch.setattr(llm_client, "claude_cli_flags", lambda: frozenset())
     return events
 
 
@@ -61,20 +61,28 @@ def test_a_claude_call_that_runs_out_of_time_ends_the_whole_tree(slow_cli) -> No
     descriptor = llm_client.provider_candidates("claude", max_tokens=2000)[0]
 
     with pytest.raises(llm_client.ProviderTimeout):
-        llm_client._call_claude(descriptor, "prompt", "system")
+        llm_client.call_claude(descriptor, "prompt", "system")
 
     assert ("tree", _Spawned.pid) in slow_cli
 
 
+@pytest.mark.parametrize('phase', ['discovery', 'execution'])
 def test_a_codex_call_that_runs_out_of_time_ends_the_whole_tree(
-    slow_cli, tmp_path: Path
+    slow_cli, tmp_path: Path, monkeypatch, phase
 ) -> None:
+    from tests.codex_counts_the_prepared_invocation_helpers import _empty_mcp_discovery
+
     prompt = tmp_path / "prompt.txt"
     prompt.write_bytes(b"hello")
+    binary = tmp_path / 'owned-codex'
+    binary.write_bytes(b'owned CLI fixture')
+    executable = llm_client.bind_codex_executable(str(binary))
+    if phase == 'execution':
+        monkeypatch.setattr(llm_client, 'codex_basis_local_command', _empty_mcp_discovery)
 
     with pytest.raises(llm_client.ProviderTimeout):
-        llm_client._codex_last_message(
-            ["codex"], str(prompt), str(tmp_path / "out.txt")
+        llm_client.codex_last_message(
+            [str(binary)], str(prompt), str(tmp_path / "out.txt"), executable=executable
         )
 
     assert ("tree", _Spawned.pid) in slow_cli
@@ -84,8 +92,8 @@ def test_an_unproven_cleanup_is_named_in_the_timeout(monkeypatch) -> None:
     exc = subprocess.TimeoutExpired(["claude"], 90)
     exc.cleanup_error = "taskkill_failed"
 
-    assert llm_client._cleanup_note(exc) == " (process cleanup unverified: taskkill_failed)"
-    assert llm_client._cleanup_note(subprocess.TimeoutExpired(["claude"], 90)) == ""
+    assert llm_client.cleanup_note(exc) == " (process cleanup unverified: taskkill_failed)"
+    assert llm_client.cleanup_note(subprocess.TimeoutExpired(["claude"], 90)) == ""
 
 
 def test_a_powershell_shim_is_not_offered_as_the_codex_binary(
@@ -97,10 +105,10 @@ def test_a_powershell_shim_is_not_offered_as_the_codex_binary(
     (npm / "codex.ps1").write_bytes(b"# shim\n")
     monkeypatch.setenv("APPDATA", str(tmp_path))
 
-    assert llm_client._windows_codex_candidate() is None
+    assert llm_client.windows_codex_candidate() is None
 
     (npm / "codex.cmd").write_bytes(b"@echo off\n")
-    assert llm_client._windows_codex_candidate() == str(npm / "codex.cmd")
+    assert llm_client.windows_codex_candidate() == str(npm / "codex.cmd")
 
 
 def test_a_timeout_ends_the_chain_and_a_plain_failure_does_not(monkeypatch) -> None:

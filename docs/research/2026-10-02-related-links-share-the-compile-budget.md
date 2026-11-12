@@ -1,0 +1,11 @@
+# Related links share the compile response budget
+
+Research date: 2026-10-02. A valid small compile plan carrying 65 related wikilinks was rejected by both the provider schema and semantic validator. The plan already has a bounded complete response (4 MiB), and materialization checks the whole resulting page against the canonical Markdown page budget. The separate 64-item rule had no measurement or external requirement.
+
+Remove that item-count rule from both paths. Preserve list type, per-link syntax and existing string validation, evidence verification, complete-response admission, whole-page admission, DLP and transaction publication. No settings, environment, database, runtime path or model provider changes. This does not justify all remaining numeric limits, including link length, response size and context representation choices.
+
+Alternatives: raising the number or adding a setting preserves duplicate policy without grounds; removing whole-response/page admission discards resource protection. Reusing the existing containing-object admission avoids a second arbitrary threshold. More links can increase answer and compile cost; no extra model call is introduced, and complete-cycle answer/token qualification remains outstanding.
+
+Primary sources checked: [JSON Schema array validation](https://json-schema.org/understanding-json-schema/reference/array) defines optional application-selected maxItems; [Python JSON](https://docs.python.org/3/library/json.html) calls for bounding untrusted JSON consumption; [OWASP API resource consumption](https://api-security.owasp.org/editions/2023/en/0xa4-unrestricted-resource-consumption/) grounds resource admission but specifies no universal 64-link rule. These independent references support the policy distinction, not a claim that the existing byte budgets are optimal.
+
+Regression: the same 65-link input must pass provider schema and actually publish a complete page with all links. Malformed links and an oversized whole response must still fail. Both positive checks failed on the previous implementation; the corrected suite passed seven checks. The initial schema test mistakenly used a file-schema API and was corrected before the red/green comparison; its failed output is retained.

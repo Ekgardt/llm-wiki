@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import sys
 import time
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -22,28 +22,15 @@ if str(SCRIPTS_DIR) not in sys.path:
 import doctor  # noqa: E402
 import markdown_transaction  # noqa: E402
 import operational_ownership  # noqa: E402
-from installed_memory_repair import (  # noqa: E402
+from llm_wiki.adoption_admission import (  # noqa: E402
     ReliabilityV3ValidationError,
     require_reliability_v3_adopted,
 )
 
 from tests import conftest  # noqa: E402
+from tests.a_stray_candidate_after_adoption_helpers import CANDIDATE, _adopted_vault, _stray  # noqa: E402
+from tests.doctor_helpers import GENEROUS_BUDGET_SECONDS  # noqa: E402
 from tests.slow_machine import LONG_TIMEOUT  # noqa: E402
-from tests.test_doctor import GENEROUS_BUDGET_SECONDS, _adopt, _build_root  # noqa: E402
-
-CANDIDATE = "run/markdown-transactions-v3.candidate.sqlite3"
-
-
-def _adopted_vault(tmp_path: Path) -> tuple[Path, Path, Path]:
-    root, state_root, home = _build_root(tmp_path)
-    _adopt(root, state_root)
-    return root, state_root, home
-
-
-def _stray(state_root: Path) -> Path:
-    candidate = state_root / CANDIDATE
-    markdown_transaction.initialize_coordinator_v3_candidate(candidate, source_v2=None)
-    return candidate
 
 
 def _doctor(root: Path, state_root: Path, home: Path, *, repair: bool = False) -> dict:
@@ -128,7 +115,7 @@ def test_a_candidate_with_a_live_maintenance_owner_is_kept(tmp_path: Path) -> No
 def test_a_candidate_whose_owners_have_expired_is_retired(tmp_path: Path) -> None:
     root, state_root, home = _adopted_vault(tmp_path)
     candidate = _stray(state_root)
-    past = datetime.now(timezone.utc) - timedelta(days=6)
+    past = datetime.now(UTC) - timedelta(days=6)
     registry = operational_ownership.OwnershipRegistry(state_root, clock=lambda: past)
     registry.acquire("project", scope="project:a", actor_id="actor-a")
 
@@ -140,12 +127,12 @@ def test_a_candidate_whose_owners_have_expired_is_retired(tmp_path: Path) -> Non
 def test_a_candidate_holding_a_transaction_is_kept(tmp_path: Path) -> None:
     root, state_root, home = _adopted_vault(tmp_path)
     candidate = _stray(state_root)
-    coordinator = markdown_transaction.MarkdownCoordinator._from_v3_candidate(
+    coordinator = markdown_transaction.MarkdownCoordinator.from_v3_candidate(
         candidate, state_root=state_root
     )
     coordinator.vault = root
     (root / "knowledge" / "daily").mkdir(parents=True, exist_ok=True)
-    markdown_transaction._append_until_committed(
+    markdown_transaction.append_until_committed(
         coordinator,
         "stray-write",
         "knowledge/daily/2026-09-23.md",

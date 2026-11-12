@@ -26,7 +26,7 @@ import contextlib
 import os
 import sqlite3
 import sys
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -37,10 +37,9 @@ if str(SCRIPTS_DIR) not in sys.path:
 
 import capture_adoption  # noqa: E402
 import markdown_transaction  # noqa: E402
-import memory_queue  # noqa: E402
 import operational_ownership as ownership  # noqa: E402
+import queue_core  # noqa: E402
 from reliable_memory import (  # noqa: E402
-    canonical_json_bytes,
     publish_runtime_file,
     sha256_bytes,
 )
@@ -57,13 +56,13 @@ def _build(state_root: Path):
     markdown_transaction.initialize_coordinator_v3_candidate(
         _coordinator_path(state_root), source_v2=None
     )
-    memory_queue.initialize_queue_v3_candidate(
+    queue_core.initialize_queue_v3_candidate(
         state_root / "run" / "queue-v3.candidate.sqlite3", source_v2=None
     )
-    queue = memory_queue.MemoryQueue._from_v3_candidate(
+    queue = queue_core.MemoryQueue.from_v3_candidate(
         state_root / "run" / "queue-v3.candidate.sqlite3", state_root=state_root
     )
-    coordinator = markdown_transaction.MarkdownCoordinator._from_v3_candidate(
+    coordinator = markdown_transaction.MarkdownCoordinator.from_v3_candidate(
         _coordinator_path(state_root), state_root=state_root
     )
     return queue, coordinator
@@ -72,8 +71,9 @@ def _build(state_root: Path):
 def _publish_ready_intent(state_root: Path, queue, coordinator) -> str:
     """Every publication step for real, up to but not including the enqueue."""
     seed = b"intent-fence-reclaim"
-    payload = canonical_json_bytes({"seed": seed.decode()})
-    intent_id = sha256_bytes(seed)
+    from tests.adopted_capture_vault import session_intent_payload
+
+    intent_id, payload = session_intent_payload(seed)
     shard = intent_id[:2]
     pending = f"run/capture-intents/pending/{shard}/{intent_id}.json"
     ready = f"run/capture-intents/ready/{shard}/{intent_id}.json"
@@ -112,13 +112,15 @@ def _publish_ready_intent(state_root: Path, queue, coordinator) -> str:
 
 
 def _dead_identity() -> ownership.ProcessIdentity:
+    from tests.process_identity_fixture import reused_current_process_identity
+
     return ownership.ProcessIdentity(
-        pid=os.getpid(), start_identity="llm-wiki-test:killed-process"
+        pid=os.getpid(), start_identity=reused_current_process_identity()
     )
 
 
 def _expire(state_root: Path, table: str) -> None:
-    when = datetime.now(timezone.utc) - timedelta(seconds=1)
+    when = datetime.now(UTC) - timedelta(seconds=1)
     stamp = when.isoformat().replace("+00:00", "Z")
     with contextlib.closing(sqlite3.connect(_coordinator_path(state_root))) as database:
         database.execute(f"UPDATE {table} SET expires_at=?", (stamp,))
@@ -211,7 +213,7 @@ def test_the_reclaim_takes_the_binding_projection_with_the_fence(
                 "task-wedged",
                 "b" * 64,
                 "c" * 64,
-                datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+                datetime.now(UTC).isoformat().replace("+00:00", "Z"),
                 fence["token"],
                 fence["fencing_epoch"],
             ),
@@ -227,7 +229,7 @@ def test_the_reclaim_takes_the_binding_projection_with_the_fence(
     assert [entry["intent_id"] for entry in result["adopted"]] == [intent_id]
     with contextlib.closing(sqlite3.connect(_coordinator_path(tmp_path))) as database:
         database.row_factory = sqlite3.Row
-        assert markdown_transaction._coordinator_v3_base_cross_table_invariant(database)
+        assert markdown_transaction.coordinator_v3_base_cross_table_invariant(database)
         assert (
             database.execute(
                 "SELECT COUNT(*) FROM capture_binding_projections WHERE task_id=?",

@@ -1,0 +1,137 @@
+{
+  "encoding": "o200k_base",
+  "max_tokens": 100000,
+  "serialization": "exact-duplicates/v1",
+  "files": [
+    "AGENTS.md",
+    "CLAUDE.md",
+    "docs/AGENTS.md",
+    "docs/STRUCTURE.md",
+    "docs/modules/context-bundle.md",
+    "docs/modules/context-records.md",
+    "docs/modules/context-tooling.md",
+    "docs/modules/grounded-qa-helpers.md",
+    "docs/modules/model-choice.md",
+    "docs/modules/product-structure.md",
+    "docs/modules/project-governance.md",
+    "docs/modules/query-memory-tests-grounded-qa-context.json",
+    "docs/modules/query-memory-tests-grounded-qa.md",
+    "docs/modules/test-support.md",
+    "rules/development-laws.md",
+    "scripts/__init__.py",
+    "scripts/llm_wiki/__init__.py",
+    "scripts/llm_wiki/context_bundle.py",
+    "tests/__init__.py",
+    "tests/conftest.py",
+    "tests/grounded_qa_helpers.py",
+    "tests/module_context.py",
+    "tests/module_context_paths.py",
+    "tests/module_interface.py",
+    "tests/module_interface_render.py",
+    "tests/module_qualification.py",
+    "tests/module_record_context.py",
+    "tests/module_records.py",
+    "tests/shared_fixtures.py",
+    "tests/slow_machine.py",
+    "tests/test_grounded_qa.py"
+  ],
+  "ownership": {
+    "files": [
+      "docs/modules/query-memory-tests-grounded-qa-context.json",
+      "docs/modules/query-memory-tests-grounded-qa.md",
+      "tests/test_grounded_qa.py"
+    ]
+  },
+  "qualified_dependencies": [
+    {
+      "provider": "scripts/context_budget.py",
+      "names": [
+        "ContextBudget"
+      ],
+      "contract_sha256": "1183748f4f09054ec6c44a863ab69eb2f002be9b5fd5a99ebc28e0dc3c2a037c",
+      "integration_tests": [
+        "tests/test_grounded_qa.py"
+      ]
+    },
+    {
+      "provider": "scripts/corpus_snapshot.py",
+      "names": [
+        "collect_corpus"
+      ],
+      "contract_sha256": "7ea12368f51c070a84b0754260f0a82db5ac44b0395b95eabcb01e5053c9f0bb",
+      "integration_tests": [
+        "tests/test_grounded_qa.py"
+      ]
+    },
+    {
+      "provider": "scripts/evidence_resolver.py",
+      "names": [
+        "EvidenceResolutionError"
+      ],
+      "contract_sha256": "a1eadc4c8eaa0bb94d14248059f73f2f0cccb36092af36a8a3a2021b2ec37f62",
+      "integration_tests": [
+        "tests/test_grounded_qa.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/generation_catalog_store.py",
+      "names": [
+        "GenerationCatalog"
+      ],
+      "contract_sha256": "b18194ebe04bf988b4474379fcb5243516550d43b745a00eaed1453f7844c983",
+      "integration_tests": [
+        "tests/test_a_blocked_task_has_a_way_back.py",
+        "tests/test_a_build_in_flight_is_not_an_orphan.py",
+        "tests/test_a_capacity_refusal_does_not_corrupt_a_generation.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/model_choice.py",
+      "names": [
+        "using_root"
+      ],
+      "contract_sha256": "d45f2655cb61963e77617d1dfd7d617b134ad77cc770b59b335d0856e5d65019",
+      "integration_tests": [
+        "tests/test_grounded_qa.py"
+      ]
+    },
+    {
+      "provider": "scripts/query_memory.py",
+      "names": [
+        "ANSWER_SCHEMA",
+        "GroundedContext",
+        "GroundedQAError",
+        "answer_corpus",
+        "build_grounded_context",
+        "grounded_qa",
+        "require_citation_touches_claim",
+        "verify_grounded_answer"
+      ],
+      "contract_sha256": "b952a3e03e1c623372b63f6ed6f5a6a50cae901f03a3a575b4162d2d5ec429e8",
+      "integration_tests": [
+        "tests/test_grounded_qa.py"
+      ]
+    },
+    {
+      "provider": "scripts/reliable_memory.py",
+      "names": [
+        "validate_schema",
+        "validate_state_root"
+      ],
+      "contract_sha256": "e4b305e54809218b52d218b8fc59e959f458220ebd5c46cd084c92893b9493ba",
+      "integration_tests": [
+        "tests/test_grounded_qa.py"
+      ]
+    },
+    {
+      "provider": "scripts/repository_scope.py",
+      "names": [
+        "sanitized_git_environment"
+      ],
+      "contract_sha256": "fd550ae20761afad50b37fa3a71044a162485b0e4d4b3e2af9b5b22e143c2bec",
+      "integration_tests": [
+        "tests/test_grounded_qa.py"
+      ]
+    }
+  ]
+}

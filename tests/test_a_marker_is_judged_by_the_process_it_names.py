@@ -8,14 +8,21 @@ import ast
 import os
 from pathlib import Path
 
-import doctor
+import generation_maintenance
 import installed_memory_repair
 import markdown_transaction
 import operational_ownership as ownership
 import process_liveness
 import pytest
 
-FOREIGN = "test-process:a-number-handed-to-somebody-else"
+
+def _reused_identity() -> str:
+    identity = process_liveness.process_start_identity(os.getpid())
+    prefix, ticks = identity.rsplit(":", 1)
+    return f"{prefix}:{int(ticks) + 1}"
+
+
+FOREIGN = _reused_identity()
 SCRIPTS = Path(__file__).resolve().parents[1] / "scripts"
 
 
@@ -48,35 +55,34 @@ def test_an_orphan_marker_of_a_running_owner_is_kept(tmp_path: Path) -> None:
         _reclaim(registry)
 
 
-@pytest.mark.parametrize(("identity", "alive"), [(FOREIGN, False), (None, True)])
+@pytest.mark.parametrize(
+    ("identity", "alive"), [(FOREIGN, False), (None, True)], ids=("a-reused-identity", "no-identity")
+)
 def test_doctor_reads_an_owner_row_by_its_identity(identity: str | None, alive: bool) -> None:
-    assert doctor._owner_pid_live(os.getpid(), identity) is alive
+    assert generation_maintenance.owner_pid_live(os.getpid(), identity) is alive
 
 
 def test_offline_adoption_is_not_blocked_by_a_reused_pid() -> None:
-    installed_memory_repair._require_process_absent(os.getpid(), FOREIGN)
+    installed_memory_repair.require_process_absent(os.getpid(), FOREIGN)
 
     with pytest.raises(ValueError, match="live legacy owner"):
-        installed_memory_repair._require_process_absent(os.getpid(), _own_identity())
+        installed_memory_repair.require_process_absent(os.getpid(), _own_identity())
 
 
 # The PID-only probes, and the only functions allowed to call them: the probes'
 # own wrappers, a child process this process just started, and readers of a
 # record that carries no identity (a pre-2026-09-17 preparer record, the v2
 # queue's `source_fences`). A new call is refused until it says which it is.
-_BARE_PROBES = {"pid_alive", "_pid_alive", "_pid_is_alive", "_is_pid_alive", "_pid_exists"}
+_BARE_PROBES = {
+    "pid_alive", "_pid_alive", "pid_is_alive", "_pid_is_alive", "is_pid_alive", "_is_pid_alive", "pid_exists", "_pid_exists",
+}
 _ALLOWED_CALLERS = {
-    ("doctor.py", "_owner_pid_live"),
-    ("markdown_transaction.py", "_pid_alive"),
-    ("markdown_transaction.py", "_preparer_alive"),
+    ("llm_wiki/queue_process_cleanup.py", "_descendant_alive"),
+    ("llm_wiki/queue_process_cleanup.py", "_kill_windows_tree"),
+    ("llm_wiki/queue_process_cleanup.py", "pid_is_alive"),
+    ("markdown_transaction.py", "pid_alive"),
     ("maybe_compile.py", "_is_pid_alive"),
-    ("memory_queue.py", "_pid_is_alive"),
-    ("memory_queue.py", "_descendant_alive"),
-    ("memory_queue.py", "_kill_windows_tree"),
-    ("memory_queue.py", "MemoryQueue._delete_stale_source_fences"),
-    ("memory_state.py", "_is_pid_alive"),
-    ("doctor.py", "_pid_alive"),
-    ("process_liveness.py", "owner_alive"),
+    ("memory_state.py", "is_pid_alive"),
 }
 
 
@@ -105,7 +111,8 @@ def _functions(body: list[ast.stmt], prefix: str = "") -> list[tuple[str, ast.AS
     for node in body:
         if isinstance(node, ast.ClassDef):
             found += _functions(node.body, f"{prefix}{node.name}.")
-        elif isinstance(node, ast.FunctionDef):
+            continue
+        if isinstance(node, ast.FunctionDef):
             found.append((prefix + node.name, node))
     return found
 
@@ -113,11 +120,11 @@ def _functions(body: list[ast.stmt], prefix: str = "") -> list[tuple[str, ast.AS
 def _bare_probe_callers(path: Path) -> set[tuple[str, str]]:
     functions = _functions(ast.parse(path.read_text(encoding="utf-8")).body)
     return {
-        (path.name, name) for name, function in functions if any(map(_judges_by_number, ast.walk(function)))
+        (path.relative_to(SCRIPTS).as_posix(), name) for name, function in functions if any(map(_judges_by_number, ast.walk(function)))
     }
 
 
 def test_no_new_owner_is_judged_by_its_pid_alone() -> None:
-    found = set().union(*(_bare_probe_callers(path) for path in SCRIPTS.glob("*.py")))
+    found = set().union(*(_bare_probe_callers(path) for path in SCRIPTS.rglob("*.py")))
 
     assert found - _ALLOWED_CALLERS == set()

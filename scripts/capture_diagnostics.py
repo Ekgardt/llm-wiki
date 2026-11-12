@@ -11,9 +11,9 @@ Every failure lands here:
 * one bounded JSONL trail (`logs/capture-failures.jsonl`) carrying the reason,
 * one counter per failure kind in `state.json` for the health surfaces.
 
-Both are bounded: the trail is trimmed to the newest entries under a byte cap,
-and the counter map keeps the most recent kinds only. Recording is itself
-best-effort — diagnostics must never become the reason a hook fails.
+The trail is trimmed to the newest entries under a byte cap. Cumulative counters
+retain every trusted producer kind; cache pressure must not erase health history.
+Recording is itself best-effort — diagnostics must never become the reason a hook fails.
 """
 from __future__ import annotations
 
@@ -21,30 +21,28 @@ import argparse
 import json
 import os
 import sys
+import threading
 import time
 from contextlib import contextmanager, suppress
 from datetime import datetime
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from memory_state import (  # noqa: E402
-    REPORTS_DIR,
-    StateLockTimeout,
-    atomic_write,
-    load_state,
-    update_state,
-)
+from llm_wiki import runtime_roots  # noqa: E402
+from memory_state import StateLockTimeout, atomic_write, load_state, update_state
+from reliable_memory import write_all  # noqa: E402
 from secret_redact import redact_secrets  # noqa: E402
 
-FAILURE_LOG = REPORTS_DIR / "capture-failures.jsonl"
+
+def failure_log() -> Path:
+    return runtime_roots.reports_dir() / "capture-failures.jsonl"
+
+
 # The capture-failure log is trimmed to its newest three quarters past this, so it never grows
 # without bound; the counters in hook state keep the totals. Basis unknown: value predates
 # measurement; review when a burst of failures pushes a day's records out before doctor reads
 # them.
 MAX_FAILURE_LOG_BYTES = 256 * 1024
-# Failure kinds counted in hook state; past it the least recently seen kind is dropped so the
-# state file stays bounded. The live state counts 5 kinds (2026-09-27).
-MAX_FAILURE_KINDS = 32
 # A failure reason is redacted, then cut to one bounded line of the capture-failure log (itself
 # capped by MAX_FAILURE_LOG_BYTES). Live reasons reach this cap (logs/capture-failures.jsonl,
 # 2026-09-27), so long ones are cut; Basis unknown: value predates measurement; review when a cut
@@ -63,8 +61,24 @@ STATE_LOCK_TIMEOUT = 0.5
 # (#26.3): another writer holds the resource now and the next session end or
 # queue drain carries the same event, so it is retried work, not lost work.
 CONTENTION_OWNERSHIP_CODES = frozenset({"owner_busy"})
-# SQLITE_BUSY and SQLITE_LOCKED; the driver reports them from Python 3.11 on.
+# SQLITE_BUSY and SQLITE_LOCKED.
 SQLITE_CONTENTION_CODES = frozenset({5, 6})
+
+
+def record_hook_error(state_root: Path | None, kind: str, message: str) -> bool:
+    """Append a redacted diagnostic; report failure without changing the hook outcome."""
+    if state_root is None:
+        return False
+    try:
+        line = " ".join(redact_secrets(f"{kind}: {message}").split())
+        log_path = state_root / "logs" / "hook-errors.log"
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        timestamp = datetime.now().astimezone().isoformat(timespec="seconds")
+        with log_path.open("a", encoding="utf-8") as stream:
+            stream.write(f"[{timestamp}] {line}\n")
+        return True
+    except Exception:  # noqa: BLE001 - diagnostics must not replace the primary failure
+        return False
 
 
 def _sqlite_contention(error: BaseException) -> bool:
@@ -73,10 +87,14 @@ def _sqlite_contention(error: BaseException) -> bool:
 
 
 def _typed_contention(error: BaseException) -> bool:
-    from markdown_transaction import OperationBoundElsewhereError, ProjectPendingPriorError
+    from markdown_transaction import (
+        OperationBoundElsewhereError,
+        ProjectPendingPriorError,
+        WriterAdmissionTimeout,
+    )
 
     return isinstance(
-        error, (ProjectPendingPriorError, OperationBoundElsewhereError, StateLockTimeout)
+        error, (ProjectPendingPriorError, OperationBoundElsewhereError, StateLockTimeout, WriterAdmissionTimeout)
     )
 
 
@@ -87,11 +105,11 @@ def _typed_contention(error: BaseException) -> bool:
 CONTENTION_QUEUE_CODES = frozenset({"intent_fence_lost"})
 
 
-def _queue_contention(error: BaseException) -> bool:
-    """Read the loaded queue module only: an error of its type cannot exist without it."""
-    queue_module = sys.modules.get("memory_queue")
-    error_type = getattr(queue_module, "QueueOperationError", None)
-    if error_type is None or not isinstance(error, error_type):
+def queue_contention(error: BaseException) -> bool:
+    """Recognize the owned error type even when no queue executor was loaded."""
+    from llm_wiki.queue_contracts import QueueOperationError
+
+    if not isinstance(error, QueueOperationError):
         return False
     return error.code in CONTENTION_QUEUE_CODES
 
@@ -102,7 +120,7 @@ def is_contention(error: BaseException) -> bool:
 
     if isinstance(error, OperationalOwnershipError):
         return error.code in CONTENTION_OWNERSHIP_CODES
-    return _typed_contention(error) or _sqlite_contention(error) or _queue_contention(error)
+    return _typed_contention(error) or _sqlite_contention(error) or queue_contention(error)
 
 
 # A capture worker runs only over intents published durably before it starts, and
@@ -116,7 +134,8 @@ DURABLE_WORK_KINDS = frozenset({"adapter_capture_worker"})
 # kept the capture check red for tool errors (audit B-25,
 # docs/research/2026-09-25-a-tool-failure-is-not-a-lost-capture.md); they are
 # reported on their own.
-OPERATIONAL_KINDS = frozenset({"mcp_tool", "telemetry_event"})
+# Historical compile refusals retained their source; retain the diagnostic without calling it a lost capture.
+OPERATIONAL_KINDS = frozenset({"mcp_tool", "telemetry_event", "compile_oversized_daily"})
 
 
 class DurableWorkExhausted(RuntimeError):
@@ -128,7 +147,7 @@ class DurableWorkExhausted(RuntimeError):
     """
 
 
-def _outcome_of(error: BaseException | None, kind: str = "") -> str:
+def outcome_of(error: BaseException | None, kind: str = "") -> str:
     if isinstance(error, DurableWorkExhausted):
         return "lost"
     return "deferred" if _is_retried_work(error, kind) else "lost"
@@ -167,7 +186,7 @@ def _failure_record(
     return record
 
 
-def _trimmed_tail(lines: list[str], max_bytes: int) -> list[str]:
+def trimmed_tail(lines: list[str], max_bytes: int) -> list[str]:
     """Newest lines that fit the byte cap, oldest dropped whole."""
     kept: list[str] = []
     used = 0
@@ -198,7 +217,7 @@ TRAIL_LOCK_ATTEMPTS = 20
 TRAIL_LOCK_PAUSE_SECONDS = 0.025
 
 
-def _append_locking():
+def append_locking():
     """The byte-range locking module where append is not atomic, else None."""
     if os.name != "nt":
         return None
@@ -228,20 +247,20 @@ def _unlock_trail(descriptor: int, locking) -> None:
         locking.locking(descriptor, locking.LK_UNLCK, 1)
 
 
-def _write_trail_line(descriptor: int, data: bytes, locking, pause=time.sleep) -> bool:
-    """One append-mode write, serialized where the system does not do it itself.
+def write_trail_line(descriptor: int, data: bytes, locking, pause=time.sleep) -> bool:
+    """Complete one append-mode record while the caller holds the sidecar lock.
 
     The descriptor is in append mode, so the write lands at the end wherever the
     lock left the file pointer. False means the lock was never free: nothing was
     written, and nothing of anyone else's was overwritten.
     """
     if locking is None:
-        os.write(descriptor, data)
+        write_all(descriptor, data)
         return True
     if not _lock_trail(descriptor, locking, pause):
         return False
     try:
-        os.write(descriptor, data)
+        write_all(descriptor, data)
     finally:
         _unlock_trail(descriptor, locking)
     return True
@@ -253,14 +272,46 @@ def _write_trail_line(descriptor: int, data: bytes, locking, pause=time.sleep) -
 # the trail itself is a lock on a file the trim is about to rename away.
 # Research: `docs/research/2026-09-17-a-trim-never-drops-a-line-it-did-not-read.md`.
 TRAIL_LOCK_SUFFIX = ".lock"
+_TRAIL_OWNER = threading.local()
+
+
+def _trail_lock_identity(descriptor: int):
+    try:
+        path = _trail_lock_path()
+        opened, current = os.fstat(descriptor), path.stat()
+        if (opened.st_dev, opened.st_ino) != (current.st_dev, current.st_ino):
+            return None
+        return (os.getpid(), str(path.absolute()), opened.st_dev, opened.st_ino, descriptor)
+    except OSError:
+        return None
+
+
+def owns_trail_lock() -> bool:
+    owner = getattr(_TRAIL_OWNER, "identity", None)
+    if owner is None:
+        return False
+    return owner == _trail_lock_identity(owner[-1])
+
+
+@contextmanager
+def _remember_trail_lock(held: bool, descriptor: int):
+    if not held:
+        yield False
+        return
+    previous = getattr(_TRAIL_OWNER, "identity", None)
+    _TRAIL_OWNER.identity = _trail_lock_identity(descriptor)
+    try:
+        yield True
+    finally:
+        _TRAIL_OWNER.identity = previous
 
 
 def _trail_lock_path() -> Path:
     """Read from `FAILURE_LOG` at the call: the trail's path is a module setting."""
-    return FAILURE_LOG.with_name(FAILURE_LOG.name + TRAIL_LOCK_SUFFIX)
+    return failure_log().with_name(failure_log().name + TRAIL_LOCK_SUFFIX)
 
 
-def _hold_trail_lock(descriptor: int) -> None:
+def hold_trail_lock(descriptor: int) -> None:
     """One non-blocking exclusive OS lock attempt on the sidecar's first byte."""
     if os.name == "nt":
         import msvcrt
@@ -277,7 +328,7 @@ def _await_trail_lock(descriptor: int, pause) -> bool:
     """True once the sidecar lock is ours; False when the bounded wait ran out."""
     for _ in range(TRAIL_LOCK_ATTEMPTS):
         try:
-            _hold_trail_lock(descriptor)
+            hold_trail_lock(descriptor)
         except OSError:
             pause(TRAIL_LOCK_PAUSE_SECONDS)
             continue
@@ -285,7 +336,7 @@ def _await_trail_lock(descriptor: int, pause) -> bool:
     return False
 
 
-def _open_trail_lock() -> int | None:
+def open_trail_lock() -> int | None:
     path = _trail_lock_path()
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -302,12 +353,14 @@ def trail_lock(pause=time.sleep):
     Closing the descriptor releases the lock on both systems, so nothing is left
     held by a process that died holding it.
     """
-    descriptor = _open_trail_lock()
+    descriptor = open_trail_lock()
     if descriptor is None:
         yield False
         return
     try:
-        yield _await_trail_lock(descriptor, pause)
+        held = _await_trail_lock(descriptor, pause)
+        with _remember_trail_lock(held, descriptor) as acquired:
+            yield acquired
     finally:
         with suppress(OSError):
             os.close(descriptor)
@@ -316,42 +369,47 @@ def trail_lock(pause=time.sleep):
 def _write_failure_line(line: str) -> bool:
     flags = os.O_WRONLY | os.O_CREAT | os.O_APPEND | getattr(os, "O_BINARY", 0)
     try:
-        FAILURE_LOG.parent.mkdir(parents=True, exist_ok=True)
-        descriptor = os.open(FAILURE_LOG, flags, 0o600)
+        failure_log().parent.mkdir(parents=True, exist_ok=True)
+        descriptor = os.open(failure_log(), flags, 0o600)
     except OSError:
         return False
     try:
-        return _write_trail_line(descriptor, line.encode("utf-8"), _append_locking())
+        return write_trail_line(descriptor, line.encode("utf-8"), append_locking())
     except OSError:
         return False
     finally:
         os.close(descriptor)
 
 
-def _append_failure_line(record: dict[str, str]) -> bool:
-    """Add one line with a single append-mode write; True when it was written.
+def append_failure_line(record: dict[str, str]) -> bool:
+    """Add one complete line under the trail lock; True when it was written.
 
     Reading the trail, adding a line and writing the whole file back lost a line
     whenever two hooks failed together, which is when hooks fail. See
     `docs/research/2026-09-17-two-failures-at-once-both-reach-the-trail.md`.
 
     The trail's own lock is taken around the open and the write, so the file this
-    line is appended to is not one a trim has already replaced. A line is never
-    lost to that lock: when the bounded wait runs out the line is written anyway.
+    line is appended to is not one a trim has already replaced. Expired or failed
+    acquisition refuses the write. A caller already holding this same live lock
+    in its own thread can append without acquiring a conflicting descriptor.
     """
     line = json.dumps(record, ensure_ascii=False, sort_keys=True) + "\n"
-    with trail_lock():
+    if owns_trail_lock():
+        return _write_failure_line(line)
+    with trail_lock() as held:
+        if not held:
+            return False
         return _write_failure_line(line)
 
 
-def _trim_under_lock() -> None:
-    if FAILURE_LOG.stat().st_size <= MAX_FAILURE_LOG_BYTES:
+def trim_under_lock() -> None:
+    if failure_log().stat().st_size <= MAX_FAILURE_LOG_BYTES:
         return
-    kept = _trimmed_tail(_existing_lines(FAILURE_LOG), MAX_FAILURE_LOG_BYTES * 3 // 4)
-    atomic_write(FAILURE_LOG, "\n".join(kept) + "\n")
+    kept = trimmed_tail(_existing_lines(failure_log()), MAX_FAILURE_LOG_BYTES * 3 // 4)
+    atomic_write(failure_log(), "\n".join(kept) + "\n")
 
 
-def _trim_failure_log() -> None:
+def trim_failure_log() -> None:
     """Cut an overgrown trail to three quarters of its cap, in one step.
 
     Only ever under the trail's lock: reading every line and writing the file back
@@ -360,14 +418,18 @@ def _trim_failure_log() -> None:
     the cut is below the cap, so it is owed once per quarter-cap of failures.
     """
     try:
-        with trail_lock() as held:
-            if held:
-                _trim_under_lock()
+        _trim_when_lock_taken()
     except OSError:
         return
 
 
-def _bump_counter(state: dict, record: dict[str, str]) -> None:
+def _trim_when_lock_taken() -> None:
+    with trail_lock() as held:
+        if held:
+            trim_under_lock()
+
+
+def bump_counter(state: dict, record: dict[str, str]) -> None:
     counters = state.setdefault(STATE_KEY, {})
     entry = counters.get(record["kind"])
     if not isinstance(entry, dict):
@@ -377,18 +439,15 @@ def _bump_counter(state: dict, record: dict[str, str]) -> None:
         "count": int(entry.get("count", 0)) + 1,
         "deferred": deferred,
         "last_at": record["at"],
+        "last_loss_at": _loss_moment_after(entry, record),
         "last_reason": record["reason"],
     }
-    _drop_oldest_kinds(counters)
 
 
-def _drop_oldest_kinds(counters: dict) -> None:
-    """Keep the most recently seen kinds so the counter map stays bounded."""
-    if len(counters) <= MAX_FAILURE_KINDS:
-        return
-    ranked = sorted(counters.items(), key=lambda kv: str(kv[1].get("last_at", "")))
-    for kind, _ in ranked[: len(counters) - MAX_FAILURE_KINDS]:
-        counters.pop(kind, None)
+def _loss_moment_after(entry: dict, record: dict[str, str]) -> str:
+    if record["outcome"] == "lost":
+        return record["at"]
+    return _recorded_moment(entry)
 
 
 def hook_object(raw: str, kind: str) -> dict:
@@ -429,31 +488,39 @@ def record_capture_failure(
     With the exception in hand the record says whether the write was lost or
     deferred by a writer race; without it, a failure is a loss.
     """
-    record = _failure_record(kind, reason, slug, session_id, _outcome_of(error, kind))
-    written: list[bool] = []
-
-    def _under_the_state_lock(state: dict) -> None:
-        written.append(_trail_written(record, trim=True))
-        _bump_counter(state, record)
-
-    try:
-        update_state(_under_the_state_lock, lock_timeout=STATE_LOCK_TIMEOUT)
-    except Exception:  # noqa: BLE001 - the trail below still records the loss
-        pass
-    if not any(written):
-        # No lock, no trim: an append alone cannot erase anyone else's line.
+    record = _failure_record(kind, reason, slug, session_id, outcome_of(error, kind))
+    # Publish the diagnostic before contending for shared state. The state
+    # mutator only changes counters; it never acquires the trail's lock.
+    if not _trail_written(record, trim=True):
         _trail_written(record, trim=False)
+    with suppress(Exception):  # a failed counter must not replay the trail
+        update_state(lambda state: bump_counter(state, record), lock_timeout=STATE_LOCK_TIMEOUT)
+
+
+def _write_owned_failure(record: dict[str, str], *, trim: bool) -> bool:
+    written = append_failure_line(record)
+    if not written or not trim:
+        return written
+    with suppress(Exception):  # a maintenance failure cannot undo a written line
+        trim_under_lock()
+    return written
 
 
 def _trail_written(record: dict[str, str], *, trim: bool) -> bool:
-    """Write the trail, whatever it raises: the counter still records the loss."""
+    """Append and optional trim under one trail lock, independently of counters."""
     try:
-        written = _append_failure_line(record)
-        if trim:
-            _trim_failure_log()
-    except Exception:  # noqa: BLE001 - diagnostics never break a hook
+        return _write_under_trail_lock(record, trim=trim)
+    except Exception:  # noqa: BLE001 - diagnostics never replace the primary failure
         return False
-    return written
+
+
+def _write_under_trail_lock(record: dict[str, str], *, trim: bool) -> bool:
+    if owns_trail_lock():
+        return _write_owned_failure(record, trim=trim)
+    with trail_lock() as held:
+        if not held:
+            return False
+        return _write_owned_failure(record, trim=trim)
 
 
 def _counter_entries(state: dict, *, operational: bool = False) -> dict[str, dict]:
@@ -482,7 +549,7 @@ def capture_failure_totals(state: dict) -> dict[str, int]:
 
 
 def operational_failure_totals(state: dict) -> dict[str, int]:
-    """Failed tool calls and telemetry writes per kind; not captures."""
+    """Failed operations per kind, including historical retained compile refusals."""
     return _lost_totals(_counter_entries(state, operational=True))
 
 
@@ -508,7 +575,7 @@ def _trail_pointer() -> str:
     moved, ordinary cleanup — and pointing at a file that is not there wastes
     the one moment the operator is paying attention.
     """
-    if FAILURE_LOG.is_file():
+    if failure_log().is_file():
         return "see `logs/capture-failures.jsonl`."
     return "the trail at `logs/capture-failures.jsonl` is missing; reasons are in `run/state.json`."
 
@@ -516,11 +583,15 @@ def _trail_pointer() -> str:
 def _recorded_moment(entry: object) -> str:
     if not isinstance(entry, dict):
         return ""
-    return str(entry.get("last_at", ""))
+    if _lost_count(entry) == 0:
+        return ""
+    # Older counters did not distinguish a last loss from a last deferral.
+    # Keep that historical timestamp conservatively, without fabricating one.
+    return str(entry.get("last_loss_at", entry.get("last_at", "")))
 
 
 def last_capture_failure_at(state: dict) -> str:
-    """The most recent moment a capture kind was recorded, or an empty string."""
+    """The most recent recorded loss; a later deferral cannot refresh it."""
     return _last_moment(_counter_entries(state))
 
 
@@ -613,13 +684,13 @@ def _print_summary(state: dict) -> int:
     for kind, count in sorted(capture_deferred_totals(state).items()):
         print(f"{kind}: {count} deferred by a writer race (retried, not lost)")
     for kind, count in sorted(operational_failure_totals(state).items()):
-        print(f"{kind}: {count} failed (a tool or telemetry failure, not a capture)")
+        print(f"{kind}: {count} failed (an operation failure, not a lost capture)")
     if not totals:
         print("capture_diagnostics: no capture failures recorded")
         return 0
     for kind, count in sorted(totals.items()):
         print(f"{kind}: {count}")
-    print(f"trail: {FAILURE_LOG}")
+    print(f"trail: {failure_log()}")
     return 1
 
 

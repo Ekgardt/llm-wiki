@@ -1,0 +1,147 @@
+{
+  "encoding": "o200k_base",
+  "max_tokens": 100000,
+  "serialization": "exact-duplicates/v1",
+  "files": [
+    "AGENTS.md",
+    "CLAUDE.md",
+    "docs/AGENTS.md",
+    "docs/STRUCTURE.md",
+    "docs/modules/context-bundle.md",
+    "docs/modules/context-records.md",
+    "docs/modules/context-tooling.md",
+    "docs/modules/lsp-profiles-tests-a-document-is-opened-in-its-own-language-context.json",
+    "docs/modules/lsp-profiles-tests-a-document-is-opened-in-its-own-language.md",
+    "docs/modules/model-choice.md",
+    "docs/modules/product-structure.md",
+    "docs/modules/project-governance.md",
+    "docs/modules/test-support.md",
+    "rules/development-laws.md",
+    "scripts/__init__.py",
+    "scripts/llm_wiki/__init__.py",
+    "scripts/llm_wiki/context_bundle.py",
+    "tests/__init__.py",
+    "tests/conftest.py",
+    "tests/module_context.py",
+    "tests/module_context_paths.py",
+    "tests/module_interface.py",
+    "tests/module_interface_render.py",
+    "tests/module_qualification.py",
+    "tests/module_record_context.py",
+    "tests/module_records.py",
+    "tests/shared_fixtures.py",
+    "tests/slow_machine.py",
+    "tests/test_a_document_is_opened_in_its_own_language.py"
+  ],
+  "ownership": {
+    "files": [
+      "docs/modules/lsp-profiles-tests-a-document-is-opened-in-its-own-language-context.json",
+      "docs/modules/lsp-profiles-tests-a-document-is-opened-in-its-own-language.md",
+      "tests/test_a_document_is_opened_in_its_own_language.py"
+    ]
+  },
+  "qualified_dependencies": [
+    {
+      "provider": "scripts/llm_wiki/generation_catalog_store.py",
+      "names": [
+        "GenerationCatalog"
+      ],
+      "contract_sha256": "b18194ebe04bf988b4474379fcb5243516550d43b745a00eaed1453f7844c983",
+      "integration_tests": [
+        "tests/test_a_blocked_task_has_a_way_back.py",
+        "tests/test_a_build_in_flight_is_not_an_orphan.py",
+        "tests/test_a_capacity_refusal_does_not_corrupt_a_generation.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/model_choice.py",
+      "names": [
+        "using_root"
+      ],
+      "contract_sha256": "d45f2655cb61963e77617d1dfd7d617b134ad77cc770b59b335d0856e5d65019",
+      "integration_tests": [
+        "tests/test_a_document_is_opened_in_its_own_language.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/pyright_session_core.py",
+      "names": [
+        "LanguageServerSession"
+      ],
+      "contract_sha256": "e0377e133343193dfab7cdd9fa43c7558d4157b7b06be037ce5ac172ebb1f940",
+      "integration_tests": [
+        "tests/test_a_document_is_opened_in_its_own_language.py",
+        "tests/test_a_lapsed_deadline_is_not_a_torn_stream.py",
+        "tests/test_a_retained_cleanup_owner_leaves_the_module_registry.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/pyright_session_values.py",
+      "names": [
+        "OpenDocument"
+      ],
+      "contract_sha256": "99d54b15dc8191a99847b9d254624b1ce6b1f98939da7af73f90c8af49e4a9f2",
+      "integration_tests": [
+        "tests/test_a_document_is_opened_in_its_own_language.py",
+        "tests/test_code_navigation.py",
+        "tests/test_code_navigation_benchmark.py"
+      ]
+    },
+    {
+      "provider": "scripts/lsp_profiles.py",
+      "names": [
+        "GOPLS_PROFILE",
+        "PYRIGHT_PROFILE",
+        "RUST_ANALYZER_PROFILE",
+        "TYPESCRIPT_PROFILE"
+      ],
+      "contract_sha256": "2d287bfaabb012392fb5fcda02d4b591db2ea829bfbee9377be641b96e7bd9f2",
+      "integration_tests": [
+        "tests/test_a_document_is_opened_in_its_own_language.py"
+      ]
+    },
+    {
+      "provider": "scripts/lsp_security.py",
+      "names": [
+        "RepositorySource"
+      ],
+      "contract_sha256": "dd13aca0a893752f37e8bff5fc69a0d573a876dbb01a36662d0296c033b88a4f",
+      "integration_tests": [
+        "tests/test_a_document_is_opened_in_its_own_language.py"
+      ]
+    },
+    {
+      "provider": "scripts/pyright_profile.py",
+      "names": [
+        "PyrightIdentity"
+      ],
+      "contract_sha256": "85809561bdda220617d92c8cc000de59aaf12ca45393ef3487561f4cc02cd31c",
+      "integration_tests": [
+        "tests/test_a_document_is_opened_in_its_own_language.py",
+        "tests/test_a_lapsed_deadline_is_not_a_torn_stream.py",
+        "tests/test_a_retained_cleanup_owner_leaves_the_module_registry.py"
+      ]
+    },
+    {
+      "provider": "scripts/reliable_memory.py",
+      "names": [
+        "validate_state_root"
+      ],
+      "contract_sha256": "8680515cd873056a7c8a36e0057d91f2f83f23c48841263697676ff91f7ff964",
+      "integration_tests": [
+        "tests/test_a_document_is_opened_in_its_own_language.py"
+      ]
+    },
+    {
+      "provider": "scripts/repository_scope.py",
+      "names": [
+        "resolve_repository_scope",
+        "sanitized_git_environment"
+      ],
+      "contract_sha256": "983dd096d99bafff98ca0aaa2cd722477333e30eed4bfa9297d1830c635e8d90",
+      "integration_tests": [
+        "tests/test_a_document_is_opened_in_its_own_language.py"
+      ]
+    }
+  ]
+}

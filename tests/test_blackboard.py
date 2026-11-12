@@ -2,21 +2,19 @@ from __future__ import annotations
 
 import concurrent.futures
 import json
+import multiprocessing
 import os
 import sqlite3
 import time
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import blackboard
-import markdown_transaction
 import pytest
+from llm_wiki import markdown_store
 
+from tests.blackboard_helpers import blackboard_vault  # noqa: F401
 from tests.slow_machine import LONG_TIMEOUT
-from tests.test_reliability_v3_adoption import (
-    _vault,
-    build_adopted_reliability_v3,
-)
 
 
 def _child_writer_budget() -> None:
@@ -29,7 +27,8 @@ def _child_writer_budget() -> None:
     Waiting long enough for the gate keeps these processes from needing that
     path at all.
     """
-    markdown_transaction._WRITER_WAIT_SECONDS = 120.0
+    assert multiprocessing.get_start_method() != "fork", "test workers must not inherit parent thread state"
+    markdown_store.WRITER_WAIT_SECONDS = 120.0
 
 
 def _is_contention(error: BaseException) -> bool:
@@ -95,9 +94,9 @@ def _completion_landed(project: str, claim) -> bool:
     honest move is to read back whether the work is already published. Research:
     `docs/research/2026-09-12-a-lock-error-then-a-fence-error-is-a-question-not-a-retry.md`.
     """
-    path = blackboard._bb_dir(blackboard._sanitize_project(project)) / "completed.jsonl"
+    path = blackboard.bb_dir(blackboard.sanitize_project(project)) / "completed.jsonl"
     try:
-        records = blackboard._read_jsonl(path)
+        records = blackboard.read_jsonl(path)
     except (OSError, ValueError):
         return False
     return any(str(record.get("id")) == claim.claim_id for record in records)
@@ -112,7 +111,7 @@ def _completed_or_already(project: str, claim, label: str) -> bool:
     each retry a different request. Research:
     `docs/research/2026-09-13-a-retry-must-replay-the-same-request.md`.
     """
-    completed_at = datetime.now(timezone.utc)
+    completed_at = datetime.now(UTC)
     try:
         return _under_contention(
             blackboard.complete_task, project, claim, completed_at, label=label
@@ -126,7 +125,6 @@ def _completed_or_already(project: str, claim, label: str) -> bool:
 def _write_blackboard_batch(vault: str, state_root: str, worker: int, count: int) -> int:
     os.environ["LLM_WIKI_ROOT"] = vault
     os.environ["LLM_WIKI_STATE_ROOT"] = state_root
-    blackboard.PROJECTS_DIR = Path(vault) / "knowledge/projects"
     _child_writer_budget()
     completed = 0
     for index in range(count):
@@ -168,7 +166,6 @@ def _claim(*arguments, **keywords):
 def _read_blackboard_status(vault: str, state_root: str, count: int) -> int:
     os.environ["LLM_WIKI_ROOT"] = vault
     os.environ["LLM_WIKI_STATE_ROOT"] = state_root
-    blackboard.PROJECTS_DIR = Path(vault) / "knowledge/projects"
     _child_writer_budget()
     largest = 0
     for _ in range(count):
@@ -186,13 +183,12 @@ def _compete_for_blackboard_resource(
     vault: str,
     state_root: str,
     agent: str,
-    start_at: float,
+    ready,
 ) -> tuple[str, str]:
     os.environ["LLM_WIKI_ROOT"] = vault
     os.environ["LLM_WIKI_STATE_ROOT"] = state_root
-    blackboard.PROJECTS_DIR = Path(vault) / "knowledge/projects"
     _child_writer_budget()
-    time.sleep(max(0.0, start_at - time.monotonic()))
+    ready.wait()
     try:
         claim = blackboard.claim_task(
             "demo",
@@ -205,20 +201,8 @@ def _compete_for_blackboard_resource(
     return "claimed", claim.claim_id
 
 
-@pytest.fixture
-def blackboard_vault(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[Path, Path]:
-    vault, state_root = _vault(tmp_path)
-    build_adopted_reliability_v3(vault, state_root)
-    projects = vault / "knowledge/projects"
-    (projects / "demo/.blackboard").mkdir(parents=True)
-    monkeypatch.setattr(blackboard, "PROJECTS_DIR", projects)
-    monkeypatch.setenv("LLM_WIKI_ROOT", str(vault))
-    monkeypatch.setenv("LLM_WIKI_STATE_ROOT", str(state_root))
-    return vault, state_root
-
-
 def test_status_rejects_malformed_blackboard_stream(
-    blackboard_vault: tuple[Path, Path],
+    blackboard_vault: tuple[Path, Path],  # noqa: F811
 ) -> None:
     vault, _state_root = blackboard_vault
     tasks = vault / "knowledge/projects/demo/.blackboard/tasks.jsonl"
@@ -234,11 +218,11 @@ def test_parser_rejects_stream_over_shared_transaction_limit(
     monkeypatch.setattr(blackboard, "MAX_KNOWLEDGE_TARGET_BYTES", 8)
 
     with pytest.raises(ValueError, match="tasks.jsonl exceeds the blackboard stream limit"):
-        blackboard._parse_jsonl(Path("tasks.jsonl"), b'{"id":1}\n')
+        blackboard.parse_jsonl(Path("tasks.jsonl"), b'{"id":1}\n')
 
 
 def test_status_reads_all_streams_from_one_coherent_snapshot(
-    blackboard_vault: tuple[Path, Path], monkeypatch: pytest.MonkeyPatch
+    blackboard_vault: tuple[Path, Path], monkeypatch: pytest.MonkeyPatch  # noqa: F811
 ) -> None:
     vault, state_root = blackboard_vault
     observed: list[tuple[Path, ...]] = []
@@ -266,7 +250,7 @@ def test_status_reads_all_streams_from_one_coherent_snapshot(
 
     monkeypatch.setattr(
         blackboard,
-        "_coordinator",
+        "blackboard_coordinator",
         lambda: Coordinator(vault, state_root),
     )
 
@@ -298,7 +282,9 @@ STATUS_RACE_READS = 12
 
 def _status_race_batches(vault: Path, state_root: Path, writers: int, per_writer: int):
     """Writers and two readers over one blackboard; the batches they wrote."""
-    with concurrent.futures.ProcessPoolExecutor(max_workers=writers + 2) as executor:
+    with concurrent.futures.ProcessPoolExecutor(
+        max_workers=writers + 2, mp_context=multiprocessing.get_context("spawn"),
+    ) as executor:
         readers = [
             executor.submit(_read_blackboard_status, str(vault), str(state_root), STATUS_RACE_READS)
             for _ in range(2)
@@ -315,7 +301,7 @@ def _status_race_batches(vault: Path, state_root: Path, writers: int, per_writer
 
 
 def test_multiprocess_status_reads_remain_coherent_during_claim_and_complete(
-    blackboard_vault: tuple[Path, Path],
+    blackboard_vault: tuple[Path, Path],  # noqa: F811
 ) -> None:
     vault, state_root = blackboard_vault
     writers = STATUS_RACE_WRITERS
@@ -330,9 +316,9 @@ def test_multiprocess_status_reads_remain_coherent_during_claim_and_complete(
 
 
 def _held_resources(claim_id: str) -> list[str]:
-    coordinator = blackboard._coordinator()
+    coordinator = blackboard.blackboard_coordinator()
     with coordinator._connect() as database:
-        rows = blackboard._claim_rows(database, "demo", claim_id)
+        rows = blackboard.claim_rows(database, "demo", claim_id)
     return [str(row["resource"]) for row in rows]
 
 
@@ -352,24 +338,30 @@ def _released_leftovers(status: dict) -> list[tuple[str, list[str]]]:
     return [item for item in held if item[1]]
 
 
-def test_multiprocess_same_resource_claim_has_one_fenced_winner(
-    blackboard_vault: tuple[Path, Path],
-) -> None:
-    vault, state_root = blackboard_vault
-    start_at = time.monotonic() + 2.0
-
-    with concurrent.futures.ProcessPoolExecutor(max_workers=2) as executor:
+def _competing_claim_results(vault: Path, state_root: Path, ready):
+    with concurrent.futures.ProcessPoolExecutor(
+        max_workers=2, mp_context=multiprocessing.get_context("spawn"),
+    ) as executor:
         futures = [
             executor.submit(
                 _compete_for_blackboard_resource,
                 str(vault),
                 str(state_root),
                 agent,
-                start_at,
+                ready,
             )
             for agent in ("opencode", "codex")
         ]
-        results = [future.result(timeout=LONG_TIMEOUT) for future in futures]
+        return [future.result(timeout=LONG_TIMEOUT) for future in futures]
+
+
+def test_multiprocess_same_resource_claim_has_one_fenced_winner(
+    blackboard_vault: tuple[Path, Path],  # noqa: F811
+) -> None:
+    vault, state_root = blackboard_vault
+    with multiprocessing.get_context("spawn").Manager() as manager:
+        ready = manager.Barrier(2, timeout=LONG_TIMEOUT)
+        results = _competing_claim_results(vault, state_root, ready)
 
     assert sorted(status for status, _identity in results) == ["claimed", "conflict"]
     with sqlite3.connect(
@@ -384,7 +376,7 @@ def test_multiprocess_same_resource_claim_has_one_fenced_winner(
 
 
 def test_claim_is_all_or_none_when_one_resource_is_busy(
-    blackboard_vault: tuple[Path, Path],
+    blackboard_vault: tuple[Path, Path],  # noqa: F811
 ) -> None:
     _vault_root, state_root = blackboard_vault
     first = _claim(
@@ -416,9 +408,9 @@ def test_claim_is_all_or_none_when_one_resource_is_busy(
 
 
 def test_heartbeat_expiry_reclaim_and_stale_fencing(
-    blackboard_vault: tuple[Path, Path],
+    blackboard_vault: tuple[Path, Path],  # noqa: F811
 ) -> None:
-    now = datetime(2026, 8, 15, tzinfo=timezone.utc)
+    now = datetime(2026, 8, 15, tzinfo=UTC)
     first = _claim(
         "demo",
         "own graph",
@@ -451,7 +443,7 @@ def test_heartbeat_expiry_reclaim_and_stale_fencing(
 
 
 def test_conflict_and_resolution_are_immutable_events(
-    blackboard_vault: tuple[Path, Path],
+    blackboard_vault: tuple[Path, Path],  # noqa: F811
 ) -> None:
     vault, _state_root = blackboard_vault
     _claim(
@@ -472,66 +464,66 @@ def test_conflict_and_resolution_are_immutable_events(
     )
 
     assert blackboard.detect_conflicts("demo") == []
-    records = blackboard._read_jsonl(
+    records = blackboard.read_jsonl(
         vault / "knowledge/projects/demo/.blackboard/conflicts.jsonl"
     )
     assert [record["kind"] for record in records] == ["conflict", "resolution"]
 
 
-def test_a_retried_completion_keeps_the_first_published_record(blackboard_vault):
+def test_a_retried_completion_keeps_the_first_published_record(blackboard_vault):  # noqa: F811
     """A completion is published once; a retry must not re-stamp or be refused."""
     claim = _claim(
         "demo", "shared task", "agent-a", resources=["src/one.py"]
     )
-    published = blackboard._completion_record(claim, blackboard._utc_now(None))
-    completed_file = blackboard._bb_dir("demo") / "completed.jsonl"
-    blackboard._append_jsonl(
+    published = blackboard.completion_record(claim, blackboard.utc_now(None))
+    completed_file = blackboard.bb_dir("demo") / "completed.jsonl"
+    blackboard.append_jsonl(
         completed_file, published, f"blackboard-complete:{claim.claim_id}"
     )
 
     time.sleep(0.01)
     assert blackboard.complete_task("demo", claim) is True
 
-    records = blackboard._read_jsonl(completed_file)
+    records = blackboard.read_jsonl(completed_file)
     assert [record["id"] for record in records] == [claim.claim_id]
     assert records[0]["completed_at"] == published["completed_at"]
     assert blackboard.get_status("demo")["active_tasks"] == 0
 
 
-def test_a_reconciled_activation_does_not_break_the_claimer(blackboard_vault):
+def test_a_reconciled_activation_does_not_break_the_claimer(blackboard_vault):  # noqa: F811
     """The reader may publish the activation first; the claimer must still finish."""
-    claim = blackboard._new_claim(
+    claim = blackboard.new_claim(
         "demo",
         "shared task",
         "agent-a",
-        blackboard._normalize_resources(["src/one.py", "src/two.py"]),
+        blackboard.normalize_resources(["src/one.py", "src/two.py"]),
         30,
-        blackboard._utc_now(None),
+        blackboard.utc_now(None),
     )
-    tasks_file = blackboard._bb_dir("demo") / "tasks.jsonl"
-    blackboard._append_jsonl(
+    tasks_file = blackboard.bb_dir("demo") / "tasks.jsonl"
+    blackboard.append_jsonl(
         tasks_file,
-        blackboard._claim_request_record(claim),
+        blackboard.claim_request_record(claim),
         f"blackboard-request:{claim.claim_id}",
     )
-    acquired = blackboard._acquire_claim(blackboard._coordinator(), claim)
+    acquired = blackboard.acquire_claim(blackboard.blackboard_coordinator(), claim)
 
     blackboard.get_status("demo")
 
-    blackboard._append_jsonl(
+    blackboard.append_jsonl(
         tasks_file,
-        blackboard._claim_active_record(acquired),
+        blackboard.claim_active_record(acquired),
         f"blackboard-active:{claim.claim_id}",
     )
     assert blackboard.get_status("demo")["active_tasks"] == 1
 
 
 def test_a_claim_whose_record_fails_releases_its_resources(
-    blackboard_vault: tuple[Path, Path],
+    blackboard_vault: tuple[Path, Path],  # noqa: F811
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A caller that never learns it holds a claim must not be blocked by it."""
-    real_append = blackboard._append_jsonl
+    real_append = blackboard.append_jsonl
     failures: list[str] = []
 
     def failing_append(path, record, operation_id):
@@ -540,14 +532,14 @@ def test_a_claim_whose_record_fails_releases_its_resources(
             raise TimeoutError("Markdown writer gate deadline expired")
         return real_append(path, record, operation_id)
 
-    monkeypatch.setattr(blackboard, "_append_jsonl", failing_append)
+    monkeypatch.setattr(blackboard, "append_jsonl", failing_append)
     with pytest.raises(TimeoutError):
         _claim(
             "demo", "task", "agent-a", resources=["shared/resource"]
         )
     assert len(failures) == 1
 
-    monkeypatch.setattr(blackboard, "_append_jsonl", real_append)
+    monkeypatch.setattr(blackboard, "append_jsonl", real_append)
     claim = _claim(
         "demo", "task", "agent-a", resources=["shared/resource"]
     )
@@ -556,11 +548,11 @@ def test_a_claim_whose_record_fails_releases_its_resources(
 
 
 def test_a_claim_whose_record_landed_before_the_failure_stands(
-    blackboard_vault: tuple[Path, Path],
+    blackboard_vault: tuple[Path, Path],  # noqa: F811
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """An append that commits and then fails must not orphan its activation."""
-    real_append = blackboard._append_jsonl
+    real_append = blackboard.append_jsonl
     failures: list[str] = []
 
     def append_then_fail(path, record, operation_id):
@@ -569,13 +561,13 @@ def test_a_claim_whose_record_landed_before_the_failure_stands(
             failures.append(operation_id)
             raise TimeoutError("Markdown writer gate deadline expired")
 
-    monkeypatch.setattr(blackboard, "_append_jsonl", append_then_fail)
+    monkeypatch.setattr(blackboard, "append_jsonl", append_then_fail)
     claim = _claim(
         "demo", "task", "agent-a", resources=["shared/resource"]
     )
     assert len(failures) == 1
 
-    monkeypatch.setattr(blackboard, "_append_jsonl", real_append)
+    monkeypatch.setattr(blackboard, "append_jsonl", real_append)
     status = blackboard.get_status("demo")
     assert status["active_tasks"] == 1
     assert blackboard.complete_task("demo", claim) is True
@@ -616,7 +608,7 @@ def _one_claim(project: str = "demo"):
     return _claim(project, "one task", "agent-1", resources=["only/resource"])
 
 
-def test_a_replayed_completion_time_is_the_same_request(blackboard_vault):
+def test_a_replayed_completion_time_is_the_same_request(blackboard_vault):  # noqa: F811
     """The transaction layer adopts a bound operation only when the block matches.
 
     A retry after `database is locked` used to build a record with a fresh clock
@@ -625,28 +617,28 @@ def test_a_replayed_completion_time_is_the_same_request(blackboard_vault):
     `docs/research/2026-09-13-a-retry-must-replay-the-same-request.md`.
     """
     claim = _one_claim()
-    when = datetime.now(timezone.utc)
+    when = datetime.now(UTC)
 
-    first = blackboard._completion_record(claim, when)
-    replayed = blackboard._completion_record(claim, when)
+    first = blackboard.completion_record(claim, when)
+    replayed = blackboard.completion_record(claim, when)
 
     assert first == replayed
 
 
-def test_a_fresh_clock_reading_is_a_different_request(blackboard_vault):
+def test_a_fresh_clock_reading_is_a_different_request(blackboard_vault):  # noqa: F811
     claim = _one_claim()
-    when = datetime.now(timezone.utc)
+    when = datetime.now(UTC)
 
-    later = blackboard._completion_record(claim, when + timedelta(seconds=1))
+    later = blackboard.completion_record(claim, when + timedelta(seconds=1))
 
-    assert later != blackboard._completion_record(claim, when)
+    assert later != blackboard.completion_record(claim, when)
 
 
-def test_a_completion_without_a_time_records_the_moment_it_ran(blackboard_vault):
+def test_a_completion_without_a_time_records_the_moment_it_ran(blackboard_vault):  # noqa: F811
     claim = _one_claim()
-    before = datetime.now(timezone.utc) - timedelta(seconds=1)
+    before = datetime.now(UTC) - timedelta(seconds=1)
 
     assert blackboard.complete_task("demo", claim) is True
-    records = blackboard._read_jsonl(blackboard._bb_dir("demo") / "completed.jsonl")
+    records = blackboard.read_jsonl(blackboard.bb_dir("demo") / "completed.jsonl")
     stamped = [row["completed_at"] for row in records if row.get("id") == claim.claim_id]
-    assert stamped and stamped[0] >= blackboard._timestamp(before)
+    assert stamped and stamped[0] >= blackboard.timestamp(before)

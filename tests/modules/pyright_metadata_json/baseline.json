@@ -1,0 +1,143 @@
+{
+  "cases": [
+    {
+      "name": "plain",
+      "jsonc": false,
+      "raw": "eyJ4IjoxLCJ5ZXMiOnRydWUsIm5vbmUiOm51bGx9",
+      "expected": {
+        "normalized": "eyJ4IjoxLCJ5ZXMiOnRydWUsIm5vbmUiOm51bGx9",
+        "value": {
+          "x": 1,
+          "yes": true,
+          "none": null
+        }
+      }
+    },
+    {
+      "name": "trailing",
+      "jsonc": true,
+      "raw": "eyJ4IjoxLC8qIGNvbW1lbnQgKi99DQo=",
+      "expected": {
+        "normalized": "eyJ4IjoxICAgICAgICAgICAgICB9DQo=",
+        "value": {
+          "x": 1
+        }
+      }
+    },
+    {
+      "name": "strings",
+      "jsonc": true,
+      "raw": "eyJ2IjoiLy8gLyogLF0gXCJxdW90ZVwiIiwiYSI6WzEsMixdLH0=",
+      "expected": {
+        "normalized": "eyJ2IjoiLy8gLyogLF0gXCJxdW90ZVwiIiwiYSI6WzEsMiBdIH0=",
+        "value": {
+          "v": "// /* ,] \"quote\"",
+          "a": [
+            1,
+            2
+          ]
+        }
+      }
+    },
+    {
+      "name": "unicode",
+      "jsonc": true,
+      "raw": "Ly8g0LrQvtC80LzQtdC90YLQsNGA0LjQuQp7IngiOiLQn9GA0LjQstC10YIifQ==",
+      "expected": {
+        "normalized": "ICAgICAgICAgICAgICAKeyJ4Ijoi0J/RgNC40LLQtdGCIn0=",
+        "value": {
+          "x": "\u041f\u0440\u0438\u0432\u0435\u0442"
+        }
+      }
+    },
+    {
+      "name": "unclosed-comment",
+      "jsonc": true,
+      "raw": "eyJ4IjoxLC8q",
+      "expected": {
+        "code": "bad"
+      }
+    },
+    {
+      "name": "missing-value",
+      "jsonc": true,
+      "raw": "eyJ4IjovLyBub3RoaW5nCn0=",
+      "expected": {
+        "code": "bad"
+      }
+    },
+    {
+      "name": "double-comma",
+      "jsonc": true,
+      "raw": "eyJ4IjoxLCx9",
+      "expected": {
+        "code": "bad"
+      }
+    },
+    {
+      "name": "object-leading",
+      "jsonc": true,
+      "raw": "eyx9",
+      "expected": {
+        "code": "bad"
+      }
+    },
+    {
+      "name": "array-leading",
+      "jsonc": true,
+      "raw": "Wyxd",
+      "expected": {
+        "code": "bad"
+      }
+    },
+    {
+      "name": "unterminated",
+      "jsonc": true,
+      "raw": "eyJ4IjoidW50ZXJtaW5hdGVkIC8v",
+      "expected": {
+        "code": "bad"
+      }
+    },
+    {
+      "name": "duplicate",
+      "jsonc": false,
+      "raw": "eyJ4IjoxLCJ4IjoyfQ==",
+      "expected": {
+        "code": "bad"
+      }
+    },
+    {
+      "name": "float",
+      "jsonc": false,
+      "raw": "eyJ4IjoxLjV9",
+      "expected": {
+        "code": "bad"
+      }
+    },
+    {
+      "name": "nan",
+      "jsonc": false,
+      "raw": "eyJ4IjpOYU59",
+      "expected": {
+        "code": "bad"
+      }
+    },
+    {
+      "name": "array",
+      "jsonc": false,
+      "raw": "W10=",
+      "expected": {
+        "code": "bad"
+      }
+    },
+    {
+      "name": "invalid-utf8",
+      "jsonc": true,
+      "raw": "/w==",
+      "expected": {
+        "code": "bad"
+      }
+    }
+  ],
+  "exception_module": "pyright_profile"
+}

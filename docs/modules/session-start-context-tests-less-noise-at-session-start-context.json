@@ -1,0 +1,130 @@
+{
+  "encoding": "o200k_base",
+  "max_tokens": 100000,
+  "serialization": "exact-duplicates/v1",
+  "files": [
+    "AGENTS.md",
+    "CLAUDE.md",
+    "docs/AGENTS.md",
+    "docs/STRUCTURE.md",
+    "docs/modules/context-bundle.md",
+    "docs/modules/context-records.md",
+    "docs/modules/context-tooling.md",
+    "docs/modules/model-choice.md",
+    "docs/modules/product-structure.md",
+    "docs/modules/project-governance.md",
+    "docs/modules/session-start-context-tests-less-noise-at-session-start-context.json",
+    "docs/modules/session-start-context-tests-less-noise-at-session-start.md",
+    "docs/modules/test-support.md",
+    "rules/development-laws.md",
+    "scripts/__init__.py",
+    "scripts/llm_wiki/__init__.py",
+    "scripts/llm_wiki/context_bundle.py",
+    "tests/__init__.py",
+    "tests/conftest.py",
+    "tests/module_context.py",
+    "tests/module_context_paths.py",
+    "tests/module_interface.py",
+    "tests/module_interface_render.py",
+    "tests/module_qualification.py",
+    "tests/module_record_context.py",
+    "tests/module_records.py",
+    "tests/shared_fixtures.py",
+    "tests/slow_machine.py",
+    "tests/test_less_noise_at_session_start.py"
+  ],
+  "ownership": {
+    "files": [
+      "docs/modules/session-start-context-tests-less-noise-at-session-start-context.json",
+      "docs/modules/session-start-context-tests-less-noise-at-session-start.md",
+      "tests/test_less_noise_at_session_start.py"
+    ]
+  },
+  "qualified_dependencies": [
+    {
+      "provider": "scripts/build_guardrails.py",
+      "names": [
+        "SUMMARY_MAX_CHARS",
+        "clipped"
+      ],
+      "contract_sha256": "23b86f52c1870d303edca380e3b6b556aa78ea7ce798dfa4732c212566034c7e",
+      "integration_tests": [
+        "tests/test_less_noise_at_session_start.py"
+      ]
+    },
+    {
+      "provider": "scripts/impact_analysis.py",
+      "names": [
+        "format_for_advisory"
+      ],
+      "contract_sha256": "74f02bde1e13fa1eeb7283435ed0b1d3922e5fbc651814ebdce30468b6009ef2",
+      "integration_tests": [
+        "tests/test_less_noise_at_session_start.py"
+      ]
+    },
+    {
+      "provider": "scripts/integration_adapter.py",
+      "names": [
+        "write_session_start_debug"
+      ],
+      "contract_sha256": "7363ecc90a1228edb63631e78efc23194ee6cd6ae7fcfa9db88a8a90a39230c4",
+      "integration_tests": [
+        "tests/test_less_noise_at_session_start.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/generation_catalog_store.py",
+      "names": [
+        "GenerationCatalog"
+      ],
+      "contract_sha256": "b18194ebe04bf988b4474379fcb5243516550d43b745a00eaed1453f7844c983",
+      "integration_tests": [
+        "tests/test_a_blocked_task_has_a_way_back.py",
+        "tests/test_a_build_in_flight_is_not_an_orphan.py",
+        "tests/test_a_capacity_refusal_does_not_corrupt_a_generation.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/model_choice.py",
+      "names": [
+        "using_root"
+      ],
+      "contract_sha256": "d45f2655cb61963e77617d1dfd7d617b134ad77cc770b59b335d0856e5d65019",
+      "integration_tests": [
+        "tests/test_less_noise_at_session_start.py"
+      ]
+    },
+    {
+      "provider": "scripts/reliable_memory.py",
+      "names": [
+        "validate_state_root"
+      ],
+      "contract_sha256": "8680515cd873056a7c8a36e0057d91f2f83f23c48841263697676ff91f7ff964",
+      "integration_tests": [
+        "tests/test_less_noise_at_session_start.py"
+      ]
+    },
+    {
+      "provider": "scripts/repository_scope.py",
+      "names": [
+        "sanitized_git_environment"
+      ],
+      "contract_sha256": "fd550ae20761afad50b37fa3a71044a162485b0e4d4b3e2af9b5b22e143c2bec",
+      "integration_tests": [
+        "tests/test_less_noise_at_session_start.py"
+      ]
+    },
+    {
+      "provider": "scripts/session_start_context.py",
+      "names": [
+        "latest_daily"
+      ],
+      "contract_sha256": "15a0acc6047033714e8d10b5e5e740a46100a0cbee59cbd71ee5f5de56e1e07c",
+      "integration_tests": [
+        "tests/test_a_failing_nightly_is_visible.py",
+        "tests/test_a_missed_nightly_is_caught_up.py",
+        "tests/test_capture_diagnostics.py"
+      ]
+    }
+  ]
+}

@@ -7,10 +7,11 @@ from __future__ import annotations
 import time
 from pathlib import Path
 
+import nightly_budget
 import reclaim_runtime_state
-import scheduled_nightly
+from llm_wiki import step_budgets
 
-from tests.test_nothing_half_written_is_left_behind import (
+from tests.nothing_half_written_is_left_behind_helpers import (
     _PAGE,
     _committed,
     _coordinator,
@@ -32,16 +33,16 @@ def test_undo_puts_back_the_images_a_killed_prune_staged_aside(tmp_path: Path) -
 def test_the_image_prune_stops_at_its_deadline_and_says_so(tmp_path: Path, monkeypatch) -> None:
     coordinator = _coordinator(tmp_path)
     _committed(coordinator)
-    monkeypatch.setattr(reclaim_runtime_state, "ROOT", coordinator.vault)
-    monkeypatch.setattr(reclaim_runtime_state, "STATE_ROOT", tmp_path / "state")
+    monkeypatch.setenv("LLM_WIKI_ROOT", str(coordinator.vault))
+    monkeypatch.setenv("LLM_WIKI_STATE_ROOT", str(tmp_path / "state"))
 
     result = reclaim_runtime_state.prune_settled_transactions(deadline=time.monotonic() - 1)
 
     assert result == {"pruned": 0, "failed": 0, "unfinished": True}
-    assert "stopped at its deadline" in reclaim_runtime_state._unfinished_note(result)
+    assert "stopped at its deadline" in reclaim_runtime_state.unfinished_note(result)
 
 
 def test_the_nightly_kills_the_step_no_sooner_than_the_prune_stops() -> None:
-    step = scheduled_nightly._reclaim_step()
+    step = nightly_budget.reclaim_step()
 
-    assert step.timeout == reclaim_runtime_state.RECLAIM_STEP_SECONDS > reclaim_runtime_state.RECLAIM_MARGIN_SECONDS
+    assert step.timeout == step_budgets.RECLAIM_STEP_SECONDS > reclaim_runtime_state.RECLAIM_MARGIN_SECONDS

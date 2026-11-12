@@ -15,21 +15,21 @@ for directory in (TESTS.parent / "scripts", TESTS):
     if str(directory) not in sys.path:
         sys.path.insert(0, str(directory))
 
-from test_repository_index import ALPHA, _repository  # noqa: E402
-from test_repository_refresh import _isolated_reader_cache, adopted_vault  # noqa: E402,F401
+from tests.repository_index_helpers import ALPHA, _repository  # noqa: E402
+from tests.repository_refresh_helpers import _isolated_reader_cache, adopted_vault  # noqa: E402,F401
 
 
 def _vault_with_memory_and_code(root: Path, state: Path) -> tuple[str, str]:
     """An active memory generation first, then the code generation of the same checkout."""
-    import doctor
-    import repository_index
+    import generation_maintenance
+    import repository_indexing
 
     (root / "knowledge/notes/page.md").write_text(
         "---\ntype: concept\n---\n# Page\n\nOne-sentence summary: a page.\n", encoding="utf-8"
     )
     _repository(root, {"scripts/alpha.py": ALPHA})
-    memory = doctor.run_generation_maintenance(root=root, state_root=state, time_budget_seconds=300, max_sources=50)
-    code = repository_index.index_repository(root, roots=["scripts"], state_root=state)["generation_id"]
+    memory = generation_maintenance.run_generation_maintenance(root=root, state_root=state, time_budget_seconds=300, max_sources=50)
+    code = repository_indexing.index_repository(root, roots=["scripts"], state_root=state)["generation_id"]
     return code, memory["generation_id"]
 
 
@@ -41,13 +41,13 @@ def _hint_meta(root: Path, state: Path) -> dict:
 
 
 def test_the_vault_hints_name_the_code_generation_and_stay_current(adopted_vault):  # noqa: F811
-    import repository_index
+    import repository_indexing
 
     root, state = adopted_vault
     code, memory = _vault_with_memory_and_code(root, state)
     meta = _hint_meta(root, state)
 
-    refreshed = repository_index.refresh_repository(root, state_root=state)["hints"]
+    refreshed = repository_indexing.refresh_repository(root, state_root=state)["hints"]
 
     assert code != memory
     assert (meta["generation_id"], int(meta["symbols"]) > 0) == (code, True)

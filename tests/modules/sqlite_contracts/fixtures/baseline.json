@@ -1,0 +1,17 @@
+[
+  {
+    "type": "OperationalDatabaseContract",
+    "pickle": "gASVXwAAAAAAAACMD3JlbGlhYmxlX21lbW9yeZSMG09wZXJhdGlvbmFsRGF0YWJhc2VDb250cmFjdJSTlCmBlH2UKIwOYXBwbGljYXRpb25faWSUS3uMDHVzZXJfdmVyc2lvbpRLA3ViLg==",
+    "repr": "OperationalDatabaseContract(application_id=123, user_version=3)"
+  },
+  {
+    "type": "OperationalDatabaseContractError",
+    "pickle": "gASVQgAAAAAAAACMD3JlbGlhYmxlX21lbW9yeZSMIE9wZXJhdGlvbmFsRGF0YWJhc2VDb250cmFjdEVycm9ylJOUjANiYWSUhZRSlC4=",
+    "repr": "OperationalDatabaseContractError('bad')"
+  },
+  {
+    "type": "MigrationStatement",
+    "pickle": "gASVfAAAAAAAAACMD3JlbGlhYmxlX21lbW9yeZSMEk1pZ3JhdGlvblN0YXRlbWVudJSTlCmBlH2UKIwEbmFtZZSMAW6UjANzcWyUjAhTRUxFQ1QgMZSMCWNvbXBsZXRlZJSMCGJ1aWx0aW5zlIwEYm9vbJSTlIwKcGFyYW1ldGVyc5QpdWIu",
+    "repr": "MigrationStatement(name='n', sql='SELECT 1', parameters=())"
+  }
+]

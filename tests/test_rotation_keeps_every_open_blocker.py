@@ -19,7 +19,8 @@ for entry in (str(SCRIPTS_DIR), str(TESTS)):
 
 import project_journal  # noqa: E402
 from project_journal import ProjectStore  # noqa: E402
-from test_project_journal import checkpoint_event  # noqa: E402
+
+from tests.project_journal_helpers import checkpoint_event  # noqa: E402
 
 
 def _blockers(count: int) -> list[dict[str, str]]:

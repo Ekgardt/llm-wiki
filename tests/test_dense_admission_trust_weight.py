@@ -16,7 +16,6 @@ over-fetch, and `hit@5` fell from 0.7 to 0.3 with `applied@5` from 0.857 to
 
 from __future__ import annotations
 
-import json
 import sqlite3
 import sys
 from pathlib import Path
@@ -26,71 +25,16 @@ import pytest
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "scripts"))
 
-import search_memory  # noqa: E402
-
-_COLUMNS = (
-    "chunk_id TEXT, chunk_order INTEGER, source_id TEXT, source_path TEXT, "
-    "source_sha256 TEXT, heading_ancestry TEXT, type TEXT, project TEXT, "
-    "authority TEXT, confidence TEXT, status TEXT, valid_from TEXT, "
-    "valid_to TEXT, language TEXT, title TEXT, content TEXT, span_sha256 TEXT, rank REAL"
+from tests.dense_admission_trust_weight_helpers import (  # noqa: E402
+    _COMMENTARY,
+    _DECISION,
+    _scored,
+    connection,  # noqa: F401
 )
-
-_COMMENTARY = "docs/research/2026-08-29-commentary.md"
-_DECISION = "knowledge/notes/some-decision.md"
-
-
-def _row(order: int, path: str, page_type: str) -> tuple:
-    return (
-        f"chunk-{order}",
-        order,
-        f"source:{path}",
-        path,
-        "0" * 64,
-        json.dumps([]),
-        page_type,
-        "",
-        "ai-derived",
-        "high",
-        "active",
-        "2026-08-01",
-        None,
-        "en",
-        Path(path).stem,
-        "body text",
-        "1" * 64,
-        0.0,
-    )
-
-
-@pytest.fixture()
-def connection() -> sqlite3.Connection:
-    handle = sqlite3.connect(":memory:")
-    handle.row_factory = sqlite3.Row
-    handle.execute(f"CREATE TABLE chunks ({_COLUMNS})")
-    handle.executemany(
-        f"INSERT INTO chunks VALUES ({','.join('?' * 18)})",
-        (_row(0, _COMMENTARY, "doc"), _row(1, _DECISION, "decision")),
-    )
-    handle.commit()
-    return handle
-
-
-def _scored(connection: sqlite3.Connection, similarities: list[float]) -> list[dict]:
-    return search_memory._vector_scored_rows(
-        connection,
-        similarities,
-        "generation-test",
-        scope="all",
-        since=None,
-        as_of=None,
-        project=None,
-        deadline=None,
-        cancelled=None,
-    )
 
 
 def test_commentary_with_the_higher_cosine_ranks_below_the_decision_page(
-    connection: sqlite3.Connection,
+    connection: sqlite3.Connection,  # noqa: F811
 ) -> None:
     """The exact shape measured on the vault: commentary wins on raw cosine.
 
@@ -104,7 +48,7 @@ def test_commentary_with_the_higher_cosine_ranks_below_the_decision_page(
 
 
 def test_the_dense_score_carries_the_trust_weight(
-    connection: sqlite3.Connection,
+    connection: sqlite3.Connection,  # noqa: F811
 ) -> None:
     """Not merely reordered -- the weight is on the score the caller reads."""
     by_path = {row["path"]: row for row in _scored(connection, [0.875, 0.828])}
@@ -113,7 +57,7 @@ def test_the_dense_score_carries_the_trust_weight(
     assert by_path[_DECISION]["score"] == pytest.approx(0.828 * 1.25, abs=5e-5)
 
 
-def test_a_large_cosine_gap_still_wins(connection: sqlite3.Connection) -> None:
+def test_a_large_cosine_gap_still_wins(connection: sqlite3.Connection) -> None:  # noqa: F811
     """The weight tilts admission; it does not overrule a real difference.
 
     Guards against the opposite defect: a page type must not be able to bury

@@ -27,6 +27,11 @@ try:
 except ImportError:
     from graph_storable import storable_identity_key, storable_metadata
 
+try:
+    from .llm_wiki import extractor_versions
+except ImportError:
+    from llm_wiki import extractor_versions
+
 
 class _SourceRecord(Protocol):
     logical_id: str
@@ -40,7 +45,7 @@ class _CapturedSource(Protocol):
     record: _SourceRecord
     content: bytes
 
-EXTRACTOR_VERSION = "code-extractor/v17"  # v17: star, branch and rebinding re-exports (audit 2026-09-27 C-7)
+EXTRACTOR_VERSION = extractor_versions.CODE_EXTRACTOR_VERSION
 # Syntax nodes walked between two deadline checks: the check is cheap, 256 keeps it
 # off the hot path while a stop is still heard within a fraction of a millisecond.
 _SYNTAX_STOP_INTERVAL = 256
@@ -119,7 +124,7 @@ def _whole_span(source: _CapturedSource) -> tuple[int, int, int, int]:
     return (0, len(source.content), 1, max(1, source.content.count(b"\n") + 1))
 
 
-def _canonical_observation_target(value: str) -> str:
+def canonical_observation_target(value: str) -> str:
     if not isinstance(value, str):
         raise TypeError("observation target text must be a string")
     normalized = " ".join(value.split())
@@ -150,7 +155,7 @@ def _digest_truncated(normalized: str, encoded: bytes) -> str:
     return prefix.decode("utf-8", errors="ignore").rstrip() + suffix
 
 
-def _optional_parser(language: str):
+def optional_parser(language: str):
     """Build an isolated optional parser; absence is a normal degraded state."""
     specification = _GRAMMARS.get(language)
     if specification is None:
@@ -222,7 +227,7 @@ def _positive_limit(value: object) -> bool:
     return isinstance(value, int) and not isinstance(value, bool) and value >= 1
 
 
-def _deep_freeze(value: object) -> object:
+def deep_freeze(value: object) -> object:
     if isinstance(value, _SCALARS):
         return value
     return _frozen_container(value)
@@ -230,21 +235,21 @@ def _deep_freeze(value: object) -> object:
 
 def _frozen_container(value: object) -> object:
     if isinstance(value, Mapping):
-        return _FrozenDict({key: _deep_freeze(item) for key, item in value.items()})
+        return _FrozenDict({key: deep_freeze(item) for key, item in value.items()})
     return _frozen_collection(value)
 
 
 def _frozen_collection(value: object) -> object:
     if isinstance(value, (list, tuple)):
-        return tuple(_deep_freeze(item) for item in value)
+        return tuple(deep_freeze(item) for item in value)
     if isinstance(value, (set, frozenset)):
-        return frozenset(_deep_freeze(item) for item in value)
+        return frozenset(deep_freeze(item) for item in value)
     return value
 
 
 def _frozen(records: list[dict[str, object]], key: str) -> tuple[Mapping[str, object], ...]:
     records.sort(key=lambda item: str(item[key]))
-    return tuple(_deep_freeze(record) for record in records)
+    return tuple(deep_freeze(record) for record in records)
 
 
 def _frozen_observation_dependencies(
@@ -269,7 +274,7 @@ def _bounded_values(
     return tuple(retained)
 
 
-def _identifier(prefix: str, *parts: object) -> str:
+def identifier(prefix: str, *parts: object) -> str:
     payload = json.dumps(parts, ensure_ascii=True, separators=(",", ":"), sort_keys=True)
     return f"code:{prefix}:{hashlib.sha256(payload.encode()).hexdigest()[:32]}"
 
@@ -285,7 +290,7 @@ def _module_name(path: str) -> str:
 _PYTHON_LINE_BREAK = re.compile(rb"\r\n|\r|\n")
 
 
-def _line_offsets(content: bytes) -> tuple[int, ...]:
+def line_offsets(content: bytes) -> tuple[int, ...]:
     """Where each line starts, split the way Python's parser splits them.
 
     `ast` counts `\r\n`, `\r` and `\n` as line breaks; counting only `\n` sent a
@@ -296,7 +301,7 @@ def _line_offsets(content: bytes) -> tuple[int, ...]:
 
 
 @lru_cache(maxsize=16)
-def _newline_positions(content: bytes) -> tuple[int, ...]:
+def newline_positions(content: bytes) -> tuple[int, ...]:
     """Every `\n` of one source, found once; each span is then a binary search.
 
     A count from byte zero per span made a 314 KB file 100 times slower. See
@@ -307,10 +312,10 @@ def _newline_positions(content: bytes) -> tuple[int, ...]:
 
 def _written_line(content: bytes, index: int) -> int:
     """The line the writer records for a byte: one plus the `\n` before it."""
-    return bisect_left(_newline_positions(content), index) + 1
+    return bisect_left(newline_positions(content), index) + 1
 
 
-def _span(node: ast.AST, offsets: tuple[int, ...], content: bytes) -> tuple[int, int, int, int]:
+def node_span(node: ast.AST, offsets: tuple[int, ...], content: bytes) -> tuple[int, int, int, int]:
     line = getattr(node, "lineno", 1)
     end_line = getattr(node, "end_lineno", line)
     column = getattr(node, "col_offset", 0)
@@ -398,7 +403,7 @@ class _PythonFile:
     module_id: str
 
     def span(self, node: ast.AST) -> tuple[int, int, int, int]:
-        return _span(node, self.offsets, self.source.content)
+        return node_span(node, self.offsets, self.source.content)
 
     @property
     def is_package(self) -> bool:
@@ -429,15 +434,6 @@ def _sqlite_aliases(tree: ast.Module) -> set[str]:
     }
 
 
-# The `argument->parameter` text stored on one call edge: at most 8 pairs and 256
-# bytes, and a cut list ends in "+N more", so the reader sees what was left out. A
-# display bound on a stored label; basis unknown — value predates measurement.
-MAX_BINDINGS = 8
-MAX_BINDING_BYTES = 256
-# A string literal longer than this is not read as an HTTP route path, so it makes no
-# route edge. Basis unknown: value predates measurement; review if real route
-# templates are longer.
-MAX_ROUTE_PATH_BYTES = 512
 _HTTP_CLIENT_MODULES = frozenset({"requests", "httpx"})
 _HTTP_METHODS = frozenset({"get", "post", "put", "patch", "delete"})
 
@@ -516,24 +512,12 @@ def _keyword_bindings(node: ast.Call, parameters: list[str]) -> list[str]:
 
 
 def _argument_bindings(node: ast.Call, target: Mapping[str, object]) -> str:
-    """`argument->parameter` pairs of one call, bounded in count and bytes."""
+    """Every proven `argument->parameter` pair in one source-bounded call."""
     parameters = _bound_parameters(target)
     pairs = _positional_bindings(node, parameters) + _keyword_bindings(node, parameters)
     if not pairs:
         return ""
-    return _bounded_bindings(pairs)
-
-
-def _bounded_bindings(pairs: list[str]) -> str:
-    kept = pairs[:MAX_BINDINGS]
-    text = ",".join(kept)
-    while len(text.encode("utf-8")) > MAX_BINDING_BYTES and kept:
-        kept.pop()
-        text = ",".join(kept)
-    remaining = len(pairs) - len(kept)
-    if not remaining:
-        return text
-    return f"{text}+{remaining} more".lstrip(",")
+    return ",".join(pairs)
 
 
 def _client_module(func: ast.expr, aliases: Mapping[str, tuple[str, str]]) -> str | None:
@@ -548,7 +532,7 @@ def _client_module(func: ast.expr, aliases: Mapping[str, tuple[str, str]]) -> st
 
 def _request_path(node: ast.Call) -> str | None:
     target = _string_constant(next(iter(node.args), None))
-    if target is None or len(target.encode("utf-8")) > MAX_ROUTE_PATH_BYTES:
+    if target is None:
         return None
     return _url_path(target)
 
@@ -600,9 +584,7 @@ def _is_star_import(node: ast.ImportFrom) -> bool:
 
 
 # The compound statements whose blocks still run at module level.
-_MODULE_BLOCKS = tuple(
-    getattr(ast, name) for name in ("If", "Try", "TryStar", "With") if hasattr(ast, name)
-)
+_MODULE_BLOCKS = (ast.If, ast.Try, ast.TryStar, ast.With)
 
 
 def _block_statements(statement: ast.stmt) -> list[ast.stmt]:
@@ -800,10 +782,6 @@ def _route_methods(decorator: ast.Call, function: ast.Attribute) -> tuple[str, .
 # deep parses fine and then aborted the whole extraction from inside
 # `_call_edges`. Depth is measured iteratively before anything recurses.
 MAX_EXPRESSION_DEPTH = 64
-# A re-export chain is followed this many modules deep, then left unresolved (the
-# name keeps no target rather than a wrong one); it also stops a re-export cycle.
-# Basis unknown: value predates measurement.
-MAX_REEXPORT_HOPS = 8
 _TOO_DEEP_TEXT = f"<expression nested deeper than {MAX_EXPRESSION_DEPTH}>"
 
 
@@ -950,7 +928,9 @@ _NAMED_BINDERS = (
     ast.ExceptHandler,
     ast.MatchAs,
     ast.MatchStar,
-    *(getattr(ast, kind) for kind in ("TypeVar", "ParamSpec", "TypeVarTuple") if hasattr(ast, kind)),
+    ast.TypeVar,
+    ast.ParamSpec,
+    ast.TypeVarTuple,
 )
 
 
@@ -1056,7 +1036,7 @@ class _PythonOwner:
         return self.name if self.in_class else self.lexical_scope
 
 
-class _Collector:
+class Collector:
     def __init__(
         self,
         sources: tuple[_CapturedSource, ...],
@@ -1129,7 +1109,7 @@ class _Collector:
         key: str,
         metadata: Mapping[str, object],
     ) -> str:
-        node_id = _identifier("node", scheme, key)
+        node_id = identifier("node", scheme, key)
         self.nodes.setdefault(node_id, {
             "node_id": node_id,
             "kind": kind,
@@ -1152,7 +1132,7 @@ class _Collector:
         start, end, line_start, line_end = span
         if end <= start:
             return
-        occurrence_id = _identifier("occurrence", node_id, source.record.logical_id, role, start, end)
+        occurrence_id = identifier("occurrence", node_id, source.record.logical_id, role, start, end)
         self.occurrences.append({
             "occurrence_id": occurrence_id,
             "node_id": node_id,
@@ -1186,7 +1166,7 @@ class _Collector:
         start, end, _, _ = span
         if end <= start:
             return
-        assertion_id = _identifier(
+        assertion_id = identifier(
             "assertion", source_node_id, edge_type, target_node_id or literal or "",
             source.record.logical_id, start, end,
         )
@@ -1202,7 +1182,7 @@ class _Collector:
             "confidence": confidence,
             "authority": "ai-derived",
             "resolution": "resolved",
-            "extractor": EXTRACTOR_VERSION,
+            "extractor": extractor_versions.CODE_EXTRACTOR_VERSION,
         })
         self._add_evidence(source, start, end, assertion_id=assertion_id)
         self.check(self.assertions, self.limits.max_assertions, "assertion")
@@ -1222,9 +1202,9 @@ class _Collector:
         if end <= start:
             return
         canonical_target = (
-            None if target_text is None else _canonical_observation_target(target_text)
+            None if target_text is None else canonical_observation_target(target_text)
         )
-        observation_id = _identifier(
+        observation_id = identifier(
             "observation", source_node_id, edge_type, canonical_target, reason,
             source.record.logical_id, start, end,
         )
@@ -1237,7 +1217,7 @@ class _Collector:
             "edge_type": edge_type,
             "target_text": canonical_target,
             "reason": reason,
-            "extractor": EXTRACTOR_VERSION,
+            "extractor": extractor_versions.CODE_EXTRACTOR_VERSION,
         })
         self._record_candidate_dependencies(observation_id, candidate_node_ids)
         self._add_evidence(source, start, end, observation_id=observation_id)
@@ -1268,7 +1248,7 @@ class _Collector:
         observation_id: str | None = None,
     ) -> None:
         span = source.content[start:end]
-        evidence_id = _identifier("evidence", assertion_id, observation_id)
+        evidence_id = identifier("evidence", assertion_id, observation_id)
         self.evidence.append({
             "evidence_id": evidence_id,
             "assertion_id": assertion_id,
@@ -1385,7 +1365,7 @@ class _Collector:
         self.route_receivers[source.record.logical_id] = self._python_route_receivers(tree)
         self.sqlite_modules[source.record.logical_id] = _sqlite_aliases(tree)
         self.python_entry_names[source.record.logical_id] = self._python_entry_names(tree)
-        ctx = _PythonFile(source, _line_offsets(source.content), module_name, module_id)
+        ctx = _PythonFile(source, line_offsets(source.content), module_name, module_id)
         self._record_reexports(ctx, tree)
         self._walk_python(
             ctx, tree.body, _PythonOwner(module_name or "<module>", module_id, False, module_name)
@@ -1590,7 +1570,7 @@ class _Collector:
         source: _CapturedSource,
         offsets: tuple[int, ...],
     ) -> None:
-        span = _span(statement, offsets, source.content)
+        span = node_span(statement, offsets, source.content)
         key = f"{self.repository_id}\x1f{table_name}"
         table = self.add_node("table", "database-table/v1", key, {"name": table_name, "owner": owner})
         self.tables.setdefault(table_name.casefold(), []).append(table)
@@ -1640,7 +1620,7 @@ class _Collector:
         offsets: tuple[int, ...],
     ) -> None:
         receiver = function.value.id if isinstance(function.value, ast.Name) else None
-        span = _span(decorator, offsets, source.content)
+        span = node_span(decorator, offsets, source.content)
         path = _route_path(decorator, receiver, self.route_receivers[source.record.logical_id])
         if path is None:
             self.add_observation(
@@ -1674,7 +1654,7 @@ class _Collector:
         self.check_stop()
         ctx = _PythonFile(
             source,
-            _line_offsets(source.content),
+            line_offsets(source.content),
             _module_name(source.record.relative_path),
             self.source_modules[source.record.logical_id],
         )
@@ -1882,7 +1862,7 @@ class _Collector:
         if statement is None:
             return
         supported_api = self._supported_sql_api(node.func, owner, source)
-        literal_span = _span(statement, offsets, source.content)
+        literal_span = node_span(statement, offsets, source.content)
         for edge_type, pattern in _SQL_RELATIONSHIPS:
             for match in re.finditer(pattern, statement.value, re.IGNORECASE):
                 self.check_stop()
@@ -2332,7 +2312,8 @@ class _Collector:
         seen: set[tuple[str, str]] = set()
         pending = deque(self._reexports_of(module, symbol))
         found: list[str] = []
-        while pending and len(seen) < MAX_REEXPORT_HOPS:
+        while pending:
+            self.check_stop()
             hop = pending.popleft()
             if hop not in seen:
                 seen.add(hop)
@@ -2508,7 +2489,7 @@ class _Collector:
     ) -> None:
         language = source.record.language
         module_id = self.source_modules[source.record.logical_id]
-        parser = _optional_parser(language or "")
+        parser = optional_parser(language or "")
         if parser is None:
             self.add_observation(
                 module_id, "PARSES", language, "unsupported_semantics", source, _whole_span(source),
@@ -2549,7 +2530,7 @@ def extract_code(
     selected = tuple(sorted(captured, key=lambda item: item.record.relative_path))
     _require_unique_sources(selected)
     _require_source_bytes(selected, bounds, deadline, cancelled)
-    collector = _Collector(selected, repository_id, bounds, deadline, cancelled)
+    collector = Collector(selected, repository_id, bounds, deadline, cancelled)
     return collector.extract()
 
 

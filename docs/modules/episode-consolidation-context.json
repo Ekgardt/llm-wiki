@@ -1,0 +1,292 @@
+{
+  "encoding": "o200k_base",
+  "max_tokens": 100000,
+  "serialization": "exact-duplicates/v1",
+  "files": [
+    "AGENTS.md",
+    "CLAUDE.md",
+    "docs/AGENTS.md",
+    "docs/STRUCTURE.md",
+    "docs/modules/context-bundle.md",
+    "docs/modules/context-records.md",
+    "docs/modules/context-tooling.md",
+    "docs/modules/episode-consolidation-context.json",
+    "docs/modules/episode-consolidation-helpers.md",
+    "docs/modules/episode-consolidation.md",
+    "docs/modules/formats.md",
+    "docs/modules/model-choice.md",
+    "docs/modules/product-structure.md",
+    "docs/modules/project-governance.md",
+    "docs/modules/test-support.md",
+    "rules/development-laws.md",
+    "scripts/__init__.py",
+    "scripts/episode_consolidation.py",
+    "scripts/llm_wiki/__init__.py",
+    "scripts/llm_wiki/context_bundle.py",
+    "scripts/llm_wiki/formats/__init__.py",
+    "tests/__init__.py",
+    "tests/conftest.py",
+    "tests/episode_consolidation_helpers.py",
+    "tests/module_context.py",
+    "tests/module_context_paths.py",
+    "tests/module_interface.py",
+    "tests/module_interface_render.py",
+    "tests/module_qualification.py",
+    "tests/module_record_context.py",
+    "tests/module_records.py",
+    "tests/shared_fixtures.py",
+    "tests/slow_machine.py",
+    "tests/test_a_day_is_consolidated_whole_and_reopened_when_it_grows.py",
+    "tests/test_a_day_that_failed_is_tried_again.py",
+    "tests/test_a_lesson_is_one_line_from_a_session_that_holds_its_quote.py",
+    "tests/test_a_lost_episode_batch_is_asked_again_after_a_fix.py",
+    "tests/test_a_session_is_filed_under_the_day_it_happened.py",
+    "tests/test_a_written_batch_is_found_not_asked_again.py",
+    "tests/test_episode_consolidation.py"
+  ],
+  "ownership": {
+    "files": [
+      "docs/modules/episode-consolidation-context.json",
+      "docs/modules/episode-consolidation.md",
+      "scripts/episode_consolidation.py",
+      "tests/test_a_day_is_consolidated_whole_and_reopened_when_it_grows.py",
+      "tests/test_a_day_that_failed_is_tried_again.py",
+      "tests/test_a_lesson_is_one_line_from_a_session_that_holds_its_quote.py",
+      "tests/test_a_lost_episode_batch_is_asked_again_after_a_fix.py",
+      "tests/test_a_session_is_filed_under_the_day_it_happened.py",
+      "tests/test_a_written_batch_is_found_not_asked_again.py",
+      "tests/test_episode_consolidation.py"
+    ]
+  },
+  "qualified_dependencies": [
+    {
+      "provider": "scripts/breadcrumb_evidence.py",
+      "names": [
+        "is_breadcrumb_document"
+      ],
+      "contract_sha256": "df4388a8ec28f66726fa5067cad60da10959609e6b7727e480254442d28e1744",
+      "integration_tests": [
+        "tests/test_a_day_is_consolidated_whole_and_reopened_when_it_grows.py",
+        "tests/test_a_day_that_failed_is_tried_again.py",
+        "tests/test_a_lesson_is_one_line_from_a_session_that_holds_its_quote.py",
+        "tests/test_a_lost_episode_batch_is_asked_again_after_a_fix.py",
+        "tests/test_a_session_is_filed_under_the_day_it_happened.py",
+        "tests/test_a_written_batch_is_found_not_asked_again.py",
+        "tests/test_episode_consolidation.py"
+      ]
+    },
+    {
+      "provider": "scripts/daily_log_append.py",
+      "names": [
+        "append_daily"
+      ],
+      "contract_sha256": "b8eaa0f4f567eab8ea1d78a2efd3e5436ec5422515879527a35153e03889fd53",
+      "integration_tests": [
+        "tests/test_a_written_batch_is_found_not_asked_again.py"
+      ]
+    },
+    {
+      "provider": "scripts/flush_memory.py",
+      "names": [
+        "MAX_BACKDATED_CAPTURE_DAYS",
+        "capture_operation_plan",
+        "session_time"
+      ],
+      "contract_sha256": "682cef29c03064a2c8e82a5ea3dd194c289899adc104fa63d12feb86175b8a5e",
+      "integration_tests": [
+        "tests/test_a_session_is_filed_under_the_day_it_happened.py"
+      ]
+    },
+    {
+      "provider": "scripts/integration_adapter.py",
+      "names": [
+        "capture_source_record",
+        "normalize_event"
+      ],
+      "contract_sha256": "e1f3bf07d00c91d3d1805c7a23d9feaf66302c79c7fda31b1b2c30147123d7c5",
+      "integration_tests": [
+        "tests/test_a_session_is_filed_under_the_day_it_happened.py"
+      ]
+    },
+    {
+      "provider": "scripts/iso_time.py",
+      "names": [
+        "local_now"
+      ],
+      "contract_sha256": "d855ddcfb0adb26bb08531f2c8ab69c7708bd0195d99df5f7e70fb26f0af878b",
+      "integration_tests": [
+        "tests/test_a_day_is_consolidated_whole_and_reopened_when_it_grows.py",
+        "tests/test_a_day_that_failed_is_tried_again.py",
+        "tests/test_a_lesson_is_one_line_from_a_session_that_holds_its_quote.py",
+        "tests/test_a_lost_episode_batch_is_asked_again_after_a_fix.py",
+        "tests/test_a_session_is_filed_under_the_day_it_happened.py",
+        "tests/test_a_written_batch_is_found_not_asked_again.py",
+        "tests/test_episode_consolidation.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_client.py",
+      "names": [
+        "call_ceiling",
+        "call_llm"
+      ],
+      "contract_sha256": "8a6f60ad4403b2e02f19ffae00f53436ad412a13fa2cda4f086b2f00b0556f20",
+      "integration_tests": [
+        "tests/test_a_day_is_consolidated_whole_and_reopened_when_it_grows.py",
+        "tests/test_a_day_that_failed_is_tried_again.py",
+        "tests/test_a_lesson_is_one_line_from_a_session_that_holds_its_quote.py",
+        "tests/test_a_lost_episode_batch_is_asked_again_after_a_fix.py",
+        "tests/test_a_session_is_filed_under_the_day_it_happened.py",
+        "tests/test_a_written_batch_is_found_not_asked_again.py",
+        "tests/test_episode_consolidation.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/formats/canonical.py",
+      "names": [
+        "sha256_bytes"
+      ],
+      "contract_sha256": "7d34a853c5a6f1be8b00805b2e865ac2a5ca5a6fe3ca141de97ebda61d2a85cf",
+      "integration_tests": [
+        "tests/test_a_day_is_consolidated_whole_and_reopened_when_it_grows.py",
+        "tests/test_a_day_that_failed_is_tried_again.py",
+        "tests/test_a_lesson_is_one_line_from_a_session_that_holds_its_quote.py",
+        "tests/test_a_lost_episode_batch_is_asked_again_after_a_fix.py",
+        "tests/test_a_session_is_filed_under_the_day_it_happened.py",
+        "tests/test_a_written_batch_is_found_not_asked_again.py",
+        "tests/test_episode_consolidation.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/generation_catalog_store.py",
+      "names": [
+        "GenerationCatalog"
+      ],
+      "contract_sha256": "b18194ebe04bf988b4474379fcb5243516550d43b745a00eaed1453f7844c983",
+      "integration_tests": [
+        "tests/test_a_blocked_task_has_a_way_back.py",
+        "tests/test_a_build_in_flight_is_not_an_orphan.py",
+        "tests/test_a_capacity_refusal_does_not_corrupt_a_generation.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/model_choice.py",
+      "names": [
+        "using_root"
+      ],
+      "contract_sha256": "d45f2655cb61963e77617d1dfd7d617b134ad77cc770b59b335d0856e5d65019",
+      "integration_tests": [
+        "tests/test_a_day_is_consolidated_whole_and_reopened_when_it_grows.py",
+        "tests/test_a_day_that_failed_is_tried_again.py",
+        "tests/test_a_lesson_is_one_line_from_a_session_that_holds_its_quote.py",
+        "tests/test_a_lost_episode_batch_is_asked_again_after_a_fix.py",
+        "tests/test_a_session_is_filed_under_the_day_it_happened.py",
+        "tests/test_a_written_batch_is_found_not_asked_again.py",
+        "tests/test_episode_consolidation.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/runtime_roots.py",
+      "names": [
+        "vault_root"
+      ],
+      "contract_sha256": "35ea768c9fd09097366a2ded61783ec66ac8997f3f02255c744c8443405a706b",
+      "integration_tests": [
+        "tests/test_a_continuation_keeps_its_original_entry.py",
+        "tests/test_a_prompt_checkpoint_does_not_outwait_its_host.py",
+        "tests/test_a_session_marker_survives_a_busy_writer.py"
+      ]
+    },
+    {
+      "provider": "scripts/memory_state.py",
+      "names": [
+        "load_state",
+        "update_state"
+      ],
+      "contract_sha256": "16766a3a530ab56b9404215b376a871b02f7a40ef6c6346eb23bc5a9f249944d",
+      "integration_tests": [
+        "tests/test_a_day_is_consolidated_whole_and_reopened_when_it_grows.py",
+        "tests/test_a_day_that_failed_is_tried_again.py",
+        "tests/test_a_lesson_is_one_line_from_a_session_that_holds_its_quote.py",
+        "tests/test_a_lost_episode_batch_is_asked_again_after_a_fix.py",
+        "tests/test_a_session_is_filed_under_the_day_it_happened.py",
+        "tests/test_a_written_batch_is_found_not_asked_again.py",
+        "tests/test_episode_consolidation.py"
+      ]
+    },
+    {
+      "provider": "scripts/reliable_memory.py",
+      "names": [
+        "validate_state_root"
+      ],
+      "contract_sha256": "8680515cd873056a7c8a36e0057d91f2f83f23c48841263697676ff91f7ff964",
+      "integration_tests": [
+        "tests/test_a_day_is_consolidated_whole_and_reopened_when_it_grows.py",
+        "tests/test_a_day_that_failed_is_tried_again.py",
+        "tests/test_a_lesson_is_one_line_from_a_session_that_holds_its_quote.py",
+        "tests/test_a_lost_episode_batch_is_asked_again_after_a_fix.py",
+        "tests/test_a_session_is_filed_under_the_day_it_happened.py",
+        "tests/test_a_written_batch_is_found_not_asked_again.py",
+        "tests/test_episode_consolidation.py"
+      ]
+    },
+    {
+      "provider": "scripts/reply_json.py",
+      "names": [
+        "reply_array"
+      ],
+      "contract_sha256": "8858cedb3869e550c0959f8e9dd7150c365965cdfe5c9e34ed75fbe23f07c79a",
+      "integration_tests": [
+        "tests/test_a_day_that_failed_is_tried_again.py"
+      ]
+    },
+    {
+      "provider": "scripts/repository_scope.py",
+      "names": [
+        "sanitized_git_environment"
+      ],
+      "contract_sha256": "fd550ae20761afad50b37fa3a71044a162485b0e4d4b3e2af9b5b22e143c2bec",
+      "integration_tests": [
+        "tests/test_a_day_is_consolidated_whole_and_reopened_when_it_grows.py",
+        "tests/test_a_day_that_failed_is_tried_again.py",
+        "tests/test_a_lesson_is_one_line_from_a_session_that_holds_its_quote.py",
+        "tests/test_a_lost_episode_batch_is_asked_again_after_a_fix.py",
+        "tests/test_a_session_is_filed_under_the_day_it_happened.py",
+        "tests/test_a_written_batch_is_found_not_asked_again.py",
+        "tests/test_episode_consolidation.py"
+      ]
+    },
+    {
+      "provider": "scripts/session_evidence.py",
+      "names": [
+        "SESSION_EVIDENCE_DIR"
+      ],
+      "contract_sha256": "e59a0d8d21ffcefb446f34afc764164aeee39dbf0bf84a55b17fbe04ffc2ca48",
+      "integration_tests": [
+        "tests/test_a_day_is_consolidated_whole_and_reopened_when_it_grows.py",
+        "tests/test_a_day_that_failed_is_tried_again.py",
+        "tests/test_a_lesson_is_one_line_from_a_session_that_holds_its_quote.py",
+        "tests/test_a_lost_episode_batch_is_asked_again_after_a_fix.py",
+        "tests/test_a_session_is_filed_under_the_day_it_happened.py",
+        "tests/test_a_written_batch_is_found_not_asked_again.py",
+        "tests/test_episode_consolidation.py"
+      ]
+    },
+    {
+      "provider": "scripts/settings.py",
+      "names": [
+        "setting_value"
+      ],
+      "contract_sha256": "ec6d2a43d91dba48c174aad5e9505790a05fd66f1bf1e5292264857f320a9881",
+      "integration_tests": [
+        "tests/test_a_day_is_consolidated_whole_and_reopened_when_it_grows.py",
+        "tests/test_a_day_that_failed_is_tried_again.py",
+        "tests/test_a_lesson_is_one_line_from_a_session_that_holds_its_quote.py",
+        "tests/test_a_lost_episode_batch_is_asked_again_after_a_fix.py",
+        "tests/test_a_session_is_filed_under_the_day_it_happened.py",
+        "tests/test_a_written_batch_is_found_not_asked_again.py",
+        "tests/test_episode_consolidation.py"
+      ]
+    }
+  ]
+}

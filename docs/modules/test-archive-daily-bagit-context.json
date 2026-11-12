@@ -1,0 +1,214 @@
+{
+  "encoding": "o200k_base",
+  "max_tokens": 100000,
+  "serialization": "exact-duplicates/v1",
+  "files": [
+    "AGENTS.md",
+    "CLAUDE.md",
+    "docs/AGENTS.md",
+    "docs/STRUCTURE.md",
+    "docs/modules/archive-daily-tests-archive-daily-bagit-helpers.md",
+    "docs/modules/context-bundle.md",
+    "docs/modules/context-records.md",
+    "docs/modules/context-tooling.md",
+    "docs/modules/model-choice.md",
+    "docs/modules/product-structure.md",
+    "docs/modules/project-governance.md",
+    "docs/modules/script-sources.md",
+    "docs/modules/test-archive-daily-bagit-context.json",
+    "docs/modules/test-archive-daily-bagit.md",
+    "docs/modules/test-support.md",
+    "rules/development-laws.md",
+    "scripts/__init__.py",
+    "scripts/llm_wiki/__init__.py",
+    "scripts/llm_wiki/context_bundle.py",
+    "tests/__init__.py",
+    "tests/archive_daily_bagit_helpers.py",
+    "tests/conftest.py",
+    "tests/module_context.py",
+    "tests/module_context_paths.py",
+    "tests/module_interface.py",
+    "tests/module_interface_render.py",
+    "tests/module_qualification.py",
+    "tests/module_record_context.py",
+    "tests/module_records.py",
+    "tests/script_sources.py",
+    "tests/shared_fixtures.py",
+    "tests/slow_machine.py",
+    "tests/test_archive_daily_bagit.py"
+  ],
+  "ownership": {
+    "files": [
+      "docs/modules/test-archive-daily-bagit-context.json",
+      "docs/modules/test-archive-daily-bagit.md",
+      "tests/test_archive_daily_bagit.py"
+    ]
+  },
+  "qualified_dependencies": [
+    {
+      "provider": "scripts/archive_daily.py",
+      "names": [
+        "ArchiveConflict",
+        "DailyArchiver",
+        "os",
+        "parse_args"
+      ],
+      "contract_sha256": "24f09dc34a0bdb0d11f18ce9c51bd7babdafb4d03961ba5cf0162dbc299d77d7",
+      "integration_tests": [
+        "tests/test_a_claude_prompt_takes_the_ingest_path.py",
+        "tests/test_a_failing_nightly_is_visible.py",
+        "tests/test_a_housekeeping_step_names_its_failure.py"
+      ]
+    },
+    {
+      "provider": "scripts/evidence_resolver.py",
+      "names": [
+        "EvidenceRef",
+        "EvidenceResolutionError",
+        "EvidenceResolver",
+        "validate_bag"
+      ],
+      "contract_sha256": "fa518cb3b724bae45b8b35684870c26d6b218b74e805e4cad64391909ac1c94e",
+      "integration_tests": [
+        "tests/test_a_block_opens_one_entry.py",
+        "tests/test_a_blocked_task_has_a_way_back.py",
+        "tests/test_a_capture_that_fails_says_so.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/archive_read_only.py",
+      "names": [
+        "archive_path_is_read_only"
+      ],
+      "contract_sha256": "85986bb504972ac3d082400d9ff876e51f5767fb625a6c1190c00bbeba2858bc",
+      "integration_tests": [
+        "tests/test_a_blocked_task_has_a_way_back.py",
+        "tests/test_a_check_is_judged_when_it_ends.py",
+        "tests/test_a_claude_prompt_takes_the_ingest_path.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/compile_pipeline_apply.py",
+      "names": [
+        "apply_compile_plan"
+      ],
+      "contract_sha256": "129ecd76764fbd203f197468ec01d03833729ef205c00c26dd60fb67025303bb",
+      "integration_tests": [
+        "tests/test_archive_daily_bagit.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/compile_pipeline_batches.py",
+      "names": [
+        "pack_compile_batches",
+        "read_compile_receipt_v2"
+      ],
+      "contract_sha256": "f569cc8136c3ca176231ece85c66e47de7c44a301ddc8c661583f9f9d9802d35",
+      "integration_tests": [
+        "tests/test_archive_daily_bagit.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/compile_pipeline_sources.py",
+      "names": [
+        "snapshot_compile_inputs"
+      ],
+      "contract_sha256": "bf02fc1c5e0236abe974c7bd9563649093ead7a0da80b24feef40a93b2a02969",
+      "integration_tests": [
+        "tests/test_archive_daily_bagit.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/generation_catalog_store.py",
+      "names": [
+        "GenerationCatalog"
+      ],
+      "contract_sha256": "b18194ebe04bf988b4474379fcb5243516550d43b745a00eaed1453f7844c983",
+      "integration_tests": [
+        "tests/test_a_blocked_task_has_a_way_back.py",
+        "tests/test_a_build_in_flight_is_not_an_orphan.py",
+        "tests/test_a_capacity_refusal_does_not_corrupt_a_generation.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/model_choice.py",
+      "names": [
+        "using_root"
+      ],
+      "contract_sha256": "d45f2655cb61963e77617d1dfd7d617b134ad77cc770b59b335d0856e5d65019",
+      "integration_tests": [
+        "tests/test_archive_daily_bagit.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/queue_store.py",
+      "names": [
+        "record_source_failure_row",
+        "source_failure_connection"
+      ],
+      "contract_sha256": "9420a23887fb6838d65a9ac2fdc0a83e9fe7ae3e0d5a35a7ba1ef82abd780577",
+      "integration_tests": [
+        "tests/test_archive_daily_bagit.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/windows_acl.py",
+      "names": [
+        "run_acl_command",
+        "windows_acl_identity"
+      ],
+      "contract_sha256": "b0aef9ec13897d7345f8e903ef27181e6770387c82df2e4d0070e5cb5dee6fd4",
+      "integration_tests": [
+        "tests/test_archive_daily_bagit.py"
+      ]
+    },
+    {
+      "provider": "scripts/markdown_transaction.py",
+      "names": [
+        "MarkdownChange",
+        "MarkdownCoordinator"
+      ],
+      "contract_sha256": "c911f6133147c97bb248fccfab3c4ddd482550716281b1294bf82a8c8161f20e",
+      "integration_tests": [
+        "tests/test_archive_daily_bagit.py"
+      ]
+    },
+    {
+      "provider": "scripts/queue_core.py",
+      "names": [
+        "MemoryQueue",
+        "QueueOperationError"
+      ],
+      "contract_sha256": "ffac204c88b67f868b518c5b8eef280405902a8b0ecabde1bf29b2ac0338480c",
+      "integration_tests": [
+        "tests/test_a_backup_image_carries_what_git_does_not.py",
+        "tests/test_a_backup_snapshots_what_hooks_write.py",
+        "tests/test_a_blocked_task_has_a_way_back.py"
+      ]
+    },
+    {
+      "provider": "scripts/reliable_memory.py",
+      "names": [
+        "canonical_json_bytes",
+        "fsync_directory",
+        "fsync_file",
+        "sha256_bytes",
+        "validate_state_root"
+      ],
+      "contract_sha256": "fb31994d24131e251b2f630a4837a0594d2befeebb9f8f19e0b59d8ad759eba2",
+      "integration_tests": [
+        "tests/test_archive_daily_bagit.py"
+      ]
+    },
+    {
+      "provider": "scripts/repository_scope.py",
+      "names": [
+        "sanitized_git_environment"
+      ],
+      "contract_sha256": "fd550ae20761afad50b37fa3a71044a162485b0e4d4b3e2af9b5b22e143c2bec",
+      "integration_tests": [
+        "tests/test_archive_daily_bagit.py"
+      ]
+    }
+  ]
+}

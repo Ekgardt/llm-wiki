@@ -1,0 +1,309 @@
+{
+  "encoding": "o200k_base",
+  "max_tokens": 100000,
+  "serialization": "exact-duplicates/v1",
+  "files": [
+    "AGENTS.md",
+    "CLAUDE.md",
+    "docs/AGENTS.md",
+    "docs/STRUCTURE.md",
+    "docs/modules/breadcrumb-documents.md",
+    "docs/modules/breadcrumb-evidence-context.json",
+    "docs/modules/breadcrumb-evidence.md",
+    "docs/modules/breadcrumb-reader.md",
+    "docs/modules/breadcrumb-storage.md",
+    "docs/modules/capture-intent-records-tests-breadcrumb-terminal-proof-helpers.md",
+    "docs/modules/context-bundle.md",
+    "docs/modules/context-records.md",
+    "docs/modules/context-tooling.md",
+    "docs/modules/formats.md",
+    "docs/modules/markdown-transaction-tests-queue-v3-capture-links-helpers.md",
+    "docs/modules/model-choice.md",
+    "docs/modules/product-structure.md",
+    "docs/modules/project-governance.md",
+    "docs/modules/test-support.md",
+    "rules/development-laws.md",
+    "scripts/__init__.py",
+    "scripts/breadcrumb_evidence.py",
+    "scripts/llm_wiki/__init__.py",
+    "scripts/llm_wiki/breadcrumb_reader.py",
+    "scripts/llm_wiki/context_bundle.py",
+    "scripts/llm_wiki/formats/__init__.py",
+    "tests/__init__.py",
+    "tests/breadcrumb_storage_helpers.py",
+    "tests/breadcrumb_terminal_proof_helpers.py",
+    "tests/conftest.py",
+    "tests/module_context.py",
+    "tests/module_context_paths.py",
+    "tests/module_interface.py",
+    "tests/module_interface_render.py",
+    "tests/module_qualification.py",
+    "tests/module_record_context.py",
+    "tests/module_records.py",
+    "tests/modules/__init__.py",
+    "tests/modules/breadcrumb_documents/__init__.py",
+    "tests/modules/breadcrumb_documents/contract_helpers.py",
+    "tests/modules/breadcrumb_reader/__init__.py",
+    "tests/modules/breadcrumb_reader/contract_helpers.py",
+    "tests/queue_v3_capture_links_helpers.py",
+    "tests/shared_fixtures.py",
+    "tests/slow_machine.py",
+    "tests/test_breadcrumb_evidence.py",
+    "tests/test_breadcrumb_purge.py",
+    "tests/test_breadcrumb_source_publication.py"
+  ],
+  "ownership": {
+    "files": [
+      "docs/modules/breadcrumb-evidence-context.json",
+      "docs/modules/breadcrumb-evidence.md",
+      "scripts/breadcrumb_evidence.py",
+      "tests/test_breadcrumb_evidence.py",
+      "tests/test_breadcrumb_purge.py",
+      "tests/test_breadcrumb_source_publication.py"
+    ]
+  },
+  "qualified_dependencies": [
+    {
+      "provider": "scripts/bounded_io.py",
+      "names": [
+        "MAX_KNOWLEDGE_PAGE_BYTES",
+        "check_deadline",
+        "read_stable_bytes",
+        "time",
+        "validated_deadline"
+      ],
+      "contract_sha256": "a97b4071c278cb33bd3139ae2591737153f2f28426edd9407b03f51ef82f5dfb",
+      "integration_tests": [
+        "tests/test_breadcrumb_evidence.py",
+        "tests/test_breadcrumb_purge.py",
+        "tests/test_breadcrumb_source_publication.py"
+      ]
+    },
+    {
+      "provider": "scripts/breadcrumb_bundle.py",
+      "names": [
+        "load_bundle",
+        "stored_manifest"
+      ],
+      "contract_sha256": "0b8a223de8ff949722e64e3868d16bf8ed953706b9c1811603642540f2f7858b",
+      "integration_tests": [
+        "tests/test_breadcrumb_evidence.py",
+        "tests/test_breadcrumb_purge.py",
+        "tests/test_breadcrumb_source_publication.py"
+      ]
+    },
+    {
+      "provider": "scripts/breadcrumb_decision.py",
+      "names": [
+        "decision_bytes"
+      ],
+      "contract_sha256": "80c6a265dca188f522e429c6d933aa49e949a1f4b6390c01d70ff7a6cefc43bd",
+      "integration_tests": [
+        "tests/test_breadcrumb_evidence.py",
+        "tests/test_breadcrumb_purge.py",
+        "tests/test_breadcrumb_source_publication.py"
+      ]
+    },
+    {
+      "provider": "scripts/breadcrumb_protocol.py",
+      "names": [
+        "encode_parts",
+        "make_anchor",
+        "make_manifest",
+        "read_manifest"
+      ],
+      "contract_sha256": "ccc1a4e6a05392ab0f91dcf2568f6d7119ca0eae3d537fe1b13a3c261685faef",
+      "integration_tests": [
+        "tests/test_breadcrumb_evidence.py",
+        "tests/test_breadcrumb_purge.py",
+        "tests/test_breadcrumb_source_publication.py"
+      ]
+    },
+    {
+      "provider": "scripts/breadcrumb_storage.py",
+      "names": [
+        "publish_breadcrumb"
+      ],
+      "contract_sha256": "9406dd43a27f72fe241a62c818dffda547146c570d792fd630427347b8a76b86",
+      "integration_tests": [
+        "tests/test_breadcrumb_evidence.py",
+        "tests/test_breadcrumb_purge.py",
+        "tests/test_breadcrumb_source_publication.py"
+      ]
+    },
+    {
+      "provider": "scripts/capture_intent_records.py",
+      "names": [
+        "capture_markdown_disposition",
+        "commit_capture_markdown",
+        "ensure_capture_results_directory",
+        "index_capture_decision",
+        "publish_capture_terminal"
+      ],
+      "contract_sha256": "8e09bddb9c51b2efafaf1efa955d1ac20371da474a84d8d73703052da7256bcb",
+      "integration_tests": [
+        "tests/test_breadcrumb_purge.py"
+      ]
+    },
+    {
+      "provider": "scripts/installed_memory_repair.py",
+      "names": [
+        "repair_installed_vault"
+      ],
+      "contract_sha256": "6ab4497d3ed56413bc24ea5ae9e993acf118980056b046072877a80df4f52a18",
+      "integration_tests": [
+        "tests/test_breadcrumb_evidence.py",
+        "tests/test_breadcrumb_purge.py",
+        "tests/test_breadcrumb_source_publication.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/breadcrumb_documents.py",
+      "names": [
+        "FRONTMATTER",
+        "RECORD_MARKER",
+        "SOURCE_VERSION",
+        "archived_source_path",
+        "bounded_document",
+        "document",
+        "embedded_record",
+        "is_breadcrumb_document",
+        "read_head",
+        "render_head",
+        "render_part",
+        "require_exact",
+        "restore_source",
+        "source_documents",
+        "source_part_path",
+        "source_path"
+      ],
+      "contract_sha256": "61f9a9da608b1e544ba13443d4d3e45f72d7a82bea39d94acac1bf65e7e95606",
+      "integration_tests": [
+        "tests/test_breadcrumb_evidence.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/capture_preconditions.py",
+      "names": [
+        "capture_transaction_preconditions"
+      ],
+      "contract_sha256": "56200bcfd683972a194600c0b638da3ed3b0853f57b4561aa485bf771858500a",
+      "integration_tests": [
+        "tests/test_breadcrumb_evidence.py",
+        "tests/test_breadcrumb_purge.py",
+        "tests/test_breadcrumb_source_publication.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/formats/canonical.py",
+      "names": [
+        "canonical_json_bytes",
+        "sha256_bytes"
+      ],
+      "contract_sha256": "2e42a7aefcb66ac2515f6665a03feae34e6f7bad4807787a789ce031f9f3a9c1",
+      "integration_tests": [
+        "tests/test_breadcrumb_evidence.py",
+        "tests/test_breadcrumb_purge.py",
+        "tests/test_breadcrumb_source_publication.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/generation_catalog_store.py",
+      "names": [
+        "GenerationCatalog"
+      ],
+      "contract_sha256": "b18194ebe04bf988b4474379fcb5243516550d43b745a00eaed1453f7844c983",
+      "integration_tests": [
+        "tests/test_a_blocked_task_has_a_way_back.py",
+        "tests/test_a_build_in_flight_is_not_an_orphan.py",
+        "tests/test_a_capacity_refusal_does_not_corrupt_a_generation.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/model_choice.py",
+      "names": [
+        "using_root"
+      ],
+      "contract_sha256": "d45f2655cb61963e77617d1dfd7d617b134ad77cc770b59b335d0856e5d65019",
+      "integration_tests": [
+        "tests/test_breadcrumb_evidence.py",
+        "tests/test_breadcrumb_purge.py",
+        "tests/test_breadcrumb_source_publication.py"
+      ]
+    },
+    {
+      "provider": "scripts/markdown_transaction.py",
+      "names": [
+        "ABSENT",
+        "MarkdownChange",
+        "MarkdownCoordinator",
+        "TransactionFailure",
+        "initialize_coordinator_v3_candidate"
+      ],
+      "contract_sha256": "ad14234dff69a9653b939ee2adc670ff9bca94570e066b5fd6551b983fad26c7",
+      "integration_tests": [
+        "tests/test_breadcrumb_evidence.py"
+      ]
+    },
+    {
+      "provider": "scripts/model_dlp.py",
+      "names": [
+        "DLPContentBlocked",
+        "require_safe_publication"
+      ],
+      "contract_sha256": "43804e268b01429541298137fefb7ae6e1c8c46c614abc5fa534f7cae5240544",
+      "integration_tests": [
+        "tests/test_breadcrumb_source_publication.py"
+      ]
+    },
+    {
+      "provider": "scripts/queue_core.py",
+      "names": [
+        "MemoryQueue",
+        "QueueOperationError",
+        "capture_task_fences",
+        "initialize_queue_v3_candidate"
+      ],
+      "contract_sha256": "804740226b9894485a425470d579f2a15aad2f76831689044c9f8d1d576988ed",
+      "integration_tests": [
+        "tests/test_breadcrumb_purge.py",
+        "tests/test_breadcrumb_source_publication.py"
+      ]
+    },
+    {
+      "provider": "scripts/reliable_memory.py",
+      "names": [
+        "canonical_json_bytes",
+        "sha256_bytes",
+        "validate_state_root"
+      ],
+      "contract_sha256": "4243e32fa6ecab88fca1a2d2b3214c0a36944fc23129138102dfaebf6d99457f",
+      "integration_tests": [
+        "tests/test_breadcrumb_evidence.py",
+        "tests/test_breadcrumb_purge.py"
+      ]
+    },
+    {
+      "provider": "scripts/repository_scope.py",
+      "names": [
+        "sanitized_git_environment"
+      ],
+      "contract_sha256": "fd550ae20761afad50b37fa3a71044a162485b0e4d4b3e2af9b5b22e143c2bec",
+      "integration_tests": [
+        "tests/test_breadcrumb_evidence.py",
+        "tests/test_breadcrumb_purge.py",
+        "tests/test_breadcrumb_source_publication.py"
+      ]
+    },
+    {
+      "provider": "scripts/transaction_lineage.py",
+      "names": [
+        "resolved_quarantines"
+      ],
+      "contract_sha256": "e37759095b257b55c4136a5ddf2b96c5b932b3d8ede3149a06354f540e10305c",
+      "integration_tests": [
+        "tests/test_breadcrumb_evidence.py"
+      ]
+    }
+  ]
+}

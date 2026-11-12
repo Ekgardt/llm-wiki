@@ -1,3 +1,5 @@
+> Current implementation, 2026-09-30: non-permitting Doctor observations use the existing shared doctor role and compare canonical admission epochs before and after validation. The exclusive runtime-deletion-check role remains for offline operations. The 20-second unrenewed observation below is historical. See [qualification](../../research/2026-09-30-health-observation-does-not-refuse-capture.md).
+
 # V4 Reliability Queue And Ownership Implementation Plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.

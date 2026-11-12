@@ -1,0 +1,153 @@
+{
+  "encoding": "o200k_base",
+  "max_tokens": 100000,
+  "serialization": "exact-duplicates/v1",
+  "files": [
+    "AGENTS.md",
+    "CLAUDE.md",
+    "docs/AGENTS.md",
+    "docs/STRUCTURE.md",
+    "docs/modules/compile-controller-tests-compile-archive-daily-sharing-helpers.md",
+    "docs/modules/compile-controller-tests-compile-archive-json-views-context.json",
+    "docs/modules/compile-controller-tests-compile-archive-json-views.md",
+    "docs/modules/compile-paths.md",
+    "docs/modules/context-bundle.md",
+    "docs/modules/context-records.md",
+    "docs/modules/context-tooling.md",
+    "docs/modules/model-choice.md",
+    "docs/modules/product-structure.md",
+    "docs/modules/project-governance.md",
+    "docs/modules/script-sources.md",
+    "docs/modules/test-support.md",
+    "rules/development-laws.md",
+    "scripts/__init__.py",
+    "scripts/llm_wiki/__init__.py",
+    "scripts/llm_wiki/context_bundle.py",
+    "tests/__init__.py",
+    "tests/compile_archive_daily_sharing_helpers.py",
+    "tests/compile_paths.py",
+    "tests/conftest.py",
+    "tests/module_context.py",
+    "tests/module_context_paths.py",
+    "tests/module_interface.py",
+    "tests/module_interface_render.py",
+    "tests/module_qualification.py",
+    "tests/module_record_context.py",
+    "tests/module_records.py",
+    "tests/script_sources.py",
+    "tests/shared_fixtures.py",
+    "tests/slow_machine.py",
+    "tests/test_compile_archive_json_views.py"
+  ],
+  "ownership": {
+    "files": [
+      "docs/modules/compile-controller-tests-compile-archive-json-views-context.json",
+      "docs/modules/compile-controller-tests-compile-archive-json-views.md",
+      "tests/test_compile_archive_json_views.py"
+    ]
+  },
+  "qualified_dependencies": [
+    {
+      "provider": "scripts/bounded_io.py",
+      "names": [
+        "VerifiedByteRange",
+        "open_stable_range"
+      ],
+      "contract_sha256": "d1876c02144c92c1a464525b670c61323f67a02e5e918ddd2255b345fdec2539",
+      "integration_tests": [
+        "tests/test_compile_archive_json_views.py"
+      ]
+    },
+    {
+      "provider": "scripts/compile_controller.py",
+      "names": [
+        "ARCHIVE_JSON_FIELDS",
+        "ArchiveJsonArray",
+        "CompileInputArchive",
+        "compile_inputs_digest",
+        "snapshot_json",
+        "write_archive_snapshot"
+      ],
+      "contract_sha256": "3f9c38ce550d4b7b267db335da8e5dbf27b6b8ad73a91645a43e8c4e338f8109",
+      "integration_tests": [
+        "tests/test_compile_archive_json_views.py"
+      ]
+    },
+    {
+      "provider": "scripts/compile_progress.py",
+      "names": [
+        "ProgressCorrupt"
+      ],
+      "contract_sha256": "903ac8bad60c607b04e4aefe4834501c102d8b5abeb48a865c10e7898c38a487",
+      "integration_tests": [
+        "tests/test_compile_archive_json_views.py",
+        "tests/test_compile_artifact_retention.py",
+        "tests/test_compile_atomic_capture.py"
+      ]
+    },
+    {
+      "provider": "scripts/compile_receipts.py",
+      "names": [
+        "DailySnapshot",
+        "NativeCompileFrame",
+        "native_frame_spans"
+      ],
+      "contract_sha256": "845b75cdd361ecb90c835db4042a0b6d83a504f9e15b1a0d91da3f8f6de6ed2c",
+      "integration_tests": [
+        "tests/test_compile_archive_json_views.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/compile_pipeline_sources.py",
+      "names": [
+        "CompileInputs"
+      ],
+      "contract_sha256": "c1a75c8212e623985185c7a6f7f88831a486d3323a117f38ebae6fc6db249bcd",
+      "integration_tests": [
+        "tests/test_compile_archive_json_views.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/generation_catalog_store.py",
+      "names": [
+        "GenerationCatalog"
+      ],
+      "contract_sha256": "b18194ebe04bf988b4474379fcb5243516550d43b745a00eaed1453f7844c983",
+      "integration_tests": [
+        "tests/test_a_build_in_flight_is_not_an_orphan.py",
+        "tests/test_a_code_generation_is_not_abandoned.py",
+        "tests/test_a_flow_walk_stops_when_its_caller_has.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/model_choice.py",
+      "names": [
+        "using_root"
+      ],
+      "contract_sha256": "d45f2655cb61963e77617d1dfd7d617b134ad77cc770b59b335d0856e5d65019",
+      "integration_tests": [
+        "tests/test_compile_archive_json_views.py"
+      ]
+    },
+    {
+      "provider": "scripts/reliable_memory.py",
+      "names": [
+        "validate_state_root"
+      ],
+      "contract_sha256": "8680515cd873056a7c8a36e0057d91f2f83f23c48841263697676ff91f7ff964",
+      "integration_tests": [
+        "tests/test_compile_archive_json_views.py"
+      ]
+    },
+    {
+      "provider": "scripts/repository_scope.py",
+      "names": [
+        "sanitized_git_environment"
+      ],
+      "contract_sha256": "fd550ae20761afad50b37fa3a71044a162485b0e4d4b3e2af9b5b22e143c2bec",
+      "integration_tests": [
+        "tests/test_compile_archive_json_views.py"
+      ]
+    }
+  ]
+}

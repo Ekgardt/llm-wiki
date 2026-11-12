@@ -383,7 +383,7 @@ never removes `run/lsp`.
 
 The deterministic 100 KLOC qualification corpus and gates live under
 `benchmark/`. It executes 200 definition, 100 reference, 100 call, 50 mutation,
-20 recovery, and four ownership scenarios. Linux Python 3.10 additionally gates
+20 recovery, and four ownership scenarios. Linux Python 3.14 additionally gates
 warm facade overhead, cold readiness at 60 seconds, and client RSS below
 100 MiB. Correctness-only real-Pyright checks run on Windows, Linux, and macOS.
 **Market superiority remains unclaimed.**

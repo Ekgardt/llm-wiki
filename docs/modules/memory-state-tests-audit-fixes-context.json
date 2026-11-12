@@ -1,0 +1,166 @@
+{
+  "encoding": "o200k_base",
+  "max_tokens": 100000,
+  "serialization": "exact-duplicates/v1",
+  "files": [
+    "AGENTS.md",
+    "CLAUDE.md",
+    "docs/AGENTS.md",
+    "docs/STRUCTURE.md",
+    "docs/modules/compile-paths.md",
+    "docs/modules/context-bundle.md",
+    "docs/modules/context-records.md",
+    "docs/modules/context-tooling.md",
+    "docs/modules/memory-state-tests-audit-fixes-context.json",
+    "docs/modules/memory-state-tests-audit-fixes.md",
+    "docs/modules/model-choice.md",
+    "docs/modules/product-structure.md",
+    "docs/modules/project-governance.md",
+    "docs/modules/script-sources.md",
+    "docs/modules/test-support.md",
+    "rules/development-laws.md",
+    "scripts/__init__.py",
+    "scripts/llm_wiki/__init__.py",
+    "scripts/llm_wiki/context_bundle.py",
+    "tests/__init__.py",
+    "tests/compile_paths.py",
+    "tests/conftest.py",
+    "tests/module_context.py",
+    "tests/module_context_paths.py",
+    "tests/module_interface.py",
+    "tests/module_interface_render.py",
+    "tests/module_qualification.py",
+    "tests/module_record_context.py",
+    "tests/module_records.py",
+    "tests/script_sources.py",
+    "tests/shared_fixtures.py",
+    "tests/slow_machine.py",
+    "tests/test_audit_fixes.py"
+  ],
+  "ownership": {
+    "files": [
+      "docs/modules/memory-state-tests-audit-fixes-context.json",
+      "docs/modules/memory-state-tests-audit-fixes.md",
+      "tests/test_audit_fixes.py"
+    ]
+  },
+  "qualified_dependencies": [
+    {
+      "provider": "scripts/compile_pipeline.py",
+      "names": [
+        "run"
+      ],
+      "contract_sha256": "ff6bcba09800efae836985e9d7467954b8ce32284ed60809dc34ba99078f5491",
+      "integration_tests": [
+        "tests/test_audit_fixes.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_client.py",
+      "names": [
+        "call_llm"
+      ],
+      "contract_sha256": "69cae5b47f126ae4e45e541f3401efae2ad068c9c9cac4da4a08a082d7190feb",
+      "integration_tests": [
+        "tests/test_audit_fixes.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/compile_pipeline_base.py",
+      "names": [
+        "RAW_PLAN_SCHEMA"
+      ],
+      "contract_sha256": "aa03a648e41df5b4c6dd80fadd92891f342b838d4166de6bb0d8153912043369",
+      "integration_tests": [
+        "tests/test_audit_fixes.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/compile_pipeline_selection.py",
+      "names": [
+        "select_dailies"
+      ],
+      "contract_sha256": "3cb092425475e45f70db893f694a9c527ecd784134c588cded4186da69bac3e9",
+      "integration_tests": [
+        "tests/test_audit_fixes.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/generation_catalog_store.py",
+      "names": [
+        "GenerationCatalog"
+      ],
+      "contract_sha256": "b18194ebe04bf988b4474379fcb5243516550d43b745a00eaed1453f7844c983",
+      "integration_tests": [
+        "tests/test_a_blocked_task_has_a_way_back.py",
+        "tests/test_a_build_in_flight_is_not_an_orphan.py",
+        "tests/test_a_capacity_refusal_does_not_corrupt_a_generation.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/model_choice.py",
+      "names": [
+        "using_root"
+      ],
+      "contract_sha256": "d45f2655cb61963e77617d1dfd7d617b134ad77cc770b59b335d0856e5d65019",
+      "integration_tests": [
+        "tests/test_audit_fixes.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/runtime_roots.py",
+      "names": [
+        "notes_dir"
+      ],
+      "contract_sha256": "32f1833724461f5fbb828c61adfaa3eba191cbc4d74f94a0254fe7ae1b2d5dc0",
+      "integration_tests": [
+        "tests/test_a_continuation_keeps_its_original_entry.py",
+        "tests/test_a_prompt_checkpoint_does_not_outwait_its_host.py",
+        "tests/test_a_session_marker_survives_a_busy_writer.py"
+      ]
+    },
+    {
+      "provider": "scripts/markdown_transaction.py",
+      "names": [
+        "MarkdownCoordinator"
+      ],
+      "contract_sha256": "5033973391b97bc338d02eed2a773ad25883e89b8325a9ccc726cd9e537f58ee",
+      "integration_tests": [
+        "tests/test_audit_fixes.py"
+      ]
+    },
+    {
+      "provider": "scripts/queue_core.py",
+      "names": [
+        "default_queue",
+        "enqueue",
+        "run_processor_inline",
+        "run_worker"
+      ],
+      "contract_sha256": "f5ceef274defce19a908285ff35fc7393da9f96d010f0d32474548d8e3c844b8",
+      "integration_tests": [
+        "tests/test_audit_fixes.py"
+      ]
+    },
+    {
+      "provider": "scripts/reliable_memory.py",
+      "names": [
+        "validate_state_root"
+      ],
+      "contract_sha256": "8680515cd873056a7c8a36e0057d91f2f83f23c48841263697676ff91f7ff964",
+      "integration_tests": [
+        "tests/test_audit_fixes.py"
+      ]
+    },
+    {
+      "provider": "scripts/repository_scope.py",
+      "names": [
+        "sanitized_git_environment"
+      ],
+      "contract_sha256": "fd550ae20761afad50b37fa3a71044a162485b0e4d4b3e2af9b5b22e143c2bec",
+      "integration_tests": [
+        "tests/test_audit_fixes.py"
+      ]
+    }
+  ]
+}

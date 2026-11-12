@@ -14,6 +14,7 @@ from code_navigation import (
     NavigationStatus,
     Provenance,
 )
+from llm_wiki.utf8_text import utf8_prefix as utf8_prefix
 
 # Default row count of a rendered navigation answer; `graph_query` pages 50 by default.
 DEFAULT_LIMIT = 10
@@ -93,17 +94,6 @@ def _validate_result_integers(result: NavigationResult) -> None:
             _validate_location_integers(location)
 
 
-def _utf8_prefix(value: str, ceiling: int) -> str:
-    encoded = value.encode("utf-8", errors="strict")
-    if len(encoded) <= ceiling:
-        return value
-    prefix = encoded[:ceiling]
-    try:
-        return prefix.decode("utf-8", errors="strict")
-    except UnicodeDecodeError as exc:
-        return prefix[: exc.start].decode("utf-8", errors="strict")
-
-
 def _strip_signature(
     signature: str | None,
 ) -> tuple[str | None, bool, int | None]:
@@ -112,7 +102,7 @@ def _strip_signature(
     encoded = signature.encode("utf-8", errors="strict")
     lines = signature.splitlines()
     first_line = lines[0] if lines else ""
-    bounded = _utf8_prefix(first_line, _SIGNATURE_BYTE_CEILING)
+    bounded = utf8_prefix(first_line, _SIGNATURE_BYTE_CEILING)
     truncated = bounded != signature
     return bounded, truncated, len(encoded) if truncated else None
 
@@ -123,7 +113,7 @@ def _bound_hover(hover: str | None) -> tuple[str | None, bool, int | None]:
     encoded = hover.encode("utf-8", errors="strict")
     if len(encoded) <= _HOVER_BYTE_CEILING:
         return hover, False, None
-    return _utf8_prefix(hover, _HOVER_BYTE_CEILING), True, len(encoded)
+    return utf8_prefix(hover, _HOVER_BYTE_CEILING), True, len(encoded)
 
 
 def _optional_text_key(value: str | None) -> tuple[int, str]:
@@ -149,7 +139,7 @@ def _location_sort_key(location: NavigationLocation) -> tuple[object, ...]:
     )
 
 
-def _location_view(
+def location_view(
     location: NavigationLocation,
 ) -> tuple[dict[str, object], tuple[str, ...]]:
     signature, signature_truncated, original_bytes = _strip_signature(
@@ -192,7 +182,7 @@ def _build_groups(
         members.sort(key=_location_sort_key)
         views: list[dict[str, object]] = []
         for member in members:
-            view, view_warnings = _location_view(member)
+            view, view_warnings = location_view(member)
             views.append(view)
             warnings.extend(view_warnings)
         groups.append(
@@ -221,13 +211,13 @@ def _diagnostic_sort_key(diagnostic: NavigationDiagnostic) -> tuple[object, ...]
     )
 
 
-def _diagnostic_view(
+def diagnostic_view(
     diagnostic: NavigationDiagnostic,
 ) -> tuple[dict[str, object], tuple[str, ...]]:
     related: list[dict[str, object]] = []
     warnings: list[str] = []
     for location in sorted(diagnostic.related, key=_location_sort_key):
-        view, view_warnings = _location_view(location)
+        view, view_warnings = location_view(location)
         related.append(view)
         warnings.extend(view_warnings)
     return {
@@ -249,7 +239,7 @@ def _build_diagnostics(
     views: list[dict[str, object]] = []
     warnings: list[str] = []
     for diagnostic in diagnostics:
-        view, view_warnings = _diagnostic_view(diagnostic)
+        view, view_warnings = diagnostic_view(diagnostic)
         views.append(view)
         warnings.extend(view_warnings)
     return views, tuple(warnings)
@@ -424,7 +414,7 @@ class _NavigationPage:
         )
         omitted = int(fact_omitted) + max(0, self.total - (self.offset + consumed))
         truncated = self._truncated(omitted, token_reduced, clipping_warnings)
-        return _assemble(
+        return assemble(
             self.result,
             status=_render_status(self.result.status, partial=truncated),
             groups=groups,
@@ -447,7 +437,7 @@ def _next_offset(offset: int, consumed: int, total: int) -> int | None:
     return None
 
 
-def _assemble(
+def assemble(
     result: NavigationResult,
     *,
     status: NavigationStatus,

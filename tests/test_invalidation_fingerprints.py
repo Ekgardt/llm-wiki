@@ -1,9 +1,9 @@
 """The five invalidation fingerprints are one value under five names.
 
-`evidence_graph_builder._semantic_changes` -- the only reader that does anything
+`evidence_graph_builder.source_semantic_changes` -- the only reader that does anything
 with them -- asks whether a changed source's fingerprints moved, and uses the
 answer to seed the dependent closure and to arm workspace invalidation.
-`doctor._source_extraction` answers by hashing the content, so today every
+`doctor.source_extraction` answers by hashing the content, so today every
 byte-level change is a "semantic" change and the five keys discriminate nothing.
 
 That is deliberate, and this test exists so the next reader does not mistake it
@@ -34,14 +34,14 @@ from __future__ import annotations
 
 import hashlib
 
-import doctor
+import generation_maintenance
 from evidence_graph_builder import SourceExtraction
 
 _KEYS = ("exports", "imports", "signatures", "aliases", "project_metadata")
 
 
 class _EmptyResult:
-    """The record collections `_source_extraction` copies out of an extraction."""
+    """The record collections `source_extraction` copies out of an extraction."""
 
     nodes = ()
     occurrences = ()
@@ -54,7 +54,7 @@ class _EmptyResult:
 
 
 def _fingerprints(content: bytes) -> dict[str, str]:
-    extraction = doctor._source_extraction(SourceExtraction, _EmptyResult(), content)
+    extraction = generation_maintenance.source_extraction(SourceExtraction, _EmptyResult(), content)
     return dict(extraction.invalidation_fingerprints)
 
 
@@ -75,7 +75,7 @@ def test_a_comment_only_edit_still_moves_every_fingerprint() -> None:
     """The property that makes the machinery inert: no early cutoff exists.
 
     A trailing comment changes no definition, so no dependent can observe it,
-    yet all five fingerprints move and `_semantic_changes` reports a semantic
+    yet all five fingerprints move and `evidence_graph_builder_semantic_changes` reports a semantic
     change. This is the conservative answer, not a wrong one.
     """
     before = _fingerprints(b"def f(a):\n    return a\n")
@@ -86,9 +86,9 @@ def test_a_comment_only_edit_still_moves_every_fingerprint() -> None:
 
 def test_the_five_keys_are_the_ones_the_builder_requires() -> None:
     """`_require_invalidation_fingerprints` rejects any other key set."""
-    from evidence_graph_builder import _INVALIDATION_KEYS
+    from evidence_graph_builder import INVALIDATION_KEYS
 
-    assert set(_KEYS) == set(_INVALIDATION_KEYS)
+    assert set(_KEYS) == set(INVALIDATION_KEYS)
 
 
 def test_each_fingerprint_is_a_lowercase_sha256_digest() -> None:

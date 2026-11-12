@@ -97,9 +97,9 @@ def test_grading_matches_on_word_boundaries():
 
 
 def test_grading_accepts_any_alternate_of_a_must_entry():
-    must = [["_fused_candidates", "2845"]]
+    must = [["fused_candidates", "2845"]]
     assert stand._grade_text("call at line 2845", must, []) == "correct"
-    assert stand._grade_text("_fused_candidates calls it", must, []) == "correct"
+    assert stand._grade_text("fused_candidates calls it", must, []) == "correct"
     assert stand._grade_text("line 28451", must, []) == "wrong"
 
 
@@ -109,7 +109,7 @@ def test_a_must_not_hit_grades_wrong_even_with_all_musts_present():
 
 
 def test_partial_grade_when_some_musts_are_missing():
-    grade = stand._grade_text("only _write_one here", ["_write_one", "_keep_session_record"], [])
+    grade = stand._grade_text("only _write_one here", ["_write_one", "keep_session_record"], [])
     assert grade == "partial"
 
 
@@ -120,7 +120,7 @@ def test_a_timeout_or_error_side_grades_wrong():
 
 def test_a_tool_error_answer_is_graded_on_its_text():
     outcome = {"status": "tool_error", "text": '{"error": "operation_failed"}'}
-    assert stand._grade_side(outcome, ["_fused_candidates"], []) == "wrong"
+    assert stand._grade_side(outcome, ["fused_candidates"], []) == "wrong"
 
 
 def test_side_level_must_overrides_gold_only_when_present():

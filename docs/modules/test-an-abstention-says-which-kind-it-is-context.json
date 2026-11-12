@@ -1,0 +1,287 @@
+{
+  "encoding": "o200k_base",
+  "max_tokens": 100000,
+  "serialization": "exact-duplicates/v1",
+  "files": [
+    "AGENTS.md",
+    "CLAUDE.md",
+    "benchmark/__init__.py",
+    "benchmark/longmemeval_vault.py",
+    "docs/AGENTS.md",
+    "docs/STRUCTURE.md",
+    "docs/modules/benchmark-run-benchmark.md",
+    "docs/modules/context-bundle.md",
+    "docs/modules/context-records.md",
+    "docs/modules/context-tooling.md",
+    "docs/modules/longmemeval-vault.md",
+    "docs/modules/model-choice.md",
+    "docs/modules/product-structure.md",
+    "docs/modules/project-governance.md",
+    "docs/modules/test-an-abstention-says-which-kind-it-is-context.json",
+    "docs/modules/test-an-abstention-says-which-kind-it-is.md",
+    "docs/modules/test-support.md",
+    "rules/development-laws.md",
+    "scripts/__init__.py",
+    "scripts/llm_wiki/__init__.py",
+    "scripts/llm_wiki/context_bundle.py",
+    "tests/__init__.py",
+    "tests/conftest.py",
+    "tests/module_context.py",
+    "tests/module_context_paths.py",
+    "tests/module_interface.py",
+    "tests/module_interface_render.py",
+    "tests/module_qualification.py",
+    "tests/module_record_context.py",
+    "tests/module_records.py",
+    "tests/shared_fixtures.py",
+    "tests/slow_machine.py",
+    "tests/test_an_abstention_says_which_kind_it_is.py"
+  ],
+  "ownership": {
+    "files": [
+      "docs/modules/test-an-abstention-says-which-kind-it-is-context.json",
+      "docs/modules/test-an-abstention-says-which-kind-it-is.md",
+      "tests/test_an_abstention_says_which_kind_it_is.py"
+    ]
+  },
+  "qualified_dependencies": [
+    {
+      "provider": "benchmark/longmemeval_coverage.py",
+      "names": [
+        "coverage",
+        "coverage_at_depths",
+        "evidence_turns",
+        "normalized"
+      ],
+      "contract_sha256": "aa55f17c638032e6ffa980e65950296c3c90c2615bbec203f23a2d2cbe8e8958",
+      "integration_tests": [
+        "tests/modules/longmemeval_coverage/test_prompt_evidence.py",
+        "tests/test_a_locomo_question_carries_its_evidence_labels.py",
+        "tests/test_longmemeval_coverage.py"
+      ]
+    },
+    {
+      "provider": "benchmark/longmemeval_data.py",
+      "names": [
+        "category_of",
+        "is_abstention"
+      ],
+      "contract_sha256": "adc69346fdfaac58d3fa86ff374b1d55371c1e93f61e3b4ce52ec5cbe00875d7",
+      "integration_tests": [
+        "tests/modules/longmemeval_data/test_labels.py",
+        "tests/modules/longmemeval_data/test_sampling.py",
+        "tests/modules/longmemeval_data/test_twins.py"
+      ]
+    },
+    {
+      "provider": "scripts/aggregation_pass.py",
+      "names": [
+        "CLUSTER_SYSTEM_PROMPT",
+        "FANOUT_SYSTEM_PROMPT"
+      ],
+      "contract_sha256": "6be24ce5c90e40f5e321626fbd75b131036f24e24079bfbdbed0eeb27e8449bc",
+      "integration_tests": [
+        "tests/test_an_abstention_says_which_kind_it_is.py"
+      ]
+    },
+    {
+      "provider": "scripts/context_budget.py",
+      "names": [
+        "ContextBudget"
+      ],
+      "contract_sha256": "1183748f4f09054ec6c44a863ab69eb2f002be9b5fd5a99ebc28e0dc3c2a037c",
+      "integration_tests": [
+        "tests/test_an_abstention_says_which_kind_it_is.py"
+      ]
+    },
+    {
+      "provider": "scripts/corpus_snapshot.py",
+      "names": [
+        "collect_corpus"
+      ],
+      "contract_sha256": "7ea12368f51c070a84b0754260f0a82db5ac44b0395b95eabcb01e5053c9f0bb",
+      "integration_tests": [
+        "tests/test_an_abstention_says_which_kind_it_is.py"
+      ]
+    },
+    {
+      "provider": "scripts/evidence_graph_builder.py",
+      "names": [
+        "GRAPH_SCHEMA_VERSION",
+        "IncrementalReuseConfig",
+        "build_incremental_generation"
+      ],
+      "contract_sha256": "5f26714bb4789500c3eb805df4f6f69c6b5a9ffe852c2bb7b440a83a1a3021e0",
+      "integration_tests": [
+        "tests/test_an_abstention_says_which_kind_it_is.py"
+      ]
+    },
+    {
+      "provider": "scripts/fact_keys.py",
+      "names": [
+        "KeyStore",
+        "key_turns",
+        "ledger_rows",
+        "store_path"
+      ],
+      "contract_sha256": "cdb365503a23e06dfb7effb8fd8fc09c85874cf5d133bee9a1cd21c06816cc47",
+      "integration_tests": [
+        "tests/test_an_abstention_says_which_kind_it_is.py"
+      ]
+    },
+    {
+      "provider": "scripts/flush_memory.py",
+      "names": [
+        "append_daily"
+      ],
+      "contract_sha256": "75ba72028be18e488f37fd9de069ed9636bc0f0a5830d43230c32d2967f71099",
+      "integration_tests": [
+        "tests/test_an_abstention_says_which_kind_it_is.py"
+      ]
+    },
+    {
+      "provider": "scripts/generation_maintenance.py",
+      "names": [
+        "corpus_policy",
+        "fresh_generation_id",
+        "generation_source_bytes",
+        "generation_source_extractor",
+        "generation_source_rows",
+        "maintenance_extractor_identity",
+        "workspace_manifest_sha256"
+      ],
+      "contract_sha256": "e57d453201b1fd7ded47c49c737c5700c46b5aa84f9abeb858a3acd9211a5455",
+      "integration_tests": [
+        "tests/test_an_abstention_says_which_kind_it_is.py"
+      ]
+    },
+    {
+      "provider": "scripts/installed_memory_repair.py",
+      "names": [
+        "repair_installed_vault"
+      ],
+      "contract_sha256": "6ab4497d3ed56413bc24ea5ae9e993acf118980056b046072877a80df4f52a18",
+      "integration_tests": [
+        "tests/test_an_abstention_says_which_kind_it_is.py"
+      ]
+    },
+    {
+      "provider": "scripts/lane_score.py",
+      "names": [
+        "is_user_turn"
+      ],
+      "contract_sha256": "8f7846517f73462ace7f987b4868e836a9b2b2a051066181ae6d16fb9b40b4a5",
+      "integration_tests": [
+        "tests/test_an_abstention_says_which_kind_it_is.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_client.py",
+      "names": [
+        "call_llm"
+      ],
+      "contract_sha256": "69cae5b47f126ae4e45e541f3401efae2ad068c9c9cac4da4a08a082d7190feb",
+      "integration_tests": [
+        "tests/test_an_abstention_says_which_kind_it_is.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/generation_catalog_store.py",
+      "names": [
+        "GenerationCatalog"
+      ],
+      "contract_sha256": "b18194ebe04bf988b4474379fcb5243516550d43b745a00eaed1453f7844c983",
+      "integration_tests": [
+        "tests/test_a_build_in_flight_is_not_an_orphan.py",
+        "tests/test_a_code_generation_is_not_abandoned.py",
+        "tests/test_a_flow_walk_stops_when_its_caller_has.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/model_choice.py",
+      "names": [
+        "using_root"
+      ],
+      "contract_sha256": "d45f2655cb61963e77617d1dfd7d617b134ad77cc770b59b335d0856e5d65019",
+      "integration_tests": [
+        "tests/test_an_abstention_says_which_kind_it_is.py"
+      ]
+    },
+    {
+      "provider": "scripts/query_memory.py",
+      "names": [
+        "QA_MAX_OUTPUT_TOKENS",
+        "build_grounded_context",
+        "grounded_qa",
+        "searchable_question"
+      ],
+      "contract_sha256": "2ccf6db75bafc4a2cafe0e9bfd240be9c6ee3ab55076bd1a2146686ac6680da0",
+      "integration_tests": [
+        "tests/test_an_abstention_says_which_kind_it_is.py"
+      ]
+    },
+    {
+      "provider": "scripts/refusal_pass.py",
+      "names": [
+        "MISSING_SYSTEM_PROMPT"
+      ],
+      "contract_sha256": "99e4df54fc19932f23186a4e95880a5a5d363fb2309123eda165ce6cb3868f50",
+      "integration_tests": [
+        "tests/test_an_abstention_says_which_kind_it_is.py"
+      ]
+    },
+    {
+      "provider": "scripts/reliable_memory.py",
+      "names": [
+        "validate_state_root"
+      ],
+      "contract_sha256": "8680515cd873056a7c8a36e0057d91f2f83f23c48841263697676ff91f7ff964",
+      "integration_tests": [
+        "tests/test_an_abstention_says_which_kind_it_is.py"
+      ]
+    },
+    {
+      "provider": "scripts/repository_scope.py",
+      "names": [
+        "resolve_repository_scope",
+        "sanitized_git_environment"
+      ],
+      "contract_sha256": "983dd096d99bafff98ca0aaa2cd722477333e30eed4bfa9297d1830c635e8d90",
+      "integration_tests": [
+        "tests/test_an_abstention_says_which_kind_it_is.py"
+      ]
+    },
+    {
+      "provider": "scripts/reranker.py",
+      "names": [
+        "get_reranker_bundle"
+      ],
+      "contract_sha256": "ee84009e483fc6c94af584c85da5a873ddc5f401736704600b371e89b683736b",
+      "integration_tests": [
+        "tests/test_an_abstention_says_which_kind_it_is.py"
+      ]
+    },
+    {
+      "provider": "scripts/retrieval.py",
+      "names": [
+        "analyze_query",
+        "retrieve_via_search_memory"
+      ],
+      "contract_sha256": "6c1be9a4a00208924e5b8f01f4ce3b663833f53b449cc551477d67faa5a64859",
+      "integration_tests": [
+        "tests/test_an_abstention_says_which_kind_it_is.py"
+      ]
+    },
+    {
+      "provider": "scripts/session_evidence.py",
+      "names": [
+        "render_transcript",
+        "write_session_evidence"
+      ],
+      "contract_sha256": "ae1b5617254da78e458fd5de78142bca7345da06bd821b8d4d6210f0b24824c0",
+      "integration_tests": [
+        "tests/test_an_abstention_says_which_kind_it_is.py"
+      ]
+    }
+  ]
+}

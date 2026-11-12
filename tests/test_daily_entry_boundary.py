@@ -16,7 +16,7 @@ import pytest
 
 
 class _Source:
-    """The one attribute `_evidence_block` reads from a daily snapshot."""
+    """The one attribute `evidence_block` reads from a daily snapshot."""
 
     def __init__(self, text: str) -> None:
         self.content = text.encode("utf-8")
@@ -32,41 +32,41 @@ def _heading(time: str, text: str) -> str:
 
 
 def test_a_captured_entry_can_be_cited() -> None:
-    import compile_memory
+    from llm_wiki import compile_pipeline_claims
 
     log = "# Daily\n" + _capture("ab", "10:00:00", "first") + _capture(
         "cd", "10:00:01", "second"
     )
-    block, offset = compile_memory._evidence_block(_Source(log), "10:00:01")
+    block, offset = compile_pipeline_claims.evidence_block(_Source(log), "10:00:01")
     assert b"second" in block, "the entry the timestamp names was not returned"
     assert b"first" not in block, "the entry ran past its own boundary"
     assert log.encode("utf-8")[offset:].startswith(b"<!-- llm-wiki-operation:")
 
 
 def test_a_heading_entry_still_binds() -> None:
-    import compile_memory
+    from llm_wiki import compile_pipeline_claims
 
     log = "# Daily\n" + _heading("11:00:00", "durable fact")
-    block, _offset = compile_memory._evidence_block(_Source(log), "11:00:00")
+    block, _offset = compile_pipeline_claims.evidence_block(_Source(log), "11:00:00")
     assert b"durable fact" in block
 
 
 def test_a_heading_entry_stops_at_the_next_captured_entry() -> None:
     """A quote from a later entry must not be attributed to the heading."""
-    import compile_memory
+    from llm_wiki import compile_pipeline_claims
 
     log = (
         "# Daily\n"
         + _heading("12:00:00", "the heading body")
         + _capture("ef", "12:00:05", "a later prompt")
     )
-    block, _offset = compile_memory._evidence_block(_Source(log), "12:00:00")
+    block, _offset = compile_pipeline_claims.evidence_block(_Source(log), "12:00:00")
     assert b"the heading body" in block
     assert b"a later prompt" not in block
 
 
 def test_two_entries_declaring_one_second_are_refused() -> None:
-    import compile_memory
+    from llm_wiki import compile_pipeline_claims
 
     log = (
         "# Daily\n"
@@ -74,41 +74,41 @@ def test_two_entries_declaring_one_second_are_refused() -> None:
         + _capture("ab", "13:00:00", "from the capture")
     )
     with pytest.raises(ValueError, match="ambiguous or missing"):
-        compile_memory._evidence_block(_Source(log), "13:00:00")
+        compile_pipeline_claims.evidence_block(_Source(log), "13:00:00")
 
 
 def test_a_timestamp_no_entry_declares_is_refused() -> None:
-    import compile_memory
+    from llm_wiki import compile_pipeline_claims
 
     log = "# Daily\n" + _capture("ab", "14:00:00", "only entry")
     with pytest.raises(ValueError, match="ambiguous or missing"):
-        compile_memory._evidence_block(_Source(log), "14:00:01")
+        compile_pipeline_claims.evidence_block(_Source(log), "14:00:01")
 
 
 def test_a_log_with_no_entries_is_refused() -> None:
-    import compile_memory
+    from llm_wiki import compile_pipeline_claims
 
     with pytest.raises(ValueError, match="ambiguous or missing"):
-        compile_memory._evidence_block(_Source("# Daily\n\nloose prose\n"), "15:00:00")
+        compile_pipeline_claims.evidence_block(_Source("# Daily\n\nloose prose\n"), "15:00:00")
 
 
 def test_an_absent_source_is_refused() -> None:
-    import compile_memory
+    from llm_wiki import compile_pipeline_claims
 
     with pytest.raises(ValueError, match="ambiguous or missing"):
-        compile_memory._evidence_block(None, "16:00:00")
+        compile_pipeline_claims.evidence_block(None, "16:00:00")
 
 
 def test_a_captured_bullet_is_quotable_as_one_complete_line() -> None:
     """The whole bullet, minus its marker, is what a citation must quote."""
-    import compile_memory
+    from llm_wiki import compile_pipeline_claims
 
     log = "# Daily\n" + _capture("ab", "17:00:00", "a durable fact")
-    block, _offset = compile_memory._evidence_block(_Source(log), "17:00:00")
+    block, _offset = compile_pipeline_claims.evidence_block(_Source(log), "17:00:00")
     quote = "`[17:00:00] prompt | s1` a durable fact"
     quote_bytes = quote.encode("utf-8")
-    offset = compile_memory._sole_quote_offset(block, quote_bytes)
-    assert compile_memory._completed_line(block, offset, quote_bytes, quote) == (
+    offset = compile_pipeline_claims.sole_quote_offset(block, quote_bytes)
+    assert compile_pipeline_claims.completed_line(block, offset, quote_bytes, quote) == (
         quote,
         quote_bytes,
         offset,
@@ -117,15 +117,15 @@ def test_a_captured_bullet_is_quotable_as_one_complete_line() -> None:
 
 def test_half_a_captured_bullet_is_widened_to_its_whole_line(capsys) -> None:
     """Issue #28: a partial quote used to drop the claim; the line is the anchor."""
-    import compile_memory
+    from llm_wiki import compile_pipeline_claims
 
     log = "# Daily\n" + _capture("ab", "18:00:00", "a durable fact")
-    block, _offset = compile_memory._evidence_block(_Source(log), "18:00:00")
+    block, _offset = compile_pipeline_claims.evidence_block(_Source(log), "18:00:00")
     quote = "a durable fact"
     quote_bytes = quote.encode("utf-8")
-    offset = compile_memory._sole_quote_offset(block, quote_bytes)
+    offset = compile_pipeline_claims.sole_quote_offset(block, quote_bytes)
 
-    whole, whole_bytes, whole_offset = compile_memory._completed_line(block, offset, quote_bytes, quote)
+    whole, whole_bytes, whole_offset = compile_pipeline_claims.completed_line(block, offset, quote_bytes, quote)
 
     assert whole == "`[18:00:00] prompt | s1` a durable fact"
     assert block[whole_offset : whole_offset + len(whole_bytes)] == whole_bytes
@@ -135,7 +135,6 @@ def test_half_a_captured_bullet_is_widened_to_its_whole_line(capsys) -> None:
 @pytest.fixture
 def vault(tmp_path, monkeypatch):
     """A hermetic vault holding one captured, marker-delimited daily log."""
-    import compile_memory
 
     root = tmp_path / "vault"
     for relative in ("knowledge/daily/receipts", "knowledge/notes"):
@@ -148,16 +147,7 @@ def vault(tmp_path, monkeypatch):
         "# Daily Session Memory — 2026-07-14\n" + _capture("ab", "10:00:00", "a durable fact"),
         encoding="utf-8",
     )
-    for name, value in (
-        ("ROOT", root),
-        ("MEMORY", root / "knowledge"),
-        ("DAILY_DIR", root / "knowledge/daily"),
-        ("KNOWLEDGE", root / "knowledge/notes"),
-        ("INDEX", root / "knowledge/index.md"),
-        ("LOG", root / "knowledge/log.md"),
-        ("AGENTS", root / "AGENTS.md"),
-    ):
-        monkeypatch.setattr(compile_memory, name, value)
+    monkeypatch.setenv("LLM_WIKI_ROOT", str(root))
     return daily
 
 
@@ -184,11 +174,11 @@ def _operation(quote: str) -> dict[str, object]:
 
 def test_a_captured_entry_binds_end_to_end(vault) -> None:
     """The resolver must agree with the binder, or nothing captured is citable."""
-    import compile_memory
+    from llm_wiki import compile_pipeline_prompts, compile_pipeline_sources
 
-    inputs = compile_memory.snapshot_compile_inputs([vault])
+    inputs = compile_pipeline_sources.snapshot_compile_inputs([vault])
     quote = "`[10:00:00] prompt | s1` a durable fact"
-    _normalized, bindings = compile_memory._validate_semantic_operation(
+    _normalized, bindings = compile_pipeline_prompts.validate_semantic_operation(
         _operation(quote), inputs
     )
     assert len(bindings) == 1
@@ -203,7 +193,9 @@ def test_a_shared_timestamp_is_settled_by_the_quote(tmp_path):
     Twelve consolidation entries landed in one second on 2026-08-24, and a daily
     log is append-only, so no compile of that day could bind evidence at all.
     """
-    from compile_memory import _evidence_block
+    from llm_wiki.compile_pipeline_claims import (
+        evidence_block,
+    )
 
     content = (
         b"<!-- llm-wiki-operation:aaa -->\n"
@@ -215,7 +207,7 @@ def test_a_shared_timestamp_is_settled_by_the_quote(tmp_path):
     )
     source = SimpleNamespace(content=content)
 
-    block, offset = _evidence_block(source, "13:25:41", b"  - **Decision** second item")
+    block, offset = evidence_block(source, "13:25:41", b"  - **Decision** second item")
 
     assert b"second item" in block
     assert b"first item" not in block
@@ -223,7 +215,9 @@ def test_a_shared_timestamp_is_settled_by_the_quote(tmp_path):
 
 
 def test_a_quote_in_two_shared_entries_is_still_refused(tmp_path):
-    from compile_memory import _evidence_block
+    from llm_wiki.compile_pipeline_claims import (
+        evidence_block,
+    )
 
     content = (
         b"<!-- llm-wiki-operation:aaa -->\n"
@@ -233,4 +227,4 @@ def test_a_quote_in_two_shared_entries_is_still_refused(tmp_path):
     )
 
     with pytest.raises(ValueError, match="ambiguous or missing"):
-        _evidence_block(SimpleNamespace(content=content), "13:25:41", b"said the same thing")
+        evidence_block(SimpleNamespace(content=content), "13:25:41", b"said the same thing")

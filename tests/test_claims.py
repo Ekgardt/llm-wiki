@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import hashlib
 import json
 import os
 import sqlite3
@@ -9,57 +8,10 @@ from decimal import Decimal
 from pathlib import Path
 
 import pytest
+from llm_wiki import claim_ledger
 
+from tests.claims_helpers import ledger_page, raw_claim, source_bytes
 from tests.slow_machine import LONG_TIMEOUT, PAUSE_TIMEOUT
-
-
-def sha(value: bytes) -> str:
-    return hashlib.sha256(value).hexdigest()
-
-
-def source_bytes() -> bytes:
-    return (
-        "# 2026-01-02\n"
-        "## [03:04:05] session\n"
-        "Service A DEPENDS-ON Café.\n"
-        "## [04:05:06] session\n"
-        "Second block.\n"
-    ).encode()
-
-
-def raw_claim(source: bytes | None = None) -> dict[str, object]:
-    source = source or source_bytes()
-    literal = "Service A DEPENDS-ON Café.".encode()
-    start = source.index(literal)
-    return {
-        "schema_version": "claim-extraction/v1",
-        "claims": [
-            {
-                "id": "claim:2026-01-02-03:04:05:0",
-                "text": literal.decode(),
-                "subject": " Service A ",
-                "relation": "DEPENDS-ON",
-                "value": {"type": "entity", "value": " Café "},
-                "qualifiers": [
-                    {"key": " Environment ", "value": {"type": "string", "value": " PROD "}}
-                ],
-                "validity": {"from": None, "to": None},
-                "lifecycle": "active",
-                "confidence": "high",
-                "authority": "user",
-                "evidence": {
-                    "reference": (
-                        f"daily:2026-01-02 sha256:{sha(source)} block:03:04:05 "
-                        f"bytes:{start}-{start + len(literal)}"
-                    ),
-                    "sha256": sha(literal),
-                    "text": literal.decode(),
-                },
-                "links": [],
-                "extractor_version": "extractor/v1",
-            }
-        ],
-    }
 
 
 @pytest.fixture
@@ -187,16 +139,14 @@ def test_numeric_values_normalize_decimal_strings_without_binary_floats(pipeline
 def test_decimal_bounds_reject_before_decimal_construction(
     value: str, monkeypatch
 ) -> None:
-    import claims
-
     class DecimalMustNotRun:
         def __new__(cls, _value):
             raise AssertionError("Decimal constructed before lexical bounds")
 
-    monkeypatch.setattr(claims, "Decimal", DecimalMustNotRun)
+    monkeypatch.setattr(claim_ledger, "Decimal", DecimalMustNotRun)
 
     with pytest.raises(ValueError, match="number"):
-        claims._canonical_decimal(value)
+        claim_ledger.canonical_decimal(value)
 
 
 def test_validated_record_binds_fingerprint_observation_and_literal_hash(pipeline) -> None:
@@ -207,12 +157,16 @@ def test_validated_record_binds_fingerprint_observation_and_literal_hash(pipelin
     )
     for field in ("fingerprint", "observed_at", "evidence"):
         changed = json.loads(json.dumps(normalized.record))
-        if field == "evidence":
-            changed["evidence"]["sha256"] = "0" * 64
-        elif field == "observed_at":
-            changed[field] = "2026-01-02T04:05:06Z"
-        else:
+        def damage_record():
+            if field == "evidence":
+                changed["evidence"]["sha256"] = "0" * 64
+                return
+            if field == "observed_at":
+                changed[field] = "2026-01-02T04:05:06Z"
+                return
             changed[field] = "0" * 64
+
+        damage_record()
         with pytest.raises(ValueError):
             validate_claim_record(changed)
 
@@ -233,12 +187,6 @@ def test_observed_at_is_real_rfc3339_and_matches_valid_timestamp_block(pipeline)
         changed["observed_at"] = observed
         with pytest.raises(ValueError, match="observ"):
             validate_claim_record(changed)
-
-
-def ledger_page(claim: dict[str, object]) -> bytes:
-    ledger = {"schema_version": "claim-ledger/v1", "claims": [claim]}
-    encoded = json.dumps(ledger, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
-    return f"---\ntype: concept\n---\n# Service\n\n## Claims\n```json\n{encoded}\n```\n".encode()
 
 
 def test_claim_index_rebuilds_derived_delete_full_database_and_bounds_candidates(
@@ -409,7 +357,7 @@ def test_claim_index_serializes_scan_and_publish_so_stale_rebuild_cannot_win(
 def test_claim_index_evaluates_page_provider_only_after_rebuild_lock(
     pipeline, tmp_path: Path
 ) -> None:
-    from claims import ClaimIndex, _exclusive_file_lock
+    from claims import ClaimIndex, exclusive_file_lock
 
     normalized = pipeline.normalize(
         pipeline.verify_literal(pipeline.extract(pipeline.split_blocks(source_bytes())[0], raw_claim())[0])
@@ -434,7 +382,7 @@ def test_claim_index_evaluates_page_provider_only_after_rebuild_lock(
             errors.append(exc)
 
     index.path.parent.mkdir(parents=True)
-    with _exclusive_file_lock(index.lock_path):
+    with exclusive_file_lock(index.lock_path):
         worker = threading.Thread(target=rebuild)
         worker.start()
         # No "still blocked" sleep: the provider sees new.md below only if
@@ -454,19 +402,19 @@ def test_claim_index_evaluates_page_provider_only_after_rebuild_lock(
 
 
 def test_claim_rebuild_lock_timeout_does_not_unlock_the_owner(tmp_path: Path) -> None:
-    from claims import _exclusive_file_lock
+    from claims import exclusive_file_lock
 
     lock = tmp_path / "claims.rebuild.lock"
     failures: list[BaseException] = []
 
     def contend() -> None:
         try:
-            with _exclusive_file_lock(lock, timeout=0.1):
+            with exclusive_file_lock(lock, timeout=0.1):
                 raise AssertionError("contender acquired an owned lock")
         except BaseException as exc:
             failures.append(exc)
 
-    with _exclusive_file_lock(lock):
+    with exclusive_file_lock(lock):
         contender = threading.Thread(target=contend)
         contender.start()
         contender.join(LONG_TIMEOUT)
@@ -609,7 +557,7 @@ def test_substantive_and_ledgerless_policy() -> None:
 def test_lint_validates_claim_ledgers_and_candidates(tmp_path: Path, monkeypatch) -> None:
     import lint_memory
 
-    monkeypatch.setattr(lint_memory, "ROOT", tmp_path)
+    monkeypatch.setenv("LLM_WIKI_ROOT", str(tmp_path))
 
     page = tmp_path / "knowledge/notes/page.md"
     page.parent.mkdir(parents=True)
@@ -632,7 +580,7 @@ def test_lint_skips_claim_json_in_prose_scan_but_resolves_claim_evidence(
 ) -> None:
     import lint_memory
 
-    monkeypatch.setattr(lint_memory, "ROOT", tmp_path)
+    monkeypatch.setenv("LLM_WIKI_ROOT", str(tmp_path))
     normalized = pipeline.normalize(
         pipeline.verify_literal(pipeline.extract(pipeline.split_blocks(source_bytes())[0], raw_claim())[0])
     )
@@ -662,7 +610,7 @@ def test_lint_candidate_location_and_project_claim_page_selection(
 ) -> None:
     import lint_memory
 
-    monkeypatch.setattr(lint_memory, "ROOT", tmp_path)
+    monkeypatch.setenv("LLM_WIKI_ROOT", str(tmp_path))
     claims_dir = tmp_path / "knowledge/inbox/claims"
     wrong_dir = tmp_path / "knowledge/inbox/review"
     project = tmp_path / "knowledge/projects/demo"
@@ -697,7 +645,7 @@ def test_lint_candidate_location_and_project_claim_page_selection(
     allowed.write_text(candidate, encoding="utf-8")
     misplaced.write_text(candidate, encoding="utf-8")
     misplaced_findings = " ".join(lint_memory.check_claim_schemas([misplaced]))
-    selected = lint_memory._project_claim_pages(tmp_path / "knowledge/projects")
+    selected = lint_memory.project_claim_pages(tmp_path / "knowledge/projects")
 
     assert (
         lint_memory.check_claim_schemas([allowed]),
@@ -705,3 +653,36 @@ def test_lint_candidate_location_and_project_claim_page_selection(
         [item.name for item in selected],
         len(lint_memory.check_claim_schemas(selected)),
     ) == ([], True, ["context.md", "state.md"], 2)
+
+
+def test_claim_rebuild_uses_the_existing_database_open_boundary(tmp_path):
+    import subprocess
+    import sys
+
+    import claims
+
+    identity = claims.NormalizedClaim
+    script = """
+import sys, types
+from pathlib import Path
+sys.path.insert(0, str(Path.cwd() / 'scripts'))
+import reliable_memory
+previous_surface = types.ModuleType('reliable_memory')
+previous_surface.__dict__.update(vars(reliable_memory))
+del previous_surface.validate_database_directory
+sys.modules['reliable_memory'] = previous_surface
+assert not hasattr(previous_surface, 'validate_database_directory')
+import claims
+root = Path(sys.argv[1])
+(root / 'knowledge/notes').mkdir(parents=True)
+index = claims.ClaimIndex(root, vault=root)
+index.rebuild([])
+assert index.path.is_file()
+assert not (index.path.parent / 'run').exists()
+"""
+    subprocess.run(
+        [sys.executable, '-c', script, str(tmp_path)],
+        cwd=Path(__file__).resolve().parents[1],
+        check=True, capture_output=True, text=True, timeout=LONG_TIMEOUT,
+    )
+    assert claims.NormalizedClaim is identity

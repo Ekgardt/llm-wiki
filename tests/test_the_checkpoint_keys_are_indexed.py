@@ -27,7 +27,7 @@ def _indexes(path: Path) -> set[str]:
 
 def _complete(path: Path) -> bool:
     with sqlite3.connect(path) as database:
-        return markdown_transaction._coordinator_v3_schema_complete(database)
+        return markdown_transaction.coordinator_v3_schema_complete(database)
 
 
 def test_a_database_built_before_the_indexes_is_still_complete(tmp_path: Path) -> None:
@@ -38,7 +38,7 @@ def test_a_database_built_before_the_indexes_is_still_complete(tmp_path: Path) -
 
 def test_the_history_prune_creates_them_and_the_database_stays_complete(tmp_path: Path) -> None:
     path = _database(tmp_path)
-    coordinator = markdown_transaction.MarkdownCoordinator._from_v3_candidate(path, state_root=tmp_path)
+    coordinator = markdown_transaction.MarkdownCoordinator.from_v3_candidate(path, state_root=tmp_path)
 
     coordinator.prune_history()
 

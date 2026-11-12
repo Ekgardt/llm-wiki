@@ -1,0 +1,176 @@
+{
+  "encoding": "o200k_base",
+  "max_tokens": 100000,
+  "serialization": "exact-duplicates/v1",
+  "files": [
+    "AGENTS.md",
+    "CLAUDE.md",
+    "docs/AGENTS.md",
+    "docs/STRUCTURE.md",
+    "docs/modules/context-bundle.md",
+    "docs/modules/context-records.md",
+    "docs/modules/context-tooling.md",
+    "docs/modules/formats.md",
+    "docs/modules/model-choice.md",
+    "docs/modules/product-structure.md",
+    "docs/modules/project-governance.md",
+    "docs/modules/queue-export-proof-context.json",
+    "docs/modules/queue-export-proof.md",
+    "docs/modules/test-support.md",
+    "rules/development-laws.md",
+    "scripts/__init__.py",
+    "scripts/llm_wiki/__init__.py",
+    "scripts/llm_wiki/context_bundle.py",
+    "scripts/llm_wiki/formats/__init__.py",
+    "scripts/llm_wiki/queue_export_proof.py",
+    "tests/__init__.py",
+    "tests/conftest.py",
+    "tests/module_context.py",
+    "tests/module_context_paths.py",
+    "tests/module_interface.py",
+    "tests/module_interface_render.py",
+    "tests/module_qualification.py",
+    "tests/module_record_context.py",
+    "tests/module_records.py",
+    "tests/modules/__init__.py",
+    "tests/shared_fixtures.py",
+    "tests/slow_machine.py"
+  ],
+  "directories": [
+    "tests/modules/queue_export_proof"
+  ],
+  "ownership": {
+    "files": [
+      "docs/modules/queue-export-proof-context.json",
+      "docs/modules/queue-export-proof.md",
+      "scripts/llm_wiki/queue_export_proof.py"
+    ],
+    "directories": [
+      "tests/modules/queue_export_proof"
+    ]
+  },
+  "qualified_dependencies": [
+    {
+      "provider": "scripts/llm_wiki/formats/canonical.py",
+      "names": [
+        "sha256_bytes"
+      ],
+      "contract_sha256": "7d34a853c5a6f1be8b00805b2e865ac2a5ca5a6fe3ca141de97ebda61d2a85cf",
+      "integration_tests": [
+        "tests/modules/breadcrumb_decision/test_wire.py",
+        "tests/modules/breadcrumb_documents/test_contract.py",
+        "tests/modules/breadcrumb_documents/test_rendering.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/formats/queue_payload.py",
+      "names": [
+        "MAX_QUEUE_PAYLOAD_BYTES"
+      ],
+      "contract_sha256": "9fbc2db29f1d063afe079796f90cea155301bfd4d2b50e08835292a2ed80a2d0",
+      "integration_tests": [
+        "tests/modules/formats/test_queue_payload.py",
+        "tests/modules/queue_migration_plan/test_planning.py",
+        "tests/modules/queue_validation/test_capture_checks.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/formats/schema.py",
+      "names": [
+        "validate_schema"
+      ],
+      "contract_sha256": "753e4abefcf29389d3fc0c051070bfaa66db14ecb88e1c98fc9b85588a6017cb",
+      "integration_tests": [
+        "tests/modules/breadcrumb_decision/test_wire.py",
+        "tests/modules/breadcrumb_documents/test_contract.py",
+        "tests/modules/breadcrumb_documents/test_rendering.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/generation_catalog_store.py",
+      "names": [
+        "GenerationCatalog"
+      ],
+      "contract_sha256": "b18194ebe04bf988b4474379fcb5243516550d43b745a00eaed1453f7844c983",
+      "integration_tests": [
+        "tests/test_a_blocked_task_has_a_way_back.py",
+        "tests/test_a_build_in_flight_is_not_an_orphan.py",
+        "tests/test_a_capacity_refusal_does_not_corrupt_a_generation.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/model_choice.py",
+      "names": [
+        "using_root"
+      ],
+      "contract_sha256": "d45f2655cb61963e77617d1dfd7d617b134ad77cc770b59b335d0856e5d65019",
+      "integration_tests": [
+        "tests/test_a_block_opens_one_entry.py",
+        "tests/test_a_blocked_task_has_a_way_back.py",
+        "tests/test_a_build_in_flight_is_not_an_orphan.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/queue_artifacts.py",
+      "names": [
+        "is_owner_only",
+        "read_stable_owner_file"
+      ],
+      "contract_sha256": "c6df9f67b8613bbe700be0e429cddcdf272d76e35dcd6e2dc433acb6d9ac5252",
+      "integration_tests": [
+        "tests/modules/queue_artifacts/test_artifacts.py",
+        "tests/test_a_backup_image_carries_what_git_does_not.py",
+        "tests/test_a_backup_snapshots_what_hooks_write.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/queue_contracts.py",
+      "names": [
+        "MAX_RESULT_BYTES",
+        "QueueOperationError"
+      ],
+      "contract_sha256": "7bc5382abd1539403192ef3e0c48dce925a21270f38634d45c18af8294871ffe",
+      "integration_tests": [
+        "tests/modules/compile_call_runtime/test_lifecycle.py",
+        "tests/modules/queue_artifacts/test_artifacts.py",
+        "tests/modules/queue_attempts/test_attempts.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/queue_evidence_records.py",
+      "names": [
+        "corrupt_records_match"
+      ],
+      "contract_sha256": "003f5f2bc7799a6c8ca329d9093c2f4617f3d2dbcb8f209a73c1ae0ba0532305",
+      "integration_tests": [
+        "tests/modules/queue_evidence_records/test_records.py",
+        "tests/test_a_blocked_task_has_a_way_back.py",
+        "tests/test_a_claude_prompt_takes_the_ingest_path.py"
+      ]
+    },
+    {
+      "provider": "scripts/reliable_memory.py",
+      "names": [
+        "validate_state_root"
+      ],
+      "contract_sha256": "8680515cd873056a7c8a36e0057d91f2f83f23c48841263697676ff91f7ff964",
+      "integration_tests": [
+        "tests/test_a_backup_image_carries_what_git_does_not.py",
+        "tests/test_a_backup_snapshots_what_hooks_write.py",
+        "tests/test_a_backup_takes_what_any_installed_vault_holds.py"
+      ]
+    },
+    {
+      "provider": "scripts/repository_scope.py",
+      "names": [
+        "sanitized_git_environment"
+      ],
+      "contract_sha256": "fd550ae20761afad50b37fa3a71044a162485b0e4d4b3e2af9b5b22e143c2bec",
+      "integration_tests": [
+        "tests/modules/cleanup_worktrees/test_git_refusal.py",
+        "tests/test_a_blocked_task_has_a_way_back.py",
+        "tests/test_a_build_in_flight_is_not_an_orphan.py"
+      ]
+    }
+  ]
+}

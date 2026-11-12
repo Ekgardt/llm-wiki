@@ -1,0 +1,212 @@
+{
+  "encoding": "o200k_base",
+  "max_tokens": 100000,
+  "serialization": "exact-duplicates/v1",
+  "files": [
+    "AGENTS.md",
+    "CLAUDE.md",
+    "benchmark/__init__.py",
+    "benchmark/retrieval_v2_sqlite_lexical.py",
+    "docs/AGENTS.md",
+    "docs/STRUCTURE.md",
+    "docs/modules/benchmark-retrieval-v2-sqlite-lexical-context.json",
+    "docs/modules/benchmark-retrieval-v2-sqlite-lexical.md",
+    "docs/modules/benchmark-run-benchmark.md",
+    "docs/modules/context-bundle.md",
+    "docs/modules/context-records.md",
+    "docs/modules/context-tooling.md",
+    "docs/modules/model-choice.md",
+    "docs/modules/product-structure.md",
+    "docs/modules/project-governance.md",
+    "docs/modules/reliable-memory-tests-retrieval-v2-benchmark.md",
+    "docs/modules/test-support.md",
+    "rules/development-laws.md",
+    "scripts/__init__.py",
+    "scripts/llm_wiki/__init__.py",
+    "scripts/llm_wiki/context_bundle.py",
+    "tests/__init__.py",
+    "tests/conftest.py",
+    "tests/module_context.py",
+    "tests/module_context_paths.py",
+    "tests/module_interface.py",
+    "tests/module_interface_render.py",
+    "tests/module_qualification.py",
+    "tests/module_record_context.py",
+    "tests/module_records.py",
+    "tests/retrieval_v2_helpers.py",
+    "tests/shared_fixtures.py",
+    "tests/slow_machine.py",
+    "tests/test_retrieval_v2_benchmark.py"
+  ],
+  "ownership": {
+    "files": [
+      "benchmark/retrieval_v2_sqlite_lexical.py",
+      "docs/modules/benchmark-retrieval-v2-sqlite-lexical-context.json",
+      "docs/modules/benchmark-retrieval-v2-sqlite-lexical.md",
+      "tests/test_retrieval_v2_benchmark.py"
+    ]
+  },
+  "qualified_dependencies": [
+    {
+      "provider": "benchmark/retrieval_v2_adapters.py",
+      "names": [
+        "FakeEmbeddingAdapter",
+        "FakeQAAdapter",
+        "FakeRerankerAdapter"
+      ],
+      "contract_sha256": "9229736781cbefff226b0b24a87d400eab6ff8d9d6273882e5c86af27e9eb0e4",
+      "integration_tests": [
+        "tests/test_retrieval_v2_adapters.py",
+        "tests/test_retrieval_v2_benchmark.py"
+      ]
+    },
+    {
+      "provider": "benchmark/retrieval_v2_contract.py",
+      "names": [
+        "Candidate",
+        "DEFAULT_LEXICAL_DEADLINE_SECONDS",
+        "LEXICAL_CONFIGURATIONS",
+        "MAX_CANDIDATES",
+        "MAX_SEGMENTATION_INPUT_CHARS",
+        "MAX_SEGMENTATION_TOKENS",
+        "QueryScope",
+        "REPORT_FIELDS",
+        "ScoredCandidate"
+      ],
+      "contract_sha256": "c4e161c182d97d7b05bdbd81294a3b34cd815650dab7219860713eb063b59dbb",
+      "integration_tests": [
+        "tests/test_retrieval_v2_adapters.py",
+        "tests/test_retrieval_v2_benchmark.py",
+        "tests/test_retrieval_v2_contract.py"
+      ]
+    },
+    {
+      "provider": "benchmark/retrieval_v2_corpus.py",
+      "names": [
+        "build_candidates",
+        "filter_candidates",
+        "load_corpus",
+        "normalized_id"
+      ],
+      "contract_sha256": "5d70431701fc83ff8666273551d31c30b428cbc21e741231a31ae8dc872e79e5",
+      "integration_tests": [
+        "tests/test_retrieval_v2_adapters.py",
+        "tests/test_retrieval_v2_aggregation.py",
+        "tests/test_retrieval_v2_benchmark.py"
+      ]
+    },
+    {
+      "provider": "benchmark/retrieval_v2_environment.py",
+      "names": [
+        "load_pinned_jieba",
+        "runner_sha256",
+        "sha256_file",
+        "sha256_json"
+      ],
+      "contract_sha256": "8f890d13955d3ab80a6823a8c4562041533acff4356b3a97b1b7f53259861ced",
+      "integration_tests": [
+        "tests/test_retrieval_v2_aggregation.py",
+        "tests/test_retrieval_v2_benchmark.py",
+        "tests/test_retrieval_v2_environment.py"
+      ]
+    },
+    {
+      "provider": "benchmark/retrieval_v2_metrics.py",
+      "names": [
+        "query_scope"
+      ],
+      "contract_sha256": "a17cc38134165c948218dbabbf76a630775be1e6345e1c0e31c5341319fb7a4a",
+      "integration_tests": [
+        "tests/test_retrieval_v2_benchmark.py",
+        "tests/test_retrieval_v2_corpus.py",
+        "tests/test_retrieval_v2_metrics.py"
+      ]
+    },
+    {
+      "provider": "benchmark/retrieval_v2_outputs.py",
+      "names": [
+        "is_reparse_point",
+        "same_path_identity",
+        "validate_cache_root"
+      ],
+      "contract_sha256": "1b90fac8157f3be77f2a9b5e0e5dc6c1af0903d4cbe0c4debe2758ae5835556e",
+      "integration_tests": [
+        "tests/test_retrieval_v2_aggregation.py",
+        "tests/test_retrieval_v2_benchmark.py",
+        "tests/test_retrieval_v2_orchestration.py"
+      ]
+    },
+    {
+      "provider": "benchmark/retrieval_v2_run.py",
+      "names": [
+        "run_benchmark"
+      ],
+      "contract_sha256": "961437f930d854ac142cd3f3f4846b8bfd6fcc4c3c08e0417ab8b23196932db4",
+      "integration_tests": [
+        "tests/test_retrieval_v2_benchmark.py",
+        "tests/test_retrieval_v2_cli.py",
+        "tests/test_retrieval_v2_orchestration.py"
+      ]
+    },
+    {
+      "provider": "benchmark/retrieval_v2_scoring.py",
+      "names": [
+        "candidate_text",
+        "fts5_tokens",
+        "reciprocal_rank_fusion"
+      ],
+      "contract_sha256": "f831fc1e99bc0a5e40e9ba9724fe76aa3f4153ec71eb187eb956208fcbcf1df9",
+      "integration_tests": [
+        "tests/test_retrieval_v2_adapters.py",
+        "tests/test_retrieval_v2_scoring.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/generation_catalog_store.py",
+      "names": [
+        "GenerationCatalog"
+      ],
+      "contract_sha256": "b18194ebe04bf988b4474379fcb5243516550d43b745a00eaed1453f7844c983",
+      "integration_tests": [
+        "tests/test_a_blocked_task_has_a_way_back.py",
+        "tests/test_a_build_in_flight_is_not_an_orphan.py",
+        "tests/test_a_capacity_refusal_does_not_corrupt_a_generation.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/model_choice.py",
+      "names": [
+        "using_root"
+      ],
+      "contract_sha256": "d45f2655cb61963e77617d1dfd7d617b134ad77cc770b59b335d0856e5d65019",
+      "integration_tests": [
+        "tests/test_central_model_selection.py",
+        "tests/test_compile_execution_inventory.py"
+      ]
+    },
+    {
+      "provider": "scripts/reliable_memory.py",
+      "names": [
+        "validate_state_root"
+      ],
+      "contract_sha256": "8680515cd873056a7c8a36e0057d91f2f83f23c48841263697676ff91f7ff964",
+      "integration_tests": [
+        "tests/test_a_backup_image_carries_what_git_does_not.py",
+        "tests/test_a_changed_task_setting_reaches_an_installed_machine.py",
+        "tests/test_a_committed_source_resolves_an_older_compile_plan.py"
+      ]
+    },
+    {
+      "provider": "scripts/repository_scope.py",
+      "names": [
+        "sanitized_git_environment"
+      ],
+      "contract_sha256": "fd550ae20761afad50b37fa3a71044a162485b0e4d4b3e2af9b5b22e143c2bec",
+      "integration_tests": [
+        "tests/test_a_code_generation_is_not_abandoned.py",
+        "tests/test_a_directory_link_inside_the_checkout_does_not_refuse_the_revision.py",
+        "tests/test_a_document_is_opened_in_its_own_language.py"
+      ]
+    }
+  ]
+}

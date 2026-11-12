@@ -1,0 +1,226 @@
+{
+  "encoding": "o200k_base",
+  "max_tokens": 100000,
+  "serialization": "exact-duplicates/v1",
+  "files": [
+    "AGENTS.md",
+    "CLAUDE.md",
+    "docs/AGENTS.md",
+    "docs/STRUCTURE.md",
+    "docs/modules/context-bundle.md",
+    "docs/modules/context-records.md",
+    "docs/modules/context-tooling.md",
+    "docs/modules/model-choice.md",
+    "docs/modules/product-structure.md",
+    "docs/modules/project-governance.md",
+    "docs/modules/session-start-context-tests-a-failing-nightly-is-visible-context.json",
+    "docs/modules/session-start-context-tests-a-failing-nightly-is-visible.md",
+    "docs/modules/session-start-context.md",
+    "docs/modules/test-support.md",
+    "rules/development-laws.md",
+    "scripts/__init__.py",
+    "scripts/llm_wiki/__init__.py",
+    "scripts/llm_wiki/context_bundle.py",
+    "scripts/session_start_context.py",
+    "tests/__init__.py",
+    "tests/conftest.py",
+    "tests/module_context.py",
+    "tests/module_context_paths.py",
+    "tests/module_interface.py",
+    "tests/module_interface_render.py",
+    "tests/module_qualification.py",
+    "tests/module_record_context.py",
+    "tests/module_records.py",
+    "tests/shared_fixtures.py",
+    "tests/slow_machine.py",
+    "tests/test_a_failing_nightly_is_visible.py"
+  ],
+  "ownership": {
+    "files": [
+      "docs/modules/session-start-context-tests-a-failing-nightly-is-visible-context.json",
+      "docs/modules/session-start-context-tests-a-failing-nightly-is-visible.md",
+      "tests/test_a_failing_nightly_is_visible.py"
+    ]
+  },
+  "qualified_dependencies": [
+    {
+      "provider": "scripts/build_advisory.py",
+      "names": [
+        "build_advisory"
+      ],
+      "contract_sha256": "2a214c6d4890af8972f6ebf7130c1f888a6d9b317a025b43a65189fa4e2c6c76",
+      "integration_tests": [
+        "tests/test_a_failing_nightly_is_visible.py"
+      ]
+    },
+    {
+      "provider": "scripts/build_guardrails.py",
+      "names": [
+        "build_guardrails"
+      ],
+      "contract_sha256": "9868de30be8fd25ed36fb6cef1c70c9465033345808af2dfbbc34265e8783c7d",
+      "integration_tests": [
+        "tests/test_a_failing_nightly_is_visible.py"
+      ]
+    },
+    {
+      "provider": "scripts/capture_diagnostics.py",
+      "names": [
+        "capture_failure_line",
+        "record_hook_error"
+      ],
+      "contract_sha256": "c6e70eedde550b687d0ec40e63ae66dc5ba045e550b9613edce9558f397df9fe",
+      "integration_tests": [
+        "tests/test_a_failing_nightly_is_visible.py"
+      ]
+    },
+    {
+      "provider": "scripts/context_budget.py",
+      "names": [
+        "BudgetExceededError",
+        "ContextItem",
+        "DEFAULT_CONTEXT_BUDGET"
+      ],
+      "contract_sha256": "8d6d945b7aa33430fbc4f3f434536a390af63ef89c0c9356bc65a63ea9707579",
+      "integration_tests": [
+        "tests/test_a_failing_nightly_is_visible.py"
+      ]
+    },
+    {
+      "provider": "scripts/context_compiler.py",
+      "names": [
+        "compile_context_items"
+      ],
+      "contract_sha256": "23b1ffbfd102d5b171b6535f6c6997b12c598befccfd3dc0c9d8afaef214fe00",
+      "integration_tests": [
+        "tests/test_a_failing_nightly_is_visible.py"
+      ]
+    },
+    {
+      "provider": "scripts/doctor.py",
+      "names": [
+        "degraded_summary",
+        "run_doctor"
+      ],
+      "contract_sha256": "70eb5162dd90eb33afac7e928ba93eb6c059602e61674971e8caa2d46a405982",
+      "integration_tests": [
+        "tests/test_a_failing_nightly_is_visible.py"
+      ]
+    },
+    {
+      "provider": "scripts/impact_analysis.py",
+      "names": [
+        "analyze_impact",
+        "format_for_advisory"
+      ],
+      "contract_sha256": "29ef96edce70f7407200bdd870440650f2563bf2e124b50b37170fd69094157a",
+      "integration_tests": [
+        "tests/test_a_failing_nightly_is_visible.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/generation_catalog_store.py",
+      "names": [
+        "GenerationCatalog"
+      ],
+      "contract_sha256": "b18194ebe04bf988b4474379fcb5243516550d43b745a00eaed1453f7844c983",
+      "integration_tests": [
+        "tests/test_a_blocked_task_has_a_way_back.py",
+        "tests/test_a_build_in_flight_is_not_an_orphan.py",
+        "tests/test_a_capacity_refusal_does_not_corrupt_a_generation.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/model_choice.py",
+      "names": [
+        "using_root"
+      ],
+      "contract_sha256": "d45f2655cb61963e77617d1dfd7d617b134ad77cc770b59b335d0856e5d65019",
+      "integration_tests": [
+        "tests/test_a_failing_nightly_is_visible.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/runtime_roots.py",
+      "names": [
+        "daily_dir",
+        "index_file",
+        "notes_dir",
+        "reports_dir",
+        "state_root",
+        "vault_root"
+      ],
+      "contract_sha256": "fede217058cf53714f0d4af2e9e179a599713b69d9b537fa618e2ffe9278a1f3",
+      "integration_tests": [
+        "tests/test_a_continuation_keeps_its_original_entry.py",
+        "tests/test_a_prompt_checkpoint_does_not_outwait_its_host.py",
+        "tests/test_a_session_marker_survives_a_busy_writer.py"
+      ]
+    },
+    {
+      "provider": "scripts/markdown_transaction.py",
+      "names": [
+        "active_or_legacy_coordinator"
+      ],
+      "contract_sha256": "c925a7d2a81ec95533c80abc3906d8b8f0c1422d98e7175814de9a57f0ec45ec",
+      "integration_tests": [
+        "tests/test_a_failing_nightly_is_visible.py"
+      ]
+    },
+    {
+      "provider": "scripts/memory_state.py",
+      "names": [
+        "HOOK_STATE_LOCK_TIMEOUT",
+        "load_state",
+        "spawn_detached",
+        "update_state"
+      ],
+      "contract_sha256": "0440f4a497ee6b2dec42dd8a39a4feceff265b9f19de4a896d5337363822ed30",
+      "integration_tests": [
+        "tests/test_a_failing_nightly_is_visible.py"
+      ]
+    },
+    {
+      "provider": "scripts/reliable_memory.py",
+      "names": [
+        "validate_runtime_file",
+        "validate_state_root"
+      ],
+      "contract_sha256": "8d6496bf7c816260fcc296ec050a67bb532dbd88e54cd15a47ff34c033488c8d",
+      "integration_tests": [
+        "tests/test_a_failing_nightly_is_visible.py"
+      ]
+    },
+    {
+      "provider": "scripts/repository_scope.py",
+      "names": [
+        "sanitized_git_environment"
+      ],
+      "contract_sha256": "fd550ae20761afad50b37fa3a71044a162485b0e4d4b3e2af9b5b22e143c2bec",
+      "integration_tests": [
+        "tests/test_a_failing_nightly_is_visible.py"
+      ]
+    },
+    {
+      "provider": "scripts/secret_redact.py",
+      "names": [
+        "describe_error"
+      ],
+      "contract_sha256": "fb304f29eb5f060ccb0503f24561dd6ee4cfb07e2c36b130c00ad9e1c9000eaf",
+      "integration_tests": [
+        "tests/test_a_failing_nightly_is_visible.py"
+      ]
+    },
+    {
+      "provider": "scripts/vault_log.py",
+      "names": [
+        "LOG_RELATIVE",
+        "vault_log_path"
+      ],
+      "contract_sha256": "086a356f42414596795ac6c01efceae390b56978f04f1e384b4b9619ded7eb9b",
+      "integration_tests": [
+        "tests/test_a_failing_nightly_is_visible.py"
+      ]
+    }
+  ]
+}

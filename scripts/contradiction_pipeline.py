@@ -8,21 +8,23 @@ import stat
 import tempfile
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import asdict, dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from types import MappingProxyType, SimpleNamespace
 
 from bounded_io import read_stable_bytes
 from claim_tree_manifest import snapshot_claim_tree
 from claims import (
-    CANDIDATE_SCHEMA,
-    CLAIM_LEDGER_RE,
     MAX_CLAIM_PAGE_BYTES,
     ClaimIndex,
     ClaimPipeline,
     IndexedClaim,
     NormalizedClaim,
+    claim_json_bytes,
+    claim_ledger_document,
     is_substantive,
+    parse_claim_ledger,
+    validate_claim_candidate,
     validate_claim_record,
 )
 from llm_client import (
@@ -32,12 +34,16 @@ from llm_client import (
     probe_candidate,
     provider_candidates,
 )
+from llm_wiki import runtime_roots
+from llm_wiki.claim_ledger import (
+    claim_ledger_match,
+)
+from llm_wiki.formats.canonical import canonical_json_bytes, sha256_bytes
 from markdown_transaction import (
     MarkdownChange,
     MarkdownCoordinator,
     active_or_legacy_coordinator,
 )
-from reliable_memory import canonical_json_bytes, sha256_bytes, validate_schema
 
 AUTHORITY = {"inferred": 0, "ai-derived": 1, "web": 2, "user": 3}
 FUNCTIONAL_RELATIONS = frozenset(
@@ -90,7 +96,7 @@ class LifecycleTarget:
             existing.page,
             str(record["id"]),
             str(record["fingerprint"]),
-            sha256_bytes(canonical_json_bytes(record)),
+            sha256_bytes(claim_json_bytes(record)),
             str(evidence["sha256"]),
         )
 
@@ -155,8 +161,8 @@ class BenchmarkMetrics:
 
 
 _OPEN_BOUNDS = (
-    datetime.min.replace(tzinfo=timezone.utc),
-    datetime.max.replace(tzinfo=timezone.utc),
+    datetime.min.replace(tzinfo=UTC),
+    datetime.max.replace(tzinfo=UTC),
 )
 
 
@@ -164,11 +170,11 @@ def _time_key(value: object, *, upper: bool) -> datetime:
     """An instant, not its text: `.500000Z` sorted before `Z` as text (audit B-5)."""
     if value is None:
         return _OPEN_BOUNDS[upper]
-    return _instant(str(value))
+    return instant(str(value))
 
 
-def _instant(text: str) -> datetime:
-    """A date or instant as the page wrote it, read the same on Python 3.10 and 3.11+ (audit 2026-09-26 C-4)."""
+def instant(text: str) -> datetime:
+    """A date or instant as the page wrote it, read as one instant (audit 2026-09-26 C-4)."""
     from iso_time import parse_instant
 
     if "T" not in text:
@@ -583,7 +589,7 @@ def _well_formed_evaluation(value: object) -> bool:
     )
 
 
-def _validated_evaluation_output(text: str) -> Mapping[str, object]:
+def validated_evaluation_output(text: str) -> Mapping[str, object]:
     """The evaluation a provider replied with, fenced or after a sentence.
 
     A bare `json.loads` sent a fenced verdict to quarantine as malformed. See
@@ -609,7 +615,7 @@ def _parsed_evaluation(
 ) -> Evaluation | None:
     """One provider answer, recording either the refusal or the acceptance."""
     try:
-        value = _validated_evaluation_output(text)
+        value = validated_evaluation_output(text)
     except (TypeError, ValueError, UnicodeError, json.JSONDecodeError) as exc:
         failure = "output_too_large" if str(exc) == "output_too_large" else "malformed_output"
         lineage.append(
@@ -660,7 +666,7 @@ def _existing_candidate_bytes(target: Path) -> bytes | None:
     return read_stable_bytes(target, MAX_CLAIM_PAGE_BYTES, label="claim candidate")
 
 
-def _embedded_candidate_claim(raw: bytes) -> Mapping[str, object] | None:
+def embedded_candidate_claim(raw: bytes) -> Mapping[str, object] | None:
     matches = _CANDIDATE_JSON_RE.findall(raw)
     if len(matches) != 1:
         return None
@@ -670,6 +676,7 @@ def _embedded_candidate_claim(raw: bytes) -> Mapping[str, object] | None:
         return None
     if not isinstance(candidate, dict) or candidate.get("schema_version") != "claim-candidate/v1":
         return None
+    validate_claim_candidate(candidate)
     return _dict_or_none(candidate.get("claim"))
 
 
@@ -684,7 +691,7 @@ def _candidate_present(target: Path, record: Mapping[str, object]) -> bool:
     raw = _existing_candidate_bytes(target)
     if raw is None:
         return False
-    embedded = _embedded_candidate_claim(raw)
+    embedded = embedded_candidate_claim(raw)
     if embedded is None:
         return False
     return all(embedded.get(key) == record[key] for key in _CANDIDATE_IDENTITY_KEYS)
@@ -744,7 +751,7 @@ def _require_unchanged_claim(
     evidence = record["evidence"]
     unchanged = (
         record["fingerprint"] == expected.fingerprint
-        and sha256_bytes(canonical_json_bytes(record)) == expected.record_hash
+        and sha256_bytes(claim_json_bytes(record)) == expected.record_hash
         and evidence["sha256"] == expected.evidence_hash
     )
     if not unchanged:
@@ -775,6 +782,20 @@ def _page_after(after: bytes, ledger: Mapping[str, object], source_page: str) ->
     if not page_is_superseded(ledger["claims"]):
         return after
     return _mark_page_superseded(after, source_page)
+
+
+def supersede_claims_in_page(
+    raw: bytes, mutations: Sequence[LifecycleTarget], path: str,
+) -> tuple[bytes, Mapping[str, object]]:
+    """Transform a verified ledger; the caller decides the final page status."""
+    targets = _grouped_targets(mutations).get(path, {})
+    match = claim_ledger_match(raw)
+    if match is None:
+        raise ValueError("lifecycle target has no canonical claim ledger")
+    ledger = parse_claim_ledger(raw)
+    _supersede_ledger_claims(ledger, targets, path)
+    after = raw[:match.start(2)] + claim_json_bytes(ledger) + raw[match.end(2):]
+    return after, ledger
 
 
 class ContradictionPipeline:
@@ -1143,7 +1164,7 @@ class ContradictionPipeline:
             "source_page": self.source_page,
             "created_at": claim.record["observed_at"],
         }
-        validate_schema(candidate, CANDIDATE_SCHEMA)
+        validate_claim_candidate(candidate)
         identity = sha256_bytes(
             canonical_json_bytes(
                 {"id": claim.record["id"], "evidence": claim.record["evidence"]}
@@ -1153,7 +1174,7 @@ class ContradictionPipeline:
         content = (
             "---\ntype: claim-candidate\nstatus: quarantined\n---\n"
             f"# Quarantined claim {claim.record['id']}\n\n"
-            "```json\n" + canonical_json_bytes(candidate).decode("utf-8") + "\n```\n"
+            "```json\n" + claim_json_bytes(candidate).decode("utf-8") + "\n```\n"
         ).encode("utf-8")
         return path, content, quarantined.record
 
@@ -1195,13 +1216,7 @@ class ContradictionPipeline:
             self.vault / path, MAX_CLAIM_PAGE_BYTES, label="claim lifecycle page"
         )
         preconditions[path] = sha256_bytes(raw)
-        match = CLAIM_LEDGER_RE.search(raw)
-        if match is None:
-            raise ValueError("lifecycle target has no canonical claim ledger")
-        ledger = json.loads(match[2])
-        _supersede_ledger_claims(ledger, targets, path)
-        encoded = canonical_json_bytes(ledger)
-        after = raw[: match.start(2)] + encoded + raw[match.end(2) :]
+        after, ledger = supersede_claims_in_page(raw, tuple(targets.values()), path)
         return MarkdownChange.replace(
             path,
             _page_after(after, ledger, self.source_page),
@@ -1263,14 +1278,14 @@ def _mark_page_superseded(content: bytes, source_page: str) -> bytes:
     return rebuilt + body
 
 
-def _secondary_search_hit(
+def secondary_search_hit(
     page: Path, root: Path, terms: Sequence[str]
 ) -> dict[str, object] | None:
     """One scored result for a page that contains every term, else nothing."""
-    from search_memory import (
+    from generation_search import (
         MAX_PAGE_BYTES,
-        _extract_title_and_summary,
-        _strip_frontmatter,
+        extract_title_and_summary,
+        strip_frontmatter,
     )
 
     try:
@@ -1279,10 +1294,10 @@ def _secondary_search_hit(
         ).decode("utf-8", errors="ignore")
     except (OSError, ValueError):
         return None
-    searchable = _strip_frontmatter(content).casefold()
+    searchable = strip_frontmatter(content).casefold()
     if not all(term in searchable for term in terms):
         return None
-    title, summary = _extract_title_and_summary(content, page.stem)
+    title, summary = extract_title_and_summary(content, page.stem)
     return {
         "path": page.relative_to(root).as_posix(),
         "title": title,
@@ -1293,40 +1308,53 @@ def _secondary_search_hit(
     }
 
 
+def _secondary_scan_deadline(deadline: float | None) -> float:
+    return float("inf") if deadline is None else deadline
+
+
 def _scan_secondary_pages(
-    root: Path, query: str, bounded_limit: int
+    root: Path, query: str, bounded_limit: int,
+    *, deadline: float | None = None, cancelled: Callable[[], bool] | None = None,
 ) -> Sequence[Mapping[str, object]]:
     """Term-conjunction scan over a vault that is not the running installation."""
-    from search_memory import _collect_pages
+    from generation_search import (
+        check_legacy_stop,
+        collect_pages,
+    )
 
+    check_legacy_stop(deadline, cancelled)
     terms = tuple(dict.fromkeys(re.findall(r"\w+", query.casefold())))
     if not terms:
         return ()
-    pages = _collect_pages(
-        "all", knowledge_dir=root / "knowledge" / "notes", root=root
+    pages = collect_pages(
+        "all", knowledge_dir=root / "knowledge" / "notes", root=root,
+        deadline=_secondary_scan_deadline(deadline),
     )
     results: list[dict[str, object]] = []
     for page in pages:
-        hit = _secondary_search_hit(page, root, terms)
+        check_legacy_stop(deadline, cancelled)
+        hit = secondary_search_hit(page, root, terms)
         if hit is not None:
             results.append(hit)
     results.sort(key=lambda item: (-int(item["score"]), str(item["path"])))
+    check_legacy_stop(deadline, cancelled)
     return results[:bounded_limit]
 
 
 def default_secondary_search(
-    root: Path, query: str, limit: int
+    root: Path, query: str, limit: int,
+    *, deadline: float | None = None, cancelled: Callable[[], bool] | None = None,
 ) -> Sequence[Mapping[str, object]]:
-    from search_memory import ROOT as search_root
+    from llm_wiki.runtime_roots import vault_root
     from search_memory import search
 
     bounded_limit = max(0, min(limit, 5))
     if bounded_limit == 0:
         return ()
     root = root.resolve()
-    if root == search_root.resolve():
-        return search(query, limit=bounded_limit)
-    return _scan_secondary_pages(root, query, bounded_limit)
+    if root == vault_root().resolve():
+        return search(query, limit=bounded_limit, deadline_monotonic=deadline, cancelled=cancelled)
+    return _scan_secondary_pages(root, query, bounded_limit, deadline=deadline, cancelled=cancelled)
 
 
 @dataclass
@@ -1424,10 +1452,10 @@ def _prepare_benchmark_vault(temporary: Path) -> tuple[Path, Path]:
 
 
 def _benchmark_page_bytes(claim_record: Mapping[str, object]) -> bytes:
-    ledger = {"schema_version": "claim-ledger/v1", "claims": [claim_record]}
+    ledger = claim_ledger_document([claim_record])
     return (
         b"---\ntype: concept\n---\n# Benchmark\n\n## Claims\n```json\n"
-        + canonical_json_bytes(ledger)
+        + claim_json_bytes(ledger)
         + b"\n```\n"
     )
 
@@ -1479,7 +1507,7 @@ def _extract_benchmark_claims(
         ):
             extracted[str(case["id"])] = normalized
             true_positive += int(
-                canonical_json_bytes(normalized.record)
+                claim_json_bytes(normalized.record)
                 == canonical_json_bytes(case["expected_new_claim"])
             )
     return extracted, true_positive
@@ -1575,13 +1603,13 @@ def _case_publication(
         )
         changes, _preconditions, paths = candidate_pipeline.plan_changes((result,))
         return list(changes), list(paths)
-    ledger = {"schema_version": "claim-ledger/v1", "claims": [new.record]}
+    ledger = claim_ledger_document([new.record])
     return (
         [
             MarkdownChange.create(
                 proposed,
                 b"---\ntype: concept\n---\n# Proposed\n\n## Claims\n```json\n"
-                + canonical_json_bytes(ledger)
+                + claim_json_bytes(ledger)
                 + b"\n```\n",
                 max_before_bytes=MAX_CLAIM_PAGE_BYTES,
             )
@@ -1824,8 +1852,11 @@ def _decoded_claim(claim: str) -> object:
         return None
 
 
-def _is_claim_document(decoded: object) -> bool:
-    return isinstance(decoded, dict) and decoded.get("schema_version") == "claim/v1"
+def is_claim_document(decoded: object) -> bool:
+    if not isinstance(decoded, dict):
+        return False
+    version = decoded.get("schema_version")
+    return (isinstance(version, str) and version.startswith("claim/")) or {"evidence", "subject", "relation", "value"}.issubset(decoded)
 
 
 def _verified_claim(
@@ -1848,7 +1879,7 @@ def _verified_claim(
     return NormalizedClaim(decoded)
 
 
-def _assess_query_claim(
+def assess_query_claim(
     normalized: NormalizedClaim, root: Path, state_root: Path
 ) -> ClaimAssessment:
     index = ClaimIndex(state_root, vault=root)
@@ -1880,16 +1911,15 @@ def _unsupported_evidence_view(
 def assess_text(claim: str) -> dict[str, object]:
     """Assess JSON claims or retrieve context for unsupported plain-text evidence."""
     text = _require_query_text(claim)
-    from memory_state import ROOT, STATE_ROOT
 
     decoded = _decoded_claim(text)
-    verified = _is_claim_document(decoded)
+    verified = is_claim_document(decoded)
     normalized = (
-        _verified_claim(decoded, ROOT, STATE_ROOT)
+        _verified_claim(decoded, runtime_roots.vault_root(), runtime_roots.state_root())
         if verified
         else _plain_text_query_claim(text.strip())
     )
-    assessment = _assess_query_claim(normalized, ROOT, STATE_ROOT)
+    assessment = assess_query_claim(normalized, runtime_roots.vault_root(), runtime_roots.state_root())
     canonical = assessment.canonical()
     validity, recommendations = (
         (assessment.validity, [assessment.recommendation])

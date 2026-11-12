@@ -1,0 +1,421 @@
+{
+  "encoding": "o200k_base",
+  "max_tokens": 100000,
+  "serialization": "exact-duplicates/v1",
+  "files": [
+    "AGENTS.md",
+    "CLAUDE.md",
+    "docs/AGENTS.md",
+    "docs/STRUCTURE.md",
+    "docs/modules/breadcrumb-decision-tests.md",
+    "docs/modules/breadcrumb-documents.md",
+    "docs/modules/compile-claims-producer-helpers.md",
+    "docs/modules/compile-controller-tests-compile-protected-dispatch-helpers.md",
+    "docs/modules/compile-paths.md",
+    "docs/modules/compile-pipeline-apply-tests.md",
+    "docs/modules/compile-pipeline-prompts-tests-compile-critic-drop-cannot-complete-source-work-helpers.md",
+    "docs/modules/compile-pipeline-tests-compile-keeps-physically-overlapping-existing-context-helpers.md",
+    "docs/modules/compile-progress-tests.md",
+    "docs/modules/context-bundle.md",
+    "docs/modules/context-records.md",
+    "docs/modules/context-tooling.md",
+    "docs/modules/installed-memory-repair-tests.md",
+    "docs/modules/llm-client-tests-the-compile-decides-what-the-snapshot-already-knows-helpers.md",
+    "docs/modules/model-choice.md",
+    "docs/modules/native-event-reader.md",
+    "docs/modules/product-structure.md",
+    "docs/modules/project-governance.md",
+    "docs/modules/script-sources.md",
+    "docs/modules/test-compile-protected-dispatch-context.json",
+    "docs/modules/test-compile-protected-dispatch.md",
+    "docs/modules/test-support.md",
+    "rules/development-laws.md",
+    "scripts/__init__.py",
+    "scripts/llm_wiki/__init__.py",
+    "scripts/llm_wiki/context_bundle.py",
+    "tests/__init__.py",
+    "tests/adopted_vault.py",
+    "tests/compile_call_controller_helpers.py",
+    "tests/compile_claims_producer_helpers.py",
+    "tests/compile_critic_drop_cannot_complete_source_work_helpers.py",
+    "tests/compile_keeps_physically_overlapping_existing_context_helpers.py",
+    "tests/compile_paths.py",
+    "tests/compile_progress_admission_helpers.py",
+    "tests/compile_protected_dispatch_helpers.py",
+    "tests/conftest.py",
+    "tests/legacy_adopted_vault.py",
+    "tests/module_context.py",
+    "tests/module_context_paths.py",
+    "tests/module_interface.py",
+    "tests/module_interface_render.py",
+    "tests/module_qualification.py",
+    "tests/module_record_context.py",
+    "tests/module_records.py",
+    "tests/modules/__init__.py",
+    "tests/modules/breadcrumb_documents/__init__.py",
+    "tests/modules/breadcrumb_documents/contract_helpers.py",
+    "tests/modules/native_event_reader/__init__.py",
+    "tests/modules/native_event_reader/contract_helpers.py",
+    "tests/native_compile_uses_whole_container_helpers.py",
+    "tests/native_user_frames_keep_their_physical_evidence_helpers.py",
+    "tests/script_sources.py",
+    "tests/shared_fixtures.py",
+    "tests/slow_machine.py",
+    "tests/test_compile_protected_dispatch.py",
+    "tests/the_compile_decides_what_the_snapshot_already_knows_helpers.py"
+  ],
+  "ownership": {
+    "files": [
+      "docs/modules/test-compile-protected-dispatch-context.json",
+      "docs/modules/test-compile-protected-dispatch.md",
+      "tests/test_compile_protected_dispatch.py"
+    ]
+  },
+  "qualified_dependencies": [
+    {
+      "provider": "scripts/breadcrumb_decision.py",
+      "names": [
+        "journal_block"
+      ],
+      "contract_sha256": "d9c930484c634bdb57dbd893d182a3cb86d6d5b4893041035de163552c86eebc",
+      "integration_tests": [
+        "tests/test_compile_protected_dispatch.py"
+      ]
+    },
+    {
+      "provider": "scripts/breadcrumb_evidence.py",
+      "names": [
+        "read_head"
+      ],
+      "contract_sha256": "ed6e789206b293b2cd7ca3cc716daa242835e10bc7a60103b33b2431c133913f",
+      "integration_tests": [
+        "tests/test_compile_protected_dispatch.py"
+      ]
+    },
+    {
+      "provider": "scripts/breadcrumb_protocol.py",
+      "names": [
+        "encode_parts",
+        "make_anchor",
+        "make_manifest"
+      ],
+      "contract_sha256": "d9092eee738a1a4113c9bf87afe3ae4ad27a6f4bb640b6b8040da43b1d304729",
+      "integration_tests": [
+        "tests/test_compile_protected_dispatch.py"
+      ]
+    },
+    {
+      "provider": "scripts/compile_cache.py",
+      "names": [
+        "CompileCache"
+      ],
+      "contract_sha256": "2f950a945aecf6065663cf128b0cdc4db8f0e8cf0f8d1f1057cc0d1e52d56c95",
+      "integration_tests": [
+        "tests/test_compile_protected_dispatch.py"
+      ]
+    },
+    {
+      "provider": "scripts/compile_controller.py",
+      "names": [
+        "ARCHIVE_SCHEMA",
+        "CompileDependencies",
+        "CompileInputArchive",
+        "CompileReplay",
+        "ProviderOutcomeUnknown",
+        "compile_capture_digest",
+        "compile_inputs_digest",
+        "load_compile_inputs",
+        "open_compile_inputs",
+        "restored_archive_record",
+        "run_candidate_call",
+        "save_compile_capture",
+        "save_compile_inputs",
+        "snapshot_json",
+        "write_archive_snapshot"
+      ],
+      "contract_sha256": "27c2ccc58c9460a87b92c1d64b3d92c7770198834a7d42a40f377b5cb33068ce",
+      "integration_tests": [
+        "tests/test_compile_protected_dispatch.py"
+      ]
+    },
+    {
+      "provider": "scripts/compile_pipeline.py",
+      "names": [
+        "MAX_DAILY_PART_BYTES",
+        "sha256_bytes"
+      ],
+      "contract_sha256": "e3c430fc07fbadb69bdc414c139d77ca9213d055f09a02a21f8dd68793cbfa6f",
+      "integration_tests": [
+        "tests/test_a_continuation_keeps_its_original_entry.py",
+        "tests/test_a_discarded_receipt_reopens_its_day.py",
+        "tests/test_a_failure_of_content_that_is_gone_is_retired.py"
+      ]
+    },
+    {
+      "provider": "scripts/compile_progress.py",
+      "names": [
+        "CompileEvent",
+        "ProgressCorrupt",
+        "SCHEMA_STATEMENTS",
+        "audit_events",
+        "make_source_scope"
+      ],
+      "contract_sha256": "a5fc30853fdcfd702963e36ce1ab8feba102452a40e3166c63318401fc5ef57f",
+      "integration_tests": [
+        "tests/test_compile_protected_dispatch.py"
+      ]
+    },
+    {
+      "provider": "scripts/compile_progress_migration.py",
+      "names": [
+        "migrate_candidate"
+      ],
+      "contract_sha256": "9fb4b3b645d47db7ba07afa96b3ea3eb03d0e946b9744af3d59dabbf32a2984a",
+      "integration_tests": [
+        "tests/test_compile_protected_dispatch.py"
+      ]
+    },
+    {
+      "provider": "scripts/compile_receipts.py",
+      "names": [
+        "DailySnapshot",
+        "NativeCompileFrame",
+        "SourceSnapshot"
+      ],
+      "contract_sha256": "5fc287d1ebce061cf0fd230c9ab433d26aa8c9bfb352f55938b93408786a736c",
+      "integration_tests": [
+        "tests/test_compile_protected_dispatch.py"
+      ]
+    },
+    {
+      "provider": "scripts/context_budget.py",
+      "names": [
+        "TokenUsage"
+      ],
+      "contract_sha256": "bde088db86ce68f91e9a4e3f1416339f5cecdd6c3a2e40390f25bf4fb954af76",
+      "integration_tests": [
+        "tests/test_compile_protected_dispatch.py"
+      ]
+    },
+    {
+      "provider": "scripts/corpus_snapshot.py",
+      "names": [
+        "collect_corpus"
+      ],
+      "contract_sha256": "7ea12368f51c070a84b0754260f0a82db5ac44b0395b95eabcb01e5053c9f0bb",
+      "integration_tests": [
+        "tests/test_compile_protected_dispatch.py"
+      ]
+    },
+    {
+      "provider": "scripts/evidence_resolver.py",
+      "names": [
+        "EvidenceRef"
+      ],
+      "contract_sha256": "f9835c0e0382b76f4246786d586f5d0a74bbb8559c4a25efff9110e278b33f8f",
+      "integration_tests": [
+        "tests/test_compile_protected_dispatch.py"
+      ]
+    },
+    {
+      "provider": "scripts/installed_memory_repair.py",
+      "names": [
+        "repair_installed_vault"
+      ],
+      "contract_sha256": "6ab4497d3ed56413bc24ea5ae9e993acf118980056b046072877a80df4f52a18",
+      "integration_tests": [
+        "tests/test_a_check_names_its_cause.py",
+        "tests/test_a_marker_is_judged_by_the_process_it_names.py",
+        "tests/test_a_tool_breadcrumb_waits_in_the_background.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_client.py",
+      "names": [
+        "BACKENDS",
+        "BackendResponse",
+        "LLMResult",
+        "ProviderDescriptor",
+        "probe_candidate",
+        "provider_candidates"
+      ],
+      "contract_sha256": "36198110191982beb2e0e2c80155e8a303faf7ef238a855fa51870bd9b4c463e",
+      "integration_tests": [
+        "tests/test_a_cli_provider_dies_with_its_children.py",
+        "tests/test_a_context_answer_fits_the_budget_it_was_given.py",
+        "tests/test_a_grounded_recall_has_the_time_it_needs.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/adoption_admission.py",
+      "names": [
+        "MAX_OPERATIONAL_DB_BYTES",
+        "expected_schema_digests",
+        "initial_schema_digests"
+      ],
+      "contract_sha256": "e2a9874844b2e0ecfbabd9067bd53ce68d47dfc5fc0e2893293a7c8459c704ee",
+      "integration_tests": [
+        "tests/test_compile_protected_dispatch.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/breadcrumb_documents.py",
+      "names": [
+        "source_documents",
+        "source_path"
+      ],
+      "contract_sha256": "9c32d29ba0229ab4fd59256dd23d9ea9fb8fde486cddde3ce431f64e296ab907",
+      "integration_tests": [
+        "tests/test_compile_protected_dispatch.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/compile_pipeline_apply.py",
+      "names": [
+        "apply_compile_plan"
+      ],
+      "contract_sha256": "129ecd76764fbd203f197468ec01d03833729ef205c00c26dd60fb67025303bb",
+      "integration_tests": [
+        "tests/test_compile_protected_dispatch.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/compile_pipeline_batches.py",
+      "names": [
+        "ContextRanking",
+        "pack_compile_batches",
+        "pack_planned_compile_batches",
+        "resolve_compile_plan"
+      ],
+      "contract_sha256": "8de2d8b0a782c2fd42ebdc47430a3b390f458eded384fc8087c94f15dd78a07a",
+      "integration_tests": [
+        "tests/test_compile_protected_dispatch.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/compile_pipeline_operations.py",
+      "names": [
+        "bound_evidence_block"
+      ],
+      "contract_sha256": "eb85cc0d2f89aa9e96b67af7d0b4bd30943883b39aebf8ed1e590a954aa82dd4",
+      "integration_tests": [
+        "tests/test_compile_protected_dispatch.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/compile_pipeline_prompts.py",
+      "names": [
+        "ByteBatchMeasure",
+        "CompileAttempt",
+        "SOURCE_REVIEW_SCHEMA",
+        "critique_prompt"
+      ],
+      "contract_sha256": "7b7f31d8e0556b76af8060ca81296ad7b74325da823f877986d8ef0499d6bcbe",
+      "integration_tests": [
+        "tests/test_compile_protected_dispatch.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/compile_pipeline_sources.py",
+      "names": [
+        "context_sources",
+        "snapshot_compile_inputs"
+      ],
+      "contract_sha256": "42ab5b21615f2e187b001f6e1688097c5c9b52f3e805e71e04b0ed8227d804fa",
+      "integration_tests": [
+        "tests/test_compile_protected_dispatch.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/generation_catalog_store.py",
+      "names": [
+        "GenerationCatalog"
+      ],
+      "contract_sha256": "b18194ebe04bf988b4474379fcb5243516550d43b745a00eaed1453f7844c983",
+      "integration_tests": [
+        "tests/test_a_blocked_task_has_a_way_back.py",
+        "tests/test_a_build_in_flight_is_not_an_orphan.py",
+        "tests/test_a_capacity_refusal_does_not_corrupt_a_generation.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/model_choice.py",
+      "names": [
+        "using_root"
+      ],
+      "contract_sha256": "d45f2655cb61963e77617d1dfd7d617b134ad77cc770b59b335d0856e5d65019",
+      "integration_tests": [
+        "tests/test_compile_protected_dispatch.py"
+      ]
+    },
+    {
+      "provider": "scripts/markdown_transaction.py",
+      "names": [
+        "active_markdown_coordinator"
+      ],
+      "contract_sha256": "3260e0919f0db38e974984faca8fa00d88642553366937a0604fa87f1be6898b",
+      "integration_tests": [
+        "tests/test_compile_protected_dispatch.py"
+      ]
+    },
+    {
+      "provider": "scripts/model_dlp.py",
+      "names": [
+        "DLPPolicy",
+        "DLPPolicyError",
+        "load_policy"
+      ],
+      "contract_sha256": "b07348be8e070e074270f2987586a61caca0519115bfaaf3949aad45b75c5c49",
+      "integration_tests": [
+        "tests/test_compile_protected_dispatch.py"
+      ]
+    },
+    {
+      "provider": "scripts/queue_core.py",
+      "names": [
+        "LeaseFenceError",
+        "QUEUE_V3_SCHEMA_SHA256",
+        "QueueFailure",
+        "QueueOperationError",
+        "active_memory_queue",
+        "stream_digest"
+      ],
+      "contract_sha256": "90db6df099eac260a0b90883b3d42eadb5c4b5ad882fb043292561d7d210cde2",
+      "integration_tests": [
+        "tests/test_compile_protected_dispatch.py"
+      ]
+    },
+    {
+      "provider": "scripts/reliability_v3_validation.py",
+      "names": [
+        "artifact_record"
+      ],
+      "contract_sha256": "3a4adad396f3e17fbdae971bd0f09e3de3f286bbe731eb0f10564ed7df20eb60",
+      "integration_tests": [
+        "tests/test_compile_protected_dispatch.py"
+      ]
+    },
+    {
+      "provider": "scripts/reliable_memory.py",
+      "names": [
+        "canonical_json_bytes",
+        "sha256_bytes",
+        "validate_state_root"
+      ],
+      "contract_sha256": "4243e32fa6ecab88fca1a2d2b3214c0a36944fc23129138102dfaebf6d99457f",
+      "integration_tests": [
+        "tests/test_compile_protected_dispatch.py"
+      ]
+    },
+    {
+      "provider": "scripts/repository_scope.py",
+      "names": [
+        "sanitized_git_environment"
+      ],
+      "contract_sha256": "fd550ae20761afad50b37fa3a71044a162485b0e4d4b3e2af9b5b22e143c2bec",
+      "integration_tests": [
+        "tests/test_compile_protected_dispatch.py"
+      ]
+    }
+  ]
+}

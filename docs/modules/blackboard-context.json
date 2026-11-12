@@ -1,0 +1,251 @@
+{
+  "encoding": "o200k_base",
+  "max_tokens": 100000,
+  "serialization": "exact-duplicates/v1",
+  "files": [
+    "AGENTS.md",
+    "CLAUDE.md",
+    "docs/AGENTS.md",
+    "docs/STRUCTURE.md",
+    "docs/modules/blackboard-context.json",
+    "docs/modules/blackboard.md",
+    "docs/modules/compile-paths.md",
+    "docs/modules/context-bundle.md",
+    "docs/modules/context-records.md",
+    "docs/modules/context-tooling.md",
+    "docs/modules/model-choice.md",
+    "docs/modules/product-structure.md",
+    "docs/modules/project-governance.md",
+    "docs/modules/queue-core-tests-reliability-v3-adoption-helpers.md",
+    "docs/modules/script-sources.md",
+    "docs/modules/test-support.md",
+    "rules/development-laws.md",
+    "scripts/__init__.py",
+    "scripts/blackboard.py",
+    "scripts/llm_wiki/__init__.py",
+    "scripts/llm_wiki/context_bundle.py",
+    "tests/__init__.py",
+    "tests/blackboard_helpers.py",
+    "tests/compile_paths.py",
+    "tests/conftest.py",
+    "tests/module_context.py",
+    "tests/module_context_paths.py",
+    "tests/module_interface.py",
+    "tests/module_interface_render.py",
+    "tests/module_qualification.py",
+    "tests/module_record_context.py",
+    "tests/module_records.py",
+    "tests/reliability_v3_adoption_helpers.py",
+    "tests/script_sources.py",
+    "tests/shared_fixtures.py",
+    "tests/slow_machine.py",
+    "tests/test_blackboard.py",
+    "tests/test_blackboard_inputs_use_the_journal_contract.py",
+    "tests/test_blackboard_release_retry.py",
+    "tests/test_security_invariants.py"
+  ],
+  "ownership": {
+    "files": [
+      "docs/modules/blackboard-context.json",
+      "docs/modules/blackboard.md",
+      "scripts/blackboard.py",
+      "tests/blackboard_helpers.py",
+      "tests/test_blackboard.py",
+      "tests/test_blackboard_inputs_use_the_journal_contract.py",
+      "tests/test_blackboard_release_retry.py",
+      "tests/test_security_invariants.py"
+    ]
+  },
+  "qualified_dependencies": [
+    {
+      "provider": "scripts/compile_pipeline.py",
+      "names": [
+        "validate_rule"
+      ],
+      "contract_sha256": "9da557367f673c8fadbcf6b383d599d3ae61c05ff27ea7a2eb1196f91c21252f",
+      "integration_tests": [
+        "tests/test_security_invariants.py"
+      ]
+    },
+    {
+      "provider": "scripts/integration_adapter.py",
+      "names": [
+        "validated_capture_transcript_path"
+      ],
+      "contract_sha256": "1be09a632274f2715668aec0132f9568e609c19f2b1a1493b8ceab7662e4a529",
+      "integration_tests": [
+        "tests/test_security_invariants.py"
+      ]
+    },
+    {
+      "provider": "scripts/iso_time.py",
+      "names": [
+        "utc_text"
+      ],
+      "contract_sha256": "b7151d094646f6efb0895d5e32f0237918a40d0f8e12b5eb0af3e60484d51a03",
+      "integration_tests": [
+        "tests/test_blackboard.py",
+        "tests/test_blackboard_inputs_use_the_journal_contract.py",
+        "tests/test_blackboard_release_retry.py",
+        "tests/test_security_invariants.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/compile_pipeline_base.py",
+      "names": [
+        "RAW_PLAN_SCHEMA"
+      ],
+      "contract_sha256": "aa03a648e41df5b4c6dd80fadd92891f342b838d4166de6bb0d8153912043369",
+      "integration_tests": [
+        "tests/test_security_invariants.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/generation_catalog_store.py",
+      "names": [
+        "GenerationCatalog"
+      ],
+      "contract_sha256": "b18194ebe04bf988b4474379fcb5243516550d43b745a00eaed1453f7844c983",
+      "integration_tests": [
+        "tests/test_a_blocked_task_has_a_way_back.py",
+        "tests/test_a_build_in_flight_is_not_an_orphan.py",
+        "tests/test_a_capacity_refusal_does_not_corrupt_a_generation.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/markdown_store.py",
+      "names": [
+        "MAX_KNOWLEDGE_TARGET_BYTES",
+        "WRITER_WAIT_SECONDS"
+      ],
+      "contract_sha256": "9e4776fcf8518ebc5f652244c85207bae5a4d612dc818fa50f3e2c1d25cf245f",
+      "integration_tests": [
+        "tests/test_blackboard.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/model_choice.py",
+      "names": [
+        "using_root"
+      ],
+      "contract_sha256": "d45f2655cb61963e77617d1dfd7d617b134ad77cc770b59b335d0856e5d65019",
+      "integration_tests": [
+        "tests/test_blackboard.py",
+        "tests/test_blackboard_inputs_use_the_journal_contract.py",
+        "tests/test_blackboard_release_retry.py",
+        "tests/test_security_invariants.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/runtime_roots.py",
+      "names": [
+        "projects_dir",
+        "state_root",
+        "vault_root"
+      ],
+      "contract_sha256": "09c4b547a1990d7ce8824ed10a7e58b7851fb9473820397a142e762c214e52a3",
+      "integration_tests": [
+        "tests/test_a_continuation_keeps_its_original_entry.py",
+        "tests/test_a_prompt_checkpoint_does_not_outwait_its_host.py",
+        "tests/test_a_session_marker_survives_a_busy_writer.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/sqlite_transactions.py",
+      "names": [
+        "begin_immediate"
+      ],
+      "contract_sha256": "fb9ecde177ce133dd8e6e34a67214ca0c051a02d758e8611dac84b568d955373",
+      "integration_tests": [
+        "tests/test_blackboard.py",
+        "tests/test_blackboard_inputs_use_the_journal_contract.py",
+        "tests/test_blackboard_release_retry.py",
+        "tests/test_security_invariants.py"
+      ]
+    },
+    {
+      "provider": "scripts/markdown_transaction.py",
+      "names": [
+        "COORDINATOR_V3_SCHEMA_SHA256",
+        "MarkdownChange",
+        "MarkdownCoordinator",
+        "active_markdown_coordinator",
+        "append_knowledge",
+        "initialize_coordinator_v3_candidate",
+        "validate_coordinator_v3_database"
+      ],
+      "contract_sha256": "02267c59a1038f6abc64497d19322b73ef1630ea8335c369bb304048244e85fa",
+      "integration_tests": [
+        "tests/test_security_invariants.py"
+      ]
+    },
+    {
+      "provider": "scripts/queue_core.py",
+      "names": [
+        "QUEUE_V3_SCHEMA_SHA256",
+        "harden_owner_only",
+        "initialize_queue_v3_candidate",
+        "validate_queue_v3_database"
+      ],
+      "contract_sha256": "66c9235a0ce0f6ddda3e804b17690f77bdad6d41070a570ab6dfd8efaaf8717a",
+      "integration_tests": [
+        "tests/test_blackboard.py",
+        "tests/test_blackboard_inputs_use_the_journal_contract.py",
+        "tests/test_blackboard_release_retry.py",
+        "tests/test_security_invariants.py"
+      ]
+    },
+    {
+      "provider": "scripts/rebuild_memory_index.py",
+      "names": [
+        "is_retired_page"
+      ],
+      "contract_sha256": "f2fc00afc13a19922ea0d31296c7c5a919071bb5da2f306d72ea8623ce70a18e",
+      "integration_tests": [
+        "tests/test_security_invariants.py"
+      ]
+    },
+    {
+      "provider": "scripts/reliable_memory.py",
+      "names": [
+        "canonical_json_bytes",
+        "capture_runtime_file_identity",
+        "sha256_bytes",
+        "validate_state_root"
+      ],
+      "contract_sha256": "f3f750c31251ccb4ad9ec08857d94fb52c89bf906ed0ca7358102fc80d957a33",
+      "integration_tests": [
+        "tests/test_blackboard.py",
+        "tests/test_blackboard_inputs_use_the_journal_contract.py",
+        "tests/test_blackboard_release_retry.py",
+        "tests/test_security_invariants.py"
+      ]
+    },
+    {
+      "provider": "scripts/repository_scope.py",
+      "names": [
+        "sanitized_git_environment"
+      ],
+      "contract_sha256": "fd550ae20761afad50b37fa3a71044a162485b0e4d4b3e2af9b5b22e143c2bec",
+      "integration_tests": [
+        "tests/test_blackboard.py",
+        "tests/test_blackboard_inputs_use_the_journal_contract.py",
+        "tests/test_blackboard_release_retry.py",
+        "tests/test_security_invariants.py"
+      ]
+    },
+    {
+      "provider": "scripts/secret_redact.py",
+      "names": [
+        "redact_structure"
+      ],
+      "contract_sha256": "99f834813f94cd91a34f4b0cb1e51e0709d4d8f9ad7b6b523ce1333b7b3e78ee",
+      "integration_tests": [
+        "tests/test_blackboard.py",
+        "tests/test_blackboard_inputs_use_the_journal_contract.py",
+        "tests/test_blackboard_release_retry.py",
+        "tests/test_security_invariants.py"
+      ]
+    }
+  ]
+}

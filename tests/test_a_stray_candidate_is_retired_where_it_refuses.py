@@ -12,7 +12,7 @@ from __future__ import annotations
 import os
 import stat
 import sys
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -22,33 +22,34 @@ if str(SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_DIR))
 
 import markdown_transaction  # noqa: E402
-import memory_queue  # noqa: E402
 import operational_ownership  # noqa: E402
-from installed_memory_repair import (  # noqa: E402
+import queue_core  # noqa: E402
+from llm_wiki import markdown_store  # noqa: E402
+from llm_wiki.adoption_admission import (  # noqa: E402
     ReliabilityV3ValidationError,
     require_reliability_v3_adopted,
     retire_stray_candidates,
 )
 
-from tests.test_a_stray_candidate_after_adoption import _adopted_vault, _stray  # noqa: E402
+from tests.a_stray_candidate_after_adoption_helpers import _adopted_vault, _stray  # noqa: E402
 
 QUEUE_CANDIDATE = "run/queue-v3.candidate.sqlite3"
 
 
 def _queue_stray(state_root: Path) -> Path:
     candidate = state_root / QUEUE_CANDIDATE
-    memory_queue.initialize_queue_v3_candidate(candidate, source_v2=None)
+    queue_core.initialize_queue_v3_candidate(candidate, source_v2=None)
     return candidate
 
 
 def _now() -> datetime:
-    return datetime.now(timezone.utc)
+    return datetime.now(UTC)
 
 
 def test_a_writer_retires_an_empty_coordinator_stray_and_is_admitted(tmp_path: Path) -> None:
     root, state_root, _home = _adopted_vault(tmp_path)
     candidate = _stray(state_root)
-    markdown_transaction._ADOPTION_VALIDATION_CACHE.clear()
+    markdown_store.ADOPTION_VALIDATION_CACHE.clear()
 
     coordinator = markdown_transaction.active_markdown_coordinator(root, state_root)
 
@@ -69,7 +70,7 @@ def test_an_empty_queue_stray_is_retired_into_the_queue_quarantine(tmp_path: Pat
 def test_a_queue_stray_holding_a_task_is_kept_and_still_refuses(tmp_path: Path) -> None:
     root, state_root, _home = _adopted_vault(tmp_path)
     candidate = _queue_stray(state_root)
-    memory_queue._QueueV3CandidateReader(candidate).enqueue("flush", 1, {"n": 1})
+    queue_core.QueueV3CandidateReader(candidate).enqueue("flush", 1, {"n": 1})
 
     outcome = retire_stray_candidates(state_root, _now())
 

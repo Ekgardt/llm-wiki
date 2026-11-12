@@ -19,7 +19,7 @@ def _model_facing_bytes(tool) -> int:
 
 
 def test_the_model_facing_tool_list_stays_within_its_budget() -> None:
-    tools = mcp_server._build_tool_definitions()
+    tools = mcp_server.build_tool_definitions()
 
-    assert len(tools) == len(mcp_server._TOOL_HANDLERS) + 1  # doctor has its own handler
+    assert len(tools) == len(mcp_server.TOOL_HANDLERS) + 1  # doctor has its own handler
     assert sum(map(_model_facing_bytes, tools)) <= MODEL_FACING_BUDGET_BYTES

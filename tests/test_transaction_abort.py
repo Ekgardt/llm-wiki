@@ -12,55 +12,9 @@ if str(SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_DIR))
 
 import markdown_transaction  # noqa: E402
-import memory_queue  # noqa: E402
-import operational_ownership  # noqa: E402
-from markdown_transaction import MarkdownChange  # noqa: E402
 from reliable_memory import sha256_bytes, validate_schema  # noqa: E402
 
-
-def _abort_fixture(tmp_path: Path):
-    notes = tmp_path / "knowledge" / "notes"
-    notes.mkdir(parents=True)
-    (notes / "replace.md").write_bytes(b"replace-before")
-    (notes / "delete.md").write_bytes(b"delete-before")
-    candidate = tmp_path / "run" / "markdown-transactions-v3.candidate.sqlite3"
-    markdown_transaction.initialize_coordinator_v3_candidate(candidate, source_v2=None)
-    coordinator = markdown_transaction.MarkdownCoordinator._from_v3_candidate(
-        candidate, state_root=tmp_path
-    )
-    registry = operational_ownership.OwnershipRegistry(tmp_path)
-    intent_id = "f" * 64
-    owner = registry.acquire(
-        "repair", scope="repair:transaction-abort", actor_id="abort-repair"
-    )
-    fence = coordinator.acquire_intent_fence(intent_id, mode="operator", owner=owner)
-    binding = memory_queue.CaptureTaskBinding(
-        task_id="abort-task",
-        intent_id=intent_id,
-        intent_sha256="1" * 64,
-        handler_version=1,
-        active_digest="2" * 64,
-        seal_digest="3" * 64,
-    )
-    coordinator.project_capture_binding(binding, intent_fence=fence)
-    record = coordinator.prepare(
-        [
-            MarkdownChange.create("knowledge/notes/create.md", b"create-after"),
-            MarkdownChange.replace("knowledge/notes/replace.md", b"replace-after"),
-            MarkdownChange.delete("knowledge/notes/delete.md"),
-        ],
-        operation_id="abort-mixed-fixture",
-    )
-    plan = coordinator._load_verified_plan(record)
-    rows = coordinator._operation_rows(record.id)
-    with coordinator.writer_gate():
-        for row, operation_plan in zip(rows, plan["operations"], strict=True):
-            coordinator._mutate_and_mark(record.id, row, operation_plan)
-    with coordinator._connect() as database:
-        database.execute(
-            'UPDATE "transaction" SET state="applying" WHERE id=?', (record.id,)
-        )
-    return coordinator, registry, owner, fence, binding, record
+from tests.transaction_abort_helpers import _abort_fixture  # noqa: E402
 
 
 def test_abort_restores_mixed_before_images_and_publishes_exact_receipt(
@@ -152,7 +106,7 @@ def test_recovery_of_aborting_transaction_is_rollback_only(tmp_path: Path) -> No
             actor_identity="posix-uid:1000",
         )
 
-    recovered = markdown_transaction.MarkdownCoordinator._from_v3_candidate(
+    recovered = markdown_transaction.MarkdownCoordinator.from_v3_candidate(
         coordinator.database_path, state_root=tmp_path
     ).recover()
 
@@ -175,7 +129,7 @@ def test_recovery_flags_aborted_transaction_with_missing_receipt(tmp_path: Path)
     )
     (tmp_path / receipt.receipt_path).unlink()
 
-    recovered = markdown_transaction.MarkdownCoordinator._from_v3_candidate(
+    recovered = markdown_transaction.MarkdownCoordinator.from_v3_candidate(
         coordinator.database_path, state_root=tmp_path
     ).recover()
 

@@ -1,0 +1,210 @@
+{
+  "encoding": "o200k_base",
+  "max_tokens": 100000,
+  "serialization": "exact-duplicates/v1",
+  "files": [
+    "AGENTS.md",
+    "CLAUDE.md",
+    "docs/AGENTS.md",
+    "docs/STRUCTURE.md",
+    "docs/modules/breadcrumb-adoption-helpers.md",
+    "docs/modules/breadcrumb-storage.md",
+    "docs/modules/capture-adoption-tests-the-nightly-finishes-what-a-publisher-left-half-way-helpers.md",
+    "docs/modules/context-bundle.md",
+    "docs/modules/context-records.md",
+    "docs/modules/context-tooling.md",
+    "docs/modules/markdown-transaction-tests-queue-v3-capture-links-helpers.md",
+    "docs/modules/model-choice.md",
+    "docs/modules/product-structure.md",
+    "docs/modules/project-checkpoint-tests-adopted-capture-vault.md",
+    "docs/modules/project-governance.md",
+    "docs/modules/reliable-memory-tests-capture-intent-adoption-helpers.md",
+    "docs/modules/test-breadcrumb-adoption-context.json",
+    "docs/modules/test-breadcrumb-adoption.md",
+    "docs/modules/test-support.md",
+    "rules/development-laws.md",
+    "scripts/__init__.py",
+    "scripts/llm_wiki/__init__.py",
+    "scripts/llm_wiki/context_bundle.py",
+    "tests/__init__.py",
+    "tests/adopted_capture_vault.py",
+    "tests/breadcrumb_adoption_helpers.py",
+    "tests/breadcrumb_storage_helpers.py",
+    "tests/capture_intent_adoption_helpers.py",
+    "tests/conftest.py",
+    "tests/module_context.py",
+    "tests/module_context_paths.py",
+    "tests/module_interface.py",
+    "tests/module_interface_render.py",
+    "tests/module_qualification.py",
+    "tests/module_record_context.py",
+    "tests/module_records.py",
+    "tests/queue_v3_capture_links_helpers.py",
+    "tests/shared_fixtures.py",
+    "tests/slow_machine.py",
+    "tests/test_breadcrumb_adoption.py",
+    "tests/the_nightly_finishes_what_a_publisher_left_half_way_helpers.py"
+  ],
+  "ownership": {
+    "files": [
+      "docs/modules/test-breadcrumb-adoption-context.json",
+      "docs/modules/test-breadcrumb-adoption.md",
+      "tests/test_breadcrumb_adoption.py"
+    ]
+  },
+  "qualified_dependencies": [
+    {
+      "provider": "scripts/breadcrumb_bundle.py",
+      "names": [
+        "load_bundle",
+        "part_path",
+        "stored_manifest"
+      ],
+      "contract_sha256": "da89d4a7e2fa3ed3c9a40b516b9e620e0e04cb1dc89d9a27f95f35dba189b41d",
+      "integration_tests": [
+        "tests/test_breadcrumb_adoption.py"
+      ]
+    },
+    {
+      "provider": "scripts/breadcrumb_storage.py",
+      "names": [
+        "protocol",
+        "publish_breadcrumb",
+        "recover_pending",
+        "store_manifest"
+      ],
+      "contract_sha256": "0657b88f96acb4cf477c1cbdfd2ecba74a665a84abb6beb748dd8758114154a4",
+      "integration_tests": [
+        "tests/test_breadcrumb_adoption.py"
+      ]
+    },
+    {
+      "provider": "scripts/capture_adoption.py",
+      "names": [
+        "adopt_in_active_vault",
+        "adopt_orphaned_capture_intents",
+        "complete_pending_capture_intents",
+        "report"
+      ],
+      "contract_sha256": "27116d490db1b398f892edd6bd987b8296dbbd950ba66be7adba71a45b7c0d32",
+      "integration_tests": [
+        "tests/test_a_failed_capture_fence_release_retains_its_owner.py",
+        "tests/test_a_pending_snapshot_survives_publication.py",
+        "tests/test_both_recovery_passes_look_past_a_bad_head.py"
+      ]
+    },
+    {
+      "provider": "scripts/capture_publication.py",
+      "names": [
+        "ensure_capture_intent_directories"
+      ],
+      "contract_sha256": "fd30056be0647a3f338d0e141aec0d224a3b0dd3064787af657a649da4de24cf",
+      "integration_tests": [
+        "tests/test_breadcrumb_adoption.py"
+      ]
+    },
+    {
+      "provider": "scripts/flush_memory.py",
+      "names": [
+        "adopt_orphaned_intents"
+      ],
+      "contract_sha256": "5a02fa9f0625de2ab03f254ad0b7646862908dc27ea9db437da86e2dfa39bbeb",
+      "integration_tests": [
+        "tests/test_breadcrumb_adoption.py"
+      ]
+    },
+    {
+      "provider": "scripts/installed_memory_repair.py",
+      "names": [
+        "repair_installed_vault"
+      ],
+      "contract_sha256": "6ab4497d3ed56413bc24ea5ae9e993acf118980056b046072877a80df4f52a18",
+      "integration_tests": [
+        "tests/test_breadcrumb_adoption.py"
+      ]
+    },
+    {
+      "provider": "scripts/integration_adapter.py",
+      "names": [
+        "encoded_capture_record"
+      ],
+      "contract_sha256": "c1c73b27401a0eeada333af83348785cd87fa68f98653a85a69f8e83e1d64a31",
+      "integration_tests": [
+        "tests/test_a_capture_that_fails_says_so.py",
+        "tests/test_a_checkpoint_records_what_was_done.py",
+        "tests/test_a_claude_prompt_takes_the_ingest_path.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/generation_catalog_store.py",
+      "names": [
+        "GenerationCatalog"
+      ],
+      "contract_sha256": "b18194ebe04bf988b4474379fcb5243516550d43b745a00eaed1453f7844c983",
+      "integration_tests": [
+        "tests/test_a_blocked_task_has_a_way_back.py",
+        "tests/test_a_build_in_flight_is_not_an_orphan.py",
+        "tests/test_a_capacity_refusal_does_not_corrupt_a_generation.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/model_choice.py",
+      "names": [
+        "using_root"
+      ],
+      "contract_sha256": "d45f2655cb61963e77617d1dfd7d617b134ad77cc770b59b335d0856e5d65019",
+      "integration_tests": [
+        "tests/test_breadcrumb_adoption.py"
+      ]
+    },
+    {
+      "provider": "scripts/markdown_transaction.py",
+      "names": [
+        "MarkdownCoordinator",
+        "active_markdown_coordinator",
+        "initialize_coordinator_v3_candidate"
+      ],
+      "contract_sha256": "6cfad5e4cc382b81261d28dd7d6893e666519b8f3404651dc8ad935f7189151b",
+      "integration_tests": [
+        "tests/test_a_backup_image_carries_what_git_does_not.py",
+        "tests/test_a_backup_snapshots_what_hooks_write.py",
+        "tests/test_a_backup_takes_what_any_installed_vault_holds.py"
+      ]
+    },
+    {
+      "provider": "scripts/queue_core.py",
+      "names": [
+        "MemoryQueue",
+        "active_memory_queue",
+        "initialize_queue_v3_candidate"
+      ],
+      "contract_sha256": "a3a735c1dffaab034f9ed706f2eb2a2eb66ebfb3c245f38543e2cc70e8c82910",
+      "integration_tests": [
+        "tests/test_breadcrumb_adoption.py"
+      ]
+    },
+    {
+      "provider": "scripts/reliable_memory.py",
+      "names": [
+        "canonical_json_bytes",
+        "publish_runtime_file",
+        "sha256_bytes",
+        "validate_state_root"
+      ],
+      "contract_sha256": "4deea09f4b4d36820d5c04b26b23da117c7a2fa4dd444496bfe561f4bb814ca1",
+      "integration_tests": [
+        "tests/test_breadcrumb_adoption.py"
+      ]
+    },
+    {
+      "provider": "scripts/repository_scope.py",
+      "names": [
+        "sanitized_git_environment"
+      ],
+      "contract_sha256": "fd550ae20761afad50b37fa3a71044a162485b0e4d4b3e2af9b5b22e143c2bec",
+      "integration_tests": [
+        "tests/test_breadcrumb_adoption.py"
+      ]
+    }
+  ]
+}

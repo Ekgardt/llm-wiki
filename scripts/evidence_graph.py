@@ -24,14 +24,16 @@ from graph_storable import (  # noqa: F401 - the writer's rules, shared with its
     storable_metadata,
 )
 from graph_storable import valid_graph_text as _valid_text
-from reliable_memory import canonical_json_bytes, validate_runtime_file
+from llm_wiki import evidence_graph_limits
+from llm_wiki.formats.canonical import canonical_json_bytes
+from reliable_memory import validate_runtime_file
 from repository_scope import RepositoryScope
 
 GRAPH_SCHEMA_VERSION = "evidence-graph/v2"
 
 
 @unique
-class GraphSchema(str, Enum):
+class GraphSchema(str, Enum):  # noqa: UP042 - preserve existing Enum string and format behavior
     """The one published generation schema.
 
     `evidence-graph/v3` -- the analyzer-run, claim and slice tables of the
@@ -71,9 +73,6 @@ MAX_NODE_FILTER = 512
 # aggregate refuses by name through the same `limit + 1` fetch; it is never
 # silently truncated.
 MAX_AGGREGATE_ROWS = 200_000
-# Bounded caller-supplied name-prefix exclusions for `nodes_without_edges` (untrusted
-# input); more are refused. Basis unknown: value predates measurement.
-MAX_NAME_PREFIX_FILTER = 32
 # Units of traversal work one walk may spend before it is refused by name, never
 # truncated. Basis unknown: value predates measurement.
 MAX_WORK = 100_000
@@ -81,10 +80,6 @@ MAX_WORK = 100_000
 # (sqlite3_progress_handler); 1 000 checks the deadline often enough to stop a build
 # within milliseconds while costing nothing measurable.
 PROGRESS_OPCODES = 1000
-# Rows one generation build validates per table, refused past it (a runaway build).
-# This repository's generation held about 38 000 CALLS assertions (2026-08-29), so a
-# million is over 25 times a real repository.
-MAX_VALIDATION_ROWS = 1_000_000
 # A generation's source manifest read back (also by generation_catalog and
 # mcp_server): the installed vault's was 446 809 bytes on 2026-09-27, so 256 MiB is a
 # guard; a larger one is refused.
@@ -520,7 +515,7 @@ def _ordered_stopped(
     for record in records:
         _check_build_stop(deadline, cancelled, monotonic)
         values.append(record)
-        if len(values) > MAX_VALIDATION_ROWS:
+        if len(values) > evidence_graph_limits.MAX_VALIDATION_ROWS:
             raise ValueError(f"{label} row ceiling exceeded")
     _check_build_stop(deadline, cancelled, monotonic)
     return sorted(values, key=lambda record: str(record.get(key, "")))
@@ -533,6 +528,14 @@ def _configure_write(database: sqlite3.Connection) -> None:
     database.execute("PRAGMA synchronous=FULL")
     database.execute("PRAGMA foreign_keys=ON")
     database.execute("PRAGMA trusted_schema=OFF")
+
+
+def _configure_generation_page_size(database: sqlite3.Connection, page_size: int) -> None:
+    if type(page_size) is not int:
+        raise TypeError("Evidence Graph page size must be an integer")
+    database.execute(f"PRAGMA page_size={page_size}")
+    if database.execute("PRAGMA page_size").fetchone()[0] != page_size:
+        raise ValueError("Evidence Graph page size is unsupported by SQLite")
 
 
 def _require_regular_parent(path: Path) -> None:
@@ -1003,9 +1006,11 @@ def _built_generation_database(
     deadline: float | None,
     cancelled: Callable[[], bool] | None,
     monotonic: Callable[[], float],
+    page_size: int = 4096,
 ) -> None:
     database = sqlite3.connect(temporary)
     try:
+        _configure_generation_page_size(database, page_size)
         _configure_write(database)
         database.set_progress_handler(
             _build_progress_handler(deadline, cancelled, monotonic),
@@ -1080,6 +1085,7 @@ def create_generation_database(
     deadline: float | None = None,
     cancelled: Callable[[], bool] | None = None,
     monotonic: Callable[[], float] = time.monotonic,
+    page_size: int = 4096,
 ) -> GraphSchema:
     """Create one immutable database using only the explicitly selected schema."""
     if not isinstance(schema, GraphSchema):
@@ -1100,7 +1106,7 @@ def create_generation_database(
             monotonic,
         )
         _built_generation_database(
-            temporary, schema, normalized, deadline, cancelled, monotonic
+            temporary, schema, normalized, deadline, cancelled, monotonic, page_size=page_size
         )
         _published_database(temporary, path, schema, deadline, cancelled, monotonic)
         return schema
@@ -1516,9 +1522,9 @@ def _require_row_ceilings(
         _check_build_stop(deadline, cancelled, monotonic)
         count = database.execute(
             f"SELECT COUNT(*) FROM (SELECT 1 FROM {table} LIMIT ?)",
-            (MAX_VALIDATION_ROWS + 1,),
+            (evidence_graph_limits.MAX_VALIDATION_ROWS + 1,),
         ).fetchone()[0]
-        if count > MAX_VALIDATION_ROWS:
+        if count > evidence_graph_limits.MAX_VALIDATION_ROWS:
             raise ValueError(f"Evidence Graph {table} row ceiling exceeded")
 
 
@@ -1547,7 +1553,7 @@ def _raise_validation_error(
     raise ValueError(message) from exc
 
 
-def _validate_connection(
+def validate_connection(
     database: sqlite3.Connection,
     *,
     schema: GraphSchema = GraphSchema.V2,
@@ -1640,9 +1646,9 @@ def _stored_shared_source_membership(
         rows = database.execute(
             "SELECT source_id, relative_path, sha256 FROM source "
             "ORDER BY relative_path, source_id LIMIT ?",
-            (MAX_VALIDATION_ROWS + 1,),
+            (evidence_graph_limits.MAX_VALIDATION_ROWS + 1,),
         ).fetchall()
-        if len(rows) > MAX_VALIDATION_ROWS:
+        if len(rows) > evidence_graph_limits.MAX_VALIDATION_ROWS:
             raise ValueError("Evidence Graph source row ceiling exceeded")
         _check_build_stop(deadline, cancelled, monotonic)
         return [
@@ -1683,7 +1689,7 @@ def validate_generation_database(
         database.row_factory = sqlite3.Row
         database.execute("PRAGMA query_only=ON")
         database.execute("PRAGMA trusted_schema=OFF")
-        _validate_connection(
+        validate_connection(
             database,
             schema=schema,
             deadline=deadline,
@@ -1700,7 +1706,7 @@ def validate_generation_database(
 # same verdict — and re-deciding it cost about twenty seconds per read of a
 # 146 MB artifact, four times per search. Everything that consults the live
 # corpus stays outside this and still runs every time.
-_FORMAT_VALIDATED: set[str] = set()
+FORMAT_VALIDATED: set[str] = set()
 
 
 def _evidence_artifact_digest(manifest: Mapping[str, object]) -> str | None:
@@ -1825,28 +1831,28 @@ def _artifact_format_known(
     """
     prefix = f"{digest}|{schema.value}|"
     stored = [] if receipt is None else _stored_format_receipts(receipt)
-    return any(item.startswith(prefix) for item in [*_FORMAT_VALIDATED, *stored])
+    return any(item.startswith(prefix) for item in [*FORMAT_VALIDATED, *stored])
 
 
 def _remember_artifact_format(
     digest: str, schema: GraphSchema, receipt: Path | None
 ) -> None:
     key = f"{digest}|{schema.value}|artifact-only"
-    _FORMAT_VALIDATED.add(key)
+    FORMAT_VALIDATED.add(key)
     if receipt is not None:
         _remember_format_receipt(receipt, key)
 
 
 def _known_format_key(key: str | None, receipt: Path) -> bool:
-    if key is None or key in _FORMAT_VALIDATED:
+    if key is None or key in FORMAT_VALIDATED:
         return key is not None
     if key in _stored_format_receipts(receipt):
-        _FORMAT_VALIDATED.add(key)
+        FORMAT_VALIDATED.add(key)
         return True
     return False
 
 
-def _validate_connection_once(
+def validate_connection_once(
     database: sqlite3.Connection,
     manifest: Mapping[str, object],
     generation_path: Path,
@@ -1861,7 +1867,7 @@ def _validate_connection_once(
     receipt = _format_receipt_path(generation_path)
     if _known_format_key(key, receipt):
         return
-    _validate_connection(
+    validate_connection(
         database,
         schema=schema,
         deadline=deadline,
@@ -1869,7 +1875,7 @@ def _validate_connection_once(
         cancelled=cancelled,
     )
     if key is not None:
-        _FORMAT_VALIDATED.add(key)
+        FORMAT_VALIDATED.add(key)
         _remember_format_receipt(receipt, key)
 
 
@@ -2034,7 +2040,7 @@ def _validated_graph_database(
         database.row_factory = sqlite3.Row
         database.execute("PRAGMA query_only=ON")
         database.execute("PRAGMA trusted_schema=OFF")
-        _validate_connection_once(
+        validate_connection_once(
             database,
             manifest,
             Path(generation_path),
@@ -2160,7 +2166,7 @@ def _without_edges_query(
     _kind_clause(kinds, clauses, parameters)
     _metadata_clause(name, "name", 1024, clauses, parameters)
     where = " WHERE " + " AND ".join(clauses) if clauses else " WHERE 1"
-    where += _name_prefix_exclusions(exclude_name_prefixes, parameters)
+    where += name_prefix_exclusions(exclude_name_prefixes, parameters)
     where += _without_edge_clause("target_node_id", incoming_edge_types, parameters)
     where += _without_edge_clause("source_node_id", outgoing_edge_types, parameters)
     sql = (
@@ -2217,14 +2223,14 @@ def _like_piece(character: str) -> str:
     return character
 
 
-def _like_escaped(value: str) -> str:
+def like_escaped(value: str) -> str:
     """The text as a literal LIKE operand: no glob translation, only escaping."""
     for character in (_LIKE_ESCAPE, "%", "_"):
         value = value.replace(character, _LIKE_ESCAPE + character)
     return value
 
 
-def _search_patterns(pattern: object) -> tuple[str, str, str]:
+def search_patterns(pattern: object) -> tuple[str, str, str]:
     """(match, exact, prefix) LIKE forms of one search pattern.
 
     Without a glob the pattern matches anywhere in the name; with one, the
@@ -2245,7 +2251,7 @@ def _path_prefix_clause(
         return
     prefix = _text(path_prefix, "path prefix", maximum=4096)
     clauses.append(f"json_extract(metadata_json, '$.path') LIKE ? ESCAPE '{_LIKE_ESCAPE}'")
-    parameters.append(f"{_like_escaped(prefix)}%")
+    parameters.append(f"{like_escaped(prefix)}%")
 
 
 # Degrees are grouped over the matched set and joined back, not asked per row
@@ -2378,11 +2384,6 @@ def _argument_binding_row(row: sqlite3.Row) -> dict[str, object]:
 def _validated_prefix_values(prefixes: object) -> tuple[str, ...]:
     if isinstance(prefixes, (str, bytes)) or not isinstance(prefixes, Sequence):
         raise ValueError("exclude_name_prefixes must be a bounded sequence")
-    if len(prefixes) > MAX_NAME_PREFIX_FILTER:
-        raise ValueError(
-            f"exclude_name_prefixes cannot contain more than "
-            f"{MAX_NAME_PREFIX_FILTER} values"
-        )
     return tuple(sorted({_text(value, "name prefix", maximum=256) for value in prefixes}))
 
 
@@ -2392,16 +2393,22 @@ def _like_prefix(value: str) -> str:
     return f"{escaped}%"
 
 
-def _name_prefix_exclusions(prefixes: Sequence[str], parameters: list[object]) -> str:
+def name_prefix_exclusions(prefixes: Sequence[str], parameters: list[object]) -> str:
     """Exclude nodes whose metadata name starts with a caller-supplied prefix.
 
     The prefixes are caller data, never store policy: `code_graph` owns the
     convention that a `test_` function is not a dead-code candidate.
     """
     values = _validated_prefix_values(prefixes)
-    parameters.extend(_like_prefix(value) for value in values)
-    clause = " AND json_extract(metadata_json, '$.name') NOT LIKE ? ESCAPE '\\'"
-    return clause * len(values)
+    if not values:
+        return ""
+    parameters.append(json.dumps([_like_prefix(value) for value in values]))
+    return (
+        " AND json_extract(metadata_json, '$.name') IS NOT NULL"
+        " AND NOT EXISTS (SELECT 1 FROM json_each(?) AS excluded_prefix"
+        " WHERE json_extract(metadata_json, '$.name') LIKE excluded_prefix.value"
+        " ESCAPE '\\')"
+    )
 
 
 def _without_edge_clause(
@@ -2506,7 +2513,7 @@ def _reason_filter(reason: str | None) -> tuple[str, tuple[object, ...]]:
     return " WHERE reason=?", (reason,)
 
 
-def _remembered_artifact_digest(cache, database_path: Path) -> str | None:
+def remembered_artifact_digest(cache, database_path: Path) -> str | None:
     """The digest the catalog verified for this exact file, or None."""
     try:
         metadata = database_path.stat()
@@ -2584,7 +2591,7 @@ class EvidenceGraph:
         """
         from verified_artifacts import VerifiedArtifacts
 
-        remembered = _remembered_artifact_digest(
+        remembered = remembered_artifact_digest(
             VerifiedArtifacts(self.state_root), self.database_path
         )
         if remembered is not None:
@@ -2613,7 +2620,7 @@ class EvidenceGraph:
         digest = self._artifact_digest(deadline, cancelled)
         if _artifact_format_known(digest, self.schema, receipt):
             return
-        _validate_connection(
+        validate_connection(
             database, schema=self.schema, deadline=deadline, cancelled=cancelled
         )
         _remember_artifact_format(digest, self.schema, receipt)
@@ -3742,7 +3749,7 @@ ORDER BY found.depth, found.assertion_ids LIMIT ?
         more than `MAX_SEARCH_MATCHES` names is refused by name rather than
         ranked, because ranking costs one degree count per match.
         """
-        match, exact, prefix = _search_patterns(pattern)
+        match, exact, prefix = search_patterns(pattern)
         clauses = [f"json_extract(metadata_json, '$.name') LIKE ? ESCAPE '{_LIKE_ESCAPE}'"]
         parameters: list[object] = [match]
         _kind_clause(kinds, clauses, parameters)

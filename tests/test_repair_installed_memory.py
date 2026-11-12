@@ -1,17 +1,15 @@
 from __future__ import annotations
 
 import json
-import os
-import subprocess
-import sys
 from pathlib import Path
 
 import markdown_transaction
-import memory_queue
 import pytest
+import queue_core
 import repair_installed_memory
 
-SCRIPT = Path(__file__).parents[1] / "scripts" / "repair_installed_memory.py"
+from tests.repair_installed_memory_helpers import SCRIPT, _run
+
 ADAPTER = SCRIPT.with_name("integration_adapter.py")
 
 
@@ -22,19 +20,6 @@ def _vault(tmp_path: Path) -> tuple[Path, Path]:
     (root / "scripts").mkdir()
     (root / "scripts/integration_adapter.py").write_bytes(ADAPTER.read_bytes())
     return root, state_root
-
-
-def _run(*arguments: str) -> subprocess.CompletedProcess[str]:
-    environment = os.environ.copy()
-    environment.pop("LLM_WIKI_ROOT", None)
-    environment.pop("LLM_WIKI_STATE_ROOT", None)
-    return subprocess.run(
-        [sys.executable, str(SCRIPT), *arguments],
-        check=False,
-        capture_output=True,
-        text=True,
-        env=environment,
-    )
 
 
 def test_default_mode_is_read_only_check(tmp_path: Path) -> None:
@@ -131,7 +116,7 @@ def test_complete_offline_gate_initializes_fresh_pair(
     assert json.loads((run / "markdown-transactions.sqlite3").read_bytes())[
         "source_state"
     ] == "fresh"
-    assert memory_queue.validate_queue_v3_database(
+    assert queue_core.validate_queue_v3_database(
         run / "queue-v3.sqlite3", state_root=state_root
     )["integrity_check"] == "ok"
     assert markdown_transaction.validate_coordinator_v3_database(
@@ -161,7 +146,7 @@ def test_cli_redacts_backend_exceptions(
     assert report == {
         "actions": [],
         "blockers": [{"code": "repair_backend_error"}],
-        "details": {},
+        "details": {"error": "RuntimeError: <path>"},
         "mode": "check",
         "overall_status": "error",
     }

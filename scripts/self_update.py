@@ -15,6 +15,7 @@ See knowledge/notes/automatic-code-update-decision.md.
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import re
 import subprocess
@@ -22,50 +23,42 @@ import sys
 from collections.abc import Sequence
 from pathlib import Path
 
-if sys.version_info >= (3, 11):
-    import tomllib
-else:  # pragma: no cover - 3.10 reads the same documents through tomli
-    import tomli as tomllib
-
+from llm_wiki.step_budgets import (
+    FETCH_TIMEOUT_SECONDS,
+    GIT_TIMEOUT_SECONDS,
+    PYTHON_PROBE_TIMEOUT_SECONDS,
+    SYNC_TIMEOUT_SECONDS,
+)
 from secret_redact import describe_error
 
-# One `git fetch` of the nightly update; the update's time limit counts one fetch. basis unknown — value predates measurement; review when fetches time out on a working network.
-FETCH_TIMEOUT_SECONDS = 120.0
-# One git call of the nightly update, which fetches over the network; the local-only git calls elsewhere allow 10-20 s.
-GIT_TIMEOUT_SECONDS = 60.0
-SYNC_TIMEOUT_SECONDS = 600.0
-# The project's baseline sync, as `sync_memory` runs it. Without `--inexact` an
-# exact sync removes every package the lock selection does not name: dry-run on
-# the live environment said "Would uninstall 93 packages", torch and the models
-# among them. See `docs/research/2026-09-14-an-update-that-keeps-what-is-installed.md`.
+# The update's sync, before the selection it names. It is exact: every extra and
+# group the vault has is named (`sync_selection`), so what the lock no longer names
+# is removed — 2.7 GB of CUDA wheels stayed behind on the owner's vault after torch
+# moved to its CPU build. Inexact was right while the update named no extra
+# (docs/research/2026-09-14-an-update-that-keeps-what-is-installed.md); see
+# docs/research/2026-09-29-a-sync-removes-what-the-lock-no-longer-names.md.
 BASELINE_SYNC_COMMAND = (
-    "uv", "sync", "--locked", "--inexact", "--no-default-groups", "--no-python-downloads", "--quiet",
+    "uv", "sync", "--locked", "--no-default-groups", "--no-python-downloads", "--quiet",
 )
 FETCH_DETAIL_CHARS = 300
 
-# What one update may cost the pass that calls it, by its own timeouts: one
-# fetch of the default branch, the baseline sync, and the sixteen ordinary git
-# calls of a full update — `rev-parse --abbrev-ref`, `config --get`,
-# `symbolic-ref`, `rev-parse FETCH_HEAD`, `rev-parse HEAD` twice,
-# `merge-base --is-ancestor` twice, five `diff`s, `hash-object`, `cat-file` and
-# the `merge`. The nightly counts this in its own bound instead of leaving the
-# step out of the sum; `tests/test_an_update_costs_what_it_says.py` runs a real
-# update and holds the counts to the code. Research:
-# docs/research/2026-09-18-a-pass-that-knows-how-long-it-can-be.md
-FETCHES_PER_UPDATE = 1
-GIT_CALLS_PER_UPDATE = 16
-WORST_CASE_SECONDS = (
-    FETCHES_PER_UPDATE * FETCH_TIMEOUT_SECONDS
-    + SYNC_TIMEOUT_SECONDS
-    + GIT_CALLS_PER_UPDATE * GIT_TIMEOUT_SECONDS
-)
+# The extras every install brings: all of them (`full` names semantic, hybrid,
+# code-graph, mcp-server and reranker), by the owner's requirement of 2026-09-29.
+# The models step fetches every pinned model whose runtime is present, so both the
+# e5 encoder and the reranker arrive; Linux takes torch's CPU build (pyproject.toml).
+# Language servers other than Pyright stay one explicit command per language.
+# `tests/test_the_installer_brings_the_runtime_of_every_model_it_fetches.py`
+# holds this to `install_models.pinned_models`; the nightly update keeps it
+# through `self_update.chosen_extras`.
+# See docs/research/2026-09-29-every-install-brings-every-component.md.
+DEFAULT_EXTRAS = ("full",)
 
 
 class SelfUpdateError(RuntimeError):
     """A git command failed in a way the caller must not paper over."""
 
 
-def _run(
+def run(
     command: Sequence[str], *, cwd: Path, timeout: float, stdin: str | None = None
 ) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
@@ -87,9 +80,9 @@ def _git_detail(completed: subprocess.CompletedProcess[str]) -> str:
     return said[-FETCH_DETAIL_CHARS:] or f"exit {completed.returncode}"
 
 
-def _git(root: Path, *arguments: str, stdin: str | None = None) -> str:
+def git(root: Path, *arguments: str, stdin: str | None = None) -> str:
     """One git call; a failure carries git's own words (audit 2026-09-26 A-9)."""
-    completed = _run(("git", *arguments), cwd=root, timeout=GIT_TIMEOUT_SECONDS, stdin=stdin)
+    completed = run(("git", *arguments), cwd=root, timeout=GIT_TIMEOUT_SECONDS, stdin=stdin)
     if completed.returncode != 0:
         raise SelfUpdateError(f"git {arguments[0]} failed: {_git_detail(completed)}")
     return completed.stdout.strip()
@@ -101,14 +94,14 @@ def _outcome(status: str, reason: str | None = None, **fields: object) -> dict:
 
 def _current_branch(root: Path) -> str | None:
     """The checked-out branch, or None on a detached head."""
-    branch = _git(root, "rev-parse", "--abbrev-ref", "HEAD")
+    branch = git(root, "rev-parse", "--abbrev-ref", "HEAD")
     if branch == "HEAD":
         return None
     return branch
 
 
 def _remote_for(root: Path, branch: str) -> str | None:
-    completed = _run(
+    completed = run(
         ("git", "config", "--get", f"branch.{branch}.remote"),
         cwd=root,
         timeout=GIT_TIMEOUT_SECONDS,
@@ -119,7 +112,7 @@ def _remote_for(root: Path, branch: str) -> str | None:
 
 
 def _is_ancestor(root: Path, ancestor: str, descendant: str) -> bool:
-    completed = _run(
+    completed = run(
         ("git", "merge-base", "--is-ancestor", ancestor, descendant),
         cwd=root,
         timeout=GIT_TIMEOUT_SECONDS,
@@ -129,7 +122,7 @@ def _is_ancestor(root: Path, ancestor: str, descendant: str) -> bool:
 
 def _diff_paths(root: Path, *arguments: str) -> set[str]:
     """`-z` output: no status column to slice past and no C-quoted names."""
-    output = _git(root, "diff", "--name-only", "-z", *arguments)
+    output = git(root, "diff", "--name-only", "-z", *arguments)
     return {item for item in output.split("\0") if item}
 
 
@@ -142,20 +135,26 @@ def _modified_paths(root: Path) -> set[str]:
     return _diff_paths(root) | _diff_paths(root, "--cached")
 
 
-def _sync_command(extras: Sequence[str]) -> tuple[str, ...]:
-    """The baseline sync plus every extra the operator chose, in one inexact call."""
-    chosen = tuple(argument for extra in extras for argument in ("--extra", extra))
-    return (*BASELINE_SYNC_COMMAND, *chosen)
+def selection_arguments(extras: Sequence[str], groups: Sequence[str] = ()) -> tuple[str, ...]:
+    """`--extra` for each extra and `--group` for each group, in that order."""
+    named = [("--extra", extra) for extra in extras] + [("--group", group) for group in groups]
+    return tuple(argument for pair in named for argument in pair)
 
 
-def _synced_dependencies(root: Path, extras: Sequence[str]) -> bool:
-    completed = _run(_sync_command(extras), cwd=root, timeout=SYNC_TIMEOUT_SECONDS)
+def sync_command(extras: Sequence[str], groups: Sequence[str] = ()) -> tuple[str, ...]:
+    """The exact sync of the baseline and every extra and group the vault has."""
+    return (*BASELINE_SYNC_COMMAND, *selection_arguments(extras, groups))
+
+
+def synced_dependencies(root: Path, extras: Sequence[str]) -> bool:
+    command = sync_command(extras, chosen_groups(root))
+    completed = run(command, cwd=root, timeout=SYNC_TIMEOUT_SECONDS)
     return completed.returncode == 0
 
 
-def _fetch_failure(root: Path, remote: str, branch: str) -> str | None:
+def fetch_failure(root: Path, remote: str, branch: str) -> str | None:
     """None when the fetch worked; otherwise what git said, redacted and bounded."""
-    completed = _run(
+    completed = run(
         ("git", "fetch", "--quiet", remote, branch),
         cwd=root,
         timeout=FETCH_TIMEOUT_SECONDS,
@@ -218,10 +217,40 @@ def _fast_forward(root: Path, head: str, fetched: str) -> dict | None:
     passed its checks as a merged pull request; see
     `docs/research/2026-09-14-an-update-only-to-what-main-holds.md`.
     """
-    blocked = _fast_forward_block(root, head, fetched)
+    blocked = _fast_forward_block(root, head, fetched) or _python_requirement_block(root, fetched)
     if blocked is not None:
         return blocked
     return _conflicting_paths(root, head, fetched)
+
+
+def _required_python(root: Path, fetched: str) -> str | None:
+    """The next commit's `requires-python`; a commit without one asks for nothing."""
+    command = ("git", "show", f"{fetched}:pyproject.toml")
+    shown = run(command, cwd=root, timeout=GIT_TIMEOUT_SECONDS)
+    if shown.returncode != 0:
+        return None
+    import tomllib
+
+    try:
+        return tomllib.loads(shown.stdout).get("project", {}).get("requires-python")
+    except ValueError as error:
+        raise SelfUpdateError(f"the fetched pyproject.toml is unreadable: {error}") from error
+
+
+def _python_requirement_block(root: Path, fetched: str) -> dict | None:
+    """Stay on working code when no interpreter here can run the next commit.
+
+    The sync comes after the merge and may not download an interpreter, so a commit
+    that moved past this machine's Python would land and could not start. See
+    `docs/research/2026-11-09-an-update-names-the-python-it-needs.md`.
+    """
+    required = _required_python(root, fetched)
+    if required is None:
+        return None
+    found = run(("uv", "python", "find", required), cwd=root, timeout=PYTHON_PROBE_TIMEOUT_SECONDS)
+    if found.returncode == 0:
+        return None
+    return _outcome("skipped", "python_requirement_unmet", required=required)
 
 
 def update_checkout(root: Path | str) -> dict:
@@ -240,7 +269,7 @@ def update_checkout(root: Path | str) -> dict:
 
 def _default_branch(root: Path, remote: str) -> str:
     """The remote's default branch as `refs/remotes/<remote>/HEAD` names it, else `main`."""
-    completed = _run(
+    completed = run(
         ("git", "symbolic-ref", "--short", f"refs/remotes/{remote}/HEAD"),
         cwd=root,
         timeout=GIT_TIMEOUT_SECONDS,
@@ -253,10 +282,10 @@ def _default_branch(root: Path, remote: str) -> str:
 
 def _fetched_tip(root: Path, remote: str, branch: str) -> str | dict:
     """The fetched commit of one remote branch, or the outcome that stops us."""
-    failure = _fetch_failure(root, remote, branch)
+    failure = fetch_failure(root, remote, branch)
     if failure is not None:
         return _outcome("skipped", "fetch_failed", detail=failure)
-    return _git(root, "rev-parse", "FETCH_HEAD")
+    return git(root, "rev-parse", "FETCH_HEAD")
 
 
 def _prepared_update(root: Path) -> tuple[str, str] | dict:
@@ -268,11 +297,11 @@ def _prepared_update(root: Path) -> tuple[str, str] | dict:
     fetched = _fetched_tip(root, remote, branch)
     if isinstance(fetched, dict):
         return fetched
-    return _git(root, "rev-parse", "HEAD"), fetched
+    return git(root, "rev-parse", "HEAD"), fetched
 
 
 def _dependency_state(root: Path, extras: Sequence[str]) -> str:
-    if _synced_dependencies(root, extras):
+    if synced_dependencies(root, extras):
         return "synced"
     return "stale"
 
@@ -285,7 +314,7 @@ def sync_dependencies(root: Path | str) -> str:
     (audit 2026-09-26 B-24).
     """
     root = Path(root)
-    return _dependency_state(root, chosen_extras(root))
+    return _dependency_state(root, update_extras(root))
 
 
 def canonical_name(name: str) -> str:
@@ -309,12 +338,18 @@ def _unconditional(requirement: str) -> bool:
     return "extra" not in requirement.partition(";")[2]
 
 
-def _installed_distributions() -> dict[str, set[str]]:
-    """Each installed distribution and the distributions it always requires."""
+def _distributions_under(site_paths: Sequence[str] | None):
     from importlib.metadata import distributions
 
+    if site_paths is None:
+        return distributions()
+    return distributions(path=list(site_paths))
+
+
+def installed_distributions(site_paths: Sequence[str] | None = None) -> dict[str, set[str]]:
+    """Each distribution installed here, or under `site_paths`, and what it always requires."""
     installed: dict[str, set[str]] = {}
-    for distribution in distributions():
+    for distribution in _distributions_under(site_paths):
         name = distribution.metadata["Name"]
         if name:
             requires = filter(_unconditional, distribution.requires or ())
@@ -335,12 +370,18 @@ def _chosen_by_itself(
     return bool((exclusive & installed.keys()) - pulled_in)
 
 
-def _project(root: Path) -> dict:
-    """The `[project]` table; a checkout without one declares no extras to keep."""
+def _pyproject(root: Path) -> dict:
+    """The whole `pyproject.toml`; a checkout without one declares nothing to keep."""
     path = root / "pyproject.toml"
     if not path.is_file():
         return {}
-    return tomllib.loads(path.read_text(encoding="utf-8")).get("project", {})
+    import tomllib
+    return tomllib.loads(path.read_text(encoding="utf-8"))
+
+
+def _project(root: Path) -> dict:
+    """The `[project]` table."""
+    return _pyproject(root).get("project", {})
 
 
 def _own_names(project: dict) -> dict[str, set[str]]:
@@ -360,15 +401,45 @@ def _exclusive_names(project: dict) -> dict[str, set[str]]:
     chosen by itself; its parts are.
     """
     base = {_requirement_name(value) for value in project.get("dependencies", [])}
-    own = _own_names(project)
+    return _exclusive(_own_names(project), base)
+
+
+def _exclusive(owned: dict[str, set[str]], shared: set[str]) -> dict[str, set[str]]:
+    """What each set names that no other set and nothing in `shared` names."""
     exclusive: dict[str, set[str]] = {}
-    for extra, names in own.items():
-        others = set().union(*(other for name, other in own.items() if name != extra))
-        exclusive[extra] = names - others - base
+    for key, names in owned.items():
+        others = set().union(*(other for name, other in owned.items() if name != key))
+        exclusive[key] = names - others - shared
     return exclusive
 
 
-def chosen_extras(root: Path) -> tuple[str, ...]:
+def _group_names(document: dict) -> dict[str, set[str]]:
+    """Each dependency group and the distributions it names (an include names none)."""
+    groups = document.get("dependency-groups", {})
+    return {
+        canonical_name(group): {_requirement_name(value) for value in values if isinstance(value, str)} - {""}
+        for group, values in groups.items()
+    }
+
+
+def chosen_groups(root: Path, installed: dict[str, set[str]] | None = None) -> tuple[str, ...]:
+    """The dependency groups the operator installed, found as chosen extras are.
+
+    A group is chosen when a distribution only it brings is installed and nothing
+    else pulled it in: `pytest` means `dev`. An exact sync that did not name it
+    would uninstall the operator's test tools.
+    """
+    document = _pyproject(root)
+    project = document.get("project", {})
+    groups = _group_names(document)
+    shared = {_requirement_name(value) for value in project.get("dependencies", [])}
+    shared |= set().union(*_own_names(project).values())
+    present = installed_distributions() if installed is None else installed
+    exclusive = _exclusive(groups, shared)
+    return tuple(sorted(group for group, names in exclusive.items() if _chosen_by_itself(names, groups[group], present)))
+
+
+def chosen_extras(root: Path, installed: dict[str, set[str]] | None = None) -> tuple[str, ...]:
     """The extras the operator chose: those with a distribution only they bring installed.
 
     Nothing records the choice, so the environment is the record. The update syncs
@@ -376,7 +447,7 @@ def chosen_extras(root: Path) -> tuple[str, ...]:
     code that needs it. See
     `docs/research/2026-09-25-an-update-brings-the-extras-the-operator-chose.md`.
     """
-    installed = _installed_distributions()
+    installed = installed_distributions() if installed is None else installed
     project = _project(root)
     own = _own_names(project)
     exclusive = _exclusive_names(project)
@@ -385,12 +456,48 @@ def chosen_extras(root: Path) -> tuple[str, ...]:
     )
 
 
+def update_extras(root: Path, installed: dict[str, set[str]] | None = None) -> tuple[str, ...]:
+    """What an update syncs: every extra an install brings, and any the operator added.
+
+    Syncing only what was installed kept a vault updated by the nightly alone on the
+    components of the release it was first installed from; the default set grows
+    with the product (docs/research/2026-09-29-every-install-brings-every-component.md).
+    """
+    return tuple(sorted(set(DEFAULT_EXTRAS) | set(chosen_extras(root, installed))))
+
+
+def sync_selection(root: Path, installed: dict[str, set[str]] | None = None) -> dict[str, list[str]]:
+    """What an exact sync of this vault must name: the extras and the groups.
+
+    One rule for the nightly update and the installer; the installer asks the
+    environment's own interpreter for its distribution inventory, because only
+    that one sees what is installed there.
+    """
+    extras, groups = update_extras(root, installed), chosen_groups(root, installed)
+    return {"extras": list(extras), "groups": list(groups), "arguments": list(selection_arguments(extras, groups))}
+
+
+def repair_environment(root: Path, site_paths: Sequence[str]) -> str | None:
+    """Move the environment onto the checkout's Python: None, or why it could not move.
+
+    Runs on a supported interpreter outside the environment, on behalf of the
+    `python_series` gate. `site_paths` is the old environment, read first, because
+    it is the only record of what the operator chose and the sync replaces it.
+    """
+    selection = sync_selection(root, installed_distributions(site_paths))
+    completed = run((*BASELINE_SYNC_COMMAND, *selection["arguments"]), cwd=root, timeout=SYNC_TIMEOUT_SECONDS)
+    if completed.returncode == 0:
+        return None
+    return _git_detail(completed)
+
+
 # What the installer renders owned resources from — units, plists, task settings,
 # agent hook blocks, the OpenCode plugin. A change here reaches an installed vault
 # only when the operator reruns the installer; a maintenance pass must not write
 # the operator's shell profile or agent configuration by itself.
 _OWNED_RESOURCE_SOURCES = (
     "scripts/install_control.py",
+    "scripts/llm_wiki/install_",
     "scripts/installer_config.py",
     "scripts/integration_hook_config.py",
     "scripts/install-scheduled-tasks.ps1",
@@ -413,7 +520,7 @@ def _present_additions(root: Path, head: str, fetched: str) -> list[str]:
 def _local_blobs(root: Path, paths: list[str]) -> list[str | None]:
     """Each path's blob id as `git add` would store it; a link or directory is None."""
     regular = [path for path in paths if _is_regular_file(root / path)]
-    ids = _git(root, "hash-object", "--stdin-paths", stdin="\n".join(regular) + "\n").splitlines()
+    ids = git(root, "hash-object", "--stdin-paths", stdin="\n".join(regular) + "\n").splitlines()
     known = dict(zip(regular, ids))
     return [known.get(path) for path in paths]
 
@@ -425,7 +532,7 @@ def _is_regular_file(path: Path) -> bool:
 def _fetched_blobs(root: Path, fetched: str, paths: list[str]) -> list[str]:
     """Each path's object id in the fetched commit, from one `cat-file --batch-check`."""
     requests = "".join(f"{fetched}:{path}\n" for path in paths)
-    lines = _git(root, "cat-file", "--batch-check=%(objectname)", stdin=requests).splitlines()
+    lines = git(root, "cat-file", "--batch-check=%(objectname)", stdin=requests).splitlines()
     return [line.strip() for line in lines]
 
 
@@ -468,7 +575,7 @@ def _put_back(root: Path, saved: dict[str, tuple[bytes, int]]) -> None:
 def _fast_forward_over(root: Path, fetched: str, copies: list[str]) -> None:
     saved = _set_aside(root, copies)
     try:
-        _git(root, "merge", "--ff-only", fetched)
+        git(root, "merge", "--ff-only", fetched)
     except BaseException:
         # A timeout or an OSError skipped the put-back too (audit 2026-09-27 C-13);
         # only a missing path is written, so a merge that got as far as the file
@@ -480,11 +587,11 @@ def _fast_forward_over(root: Path, fetched: str, copies: list[str]) -> None:
 def _merged_update(root: Path, head: str, fetched: str, copies: list[str]) -> dict:
     changed = _changed_paths(root, head, fetched)
     _fast_forward_over(root, fetched, copies)
-    extras = chosen_extras(root)
+    extras = update_extras(root)
     return _outcome(
         "updated",
         None,
-        commit=_git(root, "rev-parse", "HEAD"),
+        commit=git(root, "rev-parse", "HEAD"),
         previous=head,
         dependencies=_dependency_state(root, extras),
         extras=extras,
@@ -539,10 +646,35 @@ def update_target_note(root: Path | str) -> str:
     return f"nightly fast-forward of {branch}, the default branch of {remote}"
 
 
+def _repair_exit_code(root: Path, site_paths: Sequence[str]) -> int:
+    """0 when the environment moved; otherwise why not, on stderr, redacted."""
+    try:
+        failure = repair_environment(root, site_paths)
+    except (OSError, ValueError, subprocess.TimeoutExpired) as error:
+        failure = describe_error(error)
+    if failure is None:
+        return 0
+    print(failure, file=sys.stderr)
+    return 1
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Say what the nightly code update does with a checkout.")
-    parser.add_argument("--note", type=Path, required=True, metavar="ROOT", help="the checkout to describe")
+    chosen = parser.add_mutually_exclusive_group(required=True)
+    chosen.add_argument("--note", type=Path, metavar="ROOT", help="the checkout to describe")
+    chosen.add_argument(
+        "--selection", type=Path, metavar="ROOT", help="print the extras and groups an exact sync names, as JSON"
+    )
+    chosen.add_argument(
+        "--repair-environment", type=Path, metavar="ROOT", help="move the environment onto the checkout's Python"
+    )
+    parser.add_argument("--site", action="append", default=[], help="a site-packages directory of the old environment")
     args = parser.parse_args(argv)
+    if args.repair_environment is not None:
+        return _repair_exit_code(args.repair_environment, args.site)
+    if args.selection is not None:
+        print(json.dumps(sync_selection(args.selection), sort_keys=True))
+        return 0
     print(update_target_note(args.note))
     return 0
 

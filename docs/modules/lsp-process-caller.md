@@ -1,0 +1,6 @@
+# Caller-driven shutdown, restart and exit waits of an LSP child
+
+This module owns `scripts/llm_wiki/lsp_process_caller.py`, one part of the `scripts/lsp_process.py` facade.
+
+The owned files and the complete maintenance context are listed in the `-context.json`
+manifest next to this guide.

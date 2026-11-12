@@ -118,7 +118,7 @@ uv run --locked --no-sync python scripts/install_pyright.py --state-root "$LLM_W
 uv run --locked --no-sync python benchmark/run_code_navigation.py --fixture --correctness-only --require-gates
 ```
 
-Linux Python 3.10 additionally runs the fixed 100 KLOC qualification gate with
+Linux Python 3.14 additionally runs the fixed 100 KLOC qualification gate with
 `--qualification --require-gates`. Navigation changes must keep Windows, Linux, and
 macOS process-ownership claims platform-qualified.
 

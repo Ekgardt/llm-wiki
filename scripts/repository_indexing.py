@@ -1,0 +1,1335 @@
+"""Admit, index, inspect and refresh one repository checkout."""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import os
+import subprocess
+import sys
+import time
+from collections.abc import Callable, Iterable, Mapping
+from dataclasses import dataclass
+from pathlib import Path
+
+from llm_wiki import runtime_roots  # noqa: E402
+from llm_wiki.step_budgets import (
+    REFRESH_ALL_BUDGET_SECONDS,
+)
+from repository_refusal import SCHEMA_VERSION, RepositoryIndexRefused  # noqa: E402
+
+# A listing names repositories, not files. 128 is far above the number of
+# repositories one operator keeps on one machine; listing truncation is explicit.
+MAX_LISTED_REPOSITORIES = 128
+# Bounded path evidence in a change report. The counts are always exact; the
+# named paths are the first of each kind in sorted order.
+MAX_REPORTED_PATHS = 50
+# Same ceiling the vault's own maintenance build uses for its corpus.
+MAX_INDEXED_SOURCES = 20_000
+# `_policy` accepts at most 128 roots; a repository with more tracked top-level
+# directories than this is refused rather than silently narrowed.
+MAX_CODE_ROOTS = 128
+# The same 10 s bound repository_scope gives a git probe, whose comment records the
+# hang it was measured against.
+GIT_TIMEOUT_SECONDS = 10.0
+# `git ls-files -z` and probes, refused past it: this repository lists 2 094 files in
+# 107 385 bytes (about 51 per path, 2026-09-27), so 4 MiB holds MAX_INDEXED_SOURCES
+# paths at four times that length.
+MAX_GIT_OUTPUT_BYTES = 4 * 1024 * 1024
+
+
+def refuse(reason: str, message: str, **details: object) -> RepositoryIndexRefused:
+    return RepositoryIndexRefused(reason, message, **details)
+
+
+# --------------------------------------------------------------------------
+# state root and catalog
+# --------------------------------------------------------------------------
+
+
+def state_root_path(state_root: Path | str | None = None) -> Path:
+    """The vault's runtime root -- the only place this module ever writes."""
+    if state_root is not None:
+        return Path(state_root).resolve()
+    return runtime_roots.state_root()
+
+
+def open_catalog(state_root: Path, *, read_only: bool):
+    from llm_wiki.generation_catalog_store import GenerationCatalog
+
+    catalog_path = state_root / "cache" / "evidence-graph" / "catalog.sqlite3"
+    if read_only:
+        return _read_only_catalog(GenerationCatalog, state_root, catalog_path)
+    return GenerationCatalog(state_root, catalog_path=catalog_path)
+
+
+def _read_only_catalog(catalog_class, state_root: Path, catalog_path: Path):
+    """A listing must not create a catalog just by asking what is indexed."""
+    if not catalog_path.is_file():
+        return None
+    return catalog_class.open_existing_read_only(state_root, catalog_path=catalog_path)
+
+
+# --------------------------------------------------------------------------
+# admission: what this product will point itself at
+# --------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class Admission:
+    """A directory that passed every safety gate, with its resolved identity."""
+
+    root: Path
+    scope: object
+    ownership_checked: bool
+
+
+def _require_directory(directory: Path | str) -> Path:
+    candidate = Path(directory).expanduser()
+    if not candidate.is_absolute():
+        raise refuse(
+            "repository_path_not_absolute",
+            "repository path must be absolute",
+            directory=str(candidate),
+        )
+    if not candidate.is_dir():
+        raise refuse(
+            "repository_path_not_a_directory",
+            f"repository path is not an existing directory: {candidate}",
+            directory=str(candidate),
+        )
+    return candidate
+
+
+def _require_unsymlinked(candidate: Path) -> Path:
+    """A symlinked path is refused by name, and the real path is offered back.
+
+    Following it silently would index one repository under another's identity:
+    `repository_id` is derived from the canonical path, so the operator would
+    get answers filed under a name they never asked for.
+    """
+    real = Path(os.path.realpath(candidate))
+    if real != candidate:
+        raise refuse(
+            "repository_path_is_symlinked",
+            f"repository path resolves elsewhere; pass the real path: {real}",
+            directory=str(candidate),
+            real_path=str(real),
+        )
+    return real
+
+
+def _require_owned_by_caller(root: Path) -> bool:
+    """True when ownership was checked and held; False when the platform cannot.
+
+    There is no privilege boundary in a local-first single-operator product, so
+    ownership is the only boundary available. On a platform where `st_uid` means
+    nothing the receipt says the check was not performed rather than claiming it
+    passed.
+    """
+    if os.name != "posix" or not hasattr(os, "geteuid"):
+        return False
+    if root.stat().st_uid != os.geteuid():
+        raise refuse(
+            "repository_not_owned_by_caller",
+            f"repository is owned by another user: {root}",
+            directory=str(root),
+        )
+    return True
+
+
+def _git_completed(root: Path, arguments: tuple[str, ...], timeout: float):
+    """The finished Git process, or a named refusal when it outlived its bound.
+
+    `subprocess.TimeoutExpired` is not a `TimeoutError`, so no caller's deferral
+    caught it and one slow checkout ended the whole pass. See
+    `docs/research/2026-09-17-one-checkout-does-not-end-the-pass.md`.
+    """
+    from repository_scope import GIT_NO_CONFIG_COMMANDS, sanitized_git_environment
+
+    try:
+        return subprocess.run(  # noqa: S603 - fixed argv, no shell
+            ["git", *GIT_NO_CONFIG_COMMANDS, "-C", str(root), *arguments],
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            shell=False,
+            env=sanitized_git_environment(),
+            timeout=timeout,
+            check=False,
+        )
+    except subprocess.TimeoutExpired as error:
+        raise refuse(
+            "repository_git_probe_timed_out",
+            f"git {arguments[0]} did not finish in {timeout} seconds",
+            directory=str(root),
+        ) from error
+
+
+def git_text(root: Path, *arguments: str, timeout: float = GIT_TIMEOUT_SECONDS) -> str:
+    """One bounded, non-interactive Git read inside `root`. Never writes."""
+    completed = _git_completed(root, arguments, timeout)
+    if completed.returncode != 0:
+        raise refuse(
+            "repository_git_probe_failed",
+            f"git {arguments[0]} failed in {root}",
+            directory=str(root),
+        )
+    if len(completed.stdout) > MAX_GIT_OUTPUT_BYTES:
+        raise refuse(
+            "repository_git_output_too_large",
+            f"git {arguments[0]} produced more than {MAX_GIT_OUTPUT_BYTES} bytes",
+            directory=str(root),
+        )
+    return completed.stdout.decode("utf-8", errors="strict")
+
+
+def _resolved_scope(root: Path, deadline: float | None, cancelled):
+    from repository_scope import RepositoryScopeUnavailable, resolve_repository_scope
+
+    try:
+        return resolve_repository_scope(root, deadline=deadline, cancelled=cancelled)
+    except TimeoutError:
+        raise
+    except (RepositoryScopeUnavailable, OSError, ValueError) as error:
+        raise refuse(
+            "repository_identity_unavailable",
+            f"repository identity could not be resolved: {error}",
+            directory=str(root),
+        ) from error
+
+
+def _require_git_checkout_root(root: Path, scope) -> None:
+    if scope.git_common_dir is None:
+        raise refuse(
+            "repository_not_git",
+            f"not a Git repository: {root}",
+            directory=str(root),
+        )
+    # Compare as paths, not as text. `repository_scope` serialises a Windows
+    # root with an upper-case drive and forward slashes, so `C:/Users/x` never
+    # equals the `C:\\Users\\x` a `Path` renders — and every repository on
+    # Windows was refused as "not the checkout root". Measured 2026-08-30: all
+    # fifteen Windows shards, every Python version. Path equality normalises
+    # separators and case on Windows and is exact on POSIX.
+    if root.resolve() != Path(scope.checkout_root):
+        raise refuse(
+            "repository_not_checkout_root",
+            "index the checkout root, not a directory inside it: "
+            f"{scope.checkout_root}",
+            directory=str(root),
+            checkout_root=scope.checkout_root,
+        )
+
+
+def _require_not_submodule(root: Path) -> None:
+    """A submodule's files belong to its superproject's tree, not to itself.
+
+    Two generations claiming overlapping paths is a contradiction with no reader
+    to resolve it, so the submodule is refused and its superproject named.
+    """
+    superproject = git_text(root, "rev-parse", "--show-superproject-working-tree")
+    if superproject.strip():
+        raise refuse(
+            "repository_is_submodule",
+            f"this is a submodule of {superproject.strip()}; index that instead",
+            directory=str(root),
+            superproject=superproject.strip(),
+        )
+
+
+MEMORY_ROOT = "knowledge"
+
+
+def _is_the_vault(root: Path, state_root: Path) -> bool:
+    """True when this checkout is the installed vault, which is also a repository."""
+
+    return root in {Path(runtime_roots.vault_root()).resolve(), state_root}
+
+
+def _require_not_the_memory_tree(
+    root: Path, requested: Iterable[str], memory_owner: bool
+) -> None:
+    """The vault's `knowledge/` belongs to its memory generation; a code index refuses it.
+
+    Refused rather than pruned: asking for the memory tree in a code index is a
+    mistake worth naming, and silence about a dropped root is what NEW-67 was.
+    Only this vault's, though: `knowledge/` is this vault's noun, and another
+    repository's directory of that name is one of its code roots. See
+    `docs/research/2026-09-17-a-question-is-answered-by-its-own-kind-of-generation.md`.
+    """
+    if not memory_owner or MEMORY_ROOT not in set(requested):
+        return
+    raise refuse(
+        "repository_root_is_the_memory_tree",
+        f"{MEMORY_ROOT}/ is held by the vault's own generation, never by a code "
+        "index; ask for the code roots instead",
+        directory=str(root),
+    )
+
+
+def admit_repository(
+    directory: Path | str,
+    *,
+    state_root: Path | None = None,
+    deadline: float | None = None,
+    cancelled: Callable[[], bool] | None = None,
+) -> Admission:
+    """Every safety gate, in the order that makes each refusal nameable."""
+    root = _require_unsymlinked(_require_directory(directory))
+    ownership_checked = _require_owned_by_caller(root)
+    scope = _resolved_scope(root, deadline, cancelled)
+    _require_git_checkout_root(root, scope)
+    _require_not_submodule(root)
+    return Admission(root=root, scope=scope, ownership_checked=ownership_checked)
+
+
+# --------------------------------------------------------------------------
+# code roots
+# --------------------------------------------------------------------------
+
+
+def tracked_top_level_entries(root: Path) -> tuple[str, ...]:
+    """Top-level entries Git tracks, which is what belongs to the repository.
+
+    Entries, not directories. A code root may be a file -- `_add_code_root`
+    branches on `stat.S_ISDIR` and stores a regular file directly -- and the
+    files at a repository's root are the ones a question about a repository is
+    most likely to be about. Measured 2026-08-29: seven of them in the
+    neighbouring repository (`README.md`, `bootstrap.sh`, `crontab.txt`,
+    `env.template`, `onboarding.md`, `pyproject.toml`, `uv.lock`) and twelve
+    here, none of them reachable before. Hidden root files are pruned by the
+    same rule that prunes hidden directories, so they are named in
+    `excluded_roots` rather than dropped. See the 2026-08-29 note.
+
+    Using the tracked set rather than a directory walk excludes build output,
+    virtual environments and caches by construction, and honours `.gitignore`
+    for free. Measured on the real second repository here: the tracked
+    directories hold 963 files while the checkout is 2.2 GB.
+    """
+    listing = git_text(root, "ls-files", "-z")
+    names = _top_level_directory_names(listing) | _top_level_file_names(listing)
+    # `lexists`, not `exists`: a broken symlink is still an entry, and it must
+    # reach `excluded_roots` under its own name rather than vanish from the
+    # answer between Git's listing and ours.
+    return tuple(sorted(name for name in names if os.path.lexists(root / name)))
+
+
+def _tracked_entries(listing: str) -> tuple[str, ...]:
+    return tuple(entry for entry in listing.split("\0") if entry)
+
+
+def _top_level_directory_names(listing: str) -> set[str]:
+    """The first path component of every tracked file that lives in a directory."""
+    return {entry.split("/", 1)[0] for entry in _tracked_entries(listing) if "/" in entry}
+
+
+def _top_level_file_names(listing: str) -> set[str]:
+    """Every tracked file that lives at the repository root."""
+    return {entry for entry in _tracked_entries(listing) if "/" not in entry}
+
+
+def _indexable_entry(root: Path, name: str) -> bool:
+    """A directory to walk or a file to read; a symlink is neither.
+
+    Git tracks a symlink as a file, and the collector refuses a symlinked path
+    outright, so admitting one as a root would refuse the *whole repository*
+    over one entry. It is left out instead -- and named in `excluded_roots`,
+    which is the difference between an omission and a silence.
+    """
+    path = root / name
+    if path.is_symlink():
+        return False
+    return path.is_dir() or path.is_file()
+
+
+@dataclass(frozen=True, slots=True)
+class CodeRoots:
+    """What an index covers, and what it deliberately does not.
+
+    `excluded` is never silent: it reaches the receipt, so the omission is
+    stated at the moment it is made. Sourcegraph does the same from the other
+    end -- files it skips are listed on the repository's indexing page rather
+    than dropped. See the 2026-08-29 note.
+    """
+
+    selected: tuple[str, ...]
+    excluded: tuple[str, ...]
+
+
+def _collectable(name: str) -> bool:
+    from corpus_snapshot import collectable_root_name
+
+    return collectable_root_name(name)
+
+
+def _takeable(root: Path, name: str) -> bool:
+    """Both halves of "the collector will take this": the name, and the entry."""
+    return _collectable(name) and _indexable_entry(root, name)
+
+
+def _partition(
+    root: Path, names: tuple[str, ...]
+) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    """(what the collector will take, what it will not) -- both named, neither guessed."""
+    taken = tuple(name for name in names if _takeable(root, name))
+    left = tuple(name for name in names if name not in taken)
+    return taken, left
+
+
+def _pruned_note(excluded: tuple[str, ...]) -> str:
+    if not excluded:
+        return ""
+    return f"; the corpus walk prunes {', '.join(excluded)}"
+
+
+def _require_any_root(
+    selected: tuple[str, ...], root: Path, excluded: tuple[str, ...]
+) -> None:
+    if selected:
+        return
+    raise refuse(
+        "repository_has_no_code_roots",
+        f"no indexable top-level entry is tracked in {root}"
+        + _pruned_note(excluded),
+        directory=str(root),
+        excluded_roots=list(excluded),
+    )
+
+
+def _require_root_ceiling(selected: tuple[str, ...], root: Path) -> None:
+    if len(selected) <= MAX_CODE_ROOTS:
+        return
+    raise refuse(
+        "repository_has_too_many_code_roots",
+        f"{len(selected)} tracked top-level entries exceed the "
+        f"{MAX_CODE_ROOTS} the collector accepts",
+        directory=str(root),
+        roots=len(selected),
+    )
+
+
+def _require_root_count(
+    selected: tuple[str, ...], root: Path, excluded: tuple[str, ...] = ()
+) -> None:
+    _require_any_root(selected, root, excluded)
+    _require_root_ceiling(selected, root)
+
+
+def _require_collectable_request(
+    selected: tuple[str, ...], refused: tuple[str, ...], root: Path
+) -> None:
+    """Fail closed on a requested root the collector will not descend into.
+
+    The walk applies its prune rule to a root's children, not to the root
+    itself, so honouring a request for `.claude` would walk
+    `.claude/worktrees/` -- a second copy of the repository, the defect closed
+    in commit 1d06e6a. Refusing by name beats collecting the wrong tree, and
+    beats collecting nothing while reporting success.
+    """
+    if not refused:
+        return
+    raise refuse(
+        "repository_root_not_collectable",
+        "the corpus walk will not take these, so indexing them would "
+        f"collect nothing: {', '.join(refused)}. Hidden and archive names are "
+        "outside the corpus in every repository, this one included, and a "
+        "symlinked entry is refused by the collector rather than followed.",
+        directory=str(root),
+        refused_roots=list(refused),
+        admissible_roots=list(selected),
+    )
+
+
+def _explicit_roots(requested: Iterable[str], root: Path) -> tuple[str, ...]:
+    selected = tuple(sorted({str(name) for name in requested}))
+    missing = tuple(name for name in selected if not (root / name).exists())
+    if missing:
+        raise refuse(
+            "repository_root_missing",
+            f"requested root does not exist in {root}: {', '.join(missing)}",
+            directory=str(root),
+            missing_roots=list(missing),
+        )
+    return selected
+
+
+def _requested_code_roots(root: Path, requested: Iterable[str]) -> CodeRoots:
+    """A deliberately narrow index: exactly what was asked for, or a refusal."""
+    selected, refused = _partition(root, _explicit_roots(requested, root))
+    _require_collectable_request(selected, refused, root)
+    _require_root_count(selected, root)
+    return CodeRoots(selected=selected, excluded=())
+
+
+def _discovered_code_roots(root: Path) -> CodeRoots:
+    """Every tracked top-level entry the collector will take -- directory or file.
+
+    Git's tracked set is the repository, which is why this asks Git rather than
+    a name allowlist or a build manifest: measured 2026-08-29, the manifest of
+    the real second repository on this machine names one of its twelve tracked
+    top-level directories in its wheel target and four in its sdist target, and
+    this vault's own manifest names none. See the 2026-08-29 note.
+    """
+    selected, excluded = _partition(root, tracked_top_level_entries(root))
+    _require_root_count(selected, root, excluded)
+    return CodeRoots(selected=selected, excluded=excluded)
+
+
+def _without_memory_root(roots: CodeRoots) -> CodeRoots:
+    """The vault's memory tree, named as excluded rather than quietly dropped.
+
+    The knowledge tree is reached twice on a vault — once as a tracked top-level
+    entry and once by the memory walk — which is why the collector refused a
+    vault-shaped repository with `duplicate corpus source path` until
+    2026-09-12. It belongs to one generation, and that is the memory one.
+    """
+    if MEMORY_ROOT not in roots.selected:
+        return roots
+    return CodeRoots(
+        selected=tuple(name for name in roots.selected if name != MEMORY_ROOT),
+        excluded=tuple(sorted({*roots.excluded, MEMORY_ROOT})),
+    )
+
+
+def selected_code_roots(
+    root: Path, requested: Iterable[str] | None, *, memory_owner: bool = False
+) -> CodeRoots:
+    """Explicit roots when given, otherwise every tracked top-level entry.
+
+    `memory_owner` says this checkout is the installed vault, whose knowledge
+    tree its own generation holds: see
+    `docs/research/2026-09-12-the-vault-is-a-repository-too.md`.
+    """
+    if requested is not None:
+        _require_not_the_memory_tree(root, requested, memory_owner)
+        return _requested_code_roots(root, requested)
+    discovered = _discovered_code_roots(root)
+    if not memory_owner:
+        return discovered
+    return _without_memory_root(discovered)
+
+
+# --------------------------------------------------------------------------
+# corpus
+# --------------------------------------------------------------------------
+
+
+def collect(root: Path, roots: tuple[str, ...], deadline: float | None):
+    """The captured corpus, or a named refusal: a checkout being written is one too.
+
+    See `docs/research/2026-09-17-one-checkout-does-not-end-the-pass.md`.
+    """
+    from corpus_snapshot import CorpusChanged, collect_corpus
+    from workspace_revision import ignored_directories
+
+    try:
+        return collect_corpus(
+            root,
+            code_roots=roots,
+            # What git ignores is not the repository's code at any depth (audit
+            # 2026-09-26 A-8); the freshness walk prunes the same set.
+            pruned_directories=ignored_directories(root, deadline=deadline, cancelled=None),
+            # The allowlist is this repository's own selected roots, not the
+            # vault's `APPROVED_CODE_ROOTS`. What the collector still enforces
+            # is the shape of each path and that the walk would descend into it.
+            approved_code_roots=roots,
+            max_files=MAX_INDEXED_SOURCES,
+            deadline=deadline,
+        )
+    except TimeoutError:
+        raise
+    except CorpusChanged as error:
+        raise refuse(
+            "repository_changed_during_capture",
+            f"the repository was being written while it was read; try again: {error}",
+            directory=str(root),
+            roots=list(roots),
+        ) from error
+    except (OSError, ValueError) as error:
+        raise refuse(
+            "repository_exceeds_corpus_bounds",
+            f"the corpus collector refused this repository: {error}",
+            directory=str(root),
+            roots=list(roots),
+        ) from error
+
+
+# --------------------------------------------------------------------------
+# index
+# --------------------------------------------------------------------------
+
+
+def newest_generation_for(catalog, scope, deadline: float | None):
+    """The newest code generation already registered for this repository, or None.
+
+    The vault's checkout also carries memory generations of the same scope, and
+    the newest of those holds no code roots: a refresh that read it rebuilt with
+    none and was refused, night after night. Detection, refresh and a build's
+    parent read the same generation code answers read. See
+    `docs/research/2026-09-15-a-code-generation-is-not-abandoned.md`.
+    """
+    return catalog.code_generation_for_repository(scope, deadline=deadline)
+
+
+def _reuse_config(snapshot, workspace_sha256: str):
+    import generation_maintenance
+    from evidence_graph_builder import GRAPH_SCHEMA_VERSION, IncrementalReuseConfig
+
+    return IncrementalReuseConfig(
+        extractor_version=generation_maintenance.maintenance_extractor_identity(),  # noqa: SLF001
+        grammar_version="builtin-grammars/v1",
+        compiler_version=f"python-{sys.version_info.major}.{sys.version_info.minor}",
+        resolver_config_sha256=hashlib.sha256(
+            b"llm-wiki-foreign-repository-resolver/v1"
+        ).hexdigest(),
+        schema_version=GRAPH_SCHEMA_VERSION,
+        workspace_manifest_sha256=workspace_sha256,
+    )
+
+
+def _fresh_generation_id(catalog) -> str:
+    import generation_maintenance
+
+    return generation_maintenance.fresh_generation_id(catalog)  # noqa: SLF001
+
+
+def _build(catalog, admission: Admission, snapshot, parent_id, deadline, cancelled):
+    """Build and register; `activate=False` is the whole safety property here."""
+    from code_extractor import ExtractionCeilingExceeded
+
+    try:
+        return _built_generation(catalog, admission, snapshot, parent_id, deadline, cancelled)
+    except ExtractionCeilingExceeded as error:
+        raise refuse(
+            "repository_exceeds_extraction_bounds",
+            f"the code extractor refused this repository: {error}",
+            directory=str(admission.root),
+        ) from error
+
+
+def _built_generation(catalog, admission: Admission, snapshot, parent_id, deadline, cancelled):
+    import generation_maintenance
+    from evidence_graph_builder import build_incremental_generation
+
+    return build_incremental_generation(
+        catalog,
+        sources=generation_maintenance.generation_source_rows(snapshot),  # noqa: SLF001
+        source_bytes=generation_maintenance.generation_source_bytes(snapshot),  # noqa: SLF001
+        extractor=generation_maintenance.generation_source_extractor(  # noqa: SLF001
+            snapshot, admission.scope.repository_id
+        ),
+        reuse_config=_reuse_config(
+            snapshot,
+            generation_maintenance.workspace_manifest_sha256(snapshot),  # noqa: SLF001
+        ),
+        generation_id=_fresh_generation_id(catalog),
+        parent_generation_id=parent_id,
+        policy=generation_maintenance.corpus_policy(snapshot),  # noqa: SLF001
+        activate=False,
+        deadline=deadline,
+        cancelled=cancelled,
+        repository_scope=admission.scope,
+        snapshot=snapshot,
+        # No `publication_root`: it fences live bytes for an *activation*, and
+        # nothing here activates. Passing the foreign root would be the one
+        # place this module reached back into a repository it must only read.
+    )
+
+
+def _index_receipt(
+    admission: Admission, built, snapshot, roots: CodeRoots, parent_id, seconds
+):
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "status": "indexed",
+        "directory": str(admission.root),
+        "repository_id": admission.scope.repository_id,
+        "checkout_id": admission.scope.checkout_id,
+        "git_commit": admission.scope.git_commit,
+        "generation_id": built.generation_id,
+        "parent_generation_id": parent_id,
+        "activated": False,
+        "code_roots": list(roots.selected),
+        # Named, never silent: tracked top-level directories the corpus walk
+        # prunes, so a reader can tell "not there" from "not looked at".
+        "excluded_roots": list(roots.excluded),
+        "sources": len(snapshot.sources),
+        "chunks": len(snapshot.chunks),
+        # Entries under a root the collector left out rather than refuse the whole
+        # repository — a link, a file past the size bound, a name that is not
+        # UTF-8 — counted and the first twenty named (audit 2026-09-26 A-8).
+        "skipped_entries": len(snapshot.skipped),
+        "skipped_examples": list(snapshot.skipped[:20]),
+        # What the collector did, and the cost of it, as a number rather than a
+        # label. Under a root it walks the filesystem, not Git's index, so an
+        # untracked file that is not pruned is collected. "Indexed" is not
+        # "tracked", and an answer that cannot say which it looked at is the
+        # same defect class as a silent omission. See the 2026-08-29 note.
+        "source_selection": "filesystem-walk",
+        "untracked_sources": untracked_source_count(admission.root, snapshot),
+        "rebuilt_sources": len(built.rebuilt_sources),
+        "reused_sources": len(built.reused_sources),
+        "ownership_checked": admission.ownership_checked,
+        "seconds": round(seconds, 2),
+        "disk_bytes": _generation_bytes(built.generation_path),
+    }
+
+
+def untracked_sources(root: Path, snapshot) -> tuple[str, ...]:
+    """Collected sources Git does not track, in the order the corpus holds them.
+
+    Measured 2026-08-29: zero on the neighbouring repository, because every
+    untracked file under a tracked root there is inside `__pycache__`, which
+    the walk already prunes. Zero is worth being able to see; anything else is
+    exactly what a reader needs to know and could not previously ask.
+    """
+    tracked = set(_tracked_entries(git_text(root, "ls-files", "-z")))
+    collected = (source.record.relative_path for source in snapshot.sources)
+    return tuple(path for path in collected if path not in tracked)
+
+
+def untracked_source_count(root: Path, snapshot) -> int | None:
+    """The count, or None when Git could not be asked.
+
+    A census must not fail a build that already succeeded, and `None` says
+    "not counted" where a zero would say "counted, and none" -- the whole point
+    of the field is that the two are different answers.
+    """
+    try:
+        return len(untracked_sources(root, snapshot))
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return None
+
+
+def _generation_bytes(generation_path: Path) -> int:
+    total = 0
+    for entry in sorted(Path(generation_path).iterdir()):
+        if entry.is_file():
+            total += entry.stat().st_size
+    return total
+
+
+def index_repository(
+    directory: Path | str,
+    *,
+    roots: Iterable[str] | None = None,
+    state_root: Path | None = None,
+    deadline: float | None = None,
+    cancelled: Callable[[], bool] | None = None,
+) -> dict[str, object]:
+    """Build and register one generation for a repository that is not the vault.
+
+    A checkout whose branch or repository turned indexing off is refused by
+    name; after the build the hook-time hint table is exported (#24, C1), and
+    a failed export is reported in the receipt, never raised.
+    """
+
+    started = time.monotonic()
+    admission = admit_repository(
+        directory, state_root=state_root, deadline=deadline, cancelled=cancelled
+    )
+    require_indexing_wanted(admission.root)
+    selected = selected_code_roots(
+        admission.root,
+        roots,
+        memory_owner=_is_the_vault(admission.root, state_root_path(state_root)),
+    )
+    snapshot = collect(admission.root, selected.selected, deadline)
+    catalog = open_catalog(state_root_path(state_root), read_only=False)
+    parent_id, _parent = newest_generation_for(catalog, admission.scope, deadline)
+    built = _build(catalog, admission, snapshot, parent_id, deadline, cancelled)
+    receipt = _index_receipt(
+        admission, built, snapshot, selected, parent_id, time.monotonic() - started
+    )
+    return {**receipt, "hints": _exported_hints(catalog, admission.scope, state_root, deadline)}
+
+
+def _exported_hints(catalog, scope, state_root: Path | None, deadline: float | None) -> dict:
+    from code_hints import export_hints_quietly
+
+    return export_hints_quietly(catalog, scope, state_root_path(state_root), deadline=deadline)
+
+
+# --------------------------------------------------------------------------
+# list
+# --------------------------------------------------------------------------
+
+
+def _repository_row(
+    identifier: str, registered_at: str, manifest: Mapping, holds_code: bool = False
+) -> dict:
+    """One generation, flattened. `code_roots` is filled in later; see `_covered`.
+
+    The generation manifest deliberately does not carry the snapshot policy --
+    that lives in `source-manifest.json`, whose digest the manifest binds -- so
+    what a generation actually covered costs one extra verified file read, paid
+    once per repository rather than once per generation.
+    """
+    scope = manifest.get("repository_scope") or {}
+    return {
+        "repository_id": scope.get("repository_id"),
+        "checkout_id": scope.get("checkout_id"),
+        "checkout_root": scope.get("checkout_root"),
+        "git_commit": scope.get("git_commit"),
+        "generation_id": identifier,
+        "registered_at": registered_at,
+        "graph_schema_version": manifest.get("graph_schema_version"),
+        "vector_state": manifest.get("vector_state"),
+        "manifest": manifest,
+        "holds_code": holds_code,
+        "generations": 1,
+    }
+
+
+def _covered(catalog, row: dict) -> list[str] | None:
+    """The code roots this generation covered, or None when that cannot be read."""
+    try:
+        source_manifest = _verified_source_manifest(
+            catalog, row["generation_id"], row.pop("manifest")
+        )
+    except (RepositoryIndexRefused, OSError, ValueError):
+        return None
+    return list((source_manifest.get("policy") or {}).get("code_roots") or [])
+
+
+def _merge_repository_rows(rows: Iterable[dict]) -> list[dict]:
+    """One row per checkout: its newest code generation, else its newest one.
+
+    A checkout carries two kinds of generation since 2026-09-12, and the rows
+    arrive newest first, so "the first row wins" made the vault's row -- and
+    with it whether a worktree of the vault is followed -- depend on which kind
+    happened to be registered last. Every consumer of a row asks a code
+    question: which roots it covered, what to follow a worktree with. See
+    `docs/research/2026-09-17-small-corrections-in-the-generations-area.md`.
+    """
+    merged: dict[object, dict] = {}
+    for row in rows:
+        key = (row["repository_id"], row["checkout_id"])
+        existing = merged.get(key)
+        if existing is None:
+            merged[key] = row
+            continue
+        existing["generations"] += 1
+        _prefer_code_head(merged, key, row)
+    return list(merged.values())
+
+
+def _prefer_code_head(merged: dict[object, dict], key: object, row: dict) -> None:
+    """Let a code generation head the checkout's row, whatever was registered last."""
+    head = merged[key]
+    if head["holds_code"] or not row["holds_code"]:
+        return
+    row["generations"] = head["generations"]
+    merged[key] = row
+
+
+def _active_generation_id(catalog, deadline: float | None) -> str | None:
+    try:
+        active = catalog.get_active(deadline=deadline)
+    except (OSError, ValueError):
+        return None
+    return None if active is None else str(active["generation_id"])
+
+
+def list_repositories(
+    *,
+    state_root: Path | None = None,
+    deadline: float | None = None,
+) -> dict[str, object]:
+    """Every repository with a registered generation, newest generation first."""
+    catalog = open_catalog(state_root_path(state_root), read_only=True)
+    if catalog is None:
+        return {
+            "schema_version": SCHEMA_VERSION,
+            "status": "ok",
+            "repositories": [],
+            "active_generation_id": None,
+            "truncated": False,
+        }
+    manifests = catalog.registered_manifests(deadline=deadline)
+    active_id = _active_generation_id(catalog, deadline)
+    rows = _merge_repository_rows(
+        _repository_row(
+            identifier,
+            registered_at,
+            manifest,
+            catalog.holds_code(identifier, manifest),
+        )
+        for identifier, registered_at, manifest in manifests
+    )
+    return _listing(catalog, rows, active_id)
+
+
+def _listing(catalog, rows: list[dict], active_id: str | None) -> dict[str, object]:
+    for row in rows:
+        row["active"] = row["generation_id"] == active_id
+        row["code_roots"] = _covered(catalog, row)
+    ordered = sorted(rows, key=lambda row: str(row["registered_at"]), reverse=True)
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "status": "ok",
+        "repositories": ordered[:MAX_LISTED_REPOSITORIES],
+        "active_generation_id": active_id,
+        "truncated": len(ordered) > MAX_LISTED_REPOSITORIES,
+    }
+
+
+# --------------------------------------------------------------------------
+# detect
+# --------------------------------------------------------------------------
+
+
+def _artifact_digest(manifest: Mapping, name: str) -> str | None:
+    for artifact in manifest.get("artifacts") or []:
+        if artifact.get("path") == name:
+            return str(artifact.get("sha256"))
+    return None
+
+
+def _source_manifest_bytes(path: Path, generation_id: str) -> bytes:
+    """A registration whose tree is gone is a named refusal, not the end of the pass."""
+    try:
+        return path.read_bytes()
+    except OSError as error:
+        raise refuse(
+            "repository_index_unreadable",
+            "the recorded source manifest cannot be read; re-index",
+            generation_id=generation_id,
+        ) from error
+
+
+def _verified_source_manifest(catalog, generation_id: str, manifest: Mapping) -> dict:
+    """Read `source-manifest.json` only after its bytes match the manifest digest."""
+    path = Path(catalog.generations_path) / generation_id / "source-manifest.json"
+    expected = _artifact_digest(manifest, "source-manifest.json")
+    raw = _source_manifest_bytes(path, generation_id)
+    if expected is None or hashlib.sha256(raw).hexdigest() != expected:
+        raise refuse(
+            "repository_index_unreadable",
+            "the recorded source manifest does not match its digest; re-index",
+            generation_id=generation_id,
+        )
+    return json.loads(raw)
+
+
+def _recorded_hashes(source_manifest: Mapping) -> dict[str, str]:
+    return {
+        str(source["relative_path"]): str(source["sha256"])
+        for source in source_manifest.get("sources") or []
+    }
+
+
+def _current_hashes(snapshot) -> dict[str, str]:
+    return {
+        source.record.relative_path: source.record.sha256 for source in snapshot.sources
+    }
+
+
+def _difference(recorded: Mapping[str, str], current: Mapping[str, str]) -> dict:
+    added = sorted(set(current) - set(recorded))
+    removed = sorted(set(recorded) - set(current))
+    modified = sorted(
+        path
+        for path in set(recorded) & set(current)
+        if recorded[path] != current[path]
+    )
+    return {"added": added, "removed": removed, "modified": modified}
+
+
+def _change_report(admission: Admission, generation_id: str, roots, difference: dict):
+    counts = {kind: len(paths) for kind, paths in difference.items()}
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "status": "ok",
+        "directory": str(admission.root),
+        "repository_id": admission.scope.repository_id,
+        "generation_id": generation_id,
+        "git_commit": admission.scope.git_commit,
+        "code_roots": list(roots),
+        "stale": any(counts.values()),
+        "counts": counts,
+        "added": difference["added"][:MAX_REPORTED_PATHS],
+        "removed": difference["removed"][:MAX_REPORTED_PATHS],
+        "modified": difference["modified"][:MAX_REPORTED_PATHS],
+        "paths_truncated": any(
+            len(paths) > MAX_REPORTED_PATHS for paths in difference.values()
+        ),
+    }
+
+
+def _not_indexed(admission: Admission) -> dict[str, object]:
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "status": "not_indexed",
+        "directory": str(admission.root),
+        "repository_id": admission.scope.repository_id,
+        "generation_id": None,
+        "stale": True,
+        "message": "this repository has no registered generation; index it first",
+    }
+
+
+def detect_repository_changes(
+    directory: Path | str,
+    *,
+    state_root: Path | None = None,
+    deadline: float | None = None,
+    cancelled: Callable[[], bool] | None = None,
+) -> dict[str, object]:
+    """What changed in a repository since its newest generation was built.
+
+    The comparison is by content digest, not by mtime: an edit that preserves
+    size and timestamp is still an edit, and a caller asking whether the index
+    is stale is asking exactly that.
+    """
+    admission = admit_repository(
+        directory, state_root=state_root, deadline=deadline, cancelled=cancelled
+    )
+    catalog = open_catalog(state_root_path(state_root), read_only=True)
+    if catalog is None:
+        return _not_indexed(admission)
+    generation_id, manifest = newest_generation_for(
+        catalog, admission.scope, deadline
+    )
+    if generation_id is None:
+        return _not_indexed(admission)
+    return _detected(catalog, admission, generation_id, manifest, deadline)
+
+
+def _detected(catalog, admission: Admission, generation_id, manifest, deadline):
+    source_manifest = _verified_source_manifest(catalog, generation_id, manifest)
+    recorded = tuple((source_manifest.get("policy") or {}).get("code_roots") or ())
+    roots = _live_roots(admission.root, recorded) or ()
+    difference = _difference(
+        _recorded_hashes(source_manifest), _current_root_hashes(admission.root, roots, deadline)
+    )
+    report = _change_report(admission, generation_id, roots, difference)
+    return {**report, "uncovered_roots": _uncovered_roots(admission.root, recorded)}
+
+
+def _live_roots(root: Path, recorded: tuple[str, ...]) -> tuple[str, ...] | None:
+    """The recorded roots still on disk; None when none is, so the roots are found again.
+
+    A deleted or renamed top-level folder made every detect and refresh refuse
+    with `repository_root_missing`, the nightly `refresh-all` included (audit
+    A-15, docs/research/2026-09-25-a-gone-top-level-folder-does-not-stop-the-index.md).
+    """
+    present = tuple(name for name in recorded if os.path.lexists(root / name))
+    return present or None
+
+
+def _current_root_hashes(root: Path, roots: tuple[str, ...], deadline) -> dict:
+    """Current digests under the live roots; none left means everything recorded was removed."""
+    if not roots:
+        return {}
+    return _current_hashes(collect(root, roots, deadline))
+
+
+def _uncovered_roots(root: Path, recorded: tuple[str, ...]) -> list[str]:
+    """Tracked top-level entries this index does not cover, named rather than silent."""
+    try:
+        discovered = _discovered_code_roots(root).selected
+    except RepositoryIndexRefused:
+        return []
+    return [name for name in discovered if name not in recorded and name != MEMORY_ROOT]
+
+
+# --------------------------------------------------------------------------
+# refresh
+# --------------------------------------------------------------------------
+#
+# Issue #24, section A: the incremental builder existed, nothing ran it. A
+# refresh looks first and builds only what an edit made stale, under the
+# ownership registry's `doctor` role scoped to this one repository, so the
+# vault's own global maintenance and a second session's refresh of the same
+# repository never collide (the registry's exclusion is PRIMARY KEY(role,
+# scope)). Design and measurements:
+# `docs/research/2026-09-10-warm-index-answers-inside-the-loop.md`.
+
+REFRESH_ROLE = "doctor"
+def refresh_scope(repository_id: str) -> str:
+    """The registry scope one repository's refresh is fenced under."""
+    return f"repository:{repository_id}"
+
+
+def _refresh_answer(admission: Admission, generation_id, status: str, staleness) -> dict:
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "status": status,
+        "directory": str(admission.root),
+        "repository_id": admission.scope.repository_id,
+        "git_commit": admission.scope.git_commit,
+        "generation_id": generation_id,
+        "stale": staleness["stale"],
+        "reason": staleness["reason"],
+        "commit_moved": staleness["commit_moved"],
+    }
+
+
+def generation_staleness(catalog, admission: Admission, generation_id, manifest, deadline) -> dict:
+    """Decided by content, never by the commit alone.
+
+    A commit is the cheap reason to *look* (the MCP server spawns a refresh
+    when the checkout's commit moved past the generation's), but an empty or
+    docs-only commit changes no source, and a build that reuses every record
+    still publishes a whole new generation.
+    """
+    report = _detected(catalog, admission, generation_id, manifest, deadline)
+    recorded_scope = manifest.get("repository_scope") or {}
+    # Two commits, never two scopes: the generation's recorded commit against
+    # the checkout's current one (the identity guard in tests watches this).
+    commit_moved = recorded_scope.get("git_commit") != admission.scope.git_commit
+    if report["stale"]:
+        return {
+            "stale": True,
+            "reason": "sources_changed",
+            "counts": report["counts"],
+            "commit_moved": commit_moved,
+        }
+    return {"stale": False, "reason": "unchanged", "commit_moved": commit_moved}
+
+
+def refresh_fence(state_root: Path):
+    """The coordinator and its adopted registry; the registry is None on a legacy root.
+
+    The legacy maintenance table is keyed by owner name alone, with no scope,
+    so a per-repository fence cannot be expressed there. A refresh on such a
+    vault is reported as unavailable rather than run unfenced.
+    """
+    import generation_maintenance
+    from markdown_transaction import active_or_legacy_coordinator
+
+    coordinator = active_or_legacy_coordinator(Path(runtime_roots.vault_root()), state_root)
+    return coordinator, generation_maintenance.maintenance_ownership_registry(coordinator)  # noqa: SLF001
+
+
+def _either_cancelled(first: Callable[[], bool], second: Callable[[], bool] | None):
+    def cancelled() -> bool:
+        return first() or (second is not None and second())
+
+    return cancelled
+
+
+def _bounded_deadline(deadline: float | None) -> float:
+    if deadline is not None:
+        return deadline
+    return time.monotonic() + REFRESH_ALL_BUDGET_SECONDS
+
+
+def held_lease(registry, repository_id: str):
+    from operational_ownership import OperationalOwnershipError
+
+    try:
+        return registry.acquire(REFRESH_ROLE, scope=refresh_scope(repository_id))
+    except OperationalOwnershipError:
+        return None
+
+
+def _recorded_roots(catalog, generation_id, manifest) -> tuple[str, ...]:
+    source_manifest = _verified_source_manifest(catalog, generation_id, manifest)
+    return tuple((source_manifest.get("policy") or {}).get("code_roots") or ())
+
+
+def _rebuilt(admission, catalog, generation_id, manifest, root, deadline, cancelled) -> dict:
+    receipt = index_repository(
+        admission.root,
+        roots=_live_roots(admission.root, _recorded_roots(catalog, generation_id, manifest)),
+        state_root=root,
+        deadline=deadline,
+        cancelled=cancelled,
+    )
+    return {**receipt, "status": "refreshed", "previous_generation_id": generation_id}
+
+
+FENCE_REFUSED = "fence_refused"
+
+
+def run_fenced(
+    repository_id: str,
+    root: Path,
+    deadline: float | None,
+    cancelled: Callable[[], bool] | None,
+    work: Callable[[float, Callable[[], bool]], dict],
+) -> dict:
+    """`work(bound, stop)` under the per-repository lease, or a named refusal.
+
+    One fence for every writer of a repository's generations: the refresh,
+    the worktree follower and the retention pass (#24, D1). A refusal carries
+    `FENCE_REFUSED` and the status to report.
+    """
+    import generation_maintenance
+
+    coordinator, registry = refresh_fence(root)
+    if registry is None:
+        return {FENCE_REFUSED: True, "status": "refresh_unavailable", "reason": "coordinator_v3_required"}
+    owner = held_lease(registry, repository_id)
+    if owner is None:
+        return {FENCE_REFUSED: True, "status": "refresh_owned_elsewhere"}
+    # The doctor's own heartbeat: it renews through the registry the lease came
+    # from, tolerates a busy database, and releases the owner on exit.
+    lease = {"token": owner.token, "epoch": owner.epoch, "registry": registry, "owner": owner}
+    bound = _bounded_deadline(deadline)
+    # The heartbeat checks the owner on entry and releases it on exit; both say
+    # `MaintenanceFenceLost` when the lease was taken, and the exit's replaces
+    # the cancelled build's `TimeoutError`. That is a refused fence, not a crash:
+    # `docs/research/2026-09-17-one-checkout-does-not-end-the-pass.md`.
+    try:
+        with generation_maintenance.MaintenanceHeartbeat(coordinator, lease, deadline=bound) as beat:  # noqa: SLF001
+            return work(bound, _either_cancelled(beat.cancelled, cancelled))
+    except generation_maintenance.MaintenanceFenceLost:
+        return {FENCE_REFUSED: True, "status": "refresh_owned_elsewhere", "reason": "fence_lost"}
+
+
+def _refused_staleness(outcome: dict, staleness) -> dict:
+    if "reason" not in outcome:
+        return staleness
+    return {**staleness, "reason": outcome["reason"]}
+
+
+def fenced_rebuild(
+    admission, catalog, generation_id, manifest, root, staleness, deadline, cancelled
+) -> dict:
+    def work(bound: float, stop: Callable[[], bool]) -> dict:
+        return _rebuilt(admission, catalog, generation_id, manifest, root, bound, stop)
+
+    outcome = run_fenced(admission.scope.repository_id, root, deadline, cancelled, work)
+    if not outcome.get(FENCE_REFUSED):
+        return outcome
+    refused = _refused_staleness(outcome, staleness)
+    return _refresh_answer(admission, generation_id, outcome["status"], refused)
+
+
+def _newest_registered(catalog, scope, deadline):
+    if catalog is None:
+        return None, None
+    return newest_generation_for(catalog, scope, deadline)
+
+
+def refresh_repository(
+    directory: Path | str,
+    *,
+    state_root: Path | None = None,
+    deadline: float | None = None,
+    cancelled: Callable[[], bool] | None = None,
+) -> dict[str, object]:
+    """Rebuild only what an edit made stale, under a per-repository fence.
+
+    A fresh generation still gets its hint table when the table is missing or
+    names another generation: an export that ran out of the build's budget,
+    or an index built before the table existed, is repaired here (#24, C1).
+    """
+
+    admission = admit_repository(
+        directory, state_root=state_root, deadline=deadline, cancelled=cancelled
+    )
+    require_indexing_wanted(admission.root)
+    root = state_root_path(state_root)
+    catalog = open_catalog(root, read_only=True)
+    generation_id, manifest = _newest_registered(catalog, admission.scope, deadline)
+    if generation_id is None:
+        return _not_indexed(admission)
+    staleness = generation_staleness(catalog, admission, generation_id, manifest, deadline)
+    if not staleness["stale"]:
+        fresh = _refresh_answer(admission, generation_id, "fresh", staleness)
+        return {**fresh, "hints": _current_hints(catalog, admission.scope, root, generation_id, deadline)}
+    return fenced_rebuild(
+        admission, catalog, generation_id, manifest, root, staleness, deadline, cancelled
+    )
+
+
+def _current_hints(catalog, scope, root: Path, generation_id: str, deadline) -> dict:
+    """The hint table of this generation, exported again when it names another commit.
+
+    The meta block is also the answer to "was this generation confirmed against
+    the checkout as it stands now?", which is why the commit has to match: after
+    a commit that changed no source, nothing else says the index is current, and
+    every new process spawned a refresh that found nothing. See
+    `docs/research/2026-09-17-small-corrections-in-the-generations-area.md`.
+    """
+    from code_hints import hints_path, read_meta
+
+    meta = read_meta(hints_path(root, scope.checkout_id))
+    if meta is not None and _hints_confirm(meta, scope, generation_id):
+        return {"status": "current", "generation_id": generation_id}
+    return _exported_hints(catalog, scope, root, deadline)
+
+
+def _hints_confirm(meta: Mapping, scope, generation_id: str) -> bool:
+    return (meta.get("generation_id"), meta.get("git_commit")) == (
+        generation_id,
+        str(scope.git_commit or ""),
+    )
+
+
+def deferred(stopped: TimeoutError) -> dict[str, str]:
+    """A checkout that did not fit this pass: named, left for the next one, never half-built.
+
+    One build that ran out of budget, or lost its fence, used to escape the whole
+    pass: no report, and every checkout after it skipped. See
+    `docs/research/2026-09-14-a-pass-that-keeps-its-budget.md`.
+    """
+    return {"status": "deferred", "reason": str(stopped) or "deadline"}
+
+
+# --------------------------------------------------------------------------
+# command line
+# --------------------------------------------------------------------------
+
+
+
+INDEX_KEY = "llmwiki.index"
+BRANCH_KEY = "llmwikiIndex"
+
+
+def git(root: Path, *arguments: str) -> subprocess.CompletedProcess:
+    """The index's own bounded Git run: a slow checkout is a named refusal.
+
+    A copy of it raised `subprocess.TimeoutExpired`, which no deferral catches,
+    and one slow checkout ended the nightly `refresh-all` and `retire` (audit
+    B-37, docs/research/2026-09-25-a-slow-worktree-does-not-end-the-pass.md).
+    """
+    return _git_completed(root, arguments, GIT_TIMEOUT_SECONDS)
+
+
+def _config_bool(root: Path, key: str) -> bool | None:
+    """The key's boolean value; None when it is unset or not a boolean."""
+    completed = git(root, "config", "--type=bool", "--get", key)
+    if completed.returncode != 0:
+        return None
+    return completed.stdout.strip() == b"true"
+
+
+def _current_branch(root: Path) -> str | None:
+    completed = git(root, "symbolic-ref", "--quiet", "--short", "HEAD")
+    if completed.returncode != 0:
+        return None
+    return completed.stdout.decode("utf-8", errors="replace").strip() or None
+
+
+def _mark_keys(root: Path) -> list[str]:
+    branch = _current_branch(root)
+    if branch is None:
+        return [INDEX_KEY]
+    return [f"branch.{branch}.{BRANCH_KEY}", INDEX_KEY]
+
+
+def indexing_marked_off(root: Path) -> str | None:
+    """The configuration key that turned indexing off here, or None."""
+    for key in _mark_keys(root):
+        value = _config_bool(root, key)
+        if value is not None:
+            return None if value else key
+    return None
+
+
+def require_indexing_wanted(root: Path) -> None:
+    key = indexing_marked_off(root)
+    if key is None:
+        return
+    raise refuse(
+        "repository_marked_not_indexed",
+        f"indexing is turned off here by git config {key}=false; "
+        f"to index it, run: git -C {root} config --unset {key}",
+        directory=str(root),
+        config_key=key,
+    )

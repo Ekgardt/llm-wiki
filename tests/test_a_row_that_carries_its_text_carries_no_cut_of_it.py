@@ -31,23 +31,23 @@ def _repeats_content(key: str, value: object) -> bool:
 
 
 def test_no_field_of_a_generation_row_repeats_part_of_its_content() -> None:
+    import generation_search
     import mcp_server
-    import search_memory
 
-    row = mcp_server._agent_row(search_memory._generation_result(_row(), "g"))
+    row = mcp_server.agent_row(generation_search.generation_result(_row(), "g"))
 
     assert [key for key, value in row.items() if _repeats_content(key, value)] == []
 
 
 def test_a_markdown_row_without_content_keeps_the_pages_own_summary(tmp_path, monkeypatch) -> None:
-    import search_memory
+    import generation_search
 
     page = tmp_path / "knowledge" / "notes" / "x.md"
     page.parent.mkdir(parents=True)
     page.write_text(CONTENT, encoding="utf-8")
-    monkeypatch.setattr(search_memory, "ROOT", tmp_path)
-    read = search_memory._read_page(page, "page")
+    monkeypatch.setenv("LLM_WIKI_ROOT", str(tmp_path))
+    read = generation_search.read_page(page, "page")
 
-    hit = search_memory._page_hit(read, score=1.0, bm25_score=1.0)
+    hit = generation_search.page_hit(read, score=1.0, bm25_score=1.0)
 
     assert ("content" in hit, hit["summary"].startswith("the nightly pass")) == (False, True)

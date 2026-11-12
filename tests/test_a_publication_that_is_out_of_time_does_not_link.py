@@ -14,7 +14,7 @@ for directory in (TESTS.parent / "scripts", TESTS):
     if str(directory) not in sys.path:
         sys.path.insert(0, str(directory))
 
-from test_evidence_graph import basic_graph_records  # noqa: E402
+from tests.evidence_graph_records import basic_graph_records  # noqa: E402
 
 
 class _StopOnceTheDatabaseIsBuilt:

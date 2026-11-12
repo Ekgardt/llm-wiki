@@ -19,7 +19,8 @@ for entry in (str(SCRIPTS_DIR), str(TESTS)):
         sys.path.insert(0, entry)
 
 from project_journal import ProjectStore  # noqa: E402
-from test_project_journal import checkpoint_event  # noqa: E402
+
+from tests.project_journal_helpers import checkpoint_event  # noqa: E402
 
 
 def _event_with(separator: str) -> dict[str, object]:

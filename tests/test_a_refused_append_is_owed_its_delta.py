@@ -11,13 +11,14 @@ is never replayed; a DLP refusal is a decision, not an accident.
 from __future__ import annotations
 
 import json
+import lzma
 import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 
 import repair_refused_appends as repair  # noqa: E402
-from markdown_transaction import _compressed_image  # noqa: E402
+from llm_wiki.markdown_prepare import IMAGE_COMPRESSION_PRESET  # noqa: E402
 from reliable_memory import sha256_bytes  # noqa: E402
 
 MARKER = "<!-- llm-wiki-operation:" + "a" * 64 + " -->"
@@ -30,8 +31,8 @@ def _transaction(directory: Path, before: bytes, after: bytes, kind: str = "repl
     directory.mkdir(parents=True, exist_ok=True)
     (directory / "before").mkdir()
     (directory / "after").mkdir()
-    (directory / "before/000000.bin").write_bytes(_compressed_image(before))
-    (directory / "after/000000.bin").write_bytes(_compressed_image(after))
+    (directory / "before/000000.bin").write_bytes(lzma.compress(before, preset=IMAGE_COMPRESSION_PRESET))
+    (directory / "after/000000.bin").write_bytes(lzma.compress(after, preset=IMAGE_COMPRESSION_PRESET))
     operation = {
         "kind": kind,
         "path": "knowledge/daily/2026-09-05.md",
@@ -53,7 +54,7 @@ def test_the_block_a_refused_append_carried_is_owed(tmp_path):
     directory = _transaction(tmp_path / "txn-1", BEFORE, BEFORE + BLOCK)
     vault = _vault(tmp_path, BEFORE + b"\nsomeone else's block\n")
 
-    owed = repair._owed_in(directory, IDENTITY, vault)
+    owed = repair.owed_in(directory, IDENTITY, vault)
 
     assert [(item.path, item.delta) for item in owed] == [
         ("knowledge/daily/2026-09-05.md", BLOCK)
@@ -65,7 +66,7 @@ def test_a_block_whose_marker_is_already_in_the_file_is_not_owed(tmp_path):
     directory = _transaction(tmp_path / "txn-1", BEFORE, BEFORE + BLOCK)
     vault = _vault(tmp_path, BEFORE + b"\nother\n" + BLOCK)
 
-    assert repair._owed_in(directory, IDENTITY, vault) == []
+    assert repair.owed_in(directory, IDENTITY, vault) == []
 
 
 def test_a_replace_that_changed_more_than_its_tail_is_not_an_append(tmp_path):
@@ -73,22 +74,22 @@ def test_a_replace_that_changed_more_than_its_tail_is_not_an_append(tmp_path):
     directory = _transaction(tmp_path / "txn-1", BEFORE, rewritten)
     vault = _vault(tmp_path, BEFORE)
 
-    assert repair._owed_in(directory, IDENTITY, vault) == []
+    assert repair.owed_in(directory, IDENTITY, vault) == []
 
 
 def test_a_create_is_left_to_the_other_repair(tmp_path):
     directory = _transaction(tmp_path / "txn-1", b"", BLOCK, kind="create")
     vault = _vault(tmp_path, BEFORE)
 
-    assert repair._owed_in(directory, IDENTITY, vault) == []
+    assert repair.owed_in(directory, IDENTITY, vault) == []
 
 
 def test_an_image_that_no_longer_hashes_to_its_plan_is_refused(tmp_path):
     directory = _transaction(tmp_path / "txn-1", BEFORE, BEFORE + BLOCK)
-    (directory / "after/000000.bin").write_bytes(_compressed_image(BEFORE + b"tampered"))
+    (directory / "after/000000.bin").write_bytes(lzma.compress(BEFORE + b"tampered", preset=IMAGE_COMPRESSION_PRESET))
     vault = _vault(tmp_path, BEFORE)
 
-    assert repair._owed_in(directory, IDENTITY, vault) == []
+    assert repair.owed_in(directory, IDENTITY, vault) == []
 
 
 def test_only_a_race_is_replayable():
@@ -99,17 +100,17 @@ def test_a_block_without_a_marker_is_matched_by_its_bytes(tmp_path):
     plain = b"\n## [10:05:00] tool\n\nplain block\n"
     directory = _transaction(tmp_path / "txn-1", BEFORE, BEFORE + plain)
 
-    assert repair._owed_in(directory, IDENTITY, _vault(tmp_path, BEFORE + plain)) == []
-    assert len(repair._owed_in(directory, IDENTITY, _vault(tmp_path / "b", BEFORE))) == 1
+    assert repair.owed_in(directory, IDENTITY, _vault(tmp_path, BEFORE + plain)) == []
+    assert len(repair.owed_in(directory, IDENTITY, _vault(tmp_path / "b", BEFORE))) == 1
 
 
 def test_a_journal_append_is_left_to_the_journal(tmp_path):
     directory = _transaction(tmp_path / "txn-1", BEFORE, BEFORE + BLOCK)
-    plan = json.loads((directory / "plan.json").read_text())
+    plan = json.loads((directory / "plan.json").read_text(encoding='utf-8'))
     plan["operations"][0]["path"] = "knowledge/projects/demo/journal.md"
     (directory / "plan.json").write_text(json.dumps(plan))
 
-    assert repair._owed_in(directory, IDENTITY, _vault(tmp_path, BEFORE)) == []
+    assert repair.owed_in(directory, IDENTITY, _vault(tmp_path, BEFORE)) == []
 
 
 def test_an_attempt_a_retry_already_closed_is_not_listed():
@@ -129,4 +130,4 @@ def test_an_attempt_a_retry_already_closed_is_not_listed():
         ],
     )
 
-    assert repair._quarantined(database) == [("lost", "post-tool:y")]
+    assert repair.quarantined(database) == [("lost", "post-tool:y")]

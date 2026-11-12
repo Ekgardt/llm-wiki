@@ -1,5 +1,9 @@
 # Every re-export form is followed
 
+Update 2026-09-30: the eight-hop bound described below is superseded by
+`2026-09-30-traversal-stops-at-the-budget.md`; cycles and caller deadlines remain
+enforced. The historical measurements are retained.
+
 Date: 2026-09-26 (audit of 2026-09-27, item C-7).
 
 ## What was true

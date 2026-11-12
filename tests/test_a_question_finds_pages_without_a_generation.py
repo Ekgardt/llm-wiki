@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import search_memory
+import generation_search
 
 
 def _page(root: Path, name: str, body: str) -> Path:
@@ -18,13 +18,13 @@ def _page(root: Path, name: str, body: str) -> Path:
 
 
 def test_a_question_in_russian_finds_the_page_that_shares_its_words(tmp_path: Path, monkeypatch) -> None:
-    monkeypatch.setattr(search_memory, "ROOT", tmp_path)
+    monkeypatch.setenv("LLM_WIKI_ROOT", str(tmp_path))
     pages = [
         _page(tmp_path, "nightly-scheduler", "Мы выбрали systemd таймер вместо cron: он переживает перезагрузку."),
         _page(tmp_path, "unrelated", "Заметка о другом."),
     ]
 
-    hits = search_memory._direct_markdown_hits(
+    hits = generation_search.direct_markdown_hits(
         "почему systemd таймер, а не cron", pages, limit=5, project=None, since=None,
         as_of=None, deadline=None, cancelled=None,
     )
@@ -33,13 +33,13 @@ def test_a_question_in_russian_finds_the_page_that_shares_its_words(tmp_path: Pa
 
 
 def test_a_page_sharing_more_words_ranks_first(tmp_path: Path, monkeypatch) -> None:
-    monkeypatch.setattr(search_memory, "ROOT", tmp_path)
+    monkeypatch.setenv("LLM_WIKI_ROOT", str(tmp_path))
     pages = [
         _page(tmp_path, "one-word", "cron only"),
         _page(tmp_path, "three-words", "systemd timer instead of cron"),
     ]
 
-    hits = search_memory._direct_markdown_hits(
+    hits = generation_search.direct_markdown_hits(
         "why a systemd timer and not cron", pages, limit=5, project=None, since=None,
         as_of=None, deadline=None, cancelled=None,
     )

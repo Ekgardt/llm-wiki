@@ -24,16 +24,16 @@ from code_navigation import (
     Provenance,
     ResolutionLabel,
 )
-from lsp_positions import LspPosition, LspRange, SourceAnchor, SourceDocument
-from lsp_security import resolve_repository_source
-from pyright_session import (
+from llm_wiki.pyright_session_core import PyrightSession
+from llm_wiki.pyright_session_values import (
     LspLocation,
     OpenDocument,
     ProviderCalls,
     ProviderHover,
     ProviderLocations,
-    PyrightSession,
 )
+from lsp_positions import LspPosition, LspRange, SourceAnchor, SourceDocument
+from lsp_security import resolve_repository_source
 from repository_scope import RepositoryScope, resolve_repository_scope
 from workspace_revision import WorkspaceRevision
 
@@ -113,12 +113,12 @@ def _pin_attempt(
 ) -> WorkspaceRevision:
     """One fixed workspace revision, a synchronized provider and an open document."""
     session._position_encoding = PositionEncoding.UTF8
-    revision = code_navigation._compute_revision(scope, deadline=time.monotonic() + SHORT_TIMEOUT)
+    revision = code_navigation.compute_revision(scope, deadline=time.monotonic() + SHORT_TIMEOUT)
     revision = replace(revision, revision_sha256="a" * 64)
     source = resolve_repository_source(scope, "pkg/service.py")
     content = source.absolute_path.read_bytes()
     document = OpenDocument(source, content, hashlib.sha256(content).hexdigest(), 1)
-    monkeypatch.setattr(code_navigation, "_compute_revision", lambda repository, *, deadline: revision)
+    monkeypatch.setattr(code_navigation, "compute_revision", lambda repository, *, deadline: revision)
     monkeypatch.setattr(session, "synchronize", lambda value, *, deadline: None)
     monkeypatch.setattr(session, "open_document", lambda path, *, deadline: document)
     monkeypatch.setattr(
@@ -159,10 +159,10 @@ def _operation(name: str, facade: CodeNavigation, scope: RepositoryScope):
 
 
 REVISION_FAULTS = {
-    "timeout": ("_compute_revision", _raise(TimeoutError("revision"))),
-    "oserror": ("_compute_revision", _raise(OSError("revision"))),
-    "post-oserror": ("_compute_post_revision", _raise(OSError("post"))),
-    "post-timeout": ("_compute_post_revision", _raise(TimeoutError("post"))),
+    "timeout": ("compute_revision", _raise(TimeoutError("revision"))),
+    "oserror": ("compute_revision", _raise(OSError("revision"))),
+    "post-oserror": ("compute_post_revision", _raise(OSError("post"))),
+    "post-timeout": ("compute_post_revision", _raise(TimeoutError("post"))),
     "read-fails": ("read_stable_bytes", _raise(OSError("gone"))),
 }
 
@@ -197,10 +197,10 @@ def _install_fault(
     faults = {
         **REVISION_FAULTS,
         "empty": (
-            "_compute_revision",
+            "compute_revision",
             lambda repository, *, deadline: replace(revision, revision_sha256=""),
         ),
-        "post-moves": ("_compute_post_revision", _moving_post_revision(revision)),
+        "post-moves": ("compute_post_revision", _moving_post_revision(revision)),
     }
     name, value = faults[fault]
     monkeypatch.setattr(code_navigation, name, value)
@@ -225,16 +225,19 @@ EDGE_FAULTS = {
     "anchor-timeout": ("timeout", "edge anchor validation timed out"),
     "anchor-moves": ("stale", "edge target changed during verification"),
     "verifier-timeout": ("timeout", "edge verifier timed out"),
-    "verifier-error": ("error", "edge verifier failed"),
+    "verifier-error": ("error", "edge verifier failed: RuntimeError"),
     "verifier-false": ("partial", "no structural edge proof"),
-    "verifier-not-boolean": ("error", "edge verifier failed"),
+    "verifier-not-boolean": (
+        "error",
+        "edge verifier failed: TypeError",
+    ),
 }
 
 
 def _edge_patches(fault: str) -> dict[str, object]:
     anchors = {
         "anchor-timeout": _raise(TimeoutError("anchor")),
-        "anchor-moves": _raise(code_navigation._RevisionMismatch()),
+        "anchor-moves": _raise(code_navigation.RevisionMismatch()),
     }
     verifiers = {
         "verifier-timeout": _raise(TimeoutError("verifier")),
@@ -242,7 +245,7 @@ def _edge_patches(fault: str) -> dict[str, object]:
         "verifier-false": lambda *args: False,
         "verifier-not-boolean": lambda *args: 1,
     }
-    return {"_validate_revision_anchor": anchors.get(fault), "_edge_verifier": verifiers.get(fault)}
+    return {"validate_revision_anchor": anchors.get(fault), "_edge_verifier": verifiers.get(fault)}
 
 
 @pytest.mark.parametrize("fault", sorted(EDGE_FAULTS))
@@ -252,11 +255,11 @@ def test_edge_verification_faults_name_their_cause(
     facade, session, scope = navigation
     _pin_attempt(monkeypatch, session, scope)
     patches = _edge_patches(fault)
-    anchor_fault = patches["_validate_revision_anchor"]
+    anchor_fault = patches["validate_revision_anchor"]
     monkeypatch.setattr(
         code_navigation,
-        "_validate_revision_anchor",
-        anchor_fault or code_navigation._validate_revision_anchor,
+        "validate_revision_anchor",
+        anchor_fault or code_navigation.validate_revision_anchor,
     )
     monkeypatch.setattr(facade, "_edge_verifier", patches["_edge_verifier"] or facade._edge_verifier)
 
@@ -272,7 +275,10 @@ def _resolver_failing_midway(symbol, repository, deadline):
 
 
 SYMBOL_RESOLVERS = {
-    "fails-midway": (_resolver_failing_midway, ("error", ("symbol resolver failed",))),
+    "fails-midway": (
+        _resolver_failing_midway,
+        ("error", ("symbol resolver failed: RuntimeError",)),
+    ),
     "times-out": (_raise(TimeoutError("resolver")), ("timeout", ("symbol resolver timed out",))),
     "finds-nothing": (lambda *args: (), ("partial", ("no structural candidates",))),
 }
@@ -375,8 +381,8 @@ def test_outgoing_calls_ask_the_outgoing_hierarchy(
     assert [item.path for item in result.locations] == ["pkg/api.py"]
 
 
-def _consumed_documents(scope: RepositoryScope) -> code_navigation._AttemptDocuments:
-    documents = code_navigation._AttemptDocuments()
+def _consumed_documents(scope: RepositoryScope) -> code_navigation.AttemptDocuments:
+    documents = code_navigation.AttemptDocuments()
     for path in ("pkg/service.py", "pkg/api.py"):
         source = resolve_repository_source(scope, path)
         content = source.absolute_path.read_bytes()
@@ -389,7 +395,7 @@ def test_source_document_cache_replaces_and_evicts_by_entry_bound(
     navigation, monkeypatch: pytest.MonkeyPatch, entries: int, cached: list[str]
 ) -> None:
     facade, _session, scope = navigation
-    monkeypatch.setattr(code_navigation, "_MAX_SOURCE_DOCUMENT_CACHE_ENTRIES", entries)
+    monkeypatch.setattr(code_navigation, "MAX_SOURCE_DOCUMENT_CACHE_ENTRIES", entries)
     revision_entries = _revision_entries(scope)
     sizes = []
     for _round in range(3):
@@ -401,9 +407,34 @@ def test_source_document_cache_replaces_and_evicts_by_entry_bound(
 
 
 def _revision_entries(scope: RepositoryScope) -> dict[str, object]:
-    revision = code_navigation._compute_revision(scope, deadline=time.monotonic() + SHORT_TIMEOUT)
+    revision = code_navigation.compute_revision(scope, deadline=time.monotonic() + SHORT_TIMEOUT)
     return {entry.path: entry for entry in revision.entries}
 
 
 def _cached_names(facade: CodeNavigation) -> list[str]:
     return [key[0].rsplit("/", 1)[-1] for key in facade._source_document_cache]
+
+
+def test_a_failed_structural_fallback_names_its_class_and_not_its_text(
+    navigation, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The warning said only `structural fallback failed`; the exception was dropped.
+
+    Its class is named; its text, which may quote any path, is not.
+    """
+    facade, session, scope = navigation
+    _pin_attempt(monkeypatch, session, scope)
+    root = scope.checkout_root
+    monkeypatch.setattr(
+        facade, "_structural_candidates", _raise(RuntimeError(f"no graph under {root}"))
+    )
+    monkeypatch.setattr(session, "type_definition", TYPE_CALLS["reports"])
+    monkeypatch.setattr(session, "hover", HOVER_CALLS["ranged"])
+
+    result = facade.query(
+        NavigationRequest(scope, Capability.TYPES, "pkg/service.py", 10, 20),
+        deadline=time.monotonic() + SHORT_TIMEOUT,
+    )
+
+    assert "structural fallback failed: RuntimeError" in result.warnings
+    assert "no graph" not in "".join(result.warnings)

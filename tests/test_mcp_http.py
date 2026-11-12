@@ -270,24 +270,24 @@ def test_the_http_surface_lists_the_same_twelve_tools_as_stdio():
     import mcp_server
 
     over_http = asyncio.run(_listed_tool_names())
-    assert over_http == {tool.name for tool in mcp_server._build_tool_definitions()}
+    assert over_http == {tool.name for tool in mcp_server.build_tool_definitions()}
     assert len(over_http) == 12
 
 
 def test_a_tool_call_over_http_returns_the_stdio_envelope(monkeypatch):
     """The transport must not become a second dispatch path.
 
-    The same arguments go through `_execute_tool_call` - the stdio funnel -
+    The same arguments go through `execute_tool_call` - the stdio funnel -
     and through HTTP; the envelopes must agree except where they are a clock.
     """
     import mcp_server
 
     monkeypatch.setattr(
-        mcp_server, "_wiki_overview", lambda **_kwargs: {"pages": 7, "tier": "HYBRID"}
+        "llm_wiki.mcp_server_vault.wiki_overview", lambda **_kwargs: {"pages": 7, "tier": "HYBRID"}
     )
     over_http = asyncio.run(_tool_envelope("wiki_overview", {}))
     over_stdio = json.loads(
-        mcp_server._execute_tool_call("wiki_overview", {}, time.monotonic() + 30.0)
+        mcp_server.execute_tool_call("wiki_overview", {}, time.monotonic() + 30.0)
     )
     assert _without_clocks(over_http) == _without_clocks(over_stdio)
     assert (over_http["data"]["pages"], over_http["data"]["tier"]) == (7, "HYBRID")

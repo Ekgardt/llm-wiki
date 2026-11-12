@@ -84,16 +84,13 @@ def indexed(tmp_path_factory):
     patch.setenv("LLM_WIKI_STATE_ROOT", str(state))
     patch.setenv("LLM_WIKI_ROOT", str(vault))
     import evidence_reader_cache
-    import impact_analysis
-    import memory_state
-    import repository_index
+    import repository_indexing
 
-    patch.setattr(memory_state, "ROOT", vault, raising=False)
-    patch.setattr(memory_state, "STATE_ROOT", state, raising=False)
-    patch.setattr(impact_analysis, "STATE_ROOT", state, raising=False)
+    patch.setenv("LLM_WIKI_ROOT", str(vault))
+    patch.setenv("LLM_WIKI_STATE_ROOT", str(state))
     evidence_reader_cache.clear()
     repository = _repository(base / "repo")
-    answer = repository_index.index_repository(repository, state_root=state)
+    answer = repository_indexing.index_repository(repository, state_root=state)
     assert answer["status"] == "indexed", answer
     yield repository
     evidence_reader_cache.clear()

@@ -6,116 +6,45 @@ from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from pathlib import Path
 from types import MappingProxyType, SimpleNamespace
+from typing import Any
 
+import compile_pipeline
 import pytest
 from compile_cache import CompileCache
 from llm_client import LLMResult, ProviderDescriptor
+from llm_wiki import (
+    compile_pipeline_apply,
+    compile_pipeline_base,
+    compile_pipeline_batches,
+    compile_pipeline_claims,
+    compile_pipeline_operations,
+    compile_pipeline_prompts,
+    compile_pipeline_receipts,
+    compile_pipeline_selection,
+    compile_pipeline_sources,
+    runtime_roots,
+)
 from markdown_transaction import MarkdownCoordinator
 from reliable_memory import canonical_json_bytes, sha256_bytes, validate_schema
 
-
-@pytest.fixture
-def vault(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[Path, Path]:
-    root = tmp_path / "vault"
-    state_root = tmp_path / "state"
-    state_root.mkdir()
-    for relative in ("knowledge/daily/receipts", "knowledge/notes", "knowledge/projects"):
-        (root / relative).mkdir(parents=True)
-    (root / "knowledge/index.md").write_bytes(b"# Old index\n")
-    (root / "knowledge/log.md").write_bytes(b"# Session Memory Log\n")
-    (root / "AGENTS.md").write_bytes(b"agent contract\r\n")
-
-    import compile_memory
-
-    monkeypatch.setattr(compile_memory, "ROOT", root)
-    monkeypatch.setattr(compile_memory, "STATE_ROOT", state_root)
-    monkeypatch.setattr(compile_memory, "MEMORY", root / "knowledge")
-    monkeypatch.setattr(compile_memory, "DAILY_DIR", root / "knowledge/daily")
-    monkeypatch.setattr(compile_memory, "KNOWLEDGE", root / "knowledge/notes")
-    monkeypatch.setattr(compile_memory, "INDEX", root / "knowledge/index.md")
-    monkeypatch.setattr(compile_memory, "LOG", root / "knowledge/log.md")
-    monkeypatch.setattr(compile_memory, "AGENTS", root / "AGENTS.md")
-    return root, state_root
+from tests.compile_paths import point_compile_path
+from tests.compile_transactions_helpers import (
+    _claim_record,
+    _daily,
+    _semantic_plan,
+    vault,  # noqa: F401
+)
+from tests.markdown_coordinator_parts import patch_coordinator
+from tests.script_sources import SCRIPTS
 
 
-def _daily(root: Path) -> Path:
-    path = root / "knowledge/daily/2026-07-14.md"
-    path.write_bytes(
-        b"## [10:00:00] session-end | manual\r\n"
-        b"A durable exact-byte observation.\r\n"
-        b"The prior state is blue.\r\n"
-        b"A second durable exact-byte observation.\r\n"
-    )
-    return path
-
-
-def _semantic_plan() -> dict[str, object]:
-    operation = {
-        "action": "create",
-        "category": "patterns",
-        "slug": "exact-byte-pattern",
-        "title": "Exact Byte Pattern",
-        "summary": "Compile the bytes that were actually reviewed.",
-        "body_section": "Lesson",
-        "body_markdown": "Use an immutable snapshot so later appends remain pending.",
-        "evidence": [
-            {
-                "daily_date": "2026-07-14",
-                "timestamp": "10:00:00",
-                "quoted_text": "A durable exact-byte observation.",
-                "claim": "The reviewed source is immutable.",
-            }
-        ],
-        "related": [],
-    }
-    return {
-        "schema_version": "compile-plan/v2",
-        "operations": [
-            {
-                "kind": "create",
-                "path": "knowledge/notes/exact-byte-pattern.md",
-                "content": canonical_json_bytes(operation).decode("utf-8"),
-            }
-        ],
-    }
-
-
-def _claim_record(root: Path, *, claim_id: str, value: str, text: str, authority: str) -> dict[str, object]:
-    daily = (root / "knowledge/daily/2026-07-14.md").read_bytes()
-    start = daily.index(text.encode())
-    semantic = {
-        "subject": "project",
-        "relation": "has-state",
-        "value": {"type": "string", "value": value},
-        "qualifiers": [],
-        "validity": {"from": "2026-07-14", "to": None},
-    }
-    return {
-        "schema_version": "claim/v1",
-        "id": claim_id,
-        "fingerprint": sha256_bytes(canonical_json_bytes(semantic)),
-        "text": text,
-        **semantic,
-        "observed_at": "2026-07-14T10:00:00Z",
-        "lifecycle": "active",
-        "confidence": "high",
-        "authority": authority,
-        "evidence": {
-            "reference": (
-                f"daily:2026-07-14 sha256:{sha256_bytes(daily)} "
-                f"block:10:00:00 bytes:{start}-{start + len(text.encode())}"
-            ),
-            "sha256": sha256_bytes(text.encode()),
-            "text": text,
-        },
-        "links": [],
-        "extractor_version": "test/v1",
-    }
+def _semantic_operation() -> dict[str, Any]:
+    semantic: dict[str, Any] = json.loads(_semantic_plan()["operations"][0]["content"])
+    return semantic
 
 
 def _draft_response() -> str:
-    semantic = json.loads(str(_semantic_plan()["operations"][0]["content"]))
-    return json.dumps({"operations": [semantic], "audit": {}})
+    return json.dumps({"operations": [_semantic_operation()], "audit": {}})
 
 
 def _pass_review() -> str:
@@ -144,13 +73,12 @@ def _provider(name: str = "fake", index: int = 0) -> ProviderDescriptor:
     )
 
 
-def test_snapshot_compile_inputs_preserves_exact_bytes(vault):
+def test_snapshot_compile_inputs_preserves_exact_bytes(vault):  # noqa: F811
     root, _state_root = vault
     daily = _daily(root)
 
-    import compile_memory
 
-    inputs = compile_memory.snapshot_compile_inputs([daily])
+    inputs = compile_pipeline_sources.snapshot_compile_inputs([daily])
     original = daily.read_bytes()
     daily.write_bytes(original + b"later\n")
 
@@ -162,9 +90,9 @@ def test_snapshot_compile_inputs_preserves_exact_bytes(vault):
     assert any(source.content == b"agent contract\r\n" for source in inputs.sources)
 
 
-def test_source_identity_hashes_logical_path_and_digest(vault):
+def test_source_identity_hashes_logical_path_and_digest(vault):  # noqa: F811
     root, _state_root = vault
-    import compile_memory
+    import compile_receipts
 
     shared = b"same bytes\n"
     first = root / "knowledge/daily/2026-07-14.md"
@@ -173,10 +101,10 @@ def test_source_identity_hashes_logical_path_and_digest(vault):
     second.write_bytes(shared)
     digest = sha256_bytes(shared)
 
-    first_identity = compile_memory.compile_source_identity(
+    first_identity = compile_pipeline.compile_source_identity(
         "knowledge/daily/2026-07-14.md", digest
     )
-    second_identity = compile_memory.compile_source_identity(
+    second_identity = compile_pipeline.compile_source_identity(
         "knowledge/daily/2026-07-15.md", digest
     )
 
@@ -188,64 +116,66 @@ def test_source_identity_hashes_logical_path_and_digest(vault):
     )
     assert first_identity != second_identity
     assert [
-        compile_memory.compile_receipt_path(identity).name
+        compile_receipts.compile_receipt_path(identity).name
         for identity in (first_identity, second_identity)
     ] == [f"v3-{first_identity}.md", f"v3-{second_identity}.md"]
 
 
-def test_complete_item_packer_rejects_oversized_daily_before_dispatch(vault):
+def test_complete_item_packer_rejects_oversized_daily_before_dispatch(vault):  # noqa: F811
     _root, _state_root = vault
-    import compile_memory
+    import compile_receipts
+    from llm_wiki import compile_pipeline_batches
 
     content = b"x" * 28_000
     digest = sha256_bytes(content)
-    daily = compile_memory.DailySnapshot(
+    daily = compile_receipts.DailySnapshot(
         "knowledge/daily/2026-07-14.md", content, digest
     )
-    inputs = compile_memory.CompileInputs(
+    inputs = compile_pipeline_sources.CompileInputs(
         dailies=(daily,),
         sources=(
-            compile_memory.SourceSnapshot(daily.logical_path, content, digest),
+            compile_receipts.SourceSnapshot(daily.logical_path, content, digest),
         ),
         targets=(),
     )
 
     with pytest.raises(ValueError, match="daily source exceeds compile input budget"):
-        compile_memory.pack_compile_batches(inputs, model=None)
+        compile_pipeline_batches.pack_compile_batches(inputs, model=None)
 
 
-def test_complete_item_packer_drops_oversized_optional_context(vault):
+def test_complete_item_packer_drops_oversized_optional_context(vault):  # noqa: F811
     _root, _state_root = vault
-    import compile_memory
+    import compile_receipts
+    from llm_wiki import compile_pipeline_batches
 
     daily_content = b"## [10:00:00] event\ndurable fact\n"
-    daily = compile_memory.DailySnapshot(
+    daily = compile_receipts.DailySnapshot(
         "knowledge/daily/2026-07-14.md",
         daily_content,
         sha256_bytes(daily_content),
     )
     context_content = b"x" * 28_000
-    context = compile_memory.SourceSnapshot(
+    context = compile_receipts.SourceSnapshot(
         "knowledge/notes/optional.md",
         context_content,
         sha256_bytes(context_content),
     )
-    inputs = compile_memory.CompileInputs(
+    inputs = compile_pipeline_sources.CompileInputs(
         dailies=(daily,),
         sources=(
-            compile_memory.SourceSnapshot(
+            compile_receipts.SourceSnapshot(
                 daily.logical_path, daily.content, daily.sha256
             ),
             context,
         ),
         targets=(
-            compile_memory.TargetSnapshot(
+            compile_pipeline_sources.TargetSnapshot(
                 context.logical_path, context.content, context.sha256
             ),
         ),
     )
 
-    batches = compile_memory.pack_compile_batches(inputs, model=None)
+    batches = compile_pipeline_batches.pack_compile_batches(inputs, model=None)
 
     assert len(batches) == 1
     assert [item.logical_path for item in batches[0].inputs.sources] == [
@@ -254,15 +184,14 @@ def test_complete_item_packer_drops_oversized_optional_context(vault):
     assert batches[0].inputs.targets == inputs.targets
 
 
-def test_critique_receives_cited_evidence_without_uncited_source_blob(vault):
+def test_critique_receives_cited_evidence_without_uncited_source_blob(vault):  # noqa: F811
     root, _state_root = vault
     daily = _daily(root)
-    import compile_memory
 
-    inputs = compile_memory.snapshot_compile_inputs([daily])
-    operation = json.loads(str(_semantic_plan()["operations"][0]["content"]))
+    inputs = compile_pipeline_sources.snapshot_compile_inputs([daily])
+    operation = _semantic_operation()
 
-    prompt = compile_memory._critique_prompt(inputs, [operation])
+    prompt = compile_pipeline_prompts.critique_prompt(inputs, [operation])
 
     carried = [
         text in prompt
@@ -282,20 +211,18 @@ def test_critique_receives_cited_evidence_without_uncited_source_blob(vault):
     assert (carried, uncited) == ([True, True, True], [False, False])
 
 
-def test_critique_budget_fails_before_second_provider_call(vault, monkeypatch):
+def test_critique_budget_fails_before_second_provider_call(vault, monkeypatch):  # noqa: F811
     root, state_root = vault
     daily = _daily(root)
-    import compile_memory
+    from llm_wiki import compile_pipeline_batches
 
-    inputs = compile_memory.snapshot_compile_inputs([daily])
-    batch = compile_memory.pack_compile_batches(inputs, model=None)[0]
+    inputs = compile_pipeline_sources.snapshot_compile_inputs([daily])
+    batch = compile_pipeline_batches.pack_compile_batches(inputs, model=None)[0]
     provider = _provider()
     calls = []
 
-    monkeypatch.setattr(
-        compile_memory, "provider_candidates", lambda *args, **kwargs: [provider]
-    )
-    monkeypatch.setattr(compile_memory, "probe_candidate", lambda descriptor: True)
+    point_compile_path(monkeypatch, "provider_candidates", lambda *args, **kwargs: [provider])
+    point_compile_path(monkeypatch, "probe_candidate", lambda descriptor: True)
 
     def call(descriptor, prompt, system_prompt, **kwargs):
         calls.append(prompt)
@@ -304,10 +231,10 @@ def test_critique_budget_fails_before_second_provider_call(vault, monkeypatch):
     def token_counter(text):
         return 30_000 if "CITED EVIDENCE" in text else 100
 
-    monkeypatch.setattr(compile_memory, "call_candidate", call)
+    point_compile_path(monkeypatch, "call_candidate", call)
 
     with pytest.raises(RuntimeError, match="validated compile plan"):
-        compile_memory.resolve_compile_plan(
+        compile_pipeline_batches.resolve_compile_plan(
             batch.inputs,
             CompileCache(state_root),
             coordinator=MarkdownCoordinator(root, state_root),
@@ -318,14 +245,14 @@ def test_critique_budget_fails_before_second_provider_call(vault, monkeypatch):
     assert len(calls) == 1
 
 
-def test_v3_receipt_path_and_body_bind_source_path_not_only_digest(vault):
+def test_v4_receipt_path_and_body_bind_exact_original_context(vault):  # noqa: F811
     root, state_root = vault
     daily = _daily(root)
-    import compile_memory
+    from llm_wiki import compile_pipeline_apply, compile_pipeline_batches
 
-    inputs = compile_memory.snapshot_compile_inputs([daily])
-    batch = compile_memory.pack_compile_batches(inputs, model="fake-v1")[0]
-    result = compile_memory.apply_compile_plan(
+    inputs = compile_pipeline_sources.snapshot_compile_inputs([daily])
+    batch = compile_pipeline_batches.pack_compile_batches(inputs, model="fake-v1")[0]
+    result = compile_pipeline_apply.apply_compile_plan(
         inputs,
         _semantic_plan(),
         action_key="a" * 64,
@@ -340,14 +267,13 @@ def test_v3_receipt_path_and_body_bind_source_path_not_only_digest(vault):
         },
     )
     source = batch.manifest[0]
-    source_identity = compile_memory.compile_source_identity(
-        source.logical_path, source.sha256
-    )
-    receipt = root / f"knowledge/daily/receipts/v3-{source_identity}.md"
+    descriptor = compile_pipeline_receipts.v4_source_descriptor(batch.inputs.dailies[0])
+    source_identity = compile_pipeline.compile_context_source_identity(descriptor)
+    receipt = root / f"knowledge/daily/receipts/v4-{source_identity}.md"
 
     digest_only = root / f"knowledge/daily/receipts/{source.sha256}.md"
     assert (receipt.is_file(), digest_only.exists()) == (True, False)
-    record = compile_memory.parse_compile_receipt_v3(
+    record = compile_pipeline.parse_compile_receipt_v4(
         receipt.read_bytes(),
         logical_path=source.logical_path,
         source_sha256=source.sha256,
@@ -359,22 +285,22 @@ def test_v3_receipt_path_and_body_bind_source_path_not_only_digest(vault):
         record["operation_id"],
     ) == (
         source_identity,
-        source.receipt_descriptor(),
-        batch.manifest_sha256,
+        descriptor,
+        sha256_bytes(canonical_json_bytes([descriptor])),
         result.operation_id,
     )
     assert "completed_at" not in record
 
 
 def test_oversized_prospective_receipt_fails_before_writer_gate(
-    vault, monkeypatch
+    vault, monkeypatch  # noqa: F811
 ):
     root, state_root = vault
     daily = _daily(root)
-    import compile_memory
+    from llm_wiki import compile_pipeline_apply, compile_pipeline_batches
 
-    inputs = compile_memory.snapshot_compile_inputs([daily])
-    batch = compile_memory.pack_compile_batches(inputs, model=None)[0]
+    inputs = compile_pipeline_sources.snapshot_compile_inputs([daily])
+    batch = compile_pipeline_batches.pack_compile_batches(inputs, model=None)[0]
     coordinator = MarkdownCoordinator(root, state_root)
     entered = False
 
@@ -386,10 +312,10 @@ def test_oversized_prospective_receipt_fails_before_writer_gate(
         yield
 
     monkeypatch.setattr(coordinator, "writer_gate", observed_gate)
-    monkeypatch.setattr(compile_memory, "MAX_RECEIPT_BYTES", 512)
+    point_compile_path(monkeypatch, "MAX_RECEIPT_BYTES", 512)
 
     with pytest.raises(ValueError, match="receipt exceeds"):
-        compile_memory.apply_compile_plan(
+        compile_pipeline_apply.apply_compile_plan(
             inputs,
             _semantic_plan(),
             action_key="b" * 64,
@@ -407,12 +333,12 @@ def test_oversized_prospective_receipt_fails_before_writer_gate(
     assert not list((root / "knowledge/daily/receipts").glob("*.md"))
 
 
-def test_v3_compile_uses_supplied_canonical_owner(vault):
+def test_v3_compile_uses_supplied_canonical_owner(vault):  # noqa: F811
     root, state_root = vault
     daily = _daily(root)
-    import compile_memory
     import markdown_transaction
     import operational_ownership
+    from llm_wiki import compile_pipeline_apply, compile_pipeline_batches
 
     candidate = state_root / "run/markdown-transactions-v3.candidate.sqlite3"
     markdown_transaction.initialize_coordinator_v3_candidate(
@@ -421,14 +347,14 @@ def test_v3_compile_uses_supplied_canonical_owner(vault):
     owner, marker = operational_ownership.acquire_compile_owner(
         state_root=state_root
     )
-    coordinator = MarkdownCoordinator._from_v3_candidate(
+    coordinator = MarkdownCoordinator.from_v3_candidate(
         candidate, state_root=state_root
     )
     coordinator.vault = root.resolve()
-    inputs = compile_memory.snapshot_compile_inputs([daily])
-    batch = compile_memory.pack_compile_batches(inputs, model=None)[0]
+    inputs = compile_pipeline_sources.snapshot_compile_inputs([daily])
+    batch = compile_pipeline_batches.pack_compile_batches(inputs, model=None)[0]
     try:
-        result = compile_memory.apply_compile_plan(
+        result = compile_pipeline_apply.apply_compile_plan(
             inputs,
             _semantic_plan(),
             action_key="c" * 64,
@@ -448,15 +374,15 @@ def test_v3_compile_uses_supplied_canonical_owner(vault):
     assert result.state == "committed"
 
 
-def test_successful_v3_retry_keeps_operation_receipt_path_and_bytes(
-    vault, monkeypatch
+def test_successful_v4_retry_keeps_operation_receipt_path_and_bytes(
+    vault, monkeypatch  # noqa: F811
 ):
     root, state_root = vault
     daily = _daily(root)
-    import compile_memory
+    from llm_wiki import compile_pipeline_apply, compile_pipeline_batches
 
-    inputs = compile_memory.snapshot_compile_inputs([daily])
-    batch = compile_memory.pack_compile_batches(inputs, model=None)[0]
+    inputs = compile_pipeline_sources.snapshot_compile_inputs([daily])
+    batch = compile_pipeline_batches.pack_compile_batches(inputs, model=None)[0]
     coordinator = MarkdownCoordinator(root, state_root)
     real_apply = coordinator.apply
 
@@ -466,7 +392,7 @@ def test_successful_v3_retry_keeps_operation_receipt_path_and_bytes(
 
     monkeypatch.setattr(coordinator, "apply", commit_then_fail)
     with pytest.raises(OSError, match="return was lost"):
-        compile_memory.apply_compile_plan(
+        compile_pipeline_apply.apply_compile_plan(
             inputs,
             _semantic_plan(),
             action_key="d" * 64,
@@ -481,19 +407,19 @@ def test_successful_v3_retry_keeps_operation_receipt_path_and_bytes(
             completed_at="2026-07-14T12:00:00Z",
         )
     source = batch.manifest[0]
-    identity = compile_memory.compile_source_identity(
-        source.logical_path, source.sha256
+    identity = compile_pipeline.compile_context_source_identity(
+        compile_pipeline_receipts.v4_source_descriptor(batch.inputs.dailies[0])
     )
-    receipt = root / f"knowledge/daily/receipts/v3-{identity}.md"
+    receipt = root / f"knowledge/daily/receipts/v4-{identity}.md"
     first_bytes = receipt.read_bytes()
-    first_record = compile_memory.parse_compile_receipt_v3(
+    first_record = compile_pipeline.parse_compile_receipt_v4(
         first_bytes,
         logical_path=source.logical_path,
         source_sha256=source.sha256,
     )
 
     monkeypatch.setattr(coordinator, "apply", real_apply)
-    retried = compile_memory.apply_compile_plan(
+    retried = compile_pipeline_apply.apply_compile_plan(
         inputs,
         _semantic_plan(),
         action_key="d" * 64,
@@ -512,7 +438,7 @@ def test_successful_v3_retry_keeps_operation_receipt_path_and_bytes(
     assert receipt.read_bytes() == first_bytes
 
 
-def test_index_can_be_built_from_in_memory_note_bytes(vault):
+def test_index_can_be_built_from_in_memory_note_bytes(vault):  # noqa: F811
     root, _state_root = vault
     import rebuild_memory_index
 
@@ -530,13 +456,13 @@ def test_index_can_be_built_from_in_memory_note_bytes(vault):
     assert not (root / "knowledge/notes/pending.md").exists()
 
 
-def test_compile_transaction_commits_page_index_log_and_receipt(vault):
+def test_compile_transaction_commits_page_index_log_and_receipt(vault):  # noqa: F811
     root, state_root = vault
     daily = _daily(root)
-    import compile_memory
+    from llm_wiki import compile_pipeline_apply
 
-    inputs = compile_memory.snapshot_compile_inputs([daily])
-    result = compile_memory.apply_compile_plan(
+    inputs = compile_pipeline_sources.snapshot_compile_inputs([daily])
+    result = compile_pipeline_apply.apply_compile_plan(
         inputs,
         _semantic_plan(),
         action_key="a" * 64,
@@ -550,7 +476,7 @@ def test_compile_transaction_commits_page_index_log_and_receipt(vault):
     assert (
         (root / "knowledge/notes/exact-byte-pattern.md").is_file(),
         b"exact-byte-pattern" in (root / "knowledge/index.md").read_bytes(),
-        inputs.dailies[0].sha256.encode() in (root / "knowledge/log.md").read_bytes(),
+        inputs.dailies[0].sha256.encode() in (root / "knowledge/log.local.md").read_bytes(),
         receipt.is_file(),
     ) == (True, True, True, True)
     text = receipt.read_text(encoding="utf-8")
@@ -574,11 +500,11 @@ def test_compile_transaction_commits_page_index_log_and_receipt(vault):
     )
     validate_schema(
         record,
-        Path(compile_memory.__file__).with_name("schemas") / "compile-receipt-v2.json",
+        SCRIPTS / "schemas" / "compile-receipt-v2.json",
     )
 
 
-def test_compile_page_preserves_per_agent_evidence_attribution(vault, monkeypatch):
+def test_compile_page_preserves_per_agent_evidence_attribution(vault, monkeypatch):  # noqa: F811
     root, state_root = vault
     daily = root / "knowledge/daily/2026-07-14.md"
     agents = ("opencode", "codex", "claude")
@@ -602,9 +528,9 @@ def test_compile_page_preserves_per_agent_evidence_attribution(vault, monkeypatc
             }
         )
     daily.write_text("\n".join(lines) + "\n", encoding="utf-8")
-    import compile_memory
+    from llm_wiki import compile_pipeline_apply
 
-    operation = json.loads(str(_semantic_plan()["operations"][0]["content"]))
+    operation = _semantic_operation()
     operation["evidence"] = evidence
     plan = {
         "schema_version": "compile-plan/v2",
@@ -616,9 +542,9 @@ def test_compile_page_preserves_per_agent_evidence_attribution(vault, monkeypatc
             }
         ],
     }
-    inputs = compile_memory.snapshot_compile_inputs([daily])
+    inputs = compile_pipeline_sources.snapshot_compile_inputs([daily])
 
-    compile_memory.apply_compile_plan(
+    compile_pipeline_apply.apply_compile_plan(
         inputs,
         plan,
         action_key="b" * 64,
@@ -644,11 +570,11 @@ def _resolved_evidence_texts(root: Path, page: str) -> list:
     return sorted(resolver.resolve(item).bytes.decode("utf-8") for item in references)
 
 
-def test_a_quarantined_claim_is_published_on_its_page_and_the_day_is_compiled(vault):
+def test_a_quarantined_claim_is_published_on_its_page_and_the_day_is_compiled(vault):  # noqa: F811
     root, state_root = vault
     daily = _daily(root)
-    import compile_memory
     from claims import ClaimIndex
+    from llm_wiki import compile_pipeline_apply, compile_pipeline_batches
 
     old = _claim_record(
         root,
@@ -670,9 +596,9 @@ def test_a_quarantined_claim_is_published_on_its_page_and_the_day_is_compiled(va
         text="A durable exact-byte observation.",
         authority="inferred",
     )
-    operation = json.loads(str(_semantic_plan()["operations"][0]["content"]))
+    operation = _semantic_operation()
     operation["claims"] = [new]
-    inputs = compile_memory.snapshot_compile_inputs([daily])
+    inputs = compile_pipeline_sources.snapshot_compile_inputs([daily])
     plan = {
         "schema_version": "compile-plan/v2",
         "operations": [{
@@ -684,7 +610,7 @@ def test_a_quarantined_claim_is_published_on_its_page_and_the_day_is_compiled(va
     ClaimIndex(state_root, vault=root).rebuild()
     coordinator = MarkdownCoordinator(root, state_root)
 
-    result = compile_memory.apply_compile_plan(
+    result = compile_pipeline_apply.apply_compile_plan(
         inputs,
         plan,
         action_key="9" * 64,
@@ -696,7 +622,7 @@ def test_a_quarantined_claim_is_published_on_its_page_and_the_day_is_compiled(va
     page = root / "knowledge/notes/exact-byte-pattern.md"
     candidates = list((root / "knowledge/inbox/claims").glob("*.md"))
     transaction = coordinator._record_for_operation_id(result.operation_id)
-    receipt = compile_memory.read_compile_receipt_v2(inputs.dailies[0].sha256, coordinator)
+    receipt = compile_pipeline_batches.read_compile_receipt_v2(inputs.dailies[0].sha256, coordinator)
     # A quarantined claim no longer holds its day (audit A-13): the page is
     # published carrying the claim as `quarantined`, the candidate joins the
     # same commit, and the day carries its receipt.
@@ -709,7 +635,7 @@ def test_a_quarantined_claim_is_published_on_its_page_and_the_day_is_compiled(va
         receipt is not None,
     ) == (True, {"new": "quarantined"}, 1, False, True, True)
 
-    retried = compile_memory.apply_compile_plan(
+    retried = compile_pipeline_apply.apply_compile_plan(
         inputs,
         plan,
         action_key="9" * 64,
@@ -732,14 +658,131 @@ def _operation_paths(transaction) -> set:
     return {item.path for item in transaction.operations}
 
 
-def test_a_recompile_that_quarantines_the_same_claim_again_does_not_fail(vault, capsys):
+def test_update_and_supersession_of_its_old_claim_share_one_after_image(vault):  # noqa: F811
+    from llm_wiki import compile_pipeline_apply, compile_pipeline_batches
+
+    root, state_root = vault
+    daily = _daily(root)
+    old = _claim_record(root, claim_id="old", value="blue", text="The prior state is blue.", authority="inferred")
+    page = root / "knowledge/notes/exact-byte-pattern.md"
+    page.write_bytes(b"---\ntype: concept\n---\n# Existing\n\n## Claims\n```json\n"
+                     + canonical_json_bytes({"schema_version": "claim-ledger/v1", "claims": [old]}) + b"\n```\n")
+    new = _claim_record(root, claim_id="new", value="green", text="A durable exact-byte observation.", authority="user")
+    plan = _semantic_plan()
+    semantic = json.loads(plan["operations"][0]["content"])
+    semantic.update(action="update", claims=[new])
+    plan["operations"][0].update(kind="replace", content=canonical_json_bytes(semantic).decode())
+    inputs = compile_pipeline_sources.snapshot_compile_inputs([daily])
+    coordinator = MarkdownCoordinator(root, state_root)
+
+    result = compile_pipeline_apply.apply_compile_plan(
+        inputs, plan, action_key="6" * 64, trigger="manual", coordinator=coordinator,
+        completed_at="2026-07-14T12:00:00Z",
+    )
+
+    assert _page_claim_lifecycles(page) == {"old": "superseded", "new": "active"}
+    assert b"Use an immutable snapshot" in page.read_bytes()
+    assert b"status: superseded" not in page.read_bytes()
+    transaction = coordinator._record(result.transaction_id)
+    assert [item.path for item in transaction.operations].count("knowledge/notes/exact-byte-pattern.md") == 1
+    assert compile_pipeline_batches.read_compile_receipt_v2(inputs.dailies[0].sha256, coordinator) is not None
+
+
+def _claim_for_subject(root, claim_id, subject, *, new=False):
+    text = "A durable exact-byte observation." if new else "The prior state is blue."
+    record = _claim_record(root, claim_id=claim_id, value="green" if new else "blue",
+                           text=text, authority="user" if new else "inferred")
+    record["subject"] = subject
+    semantic = {key: record[key] for key in ("subject", "relation", "value", "qualifiers", "validity")}
+    record["fingerprint"] = sha256_bytes(canonical_json_bytes(semantic))
+    return record
+
+
+def _claim_operation(slug, claims, *, replace_page=False):
+    operation = dict(_semantic_plan()["operations"][0])
+    semantic = json.loads(operation["content"])
+    semantic.update(slug=slug, title=slug, claims=claims,
+                    action="update" if replace_page else "create")
+    operation.update(path=f"knowledge/notes/{slug}.md", kind="replace" if replace_page else "create",
+                     content=canonical_json_bytes(semantic).decode())
+    return operation
+
+
+def _assert_shared_ledger_status(page, replaced):
+    content = page.read_bytes()
+    if replaced:
+        assert b"status: superseded" not in content
+        return
+    assert b"status: superseded" in content
+    assert b"superseded_by: [[second]]" in content
+
+
+@pytest.mark.parametrize("replace_page", [False, True])
+def test_two_sources_supersede_shared_ledger_in_one_after_image(vault, replace_page):  # noqa: F811
+    from llm_wiki import compile_pipeline_apply, compile_pipeline_batches
+
+    root, state_root = vault
+    daily = _daily(root)
+    old = [_claim_for_subject(root, "old-1", "first"), _claim_for_subject(root, "old-2", "second")]
+    page = root / "knowledge/notes/shared-ledger.md"
+    page.write_bytes(b"---\ntype: concept\n---\n# Shared ledger\n\n## Claims\n```json\n"
+                     + canonical_json_bytes({"schema_version": "claim-ledger/v1", "claims": old}) + b"\n```\n")
+    operations = [_claim_operation("first", [_claim_for_subject(root, "new-1", "first", new=True)]),
+                  _claim_operation("second", [_claim_for_subject(root, "new-2", "second", new=True)])]
+    if replace_page:
+        operations.append(_claim_operation("shared-ledger", [_claim_for_subject(root, "third", "third", new=True)],
+                                           replace_page=True))
+    inputs = compile_pipeline_sources.snapshot_compile_inputs([daily])
+    coordinator = MarkdownCoordinator(root, state_root)
+    plan = {"schema_version": "compile-plan/v2", "operations": operations}
+    result = compile_pipeline_apply.apply_compile_plan(inputs, plan, action_key="d" * 64, trigger="manual",
+                                               coordinator=coordinator, completed_at="2026-07-14T12:00:00Z")
+    expected = {"old-1": "superseded", "old-2": "superseded"}
+    if replace_page:
+        expected["third"] = "active"
+    assert _page_claim_lifecycles(page) == expected
+    _assert_shared_ledger_status(page, replace_page)
+    transaction = coordinator._record(result.transaction_id)
+    assert [item.path for item in transaction.operations].count("knowledge/notes/shared-ledger.md") == 1
+    assert compile_pipeline_batches.read_compile_receipt_v2(inputs.dailies[0].sha256, coordinator) is not None
+    retried = compile_pipeline_apply.apply_compile_plan(inputs, plan, action_key="d" * 64, trigger="manual",
+                                                coordinator=coordinator, completed_at="2026-07-14T12:00:00Z")
+    assert retried.transaction_id == result.transaction_id
+
+
+def test_unreceipted_target_change_still_requires_a_fresh_plan(vault):  # noqa: F811
+    from llm_wiki import compile_pipeline_apply, compile_pipeline_batches
+    from markdown_transaction import TransactionFailure
+
+    root, state_root = vault
+    daily = _daily(root)
+    page = root / "knowledge/notes/shared-ledger.md"
+    old = _claim_for_subject(root, "old", "first")
+    page.write_bytes(b"---\ntype: concept\n---\n# Shared ledger\n\n## Claims\n```json\n"
+                     + canonical_json_bytes({"schema_version": "claim-ledger/v1", "claims": [old]}) + b"\n```\n")
+    inputs = compile_pipeline_sources.snapshot_compile_inputs([daily])
+    changed = page.read_bytes() + b"\nAn external edit after the snapshot.\n"
+    page.write_bytes(changed)
+    plan = {"schema_version": "compile-plan/v2", "operations": [
+        _claim_operation("first", [_claim_for_subject(root, "new", "first", new=True)])]}
+    coordinator = MarkdownCoordinator(root, state_root)
+    with pytest.raises(TransactionFailure, match="fresh snapshot and model plan") as refusal:
+        compile_pipeline_apply.apply_compile_plan(inputs, plan, action_key="e" * 64, trigger="manual",
+                                         coordinator=coordinator, completed_at="2026-07-14T12:00:00Z")
+    assert refusal.value.code == "compile_snapshot_changed"
+    assert page.read_bytes() == changed
+    assert not (root / "knowledge/notes/first.md").exists()
+    assert compile_pipeline_batches.read_compile_receipt_v2(inputs.dailies[0].sha256, coordinator) is None
+
+
+def test_a_recompile_that_quarantines_the_same_claim_again_does_not_fail(vault, capsys):  # noqa: F811
     """2026-09-11: the next plan for a pending quarantined daily differed elsewhere
     (new action key) but proposed the same claim; the candidate create met the file
     written on 2026-09-07 and the whole compile failed with FileExistsError."""
     root, state_root = vault
     daily = _daily(root)
-    import compile_memory
     from claims import ClaimIndex
+    from llm_wiki import compile_pipeline_apply, compile_pipeline_batches
 
     old = _claim_record(root, claim_id="old", value="blue", text="The prior state is blue.", authority="user")
     (root / "knowledge/notes/existing.md").write_bytes(
@@ -748,9 +791,9 @@ def test_a_recompile_that_quarantines_the_same_claim_again_does_not_fail(vault, 
         + b"\n```\n"
     )
     new = _claim_record(root, claim_id="new", value="red", text="A durable exact-byte observation.", authority="inferred")
-    operation = json.loads(str(_semantic_plan()["operations"][0]["content"]))
+    operation = _semantic_operation()
     operation["claims"] = [new]
-    inputs = compile_memory.snapshot_compile_inputs([daily])
+    inputs = compile_pipeline_sources.snapshot_compile_inputs([daily])
     plan = {
         "schema_version": "compile-plan/v2",
         "operations": [{
@@ -761,7 +804,7 @@ def test_a_recompile_that_quarantines_the_same_claim_again_does_not_fail(vault, 
     }
     ClaimIndex(state_root, vault=root).rebuild()
     coordinator = MarkdownCoordinator(root, state_root)
-    compile_memory.apply_compile_plan(
+    compile_pipeline_apply.apply_compile_plan(
         inputs, plan, action_key="9" * 64, trigger="manual",
         coordinator=coordinator, completed_at="2026-07-14T12:00:00Z",
     )
@@ -771,9 +814,9 @@ def test_a_recompile_that_quarantines_the_same_claim_again_does_not_fail(vault, 
     # Since audit A-13 the first apply compiled the day, so a second plan for it
     # returns that commit and writes no candidate again.
     first = coordinator._record_for_operation_id(
-        compile_memory.read_compile_receipt_v2(inputs.dailies[0].sha256, coordinator)["operation_id"]
+        compile_pipeline_batches.read_compile_receipt_v2(inputs.dailies[0].sha256, coordinator)["operation_id"]
     )
-    again = compile_memory.apply_compile_plan(
+    again = compile_pipeline_apply.apply_compile_plan(
         inputs, plan, action_key="8" * 64, trigger="manual",
         coordinator=coordinator, completed_at="2026-07-15T12:00:00Z",
     )
@@ -787,20 +830,20 @@ def test_a_recompile_that_quarantines_the_same_claim_again_does_not_fail(vault, 
 
 def test_a_stale_target_that_finds_its_candidates_present_says_so(capsys):
     """The one path that still ends in candidates only: a concurrent lifecycle change."""
-    import compile_memory
+    from llm_wiki import compile_pipeline_apply
 
-    outcome = compile_memory._still_quarantined_outcome(
-        compile_memory.CandidatesAlreadyQuarantined(("knowledge/inbox/claims/a.md",))
+    outcome = compile_pipeline.still_quarantined_outcome(
+        compile_pipeline_apply.CandidatesAlreadyQuarantined(("knowledge/inbox/claims/a.md",))
     )
 
     assert (outcome.status, outcome.outcome, outcome.paths) == (0, "quarantined", 0)
     assert "batch still quarantined: 1 candidate(s)" in capsys.readouterr().out
 
 
-def test_compile_batch_claims_compare_incrementally_and_mutual_conflict_quarantines(vault):
+def test_compile_batch_claims_compare_incrementally_and_mutual_conflict_quarantines(vault):  # noqa: F811
     root, state_root = vault
     daily = _daily(root)
-    import compile_memory
+    from llm_wiki import compile_pipeline_apply
 
     first = _claim_record(
         root, claim_id="first", value="red",
@@ -810,9 +853,9 @@ def test_compile_batch_claims_compare_incrementally_and_mutual_conflict_quaranti
         root, claim_id="second", value="green",
         text="A second durable exact-byte observation.", authority="user",
     )
-    operation = json.loads(str(_semantic_plan()["operations"][0]["content"]))
+    operation = _semantic_operation()
     operation["claims"] = [first, second]
-    inputs = compile_memory.snapshot_compile_inputs([daily])
+    inputs = compile_pipeline_sources.snapshot_compile_inputs([daily])
     plan = {
         "schema_version": "compile-plan/v2",
         "operations": [{
@@ -821,7 +864,7 @@ def test_compile_batch_claims_compare_incrementally_and_mutual_conflict_quaranti
         }],
     }
 
-    compile_memory.apply_compile_plan(
+    compile_pipeline_apply.apply_compile_plan(
         inputs, plan, action_key="8" * 64, trigger="manual",
         coordinator=MarkdownCoordinator(root, state_root),
         completed_at="2026-07-14T12:00:00Z",
@@ -833,18 +876,18 @@ def test_compile_batch_claims_compare_incrementally_and_mutual_conflict_quaranti
     assert _page_claim_lifecycles(page) == {"first": "active", "second": "quarantined"}
 
 
-def test_duplicate_claim_ids_are_rejected_before_any_transaction(vault):
+def test_duplicate_claim_ids_are_rejected_before_any_transaction(vault):  # noqa: F811
     root, state_root = vault
     daily = _daily(root)
-    import compile_memory
+    from llm_wiki import compile_pipeline_apply
 
     duplicate = _claim_record(
         root, claim_id="duplicate", value="red",
         text="A durable exact-byte observation.", authority="user",
     )
-    operation = json.loads(str(_semantic_plan()["operations"][0]["content"]))
+    operation = _semantic_operation()
     operation["claims"] = [duplicate, duplicate]
-    inputs = compile_memory.snapshot_compile_inputs([daily])
+    inputs = compile_pipeline_sources.snapshot_compile_inputs([daily])
     plan = {
         "schema_version": "compile-plan/v2",
         "operations": [{
@@ -855,7 +898,7 @@ def test_duplicate_claim_ids_are_rejected_before_any_transaction(vault):
     coordinator = MarkdownCoordinator(root, state_root)
 
     with pytest.raises(ValueError, match="duplicate claim id"):
-        compile_memory.apply_compile_plan(
+        compile_pipeline_apply.apply_compile_plan(
             inputs, plan, action_key="7" * 64, trigger="manual",
             coordinator=coordinator, completed_at="2026-07-14T12:00:00Z",
         )
@@ -866,20 +909,20 @@ def test_duplicate_claim_ids_are_rejected_before_any_transaction(vault):
 
 
 def test_postcommit_claim_index_rebuild_failure_invalidates_without_failing_commit(
-    vault, monkeypatch
+    vault, monkeypatch  # noqa: F811
 ):
     root, state_root = vault
     daily = _daily(root)
-    import compile_memory
     from claims import ClaimIndex
+    from llm_wiki import compile_pipeline_apply
 
     new = _claim_record(
         root, claim_id="new", value="red",
         text="A durable exact-byte observation.", authority="user",
     )
-    operation = json.loads(str(_semantic_plan()["operations"][0]["content"]))
+    operation = _semantic_operation()
     operation["claims"] = [new]
-    inputs = compile_memory.snapshot_compile_inputs([daily])
+    inputs = compile_pipeline_sources.snapshot_compile_inputs([daily])
     plan = {
         "schema_version": "compile-plan/v2",
         "operations": [{
@@ -890,17 +933,17 @@ def test_postcommit_claim_index_rebuild_failure_invalidates_without_failing_comm
     original_rebuild = ClaimIndex.rebuild
     calls = 0
 
-    def fail_after_commit(self, sources=None):
+    def fail_after_commit(self, sources=None, **kwargs):
         nonlocal calls
         calls += 1
         if calls == 1:
-            return original_rebuild(self, sources)
+            return original_rebuild(self, sources, **kwargs)
         raise OSError("derived cache failure")
 
     monkeypatch.setattr(ClaimIndex, "rebuild", fail_after_commit)
-    monkeypatch.setattr(compile_memory, "default_secondary_search", lambda *args: [])
+    point_compile_path(monkeypatch, "default_secondary_search", lambda *args, **kwargs: [])
 
-    result = compile_memory.apply_compile_plan(
+    result = compile_pipeline_apply.apply_compile_plan(
         inputs, plan, action_key="6" * 64, trigger="manual",
         coordinator=MarkdownCoordinator(root, state_root),
         completed_at="2026-07-14T12:00:00Z",
@@ -912,11 +955,11 @@ def test_postcommit_claim_index_rebuild_failure_invalidates_without_failing_comm
 
 
 def test_new_claim_page_inserted_after_assessment_fails_tree_manifest_precondition(
-    vault, monkeypatch
+    vault, monkeypatch  # noqa: F811
 ):
     root, state_root = vault
     daily = _daily(root)
-    import compile_memory
+    from llm_wiki import compile_pipeline_apply
 
     new = _claim_record(
         root, claim_id="new", value="red",
@@ -926,9 +969,9 @@ def test_new_claim_page_inserted_after_assessment_fails_tree_manifest_preconditi
         root, claim_id="phantom", value="green",
         text="A second durable exact-byte observation.", authority="user",
     )
-    operation = json.loads(str(_semantic_plan()["operations"][0]["content"]))
+    operation = _semantic_operation()
     operation["claims"] = [new]
-    inputs = compile_memory.snapshot_compile_inputs([daily])
+    inputs = compile_pipeline_sources.snapshot_compile_inputs([daily])
     plan = {
         "schema_version": "compile-plan/v2",
         "operations": [{
@@ -950,13 +993,13 @@ def test_new_claim_page_inserted_after_assessment_fails_tree_manifest_preconditi
         return original_apply(transaction_id, **kwargs)
 
     monkeypatch.setattr(coordinator, "apply", insert_phantom_then_apply)
-    monkeypatch.setattr(compile_memory, "default_secondary_search", lambda *args: [])
+    point_compile_path(monkeypatch, "default_secondary_search", lambda *args, **kwargs: [])
 
     # The first attempt is refused — the assessment really was computed against
     # a tree that no longer exists. The second reads the tree that does, and
     # commits. Before the retry existed this raised, and the pages the compile
     # had already produced were never written.
-    result = compile_memory.apply_compile_plan(
+    result = compile_pipeline_apply.apply_compile_plan(
         inputs, plan, action_key="5" * 64, trigger="manual",
         coordinator=coordinator, completed_at="2026-07-14T12:00:00Z",
     )
@@ -965,20 +1008,20 @@ def test_new_claim_page_inserted_after_assessment_fails_tree_manifest_preconditi
     assert (root / "knowledge/notes/exact-byte-pattern.md").is_file()
 
 
-def test_a_tree_that_never_stops_moving_still_refuses_the_compile(vault, monkeypatch):
+def test_a_tree_that_never_stops_moving_still_refuses_the_compile(vault, monkeypatch):  # noqa: F811
     """The retry is bounded: a vault under a continuous writer still fails."""
     root, state_root = vault
     daily = _daily(root)
-    import compile_memory
+    from llm_wiki import compile_pipeline_apply
     from markdown_transaction import TransactionFailure
 
     new = _claim_record(
         root, claim_id="new", value="red",
         text="A durable exact-byte observation.", authority="user",
     )
-    operation = json.loads(str(_semantic_plan()["operations"][0]["content"]))
+    operation = _semantic_operation()
     operation["claims"] = [new]
-    inputs = compile_memory.snapshot_compile_inputs([daily])
+    inputs = compile_pipeline_sources.snapshot_compile_inputs([daily])
     plan = {
         "schema_version": "compile-plan/v2",
         "operations": [{
@@ -988,7 +1031,7 @@ def test_a_tree_that_never_stops_moving_still_refuses_the_compile(vault, monkeyp
     }
     coordinator = MarkdownCoordinator(root, state_root)
     original_apply = coordinator.apply
-    written = iter(range(compile_memory.COMPILE_PUBLICATION_ATTEMPTS + 1))
+    written = iter(range(compile_pipeline_apply.COMPILE_PUBLICATION_ATTEMPTS + 1))
 
     def insert_a_new_page_then_apply(transaction_id, **kwargs):
         (root / f"knowledge/notes/phantom-{next(written)}.md").write_bytes(
@@ -997,10 +1040,10 @@ def test_a_tree_that_never_stops_moving_still_refuses_the_compile(vault, monkeyp
         return original_apply(transaction_id, **kwargs)
 
     monkeypatch.setattr(coordinator, "apply", insert_a_new_page_then_apply)
-    monkeypatch.setattr(compile_memory, "default_secondary_search", lambda *args: [])
+    point_compile_path(monkeypatch, "default_secondary_search", lambda *args, **kwargs: [])
 
     with pytest.raises(TransactionFailure, match="claim tree manifest"):
-        compile_memory.apply_compile_plan(
+        compile_pipeline_apply.apply_compile_plan(
             inputs, plan, action_key="5" * 64, trigger="manual",
             coordinator=coordinator, completed_at="2026-07-14T12:00:00Z",
         )
@@ -1016,12 +1059,12 @@ def test_a_tree_that_never_stops_moving_still_refuses_the_compile(vault, monkeyp
 
 
 def test_compile_same_id_replacement_after_assessment_quarantines_without_mutation(
-    vault, monkeypatch
+    vault, monkeypatch  # noqa: F811
 ):
     root, state_root = vault
     daily = _daily(root)
-    import compile_memory
     import contradiction_pipeline
+    from llm_wiki import compile_pipeline_apply
 
     old = _claim_record(
         root, claim_id="shared", value="blue",
@@ -1055,9 +1098,9 @@ def test_compile_same_id_replacement_after_assessment_quarantines_without_mutati
         root, claim_id="new", value="green",
         text="A durable exact-byte observation.", authority="user",
     )
-    operation = json.loads(str(_semantic_plan()["operations"][0]["content"]))
+    operation = _semantic_operation()
     operation["claims"] = [new]
-    inputs = compile_memory.snapshot_compile_inputs([daily])
+    inputs = compile_pipeline_sources.snapshot_compile_inputs([daily])
     plan = {
         "schema_version": "compile-plan/v2",
         "operations": [{
@@ -1080,10 +1123,10 @@ def test_compile_same_id_replacement_after_assessment_quarantines_without_mutati
     monkeypatch.setattr(
         contradiction_pipeline.ContradictionPipeline, "assess", assess_then_replace
     )
-    monkeypatch.setattr(compile_memory, "default_secondary_search", lambda *args: [])
+    point_compile_path(monkeypatch, "default_secondary_search", lambda *args, **kwargs: [])
     coordinator = MarkdownCoordinator(root, state_root)
 
-    result = compile_memory.apply_compile_plan(
+    result = compile_pipeline_apply.apply_compile_plan(
         inputs, plan, action_key="4" * 64, trigger="manual",
         coordinator=coordinator, completed_at="2026-07-14T12:00:00Z",
     )
@@ -1101,13 +1144,15 @@ def test_compile_same_id_replacement_after_assessment_quarantines_without_mutati
     ) == (True, True, False)
 
 
-def test_committed_compile_clears_durable_source_failure(vault):
+def test_committed_compile_clears_durable_source_failure(vault):  # noqa: F811
     root, state_root = vault
     daily = _daily(root)
-    import compile_memory
-    from memory_queue import MemoryQueue
+    from llm_wiki import compile_pipeline_apply
+    from queue_core import (
+        MemoryQueue,
+    )
 
-    inputs = compile_memory.snapshot_compile_inputs([daily])
+    inputs = compile_pipeline_sources.snapshot_compile_inputs([daily])
     queue = MemoryQueue(state_root)
     queue.record_source_failure(
         inputs.dailies[0].logical_path,
@@ -1116,7 +1161,7 @@ def test_committed_compile_clears_durable_source_failure(vault):
         producer="compile",
     )
 
-    compile_memory.apply_compile_plan(
+    compile_pipeline_apply.apply_compile_plan(
         inputs,
         {"schema_version": "compile-plan/v2", "operations": []},
         action_key="f" * 64,
@@ -1130,14 +1175,14 @@ def test_committed_compile_clears_durable_source_failure(vault):
     ) is None
 
 
-def test_append_after_snapshot_remains_pending_even_after_receipt(vault):
+def test_append_after_snapshot_remains_pending_even_after_receipt(vault):  # noqa: F811
     root, state_root = vault
     daily = _daily(root)
-    import compile_memory
+    from llm_wiki import compile_pipeline_apply
 
-    inputs = compile_memory.snapshot_compile_inputs([daily])
+    inputs = compile_pipeline_sources.snapshot_compile_inputs([daily])
     daily.write_bytes(daily.read_bytes() + b"later append\n")
-    compile_memory.apply_compile_plan(
+    compile_pipeline_apply.apply_compile_plan(
         inputs,
         {"schema_version": "compile-plan/v2", "operations": []},
         action_key="b" * 64,
@@ -1146,7 +1191,7 @@ def test_append_after_snapshot_remains_pending_even_after_receipt(vault):
         completed_at="2026-07-14T12:00:00Z",
     )
 
-    selected = compile_memory.select_dailies(
+    selected = compile_pipeline_selection.select_dailies(
         Namespace(file=None, all=False),
         {"compiled_daily_hashes": {daily.name: inputs.dailies[0].sha256}},
         coordinator=MarkdownCoordinator(root, state_root),
@@ -1154,27 +1199,26 @@ def test_append_after_snapshot_remains_pending_even_after_receipt(vault):
     assert selected == [daily]
 
 
-def test_exact_legacy_diagnostic_suppresses_migration_only_compile(vault):
+def test_legacy_diagnostic_cannot_invent_verified_original_context(vault):  # noqa: F811
     root, state_root = vault
     daily = _daily(root)
-    import compile_memory
 
-    selected = compile_memory.select_dailies(
+    selected = compile_pipeline_selection.select_dailies(
         Namespace(file=None, all=False),
         {"compiled_daily_hashes": {daily.name: sha256_bytes(daily.read_bytes())}},
         coordinator=MarkdownCoordinator(root, state_root),
     )
 
-    assert selected == []
+    assert selected == [daily]
 
 
-def test_v2_receipt_alone_never_suppresses_normal_selection(vault):
+def test_v2_receipt_alone_never_suppresses_normal_selection(vault):  # noqa: F811
     root, state_root = vault
     daily = _daily(root)
-    import compile_memory
+    from llm_wiki import compile_pipeline_apply, compile_pipeline_batches
 
-    inputs = compile_memory.snapshot_compile_inputs([daily])
-    compile_memory.apply_compile_plan(
+    inputs = compile_pipeline_sources.snapshot_compile_inputs([daily])
+    compile_pipeline_apply.apply_compile_plan(
         inputs,
         {"schema_version": "compile-plan/v2", "operations": []},
         action_key="7" * 64,
@@ -1183,14 +1227,14 @@ def test_v2_receipt_alone_never_suppresses_normal_selection(vault):
         completed_at="2026-07-14T12:00:00Z",
     )
 
-    selected = compile_memory.select_dailies(
+    selected = compile_pipeline_selection.select_dailies(
         Namespace(file=None, all=False),
         {},
         coordinator=MarkdownCoordinator(root, state_root),
     )
 
     assert selected == [daily]
-    assert compile_memory.read_compile_receipt_v2(
+    assert compile_pipeline_batches.read_compile_receipt_v2(
         inputs.dailies[0].sha256,
         MarkdownCoordinator(root, state_root),
     ) is not None
@@ -1208,14 +1252,13 @@ def test_v2_receipt_alone_never_suppresses_normal_selection(vault):
     ],
 )
 def test_legacy_diagnostic_key_must_be_exact_flat_daily_basename(
-    vault, legacy_key
+    vault, legacy_key  # noqa: F811
 ):
     root, state_root = vault
     daily = _daily(root)
     digest = sha256_bytes(daily.read_bytes())
-    import compile_memory
 
-    selected = compile_memory.select_dailies(
+    selected = compile_pipeline_selection.select_dailies(
         Namespace(file=None, all=False),
         {"compiled_daily_hashes": {legacy_key: digest}},
         coordinator=MarkdownCoordinator(root, state_root),
@@ -1224,18 +1267,18 @@ def test_legacy_diagnostic_key_must_be_exact_flat_daily_basename(
     assert selected == [daily]
 
 
-def test_explicit_file_skips_only_exact_v3_authority(vault):
+def test_explicit_file_skips_only_exact_v3_authority(vault):  # noqa: F811
     root, state_root = vault
     daily = _daily(root)
-    import compile_memory
+    from llm_wiki import compile_pipeline_apply, compile_pipeline_batches
 
     coordinator = MarkdownCoordinator(root, state_root)
     args = Namespace(file=str(daily), all=False)
-    assert compile_memory.select_dailies(args, {}, coordinator=coordinator) == [daily]
+    assert compile_pipeline_selection.select_dailies(args, {}, coordinator=coordinator) == [daily]
 
-    inputs = compile_memory.snapshot_compile_inputs([daily])
-    batch = compile_memory.pack_compile_batches(inputs, model=None)[0]
-    compile_memory.apply_compile_plan(
+    inputs = compile_pipeline_sources.snapshot_compile_inputs([daily])
+    batch = compile_pipeline_batches.pack_compile_batches(inputs, model=None)[0]
+    compile_pipeline_apply.apply_compile_plan(
         inputs,
         {"schema_version": "compile-plan/v2", "operations": []},
         action_key="8" * 64,
@@ -1249,47 +1292,51 @@ def test_explicit_file_skips_only_exact_v3_authority(vault):
         },
     )
 
-    assert compile_memory.select_dailies(args, {}, coordinator=coordinator) == []
+    assert compile_pipeline_selection.select_dailies(args, {}, coordinator=coordinator) == []
 
 
-def test_resolver_refuses_llm_work_under_writer_gate(vault):
+def test_resolver_refuses_llm_work_under_writer_gate(vault):  # noqa: F811
     root, state_root = vault
     daily = _daily(root)
-    import compile_memory
+    from llm_wiki import compile_pipeline_batches
 
-    inputs = compile_memory.snapshot_compile_inputs([daily])
+    inputs = compile_pipeline_sources.snapshot_compile_inputs([daily])
     coordinator = MarkdownCoordinator(root, state_root)
     with coordinator.writer_gate():
         with pytest.raises(RuntimeError, match="forbidden under the writer gate"):
-            compile_memory.resolve_compile_plan(
+            compile_pipeline_batches.resolve_compile_plan(
                 inputs,
                 CompileCache(state_root),
                 coordinator=coordinator,
             )
 
 
+def _source_review():
+    return json.dumps({"source_review": {"complete": True, "reason": "Fixture assessment."}})
+
+
 def test_resolver_uses_exact_snapshot_for_draft_and_cited_critique_and_caches(
-    vault, monkeypatch
+    vault, monkeypatch  # noqa: F811
 ):
     root, state_root = vault
     daily = _daily(root)
-    import compile_memory
+    from llm_wiki import compile_pipeline_batches
 
-    inputs = compile_memory.snapshot_compile_inputs([daily])
+    inputs = compile_pipeline_sources.snapshot_compile_inputs([daily])
     calls = []
     provider = _provider()
-    responses = [_draft_response(), _pass_review()]
+    responses = [_draft_response(), _pass_review(), _source_review()]
 
-    monkeypatch.setattr(compile_memory, "provider_candidates", lambda *args, **kwargs: [provider])
-    monkeypatch.setattr(compile_memory, "probe_candidate", lambda descriptor: True)
+    point_compile_path(monkeypatch, "provider_candidates", lambda *args, **kwargs: [provider])
+    point_compile_path(monkeypatch, "probe_candidate", lambda descriptor: True)
 
     def call(descriptor, prompt, system_prompt, **kwargs):
         calls.append((descriptor, prompt, kwargs.get("schema")))
         return LLMResult(descriptor, responses.pop(0), True, None, "native")
 
-    monkeypatch.setattr(compile_memory, "call_candidate", call)
+    point_compile_path(monkeypatch, "call_candidate", call)
     cache = CompileCache(state_root)
-    resolved = compile_memory.resolve_compile_plan(
+    resolved = compile_pipeline_batches.resolve_compile_plan(
         inputs, cache, coordinator=MarkdownCoordinator(root, state_root)
     )
 
@@ -1301,10 +1348,11 @@ def test_resolver_uses_exact_snapshot_for_draft_and_cited_critique_and_caches(
         "A durable exact-byte observation." in calls[1][1],
         "A second durable exact-byte observation." in calls[1][1],
         _schemas_declared(calls),
-    ) == (2, True, False, True, False, True)
+    ) == (3, True, False, True, False, True)
+    assert exact in calls[2][1]
     cached = cache.get(
         resolved.action,
-        lambda plan: compile_memory.validate_compile_plan(plan, inputs),
+        lambda plan: compile_pipeline_prompts.validate_compile_plan(plan, inputs),
     )
     assert (
         resolved.action.draft_calls[0].structured_output,
@@ -1318,60 +1366,48 @@ def _schemas_declared(calls: list) -> bool:
     return all(schema is not None for _descriptor, _prompt, schema in calls)
 
 
-def test_resolver_cache_hit_revalidates_without_llm(vault, monkeypatch):
+def test_resolver_cache_hit_revalidates_without_llm(vault, monkeypatch):  # noqa: F811
     root, state_root = vault
     daily = _daily(root)
-    import compile_memory
+    from llm_wiki import compile_pipeline_batches
 
-    inputs = compile_memory.snapshot_compile_inputs([daily])
+    inputs = compile_pipeline_sources.snapshot_compile_inputs([daily])
     provider = _provider()
-    monkeypatch.setattr(compile_memory, "provider_candidates", lambda *args, **kwargs: [provider])
-    monkeypatch.setattr(compile_memory, "probe_candidate", lambda descriptor: True)
-    responses = [_draft_response(), _pass_review()]
-    monkeypatch.setattr(
-        compile_memory,
-        "call_candidate",
-        lambda descriptor, *args, **kwargs: LLMResult(
+    point_compile_path(monkeypatch, "provider_candidates", lambda *args, **kwargs: [provider])
+    point_compile_path(monkeypatch, "probe_candidate", lambda descriptor: True)
+    responses = [_draft_response(), _pass_review(), _source_review()]
+    point_compile_path(monkeypatch, "call_candidate", lambda descriptor, *args, **kwargs: LLMResult(
             descriptor, responses.pop(0), True, None, "native"
-        ),
-    )
+        ))
     cache = CompileCache(state_root)
     coordinator = MarkdownCoordinator(root, state_root)
-    first = compile_memory.resolve_compile_plan(inputs, cache, coordinator=coordinator)
-    monkeypatch.setattr(
-        compile_memory,
-        "call_candidate",
-        lambda *args, **kwargs: pytest.fail("cache hit called the LLM"),
-    )
+    first = compile_pipeline_batches.resolve_compile_plan(inputs, cache, coordinator=coordinator)
+    point_compile_path(monkeypatch, "call_candidate", lambda *args, **kwargs: pytest.fail("cache hit called the LLM"))
 
-    second = compile_memory.resolve_compile_plan(inputs, cache, coordinator=coordinator)
+    second = compile_pipeline_batches.resolve_compile_plan(inputs, cache, coordinator=coordinator)
 
     assert second.plan == first.plan
     assert second.action == first.action
     assert second.cache_hit is True
 
 
-def test_failed_evidence_is_not_cached(vault, monkeypatch):
+def test_failed_evidence_is_not_cached(vault, monkeypatch):  # noqa: F811
     root, state_root = vault
     daily = _daily(root)
-    import compile_memory
+    from llm_wiki import compile_pipeline_batches
 
-    inputs = compile_memory.snapshot_compile_inputs([daily])
+    inputs = compile_pipeline_sources.snapshot_compile_inputs([daily])
     provider = _provider()
     bad = json.loads(_draft_response())
     bad["operations"][0]["evidence"][0]["quoted_text"] = "not in source"
-    monkeypatch.setattr(compile_memory, "provider_candidates", lambda *args, **kwargs: [provider])
-    monkeypatch.setattr(compile_memory, "probe_candidate", lambda descriptor: True)
-    monkeypatch.setattr(
-        compile_memory,
-        "call_candidate",
-        lambda descriptor, *args, **kwargs: LLMResult(
+    point_compile_path(monkeypatch, "provider_candidates", lambda *args, **kwargs: [provider])
+    point_compile_path(monkeypatch, "probe_candidate", lambda descriptor: True)
+    point_compile_path(monkeypatch, "call_candidate", lambda descriptor, *args, **kwargs: LLMResult(
             descriptor, json.dumps(bad), True, None, "native"
-        ),
-    )
+        ))
 
     with pytest.raises(RuntimeError, match="validated compile plan"):
-        compile_memory.resolve_compile_plan(
+        compile_pipeline_batches.resolve_compile_plan(
             inputs,
             CompileCache(state_root),
             coordinator=MarkdownCoordinator(root, state_root),
@@ -1380,17 +1416,17 @@ def test_failed_evidence_is_not_cached(vault, monkeypatch):
     assert not list((state_root / "cache/compile").glob("*.json"))
 
 
-def test_provider_failure_recomputes_descriptor_with_actual_fallback(vault, monkeypatch):
+def test_provider_failure_recomputes_descriptor_with_actual_fallback(vault, monkeypatch):  # noqa: F811
     root, state_root = vault
     daily = _daily(root)
-    import compile_memory
+    from llm_wiki import compile_pipeline_batches
 
-    inputs = compile_memory.snapshot_compile_inputs([daily])
+    inputs = compile_pipeline_sources.snapshot_compile_inputs([daily])
     first = _provider("first", 0)
     second = _provider("second", 1)
-    monkeypatch.setattr(compile_memory, "provider_candidates", lambda *args, **kwargs: [first, second])
-    monkeypatch.setattr(compile_memory, "probe_candidate", lambda descriptor: True)
-    responses = iter([None, _draft_response(), _pass_review()])
+    point_compile_path(monkeypatch, "provider_candidates", lambda *args, **kwargs: [first, second])
+    point_compile_path(monkeypatch, "probe_candidate", lambda descriptor: True)
+    responses = iter([None, _draft_response(), _pass_review(), _source_review()])
 
     def call(descriptor, *args, **kwargs):
         text = next(responses)
@@ -1402,8 +1438,8 @@ def test_provider_failure_recomputes_descriptor_with_actual_fallback(vault, monk
             "native",
         )
 
-    monkeypatch.setattr(compile_memory, "call_candidate", call)
-    resolved = compile_memory.resolve_compile_plan(
+    point_compile_path(monkeypatch, "call_candidate", call)
+    resolved = compile_pipeline_batches.resolve_compile_plan(
         inputs,
         CompileCache(state_root),
         coordinator=MarkdownCoordinator(root, state_root),
@@ -1415,12 +1451,12 @@ def test_provider_failure_recomputes_descriptor_with_actual_fallback(vault, monk
     )
 
 
-def test_mid_apply_failure_recovers_complete_compile_tree(vault, monkeypatch):
+def test_mid_apply_failure_recovers_complete_compile_tree(vault, monkeypatch):  # noqa: F811
     root, state_root = vault
     daily = _daily(root)
-    import compile_memory
+    from llm_wiki import compile_pipeline_apply
 
-    inputs = compile_memory.snapshot_compile_inputs([daily])
+    inputs = compile_pipeline_sources.snapshot_compile_inputs([daily])
     coordinator = MarkdownCoordinator(root, state_root)
     original = coordinator._apply_operation
     calls = 0
@@ -1434,7 +1470,7 @@ def test_mid_apply_failure_recovers_complete_compile_tree(vault, monkeypatch):
 
     monkeypatch.setattr(coordinator, "_apply_operation", crash_after_first)
     with pytest.raises(OSError, match="interruption"):
-        compile_memory.apply_compile_plan(
+        compile_pipeline_apply.apply_compile_plan(
             inputs,
             _semantic_plan(),
             action_key="c" * 64,
@@ -1456,12 +1492,12 @@ def test_mid_apply_failure_recovers_complete_compile_tree(vault, monkeypatch):
     ) == ("committed", True, True, True)
 
 
-def test_cancelled_compile_does_not_publish_markdown_after_prepare(vault, monkeypatch):
+def test_cancelled_compile_does_not_publish_markdown_after_prepare(vault, monkeypatch):  # noqa: F811
     root, state_root = vault
     daily = _daily(root)
-    import compile_memory
+    from llm_wiki import compile_pipeline_apply
 
-    inputs = compile_memory.snapshot_compile_inputs([daily])
+    inputs = compile_pipeline_sources.snapshot_compile_inputs([daily])
     coordinator = MarkdownCoordinator(root, state_root)
     original_prepare = coordinator.prepare
     cancelled = False
@@ -1475,7 +1511,7 @@ def test_cancelled_compile_does_not_publish_markdown_after_prepare(vault, monkey
     monkeypatch.setattr(coordinator, "prepare", prepare_then_cancel)
 
     with pytest.raises(TimeoutError, match="deadline|cancellation"):
-        compile_memory.apply_compile_plan(
+        compile_pipeline_apply.apply_compile_plan(
             inputs,
             _semantic_plan(),
             action_key="f" * 64,
@@ -1488,19 +1524,19 @@ def test_cancelled_compile_does_not_publish_markdown_after_prepare(vault, monkey
 
     assert not (root / "knowledge/notes/exact-byte-pattern.md").exists()
     assert (root / "knowledge/index.md").read_bytes() == b"# Old index\n"
-    assert (root / "knowledge/log.md").read_bytes() == b"# Session Memory Log\n"
+    assert (root / "knowledge/log.local.md").read_bytes() == b"# Session Memory Log\n"
     assert not list((root / "knowledge/daily/receipts").glob("*.md"))
 
 
-def test_concurrent_agents_publish_snapshot_once(vault):
+def test_concurrent_agents_publish_snapshot_once(vault):  # noqa: F811
     root, state_root = vault
     daily = _daily(root)
-    import compile_memory
+    from llm_wiki import compile_pipeline_apply
 
-    inputs = compile_memory.snapshot_compile_inputs([daily])
+    inputs = compile_pipeline_sources.snapshot_compile_inputs([daily])
 
     def publish(_index):
-        return compile_memory.apply_compile_plan(
+        return compile_pipeline_apply.apply_compile_plan(
             inputs,
             _semantic_plan(),
             action_key="d" * 64,
@@ -1514,7 +1550,7 @@ def test_concurrent_agents_publish_snapshot_once(vault):
 
     assert {result.operation_id for result in results} == {results[0].operation_id}
     assert len(list((root / "knowledge/daily/receipts").glob("*.md"))) == 1
-    assert (root / "knowledge/log.md").read_text(encoding="utf-8").count(
+    assert (root / "knowledge/log.local.md").read_text(encoding="utf-8").count(
         "compile completed for snapshot"
     ) == 1
     assert (root / "knowledge/notes/exact-byte-pattern.md").read_text(
@@ -1522,25 +1558,21 @@ def test_concurrent_agents_publish_snapshot_once(vault):
     ).count("# Exact Byte Pattern") == 1
 
 
-def test_cache_contains_semantics_not_rendered_markdown(vault, monkeypatch):
+def test_cache_contains_semantics_not_rendered_markdown(vault, monkeypatch):  # noqa: F811
     root, state_root = vault
     daily = _daily(root)
-    import compile_memory
+    from llm_wiki import compile_pipeline_batches
 
-    inputs = compile_memory.snapshot_compile_inputs([daily])
+    inputs = compile_pipeline_sources.snapshot_compile_inputs([daily])
     provider = _provider()
-    responses = [_draft_response(), _pass_review()]
-    monkeypatch.setattr(compile_memory, "provider_candidates", lambda *args, **kwargs: [provider])
-    monkeypatch.setattr(compile_memory, "probe_candidate", lambda descriptor: True)
-    monkeypatch.setattr(
-        compile_memory,
-        "call_candidate",
-        lambda descriptor, *args, **kwargs: LLMResult(
+    responses = [_draft_response(), _pass_review(), _source_review()]
+    point_compile_path(monkeypatch, "provider_candidates", lambda *args, **kwargs: [provider])
+    point_compile_path(monkeypatch, "probe_candidate", lambda descriptor: True)
+    point_compile_path(monkeypatch, "call_candidate", lambda descriptor, *args, **kwargs: LLMResult(
             descriptor, responses.pop(0), True, None, "native"
-        ),
-    )
+        ))
 
-    resolved = compile_memory.resolve_compile_plan(
+    resolved = compile_pipeline_batches.resolve_compile_plan(
         inputs,
         CompileCache(state_root),
         coordinator=MarkdownCoordinator(root, state_root),
@@ -1550,23 +1582,18 @@ def test_cache_contains_semantics_not_rendered_markdown(vault, monkeypatch):
     assert b"One-sentence summary:" not in cache_bytes
     assert b"2026-07-14T12:00:00Z" not in cache_bytes
     assert b"knowledge/index.md" not in canonical_json_bytes(resolved.plan)
-    assert b"knowledge/log.md" not in canonical_json_bytes(resolved.plan)
+    assert b"knowledge/log.local.md" not in canonical_json_bytes(resolved.plan)
 
 
-def test_run_records_snapshot_hash_only_after_commit(vault, monkeypatch):
+def test_run_records_snapshot_hash_only_after_commit(vault, monkeypatch):  # noqa: F811
     root, _state_root = vault
     daily = _daily(root)
     original = daily.read_bytes()
-    import compile_memory
 
     state: dict[str, object] = {"compiled_daily_hashes": {}}
-    monkeypatch.setattr(compile_memory, "load_state", lambda: state)
-    monkeypatch.setattr(
-        compile_memory,
-        "update_state",
-        lambda mutate: mutate(state),
-    )
-    monkeypatch.setattr(compile_memory, "_mark_finished", lambda *args, **kwargs: None)
+    point_compile_path(monkeypatch, "load_state", lambda: state)
+    point_compile_path(monkeypatch, "update_state", lambda mutate: mutate(state))
+    point_compile_path(monkeypatch, "mark_finished", lambda *args, **kwargs: None)
 
     captured = {}
 
@@ -1584,8 +1611,8 @@ def test_run_records_snapshot_hash_only_after_commit(vault, monkeypatch):
             },
         )
 
-    monkeypatch.setattr(compile_memory, "resolve_compile_plan", resolve)
-    result = compile_memory._run(
+    point_compile_path(monkeypatch, "resolve_compile_plan", resolve)
+    result = compile_pipeline.run(
         Namespace(file=None, all=False, dry_run=False, trigger="manual")
     )
 
@@ -1594,17 +1621,16 @@ def test_run_records_snapshot_hash_only_after_commit(vault, monkeypatch):
     assert state["compiled_daily_hashes"] == {
         daily.name: sha256_bytes(original),
     }
-    assert compile_memory.select_dailies(
+    assert compile_pipeline_selection.select_dailies(
         Namespace(file=None, all=False),
         state,
-        coordinator=MarkdownCoordinator(root, compile_memory.STATE_ROOT),
+        coordinator=MarkdownCoordinator(root, runtime_roots.state_root()),
     ) == [daily]
 
 
-def test_run_does_not_record_provider_failure_after_cancellation(vault, monkeypatch):
+def test_run_does_not_record_provider_failure_after_cancellation(vault, monkeypatch):  # noqa: F811
     root, _state_root = vault
     _daily(root)
-    import compile_memory
 
     cancelled = False
     recorded = []
@@ -1615,21 +1641,13 @@ def test_run_does_not_record_provider_failure_after_cancellation(vault, monkeypa
         cancelled = True
         raise RuntimeError("provider failed after timeout")
 
-    monkeypatch.setattr(compile_memory, "load_state", lambda: {})
-    monkeypatch.setattr(compile_memory, "resolve_compile_plan", fail_after_cancellation)
-    monkeypatch.setattr(
-        compile_memory,
-        "_record_compile_source_failures",
-        lambda *args, **kwargs: recorded.append((args, kwargs)),
-    )
-    monkeypatch.setattr(
-        compile_memory,
-        "_mark_finished",
-        lambda *args, **kwargs: finished.append((args, kwargs)),
-    )
+    point_compile_path(monkeypatch, "load_state", lambda: {})
+    point_compile_path(monkeypatch, "resolve_compile_plan", fail_after_cancellation)
+    point_compile_path(monkeypatch, "record_compile_source_failures", lambda *args, **kwargs: recorded.append((args, kwargs)))
+    point_compile_path(monkeypatch, "mark_finished", lambda *args, **kwargs: finished.append((args, kwargs)))
 
     with pytest.raises(TimeoutError, match="deadline|cancel"):
-        compile_memory._run(
+        compile_pipeline.run(
             Namespace(file=None, all=False, dry_run=False, trigger="manual"),
             cancelled=lambda: cancelled,
         )
@@ -1638,45 +1656,41 @@ def test_run_does_not_record_provider_failure_after_cancellation(vault, monkeypa
     assert finished == []
 
 
-def test_run_packs_before_provider_dispatch(vault, monkeypatch):
+def test_run_packs_before_provider_dispatch(vault, monkeypatch):  # noqa: F811
     root, _state_root = vault
     daily = _daily(root)
     daily.write_bytes(b"x" * 28_000)
-    import compile_memory
 
-    monkeypatch.setattr(compile_memory, "load_state", lambda: {})
-    monkeypatch.setattr(compile_memory, "_mark_finished", lambda *args, **kwargs: None)
-    monkeypatch.setattr(
-        compile_memory,
-        "_record_compile_source_failures",
-        lambda *args, **kwargs: None,
-    )
-    monkeypatch.setattr(
-        compile_memory,
-        "resolve_compile_plan",
-        lambda *args, **kwargs: pytest.fail("provider dispatch ran before packing"),
-    )
-    monkeypatch.setattr(
-        compile_memory,
-        "update_state",
-        lambda *args, **kwargs: pytest.fail("compile diagnostics were updated"),
-    )
+    # A day is now cut inside a long entry, so no daily part outgrows the default
+    # budget; a window too small for one part keeps packing the step that refuses
+    # (docs/research/2026-09-28-a-long-entry-is-cut-inside-itself.md).
+    state = {}
+    point_compile_path(monkeypatch, "COMPILE_CONTEXT_WINDOW_TOKENS", 8_000)
+    point_compile_path(monkeypatch, "load_state", lambda: state)
+    point_compile_path(monkeypatch, "record_compile_source_failures", lambda *args, **kwargs: None)
+    point_compile_path(monkeypatch, "resolve_compile_plan", lambda *args, **kwargs: pytest.fail("provider dispatch ran before packing"))
+    point_compile_path(monkeypatch, "update_state", lambda mutate: mutate(state))
 
-    result = compile_memory._run(
+    result = compile_pipeline.run(
         Namespace(file=None, all=False, dry_run=False, trigger="manual")
     )
 
     assert result == 1
     assert not list((root / "knowledge/daily/receipts").glob("*.md"))
+    assert set(state) == {
+        "last_compile_error", "last_compile_finished_at", "last_compile_finished_trigger",
+        "last_compile_status", "last_compile_outcome", "last_compile_dropped_claims",
+    }
+    assert (state["last_compile_status"], state["last_compile_outcome"]) == ("error", "failed")
+    assert "daily source exceeds compile input budget" in state["last_compile_error"]
 
 
-def test_run_refreshes_context_between_compile_batches(vault, monkeypatch):
+def test_run_refreshes_context_between_compile_batches(vault, monkeypatch):  # noqa: F811
     root, _state_root = vault
     first = root / "knowledge/daily/2026-07-14.md"
     second = root / "knowledge/daily/2026-07-15.md"
     first.write_bytes(b"a" * 14_000)
     second.write_bytes(b"b" * 14_000)
-    import compile_memory
 
     state: dict[str, object] = {}
     seen_index_hashes = []
@@ -1699,12 +1713,12 @@ def test_run_refreshes_context_between_compile_batches(vault, monkeypatch):
             },
         )
 
-    monkeypatch.setattr(compile_memory, "load_state", lambda: state)
-    monkeypatch.setattr(compile_memory, "update_state", lambda mutate: mutate(state))
-    monkeypatch.setattr(compile_memory, "_mark_finished", lambda *args, **kwargs: None)
-    monkeypatch.setattr(compile_memory, "resolve_compile_plan", resolve)
+    point_compile_path(monkeypatch, "load_state", lambda: state)
+    point_compile_path(monkeypatch, "update_state", lambda mutate: mutate(state))
+    point_compile_path(monkeypatch, "mark_finished", lambda *args, **kwargs: None)
+    point_compile_path(monkeypatch, "resolve_compile_plan", resolve)
 
-    result = compile_memory._run(
+    result = compile_pipeline.run(
         Namespace(file=None, all=False, dry_run=False, trigger="manual")
     )
 
@@ -1717,38 +1731,22 @@ def test_run_refreshes_context_between_compile_batches(vault, monkeypatch):
     }
 
 
-def test_run_pending_compile_propagates_supplied_owner(monkeypatch):
-    import compile_memory
 
-    owner = object()
-    captured = {}
-
-    def run(args, **kwargs):
-        captured.update(kwargs)
-        return 0
-
-    monkeypatch.setattr(compile_memory, "_run", run)
-
-    assert compile_memory.run_pending_compile(owner=owner) == 0
-    assert captured["owner"] is owner
-
-
-def test_evidence_quote_must_be_inside_cited_timestamp_block(vault):
+def test_evidence_quote_must_be_inside_cited_timestamp_block(vault):  # noqa: F811
     root, _state_root = vault
     daily = root / "knowledge/daily/2026-07-14.md"
     daily.write_bytes(
         b"## [10:00:00] first\nDifferent claim.\n"
         b"## [11:00:00] second\nA durable exact-byte observation.\n"
     )
-    import compile_memory
 
-    inputs = compile_memory.snapshot_compile_inputs([daily])
+    inputs = compile_pipeline_sources.snapshot_compile_inputs([daily])
 
     with pytest.raises(ValueError, match="immutable snapshot"):
-        compile_memory.validate_compile_plan(_semantic_plan(), inputs)
+        compile_pipeline_prompts.validate_compile_plan(_semantic_plan(), inputs)
 
 
-def test_evidence_quote_that_is_part_of_a_bullet_is_widened_to_the_bullet(vault, capsys):
+def test_evidence_quote_that_is_part_of_a_bullet_is_widened_to_the_bullet(vault, capsys):  # noqa: F811
     """Issue #28: a partial quote is widened to its line, not dropped."""
     root, _state_root = vault
     daily = root / "knowledge/daily/2026-07-14.md"
@@ -1757,46 +1755,41 @@ def test_evidence_quote_that_is_part_of_a_bullet_is_widened_to_the_bullet(vault,
         "- Always reject substring citations before durable publication.\n",
         encoding="utf-8",
     )
-    import compile_memory
 
-    inputs = compile_memory.snapshot_compile_inputs([daily])
+    inputs = compile_pipeline_sources.snapshot_compile_inputs([daily])
     plan = _semantic_plan()
     semantic = json.loads(plan["operations"][0]["content"])
     semantic["evidence"][0]["quoted_text"] = "reject substring citations"
     plan["operations"][0]["content"] = canonical_json_bytes(semantic).decode()
 
-    compile_memory.validate_compile_plan(plan, inputs)
+    compile_pipeline_prompts.validate_compile_plan(plan, inputs)
     assert "widened to its line" in capsys.readouterr().err
 
     semantic["evidence"][0]["quoted_text"] = (
         "Always reject substring citations before durable publication."
     )
     plan["operations"][0]["content"] = canonical_json_bytes(semantic).decode()
-    compile_memory.validate_compile_plan(plan, inputs)
+    compile_pipeline_prompts.validate_compile_plan(plan, inputs)
 
 
-def test_prompt_fallback_output_is_schema_checked_before_cache(vault, monkeypatch):
+def test_prompt_fallback_output_is_schema_checked_before_cache(vault, monkeypatch):  # noqa: F811
     root, state_root = vault
     daily = _daily(root)
-    import compile_memory
+    from llm_wiki import compile_pipeline_batches
 
-    inputs = compile_memory.snapshot_compile_inputs([daily])
+    inputs = compile_pipeline_sources.snapshot_compile_inputs([daily])
     provider = _provider()
     malformed = json.loads(_draft_response())
     malformed["operations"] = []
     malformed["unexpected"] = True
-    monkeypatch.setattr(compile_memory, "provider_candidates", lambda *args, **kwargs: [provider])
-    monkeypatch.setattr(compile_memory, "probe_candidate", lambda descriptor: True)
-    monkeypatch.setattr(
-        compile_memory,
-        "call_candidate",
-        lambda descriptor, *args, **kwargs: LLMResult(
+    point_compile_path(monkeypatch, "provider_candidates", lambda *args, **kwargs: [provider])
+    point_compile_path(monkeypatch, "probe_candidate", lambda descriptor: True)
+    point_compile_path(monkeypatch, "call_candidate", lambda descriptor, *args, **kwargs: LLMResult(
             descriptor, json.dumps(malformed), True, None, "native"
-        ),
-    )
+        ))
 
     with pytest.raises(RuntimeError, match="validated compile plan"):
-        compile_memory.resolve_compile_plan(
+        compile_pipeline_batches.resolve_compile_plan(
             inputs,
             CompileCache(state_root),
             coordinator=MarkdownCoordinator(root, state_root),
@@ -1807,25 +1800,24 @@ def test_prompt_fallback_output_is_schema_checked_before_cache(vault, monkeypatc
 
 def _narrowed(inputs):
     """What batching hands the writer when nothing optional fits the prompt."""
-    import compile_memory
 
-    return compile_memory._subset_compile_inputs(
+    return compile_pipeline_sources.subset_compile_inputs(
         inputs, {inputs.dailies[0].part_key}, optional_paths=set()
     )
 
 
-def test_index_and_log_commit_when_the_prompt_had_no_room_for_them(vault):
+def test_index_and_log_commit_when_the_prompt_had_no_room_for_them(vault):  # noqa: F811
     """The prompt budget decides what the model reads, never what is on disk."""
     root, state_root = vault
     daily = _daily(root)
-    (root / "knowledge/log.md").write_bytes(
+    (root / "knowledge/log.local.md").write_bytes(
         b"# Session Memory Log\n\n- 2026-07-01 - an earlier pass.\n"
     )
-    import compile_memory
+    from llm_wiki import compile_pipeline_apply
 
-    inputs = compile_memory.snapshot_compile_inputs([daily])
+    inputs = compile_pipeline_sources.snapshot_compile_inputs([daily])
 
-    result = compile_memory.apply_compile_plan(
+    result = compile_pipeline_apply.apply_compile_plan(
         _narrowed(inputs),
         _semantic_plan(),
         action_key="b" * 64,
@@ -1838,18 +1830,18 @@ def test_index_and_log_commit_when_the_prompt_had_no_room_for_them(vault):
     assert b"exact-byte-pattern" in (root / "knowledge/index.md").read_bytes()
 
 
-def test_a_log_outside_the_prompt_is_appended_to_rather_than_rewritten(vault):
+def test_a_log_outside_the_prompt_is_appended_to_rather_than_rewritten(vault):  # noqa: F811
     """A dropped log source once became an empty before-image."""
     root, state_root = vault
     daily = _daily(root)
-    (root / "knowledge/log.md").write_bytes(
+    (root / "knowledge/log.local.md").write_bytes(
         b"# Session Memory Log\n\n- 2026-07-01 - an earlier pass.\n"
     )
-    import compile_memory
+    from llm_wiki import compile_pipeline_apply
 
-    inputs = compile_memory.snapshot_compile_inputs([daily])
+    inputs = compile_pipeline_sources.snapshot_compile_inputs([daily])
 
-    compile_memory.apply_compile_plan(
+    compile_pipeline_apply.apply_compile_plan(
         _narrowed(inputs),
         _semantic_plan(),
         action_key="c" * 64,
@@ -1858,22 +1850,22 @@ def test_a_log_outside_the_prompt_is_appended_to_rather_than_rewritten(vault):
         completed_at="2026-07-14T12:00:00Z",
     )
 
-    log = (root / "knowledge/log.md").read_bytes()
+    log = (root / "knowledge/log.local.md").read_bytes()
     assert b"an earlier pass." in log
     assert inputs.dailies[0].sha256.encode() in log
 
 
-def test_an_absent_index_and_log_are_still_created(vault):
+def test_an_absent_index_and_log_are_still_created(vault):  # noqa: F811
     """Nothing on disk means create, which is how a fresh vault compiles."""
     root, state_root = vault
     daily = _daily(root)
     (root / "knowledge/index.md").unlink()
-    (root / "knowledge/log.md").unlink()
-    import compile_memory
+    (root / "knowledge/log.local.md").unlink()
+    from llm_wiki import compile_pipeline_apply
 
-    inputs = compile_memory.snapshot_compile_inputs([daily])
+    inputs = compile_pipeline_sources.snapshot_compile_inputs([daily])
 
-    result = compile_memory.apply_compile_plan(
+    result = compile_pipeline_apply.apply_compile_plan(
         _narrowed(inputs),
         _semantic_plan(),
         action_key="d" * 64,
@@ -1883,22 +1875,91 @@ def test_an_absent_index_and_log_are_still_created(vault):
     )
 
     assert result.state == "committed"
-    assert (root / "knowledge/log.md").is_file()
+    assert (root / "knowledge/log.local.md").is_file()
+
+
+def test_publication_preserves_a_log_append_after_the_model_snapshot(vault):  # noqa: F811
+    from llm_wiki import compile_pipeline_apply
+
+    root, state_root = vault
+    inputs = compile_pipeline_sources.snapshot_compile_inputs([_daily(root)])
+    log = root / "knowledge/log.local.md"
+    concurrent = log.read_bytes() + b"\n- An independent writer's entry.\n"
+    log.write_bytes(concurrent)
+
+    result = compile_pipeline_apply.apply_compile_plan(
+        inputs, _semantic_plan(), action_key="c" * 64, trigger="manual",
+        coordinator=MarkdownCoordinator(root, state_root),
+        completed_at="2026-07-14T12:00:00Z",
+    )
+
+    assert result.state == "committed"
+    assert log.read_bytes().startswith(concurrent)
+    assert inputs.dailies[0].sha256.encode() in log.read_bytes()
+    assert all(b"independent writer" not in source.content for source in inputs.vault_files)
+
+
+def test_publication_indexes_a_note_added_after_the_model_snapshot(vault):  # noqa: F811
+    from llm_wiki import compile_pipeline_apply
+    from rebuild_memory_index import build_index_bytes
+
+    root, state_root = vault
+    inputs = compile_pipeline_sources.snapshot_compile_inputs([_daily(root)])
+    (root / "knowledge/notes/concurrent-note.md").write_bytes(
+        b"---\ntype: concept\n---\n# Concurrent Note\n\nOne-sentence summary: Another writer's note.\n"
+    )
+    (root / "knowledge/index.md").write_bytes(build_index_bytes(root))
+
+    result = compile_pipeline_apply.apply_compile_plan(
+        inputs, _semantic_plan(), action_key="d" * 64, trigger="manual",
+        coordinator=MarkdownCoordinator(root, state_root),
+        completed_at="2026-07-14T12:00:00Z",
+    )
+
+    assert result.state == "committed"
+    index = (root / "knowledge/index.md").read_bytes()
+    assert b"concurrent-note" in index
+    assert b"exact-byte-pattern" in index
+
+
+@pytest.mark.parametrize("name", ["log.local.md", "index.md"])
+def test_external_edit_after_metadata_refresh_still_fails_the_hash_check(vault, monkeypatch, name):  # noqa: F811
+    from llm_wiki import compile_pipeline_apply
+    from markdown_transaction import PreconditionChangedError
+
+    root, state_root = vault
+    inputs = compile_pipeline_sources.snapshot_compile_inputs([_daily(root)])
+    original = compile_pipeline_apply.ApplyPlan._commit
+    target = root / "knowledge" / name
+
+    def raced_commit(publication):
+        target.write_bytes(b"An external edit after the publication read.\n")
+        return original(publication)
+
+    monkeypatch.setattr(compile_pipeline_apply.ApplyPlan, "_commit", raced_commit)
+    with pytest.raises(PreconditionChangedError, match="target precondition changed"):
+        compile_pipeline_apply.apply_compile_plan(
+            inputs, _semantic_plan(), action_key="e" * 64, trigger="manual",
+            coordinator=MarkdownCoordinator(root, state_root),
+            completed_at="2026-07-14T12:00:00Z",
+        )
+    assert target.read_bytes() == b"An external edit after the publication read.\n"
+    assert not (root / "knowledge/notes/exact-byte-pattern.md").exists()
     assert (root / "knowledge/index.md").is_file()
 
 
-def test_the_log_counts_a_page_this_repository_does_not_publish(vault):
-    """`knowledge/log.md` is tracked; a private slug written there is content."""
+def test_the_log_counts_a_page_this_repository_does_not_publish(vault):  # noqa: F811
+    """The vault log may be pasted somewhere public; a private slug written there is content."""
     root, state_root = vault
     daily = _daily(root)
     (root / ".gitignore").write_text(
         "knowledge/notes/*\n!knowledge/notes/README.md\n", encoding="utf-8"
     )
-    import compile_memory
+    from llm_wiki import compile_pipeline_apply
 
-    inputs = compile_memory.snapshot_compile_inputs([daily])
+    inputs = compile_pipeline_sources.snapshot_compile_inputs([daily])
 
-    compile_memory.apply_compile_plan(
+    compile_pipeline_apply.apply_compile_plan(
         inputs,
         _semantic_plan(),
         action_key="e" * 64,
@@ -1907,21 +1968,21 @@ def test_the_log_counts_a_page_this_repository_does_not_publish(vault):
         completed_at="2026-07-14T12:00:00Z",
     )
 
-    log = (root / "knowledge/log.md").read_text(encoding="utf-8")
+    log = (root / "knowledge/log.local.md").read_text(encoding="utf-8")
     assert "exact-byte-pattern" not in log
     assert "1 unpublished page(s)" in log
 
 
-def test_the_log_names_pages_in_a_vault_that_publishes_them(vault):
+def test_the_log_names_pages_in_a_vault_that_publishes_them(vault):  # noqa: F811
     """An installed vault denies nothing under notes; the names stay useful."""
     root, state_root = vault
     daily = _daily(root)
     (root / ".gitignore").write_text("cache/\nrun/\n", encoding="utf-8")
-    import compile_memory
+    from llm_wiki import compile_pipeline_apply
 
-    inputs = compile_memory.snapshot_compile_inputs([daily])
+    inputs = compile_pipeline_sources.snapshot_compile_inputs([daily])
 
-    compile_memory.apply_compile_plan(
+    compile_pipeline_apply.apply_compile_plan(
         inputs,
         _semantic_plan(),
         action_key="f" * 64,
@@ -1930,27 +1991,26 @@ def test_the_log_names_pages_in_a_vault_that_publishes_them(vault):
         completed_at="2026-07-14T12:00:00Z",
     )
 
-    log = (root / "knowledge/log.md").read_text(encoding="utf-8")
+    log = (root / "knowledge/log.local.md").read_text(encoding="utf-8")
     assert "knowledge/notes/exact-byte-pattern.md" in log
 
 
 def _quarantine_next_compile(root: Path, state_root: Path, daily: Path):
     """Drive one compile into quarantine the way the DLP boundary did."""
-    import compile_memory
-    import markdown_transaction
+    from llm_wiki import compile_pipeline_apply
+    from model_dlp import DLPContentBlocked
 
-    inputs = compile_memory.snapshot_compile_inputs([daily])
+    inputs = compile_pipeline_sources.snapshot_compile_inputs([daily])
     coordinator = MarkdownCoordinator(root, state_root)
-    original = markdown_transaction.require_safe_publication
 
     def refuse(content: bytes) -> None:
         del content
-        raise markdown_transaction.DLPContentBlocked("content contains protected data")
+        raise DLPContentBlocked("content contains protected data")
 
-    markdown_transaction.require_safe_publication = refuse
-    try:
+    with pytest.MonkeyPatch.context() as patch:
+        patch_coordinator(patch, "require_safe_publication", refuse)
         with pytest.raises(Exception):
-            compile_memory.apply_compile_plan(
+            compile_pipeline_apply.apply_compile_plan(
                 inputs,
                 _semantic_plan(),
                 action_key="9" * 64,
@@ -1958,12 +2018,10 @@ def _quarantine_next_compile(root: Path, state_root: Path, daily: Path):
                 coordinator=coordinator,
                 completed_at="2026-07-14T12:00:00Z",
             )
-    finally:
-        markdown_transaction.require_safe_publication = original
     return inputs
 
 
-def test_a_quarantined_attempt_does_not_lock_its_inputs_out_of_compiling(vault):
+def test_a_quarantined_attempt_does_not_lock_its_inputs_out_of_compiling(vault):  # noqa: F811
     """A refused attempt is evidence, not a life sentence for those dailies.
 
     The operation id comes from the inputs, so a retry after the refusal was
@@ -1975,10 +2033,10 @@ def test_a_quarantined_attempt_does_not_lock_its_inputs_out_of_compiling(vault):
     root, state_root = vault
     daily = _daily(root)
     _quarantine_next_compile(root, state_root, daily)
-    import compile_memory
+    from llm_wiki import compile_pipeline_apply
 
-    inputs = compile_memory.snapshot_compile_inputs([daily])
-    result = compile_memory.apply_compile_plan(
+    inputs = compile_pipeline_sources.snapshot_compile_inputs([daily])
+    result = compile_pipeline_apply.apply_compile_plan(
         inputs,
         _semantic_plan(),
         action_key="9" * 64,
@@ -1992,7 +2050,7 @@ def test_a_quarantined_attempt_does_not_lock_its_inputs_out_of_compiling(vault):
 
 
 def test_a_split_day_is_recorded_by_the_whole_file_not_its_last_part(
-    vault, monkeypatch
+    vault, monkeypatch  # noqa: F811
 ):
     """The mirror must mean what its cheap readers assume it means.
 
@@ -2002,47 +2060,41 @@ def test_a_split_day_is_recorded_by_the_whole_file_not_its_last_part(
     nothing could correct the record.
     """
     root, state_root = vault
-    import compile_memory
     from memory_state import load_state
 
     daily = root / "knowledge/daily/2026-07-14.md"
     entry = b"<!-- llm-wiki-operation: session -->\n" + b"session text\n" * 300
     daily.write_bytes(b"# 2026-07-14\n\n" + entry * 12)
     content = daily.read_bytes()
-    bounds = compile_memory._daily_part_bounds(content)
+    bounds = compile_pipeline.daily_part_bounds(content)
     assert len(bounds) > 1, "this day is supposed to split into parts"
-    monkeypatch.setattr(
-        compile_memory, "_receipt_predicate", lambda _coordinator: lambda *_a: True
-    )
+    point_compile_path(monkeypatch, "receipt_predicate", lambda _coordinator, **_kwargs: lambda *_a: True)
 
-    compile_memory._repair_compile_mirror(object())
+    compile_pipeline_selection.repair_compile_mirror(object())
 
     mirror = load_state().get("compiled_daily_hashes", {})
-    last_part = compile_memory.sha256_bytes(content[bounds[-1][0] : bounds[-1][1]])
-    assert mirror["2026-07-14.md"] == compile_memory.sha256_bytes(content)
+    last_part = compile_pipeline.sha256_bytes(content[bounds[-1][0] : bounds[-1][1]])
+    assert mirror["2026-07-14.md"] == compile_pipeline.sha256_bytes(content)
     assert mirror["2026-07-14.md"] != last_part
     del state_root
 
 
-def test_a_day_without_receipts_for_every_part_is_left_alone(vault, monkeypatch):
+def test_a_day_without_receipts_for_every_part_is_left_alone(vault, monkeypatch):  # noqa: F811
     """Only the receipts decide; the repair merely writes down what they say."""
     root, state_root = vault
-    import compile_memory
     from memory_state import load_state
 
     daily = root / "knowledge/daily/2026-07-15.md"
     daily.write_bytes(b"# 2026-07-15\n\nshort day\n")
-    monkeypatch.setattr(
-        compile_memory, "_receipt_predicate", lambda _coordinator: lambda *_a: False
-    )
+    point_compile_path(monkeypatch, "receipt_predicate", lambda _coordinator, **_kwargs: lambda *_a: False)
 
-    compile_memory._repair_compile_mirror(object())
+    compile_pipeline_selection.repair_compile_mirror(object())
 
     assert "2026-07-15.md" not in load_state().get("compiled_daily_hashes", {})
     del state_root
 
 
-def test_a_corrupt_receipt_says_which_one_and_why(vault):
+def test_a_corrupt_receipt_says_which_one_and_why(vault):  # noqa: F811
     """One message for four causes explains nothing to whoever meets it.
 
     The live vault stopped compiling behind this message and the only way to
@@ -2050,10 +2102,10 @@ def test_a_corrupt_receipt_says_which_one_and_why(vault):
     """
     root, state_root = vault
     daily = _daily(root)
-    import compile_memory
+    from llm_wiki import compile_pipeline_apply, compile_pipeline_batches
 
-    inputs = compile_memory.snapshot_compile_inputs([daily])
-    compile_memory.apply_compile_plan(
+    inputs = compile_pipeline_sources.snapshot_compile_inputs([daily])
+    compile_pipeline_apply.apply_compile_plan(
         inputs,
         _semantic_plan(),
         action_key="9" * 64,
@@ -2068,7 +2120,7 @@ def test_a_corrupt_receipt_says_which_one_and_why(vault):
     )
 
     with pytest.raises(ValueError) as failure:
-        compile_memory.read_compile_receipt(
+        compile_pipeline_batches.read_compile_receipt(
             digest, MarkdownCoordinator(root, state_root)
         )
 
@@ -2079,7 +2131,7 @@ def test_a_corrupt_receipt_says_which_one_and_why(vault):
     assert separator and reason.strip()
 
 
-def test_the_retry_receipt_names_the_transaction_that_committed_it(vault):
+def test_the_retry_receipt_names_the_transaction_that_committed_it(vault):  # noqa: F811
     """A receipt is evidence only when the operation it names actually wrote it.
 
     The retry ordinal used to be chosen at the commit, after the receipts had
@@ -2092,10 +2144,10 @@ def test_the_retry_receipt_names_the_transaction_that_committed_it(vault):
     root, state_root = vault
     daily = _daily(root)
     _quarantine_next_compile(root, state_root, daily)
-    import compile_memory
+    from llm_wiki import compile_pipeline_apply, compile_pipeline_batches
 
-    inputs = compile_memory.snapshot_compile_inputs([daily])
-    result = compile_memory.apply_compile_plan(
+    inputs = compile_pipeline_sources.snapshot_compile_inputs([daily])
+    result = compile_pipeline_apply.apply_compile_plan(
         inputs,
         _semantic_plan(),
         action_key="9" * 64,
@@ -2105,7 +2157,7 @@ def test_the_retry_receipt_names_the_transaction_that_committed_it(vault):
     )
     coordinator = MarkdownCoordinator(root, state_root)
     digest = inputs.dailies[0].sha256
-    record = compile_memory.read_compile_receipt(digest, coordinator)
+    record = compile_pipeline_batches.read_compile_receipt(digest, coordinator)
     assert (result.state, record is not None) == ("committed", True)
 
     identity = str(record["operation_id"])
@@ -2120,17 +2172,17 @@ def test_the_retry_receipt_names_the_transaction_that_committed_it(vault):
     )
 
 
-def test_the_quarantined_attempt_is_kept_and_named_as_the_parent(vault):
+def test_the_quarantined_attempt_is_kept_and_named_as_the_parent(vault):  # noqa: F811
     """The refused attempt stays exactly as it was, and the retry points at it."""
     root, state_root = vault
     daily = _daily(root)
     _quarantine_next_compile(root, state_root, daily)
     import sqlite3
 
-    import compile_memory
+    from llm_wiki import compile_pipeline_apply
 
-    inputs = compile_memory.snapshot_compile_inputs([daily])
-    compile_memory.apply_compile_plan(
+    inputs = compile_pipeline_sources.snapshot_compile_inputs([daily])
+    compile_pipeline_apply.apply_compile_plan(
         inputs,
         _semantic_plan(),
         action_key="9" * 64,
@@ -2163,16 +2215,16 @@ def _rows_in_state(rows: list, state: str) -> list:
     return [row for row in rows if row["state"] == state]
 
 
-def test_a_second_refusal_takes_the_next_ordinal_again(vault):
+def test_a_second_refusal_takes_the_next_ordinal_again(vault):  # noqa: F811
     """Attempts form a chain, so two refusals do not become a dead end either."""
     root, state_root = vault
     daily = _daily(root)
     _quarantine_next_compile(root, state_root, daily)
     _quarantine_next_compile(root, state_root, daily)
-    import compile_memory
+    from llm_wiki import compile_pipeline_apply
 
-    inputs = compile_memory.snapshot_compile_inputs([daily])
-    result = compile_memory.apply_compile_plan(
+    inputs = compile_pipeline_sources.snapshot_compile_inputs([daily])
+    result = compile_pipeline_apply.apply_compile_plan(
         inputs,
         _semantic_plan(),
         action_key="9" * 64,
@@ -2184,13 +2236,10 @@ def test_a_second_refusal_takes_the_next_ordinal_again(vault):
     assert result.state == "committed"
 
 
-def test_the_retry_chain_is_bounded(vault, monkeypatch):
-    """A hundred refusals is an operator's problem, not a numbering exercise."""
+def test_the_retry_chain_obeys_the_caller_deadline(vault):  # noqa: F811
+    """Recorded refusals do not replace the caller's time budget."""
     root, state_root = vault
     daily = _daily(root)
-    import markdown_transaction
-
-    monkeypatch.setattr(markdown_transaction, "MAX_ATTEMPT_ORDINAL", 1)
     _quarantine_next_compile(root, state_root, daily)
     _quarantine_next_compile(root, state_root, daily)
     coordinator = MarkdownCoordinator(root, state_root)
@@ -2203,8 +2252,49 @@ def test_the_retry_chain_is_bounded(vault, monkeypatch):
     ).fetchone()[0]
     database.close()
 
-    with pytest.raises(ValueError, match="exhausted its quarantined retry ordinals"):
-        coordinator.attempt_operation_id(base)
+    import time
+
+    with pytest.raises(TimeoutError, match="deadline or cancellation"):
+        coordinator.attempt_operation_id(base, deadline=time.monotonic() - 1)
+
+
+def test_more_than_a_hundred_recorded_refusals_can_take_the_next_ordinal(vault, monkeypatch):  # noqa: F811
+    from types import SimpleNamespace
+
+    root, state_root = vault
+    coordinator = MarkdownCoordinator(root, state_root)
+    records = {f"compile:long#{ordinal}": SimpleNamespace(id=f"refusal-{ordinal}", state="quarantined") for ordinal in range(2, 103)}
+    records["compile:long"] = SimpleNamespace(id="refusal-1", state="quarantined")
+    monkeypatch.setattr(coordinator, "_record_for_operation_id", records.get)
+
+    assert coordinator.attempt_operation_id("compile:long") == ("compile:long#103", "refusal-102")
+
+
+def test_retry_ordinal_search_honours_cancellation(vault):  # noqa: F811
+    root, state_root = vault
+    coordinator = MarkdownCoordinator(root, state_root)
+    with pytest.raises(TimeoutError, match="deadline or cancellation"):
+        coordinator.attempt_operation_id("compile:cancelled", cancelled=lambda: True)
+
+
+def test_retry_ordinal_search_refuses_a_read_that_finishes_too_late(vault, monkeypatch):  # noqa: F811
+    from unittest.mock import Mock
+
+    root, state_root = vault
+    coordinator = MarkdownCoordinator(root, state_root)
+    monkeypatch.setattr(coordinator, "_recovery_stopped", Mock(side_effect=[False, True]))
+    with pytest.raises(TimeoutError, match="deadline or cancellation"):
+        coordinator.attempt_operation_id("compile:late")
+
+
+def test_retry_ordinal_search_uses_an_explicit_caller_budget(vault, monkeypatch):  # noqa: F811
+    import time
+
+
+    root, state_root = vault
+    coordinator = MarkdownCoordinator(root, state_root)
+    patch_coordinator(monkeypatch, 'WRITER_WAIT_SECONDS', 0)
+    assert coordinator.attempt_operation_id("compile:explicit", deadline=time.monotonic() + 1) == ("compile:explicit", None)
 
 
 def test_critique_batches_split_until_each_one_fits(monkeypatch):
@@ -2214,16 +2304,14 @@ def test_critique_batches_split_until_each_one_fits(monkeypatch):
     of 40,543 tokens against a 27,744 budget, and the whole plan used to be
     thrown away for it.
     """
-    import compile_memory
 
-    monkeypatch.setattr(
-        compile_memory, "_critique_prompt", lambda inputs, batch: "x" * len(batch)
+    point_compile_path(monkeypatch, "critique_prompt", lambda inputs, batch: "x" * len(batch))
+    attempt = compile_pipeline_prompts.CompileAttempt(
+        compile_pipeline_sources.CompileInputs((), (), ()), None, None, None
     )
-    attempt = compile_memory._CompileAttempt.__new__(compile_memory._CompileAttempt)
-    attempt.inputs = None
     attempt._fits = lambda prompt, system, schema, descriptor: len(prompt) <= 2
 
-    batches = compile_memory._CompileAttempt._critique_batches(
+    batches = compile_pipeline_prompts.CompileAttempt._critique_batches(
         attempt, None, ["a", "b", "c", "d", "e"]
     )
 
@@ -2232,32 +2320,29 @@ def test_critique_batches_split_until_each_one_fits(monkeypatch):
 
 
 def test_one_operation_that_cannot_be_reviewed_alone_is_refused(monkeypatch):
-    import compile_memory
 
-    monkeypatch.setattr(
-        compile_memory, "_critique_prompt", lambda inputs, batch: "x" * len(batch)
+    point_compile_path(monkeypatch, "critique_prompt", lambda inputs, batch: "x" * len(batch))
+    attempt = compile_pipeline_prompts.CompileAttempt(
+        compile_pipeline_sources.CompileInputs((), (), ()), None, None, None
     )
-    attempt = compile_memory._CompileAttempt.__new__(compile_memory._CompileAttempt)
-    attempt.inputs = None
     attempt._fits = lambda prompt, system, schema, descriptor: False
 
-    with pytest.raises(compile_memory._ProviderStageFailure):
-        compile_memory._CompileAttempt._critique_batches(attempt, None, ["a"])
+    with pytest.raises(compile_pipeline_prompts.ProviderStageFailure):
+        compile_pipeline_prompts.CompileAttempt._critique_batches(attempt, None, ["a"])
 
 
 def test_a_quarantined_batch_is_named_apart_from_a_published_one(capsys):
     """Issue #26.2: `done` and `ok` read the same whether pages were published or not."""
-    import compile_memory
 
-    quarantined = compile_memory.CompileApplyResult(
+    quarantined = compile_pipeline_sources.CompileApplyResult(
         "t1", "compile-quarantine:abc", "committed", ("knowledge/inbox/claims/x.md",), 1, "now", "k"
     )
-    published = compile_memory.CompileApplyResult(
+    published = compile_pipeline_sources.CompileApplyResult(
         "t2", "compile:def", "committed", ("knowledge/notes/a.md", "knowledge/notes/b.md"), 2, "now", "k"
     )
 
-    first = compile_memory._committed_outcome(quarantined)
-    second = compile_memory._committed_outcome(published)
+    first = compile_pipeline_claims.committed_outcome(quarantined)
+    second = compile_pipeline_claims.committed_outcome(published)
 
     out = capsys.readouterr().out
     assert (
@@ -2265,7 +2350,420 @@ def test_a_quarantined_batch_is_named_apart_from_a_published_one(capsys):
         "batch published 2 page(s)" in out,
     ) == (True, True)
     assert (
-        compile_memory.compile_outcome([first]),
-        compile_memory.compile_outcome([first, second]),
-        compile_memory._finished_outcome("error", [second]),
+        compile_pipeline_claims.compile_outcome([first]),
+        compile_pipeline_claims.compile_outcome([first, second]),
+        compile_pipeline_selection.finished_outcome("error", [second]),
     ) == ("quarantined", "partial", "failed")
+
+
+def _plan_with_one_snapshot_claim(root):
+    content = _semantic_operation()
+    content["claims"] = [_claim_record(
+        root, claim_id="snapshot-new", value="red",
+        text="A durable exact-byte observation.", authority="user",
+    )]
+    return {
+        "schema_version": "compile-plan/v2",
+        "operations": [{
+            "kind": "create", "path": "knowledge/notes/exact-byte-pattern.md",
+            "content": canonical_json_bytes(content).decode(),
+        }],
+    }
+
+
+@pytest.mark.parametrize("during_apply", [False, True])
+def test_stale_target_snapshot_does_not_repeat_claim_assessment(
+    vault, monkeypatch, during_apply  # noqa: F811
+):
+    from llm_wiki import compile_pipeline_apply
+    from markdown_transaction import TransactionFailure
+
+    root, state_root = vault
+    daily = _daily(root)
+    prior = root / "knowledge/notes/prior.md"
+    prior.write_bytes(b"---\ntype: concept\n---\n# Prior\nblue\n")
+    inputs = compile_pipeline_sources.snapshot_compile_inputs([daily])
+    plan = _plan_with_one_snapshot_claim(root)
+    coordinator = MarkdownCoordinator(root, state_root)
+    calls = []
+    original_assess = compile_pipeline_apply.ApplyPlan._assess_operation
+    original_apply = coordinator.apply
+
+    def observed_assessment(self, planned, candidates):
+        calls.append(planned["path"])
+        return original_assess(self, planned, candidates)
+
+    def changed_target_then_apply(transaction_id, **kwargs):
+        prior.write_bytes(b"---\ntype: concept\n---\n# Prior\ngreen\n")
+        return original_apply(transaction_id, **kwargs)
+
+    monkeypatch.setattr(compile_pipeline_apply.ApplyPlan, "_assess_operation", observed_assessment)
+    point_compile_path(monkeypatch, "default_secondary_search", lambda *args, **kwargs: [])
+    if during_apply:
+        monkeypatch.setattr(coordinator, "apply", changed_target_then_apply)
+    else:
+        prior.write_bytes(b"---\ntype: concept\n---\n# Prior\ngreen\n")
+    with pytest.raises(TransactionFailure):
+        compile_pipeline_apply.apply_compile_plan(
+            inputs, plan, action_key="b" * 64, trigger="manual",
+            coordinator=coordinator, completed_at="2026-07-14T12:00:00Z",
+        )
+    assert len(calls) == int(during_apply)
+    assert prior.read_bytes().endswith(b"green\n")
+    assert not (root / "knowledge/notes/exact-byte-pattern.md").exists()
+    assert not list((root / "knowledge/daily/receipts").glob("*.md"))
+    refreshed = compile_pipeline_sources.snapshot_compile_inputs([daily])
+    result = compile_pipeline_apply.apply_compile_plan(
+        refreshed, _plan_with_one_snapshot_claim(root), action_key="c" * 64,
+        trigger="manual", coordinator=coordinator,
+        completed_at="2026-07-14T12:00:00Z",
+    )
+    assert result.state == "committed"
+    assert len(calls) == int(during_apply) + 1
+    assert (root / "knowledge/notes/exact-byte-pattern.md").is_file()
+
+
+@pytest.mark.parametrize("size", (4001, 12000))
+def test_complete_source_line_within_claim_contract_survives_draft_validation(vault, size):  # noqa: F811
+    from llm_wiki import compile_pipeline_apply
+
+    root, _ = vault
+    daily = root / "knowledge/daily/2026-07-14.md"
+    line = "An exact observation: " + "x" * size
+    daily.write_text("## [10:00:00] session-end | manual\n" + line + "\n")
+    inputs = compile_pipeline_sources.snapshot_compile_inputs([daily])
+    operation = _semantic_operation()
+    operation["evidence"][0]["quoted_text"] = line
+
+    drafted = compile_pipeline_prompts.draft_operations(json.dumps({"operations": [operation]}))
+    normalized = compile_pipeline_operations.with_derived_claims(drafted, inputs)
+    binding = compile_pipeline_operations.evidence_binding(normalized[0]["evidence"][0], inputs)
+    assert binding["quote_sha256"] == sha256_bytes(line.encode())
+    assert normalized[0]["evidence"][0]["quoted_text"] == line
+    plan = compile_pipeline_prompts.normalize_plan(normalized, inputs)
+    compile_pipeline_apply.apply_compile_plan(
+        inputs, plan, action_key="d" * 64, trigger="manual",
+        coordinator=MarkdownCoordinator(root, vault[1]),
+        completed_at="2026-08-16T12:00:00Z",
+    )
+    page = (root / "knowledge/notes/exact-byte-pattern.md").read_text()
+    assert _resolved_evidence_texts(root, page) == [line]
+
+
+def test_complete_quote_schema_reuses_the_durable_literal_contract():
+
+    branches = compile_pipeline_base.RAW_PLAN_SCHEMA["properties"]["operations"]["items"]["properties"]["evidence"]["items"]["oneOf"]
+    evidence = branches[0]["properties"]
+    literal = compile_pipeline_base.CLAIM_RECORD_SCHEMA["properties"]["evidence"]["properties"]["text"]
+    assert evidence["quoted_text"] == literal
+    assert "native_event" in branches[1]["required"]
+    assert branches[1]["additionalProperties"] is False
+
+
+def _claim_plan_for_live_handoff(root):
+
+    daily = _daily(root)
+    record = _claim_record(root, claim_id="new", value="red",
+                           text="A durable exact-byte observation.", authority="user")
+    operation = _semantic_operation()
+    operation["claims"] = [record]
+    plan = {"schema_version": "compile-plan/v2", "operations": [{
+        "kind": "create", "path": "knowledge/notes/exact-byte-pattern.md",
+        "content": canonical_json_bytes(operation).decode(),
+    }]}
+    return compile_pipeline_sources.snapshot_compile_inputs([daily]), plan
+
+
+def test_live_handoff_prose_does_not_repeat_claim_assessment(vault, monkeypatch):  # noqa: F811
+    from llm_wiki import compile_pipeline_apply
+
+    root, state_root = vault
+    state = root / "knowledge/projects/foreign/state.md"
+    state.parent.mkdir()
+    state.write_bytes(b"---\ntype: project-state\n---\n# State\nInitial task.\n")
+    inputs, plan = _claim_plan_for_live_handoff(root)
+    original = compile_pipeline_apply.ApplyPlan.assess_claims
+    calls = []
+
+    def assess_then_project_next_handoff(self):
+        original(self)
+        calls.append(True)
+        state.write_bytes(b"---\ntype: project-state\n---\n# State\nTask " + str(len(calls)).encode() + b".\n")
+
+    monkeypatch.setattr(compile_pipeline_apply.ApplyPlan, "assess_claims", assess_then_project_next_handoff)
+    point_compile_path(monkeypatch, "default_secondary_search", lambda *args, **kwargs: [])
+    result = compile_pipeline_apply.apply_compile_plan(inputs, plan, action_key="7" * 64,
+        trigger="manual", coordinator=MarkdownCoordinator(root, state_root),
+        completed_at="2026-07-14T12:00:00Z")
+    assert result.state == "committed"
+    assert len(calls) == 1
+    assert (root / "knowledge/notes/exact-byte-pattern.md").is_file()
+    assert state.read_bytes().endswith(b"Task 1.\n")
+
+
+def test_live_handoff_claim_change_requires_fresh_assessment(vault, monkeypatch):  # noqa: F811
+    from llm_wiki import compile_pipeline_apply
+
+    root, state_root = vault
+    state = root / "knowledge/projects/foreign/state.md"
+    state.parent.mkdir()
+    state.write_bytes(b"---\ntype: project-state\n---\n# State\nInitial task.\n")
+    inputs, plan = _claim_plan_for_live_handoff(root)
+    record = _claim_record(root, claim_id="foreign", value="red",
+                           text="The prior state is blue.", authority="web")
+    changed = (b"---\ntype: project-state\n---\n# State\n## Claims\n```json\n"
+               + canonical_json_bytes({"schema_version": "claim-ledger/v1", "claims": [record]})
+               + b"\n```\n")
+    original = compile_pipeline_apply.ApplyPlan.assess_claims
+    calls = []
+
+    def assess_then_change_ledger(self):
+        original(self)
+        calls.append(True)
+        state.write_bytes(changed)
+
+    monkeypatch.setattr(compile_pipeline_apply.ApplyPlan, "assess_claims", assess_then_change_ledger)
+    point_compile_path(monkeypatch, "default_secondary_search", lambda *args, **kwargs: [])
+    result = compile_pipeline_apply.apply_compile_plan(inputs, plan, action_key="8" * 64,
+        trigger="manual", coordinator=MarkdownCoordinator(root, state_root),
+        completed_at="2026-07-14T12:00:00Z")
+    assert result.state == "committed"
+    assert len(calls) == 2
+    assert state.read_bytes() == changed
+
+
+def test_live_handoff_malformed_claim_ledger_refuses_publication(vault, monkeypatch):  # noqa: F811
+    from llm_wiki import compile_pipeline_apply
+
+    root, state_root = vault
+    state = root / "knowledge/projects/foreign/state.md"
+    state.parent.mkdir()
+    state.write_bytes(b"---\ntype: project-state\n---\n# State\nInitial task.\n")
+    inputs, plan = _claim_plan_for_live_handoff(root)
+    original = compile_pipeline_apply.ApplyPlan.assess_claims
+
+    def assess_then_break_ledger(self):
+        original(self)
+        state.write_bytes(b"---\ntype: project-state\n---\n# State\n## Claims\n```json\n{broken}\n```\n")
+
+    monkeypatch.setattr(compile_pipeline_apply.ApplyPlan, "assess_claims", assess_then_break_ledger)
+    point_compile_path(monkeypatch, "default_secondary_search", lambda *args, **kwargs: [])
+    with pytest.raises(ValueError):
+        compile_pipeline_apply.apply_compile_plan(inputs, plan, action_key="9" * 64,
+            trigger="manual", coordinator=MarkdownCoordinator(root, state_root),
+            completed_at="2026-07-14T12:00:00Z")
+    assert not (root / "knowledge/notes/exact-byte-pattern.md").exists()
+    assert not list((root / "knowledge/daily/receipts").glob("*.md"))
+
+
+def test_live_handoff_ledger_restore_does_not_hide_assessed_bytes(vault, monkeypatch):  # noqa: F811
+    from claims import ClaimIndex
+    from llm_wiki import compile_pipeline_apply
+
+    root, state_root = vault
+    state = root / "knowledge/projects/foreign/state.md"
+    state.parent.mkdir()
+    original_bytes = b"---\ntype: project-state\n---\n# State\nInitial task.\n"
+    state.write_bytes(original_bytes)
+    inputs, plan = _claim_plan_for_live_handoff(root)
+    record = _claim_record(root, claim_id="foreign", value="red",
+                           text="The prior state is blue.", authority="web")
+    changed = (b"---\ntype: project-state\n---\n# State\n## Claims\n```json\n"
+               + canonical_json_bytes({"schema_version": "claim-ledger/v1", "claims": [record]})
+               + b"\n```\n")
+    original = ClaimIndex.rebuild
+    calls = []
+
+    def rebuild_transient_ledger(self, sources=None, **kwargs):
+        calls.append(True)
+        if len(calls) == 1:
+            state.write_bytes(changed)
+        original(self, sources, **kwargs)
+        state.write_bytes(original_bytes)
+
+    monkeypatch.setattr(ClaimIndex, "rebuild", rebuild_transient_ledger)
+    point_compile_path(monkeypatch, "default_secondary_search", lambda *args, **kwargs: [])
+    result = compile_pipeline_apply.apply_compile_plan(inputs, plan, action_key="a" * 64,
+        trigger="manual", coordinator=MarkdownCoordinator(root, state_root),
+        completed_at="2026-07-14T12:00:00Z")
+    assert result.state == "committed"
+    # Two assessments plus the established post-commit rebuild.
+    assert len(calls) == 3
+    assert state.read_bytes() == original_bytes
+
+
+def test_partial_commit_preserves_failure_for_identical_uncommitted_part(vault):  # noqa: F811
+    from dataclasses import replace
+
+    from llm_wiki import compile_pipeline_apply
+    from queue_core import (
+        MemoryQueue,
+    )
+
+    root, state_root = vault
+    daily = _daily(root)
+    block = b'## [10:00:00] session-end | manual\n' + b'x' * 10000 + b'\n'
+    daily.write_bytes(block * 2)
+    inputs = compile_pipeline_sources.snapshot_compile_inputs([daily])
+    first, second = inputs.dailies
+    assert first.sha256 == second.sha256
+    queue = MemoryQueue(state_root)
+    queue.record_source_failure(first.logical_path, first.sha256, error_code='refused', producer='compile')
+    compile_pipeline_apply.apply_compile_plan(
+        replace(inputs, dailies=(first,)),
+        {'schema_version': 'compile-plan/v2', 'operations': []},
+        action_key='e' * 64, trigger='manual',
+        coordinator=MarkdownCoordinator(root, state_root), completed_at='2026-07-14T12:00:00Z',
+    )
+    assert queue.source_failure(first.logical_path, first.sha256) is not None
+
+
+def _publish_empty_contextual_batch(inputs, coordinator, key):
+    batch = compile_pipeline_batches.pack_compile_batches(inputs, model=None)[0]
+    return compile_pipeline_apply.apply_compile_plan(
+        batch.inputs, {'schema_version': 'compile-plan/v2', 'operations': []},
+        action_key=key * 64, trigger='manual', coordinator=coordinator, batch=batch,
+        provider_budget={'provider': 'fake', 'model': 'test', 'max_output_tokens': 4000},
+    )
+
+
+def test_contextual_receipts_resolve_identical_occurrences_only_after_both_commits(vault):  # noqa: F811
+    import compile_receipts
+    from queue_core import (
+        MemoryQueue,
+    )
+
+    root, state_root = vault
+    daily = _daily(root)
+    block = b'## [10:00:00] session-end | manual\n' + b'x' * 10000 + b'\n'
+    daily.write_bytes(block * 2)
+    inputs = compile_pipeline_sources.snapshot_compile_inputs([daily])
+    first, second = inputs.dailies
+    queue = MemoryQueue(state_root)
+    queue.record_source_failure(first.logical_path, first.sha256, error_code='refused', producer='compile')
+    coordinator = MarkdownCoordinator(root, state_root)
+    _publish_empty_contextual_batch(compile_pipeline_sources.inputs_with_parts(inputs, (first,)), coordinator, 'c')
+    assert queue.source_failure(first.logical_path, first.sha256) is not None
+    selection = compile_receipts.receipt_predicate(coordinator)
+    remaining = compile_pipeline_sources.snapshot_compile_inputs([daily], compiled=selection)
+    assert remaining.dailies == (second,)
+    _publish_empty_contextual_batch(remaining, coordinator, 'd')
+    assert queue.source_failure(first.logical_path, first.sha256) is None
+    assert compile_pipeline.daily_is_compiled(first.logical_path, daily.read_bytes(), compile_receipts.receipt_predicate(coordinator))
+
+
+@pytest.mark.parametrize("deadline", [123456789.0, float("inf")])
+def test_compile_secondary_search_preserves_its_stop_contract(vault, monkeypatch, deadline):  # noqa: F811
+    import search_memory
+    from llm_wiki import compile_pipeline_apply
+
+    root, _ = vault
+    observed = []
+    def cancelled():
+        return False
+
+    monkeypatch.setenv("LLM_WIKI_ROOT", str(root))
+    monkeypatch.setattr(search_memory, "search", lambda *args, **kwargs: observed.append(kwargs) or [])
+    apply = object.__new__(compile_pipeline_apply.ApplyPlan)
+    apply.deadline, apply.cancelled = deadline, cancelled
+    apply.claim_index, apply.coordinator = None, None
+    result = apply._pipeline("knowledge/notes/new.md").secondary_search("evidence", 5)
+    expected = {123456789.0: 123456789.0, float("inf"): None}[deadline]
+    assert result == []
+    assert observed == [{"limit": 5, "deadline_monotonic": expected, "cancelled": cancelled}]
+
+
+@pytest.mark.parametrize('setting,value', [('MAX_PAGES', '1'), ('MAX_TOTAL_BYTES', '1')])
+def test_index_capacity_stops_run_before_model_planning(vault, monkeypatch, setting, value):  # noqa: F811
+    from rebuild_memory_index import IndexCapacityError
+
+    root, _ = vault
+    _daily(root)
+    (root / 'knowledge/notes/one.md').write_text('# One\n')
+    (root / 'knowledge/notes/two.md').write_text('# Two\n')
+    monkeypatch.setenv('LLM_WIKI_INDEX_' + setting, value)
+    planned = []
+    point_compile_path(monkeypatch, 'pack_for_run', lambda *args: planned.append(args))
+    point_compile_path(monkeypatch, 'load_state', lambda: {})
+    with pytest.raises(IndexCapacityError):
+        compile_pipeline.run(Namespace(file=None, all=False, dry_run=False, trigger='manual'))
+    assert planned == []
+    assert (root / 'knowledge/index.md').read_bytes() == b'# Old index\n'
+    assert (root / 'knowledge/daily/2026-07-14.md').exists()
+
+
+def test_publication_capacity_stops_later_batches(vault, monkeypatch):  # noqa: F811
+    from rebuild_memory_index import IndexCapacityError
+
+    root, _ = vault
+    _daily(root)
+    point_compile_path(monkeypatch, 'load_state', lambda: {})
+    point_compile_path(monkeypatch, 'refresh_compile_batch', lambda batch, **kwargs: batch)
+    point_compile_path(monkeypatch, 'require_ready_compile_batch', lambda batch: None)
+    calls = []
+
+    def resolve(batch, *args):
+        calls.append(batch)
+        return SimpleNamespace(plan={}, action_key='a', provider_budget={})
+
+    def apply(*args, **kwargs):
+        raise IndexCapacityError('shared publication capacity exhausted')
+
+    point_compile_path(monkeypatch, '_resolve_batch_work', resolve)
+    point_compile_path(monkeypatch, 'apply_compile_plan', apply)
+    # Inputs are only needed by publication; keep the actual batch/run boundaries.
+    batches = [SimpleNamespace(inputs=None), SimpleNamespace(inputs=None)]
+    point_compile_path(monkeypatch, 'pack_for_run', lambda *args: (batches, []))
+    with pytest.raises(IndexCapacityError, match='shared publication capacity'):
+        compile_pipeline.run(Namespace(file=None, all=False, dry_run=False, trigger='manual'))
+    assert calls == [batches[0]]
+
+
+def test_plan_without_claims_refuses_changed_context_before_prepare(vault, monkeypatch):  # noqa: F811
+    from llm_wiki import compile_pipeline_apply, compile_pipeline_batches
+    from markdown_transaction import TransactionFailure
+
+    root, state_root = vault
+    daily = _daily(root)
+    page = root / 'knowledge/notes/context.md'
+    page.write_bytes(b'# Original context\n')
+    inputs = compile_pipeline_sources.snapshot_compile_inputs([daily])
+    page.write_bytes(b'# Changed context\n')
+    coordinator = MarkdownCoordinator(root, state_root)
+    monkeypatch.setattr(coordinator, 'prepare', lambda *a, **kw: pytest.fail('stale plan reached prepare'))
+    with pytest.raises(TransactionFailure) as refusal:
+        compile_pipeline_apply.apply_compile_plan(inputs, _semantic_plan(), action_key='e' * 64,
+                              trigger='manual', coordinator=coordinator)
+    assert refusal.value.code == 'compile_snapshot_changed'
+    assert page.read_bytes() == b'# Changed context\n'
+    assert not (root / 'knowledge/notes/exact-byte-pattern.md').exists()
+    assert compile_pipeline_batches.read_compile_receipt_v2(inputs.dailies[0].sha256, coordinator) is None
+
+
+def test_context_race_without_claims_does_not_repeat_stale_publication(vault, monkeypatch):  # noqa: F811
+    from llm_wiki import compile_pipeline_apply, compile_pipeline_batches
+    from markdown_transaction import TransactionFailure
+
+    root, state_root = vault
+    daily = _daily(root)
+    page = root / 'knowledge/notes/context.md'
+    page.write_bytes(b'# Original context\n')
+    inputs = compile_pipeline_sources.snapshot_compile_inputs([daily])
+    coordinator = MarkdownCoordinator(root, state_root)
+    original = compile_pipeline_apply.ApplyPlan._build_changes
+    publications = []
+
+    def race(publication):
+        publications.append(publication)
+        page.write_bytes(b'# Concurrent edit\n')
+        original(publication)
+
+    monkeypatch.setattr(compile_pipeline_apply.ApplyPlan, '_build_changes', race)
+    with pytest.raises(TransactionFailure) as refusal:
+        compile_pipeline_apply.apply_compile_plan(inputs, _semantic_plan(), action_key='e' * 64,
+                              trigger='manual', coordinator=coordinator)
+    assert refusal.value.code == 'compile_snapshot_changed'
+    assert len(publications) == 1
+    assert page.read_bytes() == b'# Concurrent edit\n'
+    assert not (root / 'knowledge/notes/exact-byte-pattern.md').exists()
+    assert compile_pipeline_batches.read_compile_receipt_v2(inputs.dailies[0].sha256, coordinator) is None

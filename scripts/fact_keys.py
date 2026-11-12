@@ -33,7 +33,12 @@ import sys
 import time
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PurePosixPath
+
+from llm_wiki import runtime_roots
+from llm_wiki.step_budgets import (
+    DEFAULT_BUDGET_SECONDS,
+)
 
 SCRIPTS = Path(__file__).resolve().parent
 if str(SCRIPTS) not in sys.path:
@@ -47,15 +52,6 @@ BATCH_TURNS = 25
 # lost knowledge (the turn's text stays searchable). Change both together.
 MAX_KEYS_PER_TURN = 5
 MAX_KEY_CHARS = 160
-MAX_TURN_CHARS = 1500
-# A nightly step keys new entries in this much time and leaves the rest for
-# the next night; the store remembers what is done. The nightly kills the step
-# at this budget plus the margin one last provider call may take
-# (`scheduled_nightly.provider_margin_seconds`), which in auto mode is the whole
-# provider order and not one of them.
-# Research: docs/research/2026-09-17-a-step-no-provider-answered-is-not-green.md,
-# docs/research/2026-09-18-a-pass-that-knows-how-long-it-can-be.md
-DEFAULT_BUDGET_SECONDS = 540.0
 # The same call also posts the ledger of things and events (`ledger`): one
 # record per thing the person names or dated event about it, so that "how many"
 # is counted by code over every record instead of by the model over twelve
@@ -89,24 +85,19 @@ CREATE TABLE IF NOT EXISTS keys(
 );
 CREATE TABLE IF NOT EXISTS attempts(span_sha256 TEXT PRIMARY KEY, asked INTEGER NOT NULL);
 """
-# A turn the provider's reply never covers is asked this many nights and then left
-# to be found by its own text. Without the bound the same failing batch was first in
-# line every night and spent the step's budget before any new turn was reached.
-MAX_ATTEMPTS = 3
-
-
 @dataclass(frozen=True)
 class Turn:
-    """A user turn of a daily entry: where it is, what it says, what names it."""
+    """A user turn and its exact physical daily or verified breadcrumb source."""
 
     source_path: str
     byte_start: int
     byte_end: int
     span_sha256: str
     text: str
-    # The digest of the whole daily file, so a ledger record can be rendered as
-    # the `daily:... sha256:... block:... bytes:...` reference of `evidence_resolver`.
+    # Whole physical-source digest. Daily references retain their existing
+    # daily/block/bytes authority; native part references cite their actual bytes.
     source_sha256: str = ""
+    capture_day: str = ""
 
 
 def store_path(state_root: Path) -> Path:
@@ -125,14 +116,14 @@ def _segments(text: str) -> list[tuple[str, str]]:
     ]
 
 
-def _user_text(text: str) -> str | None:
+def user_text(text: str) -> str | None:
     """Everything the user said in a chunk, or None when it holds no user turn.
 
     Short turns fold into one chunk, so a chunk may hold several user turns
     with replies between them; the user's segments are joined and keyed as one.
     """
     said = [words for side, words in _segments(text) if side == "user" and words]
-    return "\n".join(said)[:MAX_TURN_CHARS] or None
+    return "\n".join(said) or None
 
 
 def _next_start(marks: list, index: int, text: str) -> int:
@@ -141,16 +132,280 @@ def _next_start(marks: list, index: int, text: str) -> int:
     return len(text)
 
 
-def user_turns(chunks: Iterable[object]) -> list[Turn]:
+def user_turns(chunks: Iterable[object], *, sources=(), vault=None, deadline=None) -> list[Turn]:
     """Every user turn among the chunks of daily entries."""
     turns: list[Turn] = []
-    for chunk in chunks:
-        if chunk.type != "daily-evidence":
+    authority = NativeSourceAuthority(sources, vault, deadline)
+    for chunk in sorted(chunks, key=_native_alias_order):
+        if not _fact_source(chunk):
             continue
-        said = _user_text(chunk.text)
+        said = _captured_user_text(chunk, authority)
         if said:
             turns.append(_turn_of(chunk, said))
     return turns
+
+
+def _native_alias_order(chunk):
+    return chunk.type != "daily-evidence"
+
+
+def _fact_source(chunk):
+    return chunk.type == "daily-evidence" or chunk.source_path.endswith(".breadcrumb-part.md")
+
+
+def _captured_user_text(chunk: object, authority) -> str:
+    native = _qualified_native_text(chunk, authority)
+    if native is not None:
+        return native if authority.matches(chunk) else ""
+    return user_text(chunk.text) if chunk.type == "daily-evidence" else ""
+
+
+def _qualified_native_text(chunk, authority):
+    from event_envelope import native_physical_user_text
+
+    if chunk.type == "daily-evidence" and not authority.is_complete_daily_frame(chunk):
+        return None
+    return native_physical_user_text(chunk.text, chunk.heading_ancestry, allow_fragment=True)
+
+
+class NativeSourceAuthority:
+    """Exact physical sources bind native frames; headings never confer authority."""
+
+    def __init__(self, sources, vault, deadline):
+        self.documents = {source.record.relative_path: source.content for source in sources}
+        self.vault, self.deadline = vault, deadline
+        self.restored = {}
+        self.seen = set()
+        self.journals = {}
+        self.heads = {}
+        self._require_represented_native_inputs()
+
+    def _require_represented_native_inputs(self):
+        for head in self._candidate_pending_heads():
+            self._require_represented_head(head)
+
+    def _candidate_pending_heads(self):
+        heads = {name for name in self.documents if name.endswith(".breadcrumb.md")}
+        for name, content in self.documents.items():
+            if name.startswith("knowledge/daily/"):
+                heads.update(self._unrepresented_daily_links(name, content))
+        return heads
+
+    def _unrepresented_daily_links(self, name, content):
+        index = native_journal_index(content)
+        self.journals[name] = index
+        return _journal_link_heads(content) - index.heads()
+
+    def _require_represented_head(self, head):
+        import json
+
+        manifest, _ = self._head(head)
+        if json.loads(manifest)["part_count"] == 1 and head in self.documents:
+            self._validate_native_input(head)
+            return
+        self._require_native_physical_input(head)
+
+    def _validate_native_input(self, head):
+        from event_envelope import native_selected_user_text
+
+        content = self._input(head).decode("utf-8")
+        native_selected_user_text(content)
+
+    def _require_native_physical_input(self, head):
+        from event_envelope import native_selected_user_text
+
+        content = self._input(head).decode("utf-8")
+        said = native_selected_user_text(content)
+        if said is not None and not self._has_daily_frame(head):
+            raise ValueError("native user frame has no complete physical citation; remains pending")
+
+    def _has_daily_frame(self, head):
+        import json
+
+        from breadcrumb_decision import journal_block
+
+        _, anchor = self._head(head)
+        expected = journal_block(json.loads(anchor), head, self._input(head)).encode()
+        return any(expected in content for name, content in self.documents.items()
+                   if name.startswith("knowledge/daily/"))
+
+    def _input(self, head):
+        from breadcrumb_evidence import read_permanent_source, restore_source
+
+        self._check_deadline()
+        if head not in self.restored:
+            self.restored[head] = (read_permanent_source(self.vault, head, deadline=self.deadline)
+                                   if self.vault is not None else restore_source(head, self.documents.__getitem__))
+        self._check_deadline()
+        return self.restored[head]
+
+    def _check_deadline(self):
+        if _past(self.deadline):
+            raise TimeoutError("native source authority deadline expired")
+
+    def _claim(self, head, encoded):
+        if self._input(head) != encoded or head in self.seen:
+            return False
+        self.seen.add(head)
+        return True
+
+    def matches(self, chunk):
+        if chunk.type == "daily-evidence":
+            return self._daily_matches(chunk)
+        return self._part_matches(chunk)
+
+    def is_complete_daily_frame(self, chunk):
+        binding = self.journals.get(chunk.source_path, {}).get(chunk.byte_start)
+        if binding is None:
+            return False
+        _, block = binding
+        return block.rsplit(b"\n", 2)[-2] + b"\n" == chunk.text.encode("utf-8")
+
+    def _daily_matches(self, chunk):
+        import json
+
+        from breadcrumb_decision import journal_block
+
+        binding = self.journals.get(chunk.source_path, {}).get(chunk.byte_start)
+        if binding is None:
+            return False
+        head, block = binding
+        encoded = chunk.text[4:].rstrip("\r\n").encode("utf-8")
+        _, anchor = self._head(head)
+        if journal_block(json.loads(anchor), head, encoded).encode() != block:
+            return False
+        return self._claim(head, encoded)
+
+    def _head(self, head):
+        from breadcrumb_evidence import read_head, read_source_document
+
+        self._check_deadline()
+        if head not in self.heads:
+            document = (self.documents[head] if self.vault is None else
+                        read_source_document(self.vault, head, deadline=self.deadline))
+            self.heads[head] = read_head(document)
+        return self.heads[head]
+
+    def _part_matches(self, chunk):
+        import json
+
+        record = json.loads(chunk.text[4:])
+        head = str(PurePosixPath(chunk.source_path).with_name(record["intent_id"] + ".breadcrumb.md"))
+        if self.vault is None and head not in self.documents:
+            return False
+        return self._claim(head, record["text"].encode("utf-8"))
+
+
+def native_journal_index(content):
+    return _NativeJournalIndex(content)
+
+
+_NATIVE_MARKER_PREFIX = b'\n<!-- llm-wiki-operation:'
+_NATIVE_FIXED_HEADER_RE = re.compile(
+    rb'\n<!-- llm-wiki-operation:[0-9a-f]{64} -->\n## \[[0-9:]{8}\] Captured event\n\n'
+)
+# Width of the existing fixed grammar, never a source or event-size limit.
+_NATIVE_FIXED_HEADER_BYTES = len(
+    _NATIVE_MARKER_PREFIX + b'0' * 64 + b' -->\n## [00:00:00] Captured event\n\n'
+)
+_NATIVE_HEAD_PREFIX = b'[Complete captured event](../raw/sessions/'
+_NATIVE_ARCHIVE_PREFIX = b'[Complete captured event if archived]('
+
+
+class _NativeJournalIndex(Mapping):
+    """Keep source heads and spans; load only the requested physical block."""
+
+    def __init__(self, content):
+        self.content = _native_range_source(content)
+        self.spans = dict(_native_journal_spans(self.content))
+
+    def __len__(self):
+        return len(self.spans)
+
+    def __iter__(self):
+        return iter(self.spans)
+
+    def __contains__(self, key):
+        return key in self.spans
+
+    def __getitem__(self, key):
+        head, start, end = self.spans[key]
+        return head, self.content[start:end]
+
+    def heads(self):
+        return {head for head, _start, _end in self.spans.values()}
+
+
+def _native_range_source(content):
+    if type(content) is bytes:
+        return content
+    try:
+        with memoryview(content) as view:
+            return view.tobytes()
+    except TypeError:
+        return content
+
+
+def _native_journal_spans(content):
+    position = content.find(_NATIVE_MARKER_PREFIX)
+    while position != -1:
+        entry = _native_match_range(content, position)
+        if entry is not None:
+            yield entry
+        following = entry[1][2] if entry is not None else position + 1
+        position = content.find(_NATIVE_MARKER_PREFIX, following)
+
+
+def _native_match_range(content, position):
+    after_header = position + _NATIVE_FIXED_HEADER_BYTES
+    if _NATIVE_FIXED_HEADER_RE.fullmatch(content[position:after_header]) is None:
+        return None
+    head = _native_line_payload(content, after_header, _NATIVE_HEAD_PREFIX, b'.breadcrumb.md)')
+    if head is None or content.find(b')', head[0], head[1]) >= 0:
+        return None
+    return _native_after_head(content, position, head)
+
+
+def _native_line_payload(content, start, prefix, suffix):
+    end = content.find(b'\n', start)
+    first, last = start + len(prefix), end - len(suffix)
+    if last <= first:
+        return None
+    if content[start:first] != prefix or content[last:end] != suffix:
+        return None
+    return (first, last, end + 1) if content.find(b'\r', first, last) < 0 else None
+
+
+def _native_after_head(content, position, head):
+    archived = _native_line_payload(content, head[2], _NATIVE_ARCHIVE_PREFIX, b')')
+    if archived is None:
+        return None
+    if content[archived[2]:archived[2] + 1] != b'\n':
+        return None
+    return _native_index_entry(content, position, head, archived[2] + 1)
+
+
+def _native_index_entry(content, position, head, body_start):
+    end = _native_body_end(content, body_start)
+    if end is None:
+        return None
+    path_start, path_end = head[0] - len(b'raw/sessions/'), head[1] + len(b'.breadcrumb.md')
+    path = 'knowledge/' + content[path_start:path_end].decode()
+    return body_start, (path, position, end)
+
+
+def _native_body_end(content, start):
+    end = content.find(b'\n', start)
+    if end < 0:
+        return None
+    if content[start:start + len(b'    {')] != b'    {' or content[end - 1:end] != b'}':
+        return None
+    return end + 1 if content.find(b'\r', start, end) < 0 else None
+
+
+def _journal_link_heads(content):
+    links = re.finditer(rb'\[Complete captured event\]\(\.\./(raw/sessions/[^)\r\n]+\.breadcrumb\.md)\)', content)
+    return {"knowledge/" + match.group(1).decode() for match in links}
 
 
 def _turn_of(chunk: object, said: str) -> Turn:
@@ -161,6 +416,7 @@ def _turn_of(chunk: object, said: str) -> Turn:
         chunk.span_sha256,
         said,
         getattr(chunk, "source_sha256", ""),
+        getattr(chunk, "valid_from", "") or "",
     )
 
 
@@ -198,7 +454,7 @@ def keys_for_spans(path: Path, spans: Iterable[str]) -> dict[str, str]:
         return {}
     store = KeyStore(path)
     try:
-        rows = _span_rows(store.connection, wanted)
+        rows = span_rows(store.connection, wanted)
     finally:
         store.close()
     return _joined_keys(rows)
@@ -212,7 +468,7 @@ def _readable(path: Path, wanted: Sequence[str]) -> bool:
     return bool(wanted) and path.exists()
 
 
-def _span_rows(connection: sqlite3.Connection, wanted: Sequence[str]) -> list[tuple[object, object]]:
+def span_rows(connection: sqlite3.Connection, wanted: Sequence[str]) -> list[tuple[object, object]]:
     rows: list[tuple[object, object]] = []
     for start in range(0, len(wanted), _SPAN_BATCH):
         batch = wanted[start : start + _SPAN_BATCH]
@@ -291,17 +547,16 @@ class KeyStore:
         keys = self.connection.execute("SELECT COUNT(*) FROM keys").fetchone()[0]
         return int(turns), int(keys)
 
-    def given_up(self) -> int:
-        """Turns that used up their attempts and were never keyed."""
+    def uncovered(self) -> int:
+        """Attempted turns that still lack a covered answer; none is retired."""
         row = self.connection.execute(
-            "SELECT COUNT(*) FROM attempts WHERE asked >= ? "
-            "AND span_sha256 NOT IN (SELECT span_sha256 FROM keyed)",
-            (MAX_ATTEMPTS,),
+            "SELECT COUNT(*) FROM attempts "
+            "WHERE span_sha256 NOT IN (SELECT span_sha256 FROM keyed)"
         ).fetchone()
         return int(row[0])
 
 
-def _batch_prompt(turns: Sequence[Turn]) -> str:
+def batch_prompt(turns: Sequence[Turn]) -> str:
     lines = [f"<turn id=\"{index}\">\n{turn.text}\n</turn>" for index, turn in enumerate(turns)]
     return "\n".join(lines)
 
@@ -377,8 +632,8 @@ def _found_records(batch: Sequence[Turn], raw: str | None) -> dict[str, list]:
     }
 
 
-def waiting_turns(store: KeyStore, chunks: Iterable[object]) -> list[Turn]:
-    """The user turns still to be keyed: never-asked first, given-up ones left out.
+def waiting_turns(store: KeyStore, chunks: Iterable[object], **authority) -> list[Turn]:
+    """The user turns still to be keyed, with the least-asked turns first.
 
     The sort is stable, so among turns asked equally often the chunk order holds.
     """
@@ -386,8 +641,8 @@ def waiting_turns(store: KeyStore, chunks: Iterable[object]) -> list[Turn]:
     asked = store.asked()
     waiting = [
         turn
-        for turn in user_turns(chunks)
-        if turn.span_sha256 not in done and asked.get(turn.span_sha256, 0) < MAX_ATTEMPTS
+        for turn in user_turns(chunks, **authority)
+        if turn.span_sha256 not in done
     ]
     return sorted(waiting, key=lambda turn: asked.get(turn.span_sha256, 0))
 
@@ -397,16 +652,17 @@ def key_turns(
     chunks: Iterable[object],
     ask: Callable[[str, str], str | None],
     deadline: float | None = None,
+    *, sources=(), vault=None,
 ) -> int:
     """Key every user turn the store has not seen; how many turns were keyed."""
-    pending = waiting_turns(store, chunks)
+    pending = waiting_turns(store, chunks, sources=sources, vault=vault, deadline=deadline)
     keyed = 0
     for start in range(0, len(pending), BATCH_TURNS):
         if _past(deadline):
             break
         batch = pending[start : start + BATCH_TURNS]
-        raw = ask(_batch_prompt(batch), EXTRACT_SYSTEM_PROMPT)
-        keyed += _key_batch(store, batch, _found(batch, raw), bool(raw), _found_records(batch, raw))
+        raw = ask(batch_prompt(batch), EXTRACT_SYSTEM_PROMPT)
+        keyed += key_batch(store, batch, _found(batch, raw), bool(raw), _found_records(batch, raw))
     return keyed
 
 
@@ -414,7 +670,7 @@ def _past(deadline: float | None) -> bool:
     return deadline is not None and time.monotonic() > deadline
 
 
-def _key_batch(
+def key_batch(
     store: KeyStore,
     batch: Sequence[Turn],
     found: Mapping[str, list[str]],
@@ -428,9 +684,10 @@ def _key_batch(
     turn states nothing, and counts. See
     `docs/research/2026-09-14-an-error-is-not-an-answer.md`.
 
-    Asked again, but not for ever: a turn a reply left out has used one of its
-    `MAX_ATTEMPTS`. A provider that said nothing at all used none — an outage is
-    not the turn's fault, and three silent nights must not retire every turn.
+    An omitted turn stays pending. Its attempt count puts it behind less-asked
+    turns on the next run. A run visits each pending batch once under its existing
+    deadline; it does not repeat an incomplete batch within that run. A provider
+    that said nothing at all uses no attempt — an outage is not the turn's fault.
 
     The ledger records of a covered turn are posted beside its keys, once each.
     """
@@ -450,21 +707,34 @@ def _left_out(batch: Sequence[Turn], found: Mapping[str, list[str]], replied: bo
     return [turn for turn in batch if turn.span_sha256 not in found]
 
 
-def _daily_paths(vault: Path) -> list[str]:
+def daily_paths(vault: Path) -> list[str]:
     from memory_state import daily_logs
 
     return [path.relative_to(vault).as_posix() for path in daily_logs(vault / "knowledge" / "daily")]
 
 
-def _provider_ask(prompt: str, system_prompt: str) -> str | None:
+def provider_ask(prompt: str, system_prompt: str) -> str | None:
     from llm_client import call_llm
 
     return call_llm(prompt, system_prompt, 1500)
 
 
-def main(argv: Sequence[str] | None = None) -> int:
+def _stable_turn_snapshot(root: Path, state_root: Path, deadline: float):
+    """Freeze source bytes while cooperating Markdown writers are excluded."""
     from corpus_snapshot import collect_corpus
-    from memory_state import ROOT, STATE_ROOT
+    from llm_wiki.evidence_reference import MAX_DAILY_BYTES
+    from markdown_transaction import active_or_legacy_coordinator
+
+    coordinator = active_or_legacy_coordinator(root, state_root, deadline=deadline)
+    with coordinator.writer_gate(wait_seconds=max(0.0, deadline - time.monotonic())):
+        return collect_corpus(
+            root, code_roots=(), daily_paths=daily_paths(root), deadline=deadline,
+            max_file_bytes=MAX_DAILY_BYTES,
+            pruned_directories=("knowledge/notes", "knowledge/projects", "knowledge/raw/sessions"),
+        )
+
+
+def main(argv: Sequence[str] | None = None) -> int:
 
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--status", action="store_true", help="print how many turns and keys the store holds")
@@ -472,29 +742,28 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = parser.parse_args(argv)
     # The step's clock starts with the step: collecting the corpus is part of it.
     deadline = time.monotonic() + args.budget_seconds
-    store = KeyStore(store_path(STATE_ROOT))
+    store = KeyStore(store_path(runtime_roots.state_root()))
     if args.status:
         turns, keys = store.count()
-        print(f"keyed turns={turns} keys={keys} given up={store.given_up()}")
+        print(f"keyed turns={turns} keys={keys} uncovered={store.uncovered()}")
         return 0
-    snapshot = collect_corpus(ROOT, code_roots=(), daily_paths=_daily_paths(ROOT))
-    waiting = len(waiting_turns(store, snapshot.chunks))
-    keyed = key_turns(store, snapshot.chunks, _provider_ask, deadline)
+    snapshot = _stable_turn_snapshot(runtime_roots.vault_root(), runtime_roots.state_root(), deadline)
+    waiting = len(waiting_turns(store, snapshot.chunks, sources=snapshot.sources, vault=runtime_roots.vault_root(), deadline=deadline))
+    keyed = key_turns(store, snapshot.chunks, provider_ask, deadline, sources=snapshot.sources, vault=runtime_roots.vault_root())
     print(f"keyed {keyed} of {waiting} waiting turns")
-    print(f"extended {_extend_recurring_pages(store)} entity pages")
+    print(f"extended {extend_recurring_pages(store)} entity pages")
     return _step_exit(waiting, keyed)
 
 
-def _extend_recurring_pages(store: KeyStore) -> int:
+def extend_recurring_pages(store: KeyStore) -> int:
     """The recurrence gate: a thing the ledger saw on a second day gets its page, by code.
 
     Bounded to `ledger.MAX_PAGES_PER_RUN` pages a night through the recoverable
     Markdown transaction; a page already carrying every pointer line is left alone.
     """
     import ledger
-    from memory_state import ROOT
 
-    return ledger.extend_entity_pages(ROOT, store.connection, time.strftime("%Y-%m-%d"))
+    return ledger.extend_entity_pages(runtime_roots.vault_root(), store.connection, time.strftime("%Y-%m-%d"))
 
 
 def _step_exit(waiting: int, keyed: int) -> int:

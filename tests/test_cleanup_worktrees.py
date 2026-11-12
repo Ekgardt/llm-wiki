@@ -31,7 +31,7 @@ def test_primary_worktree_is_first_git_record_not_caller_cwd(
     primary = tmp_path / "primary"
     linked = tmp_path / "linked"
     raw = _record(str(primary), "main") + _record(str(linked))
-    monkeypatch.setattr(cleanup_worktrees, "_run_bytes", lambda *args, **kwargs: raw)
+    monkeypatch.setattr(cleanup_worktrees, "run_bytes", lambda *args, **kwargs: raw)
 
     worktrees = cleanup_worktrees.list_worktrees(linked)
 
@@ -83,7 +83,7 @@ def _main_fixture(tmp_path: Path, monkeypatch):
     calls: list[list[str]] = []
     monkeypatch.setattr(
         cleanup_worktrees,
-        "_try_run",
+        "try_run",
         lambda command, cwd=None: str(primary)
         if command[:3] == ["git", "rev-parse", "--show-toplevel"]
         else "",
@@ -100,7 +100,7 @@ def _main_fixture(tmp_path: Path, monkeypatch):
         calls.append(command)
         return ""
 
-    monkeypatch.setattr(cleanup_worktrees, "_run", run)
+    monkeypatch.setattr(cleanup_worktrees, "run", run)
     return cleanup_worktrees, primary, candidate, calls
 
 

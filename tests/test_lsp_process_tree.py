@@ -18,7 +18,7 @@ from lsp_process_tree import ProcessTree
 
 from tests.slow_machine import SHORT_TIMEOUT
 
-FAKE_SERVER = Path(__file__).with_name("fake_lsp_server.py").resolve()
+FAKE_SERVER = Path(__file__).with_name("fake_process_tree.py").resolve()
 
 
 def _command(*arguments: str) -> list[str]:
@@ -67,7 +67,7 @@ def _stat_says_reaped(payload: str) -> bool:
 def _proc_stat(pid: int) -> str | None:
     try:
         return (Path("/proc") / str(pid) / "stat").read_text(encoding="ascii")
-    except (FileNotFoundError, OSError):
+    except (FileNotFoundError, ProcessLookupError):
         return None
 
 
@@ -116,7 +116,7 @@ def _install_windows_job_queries(
             ctypes.set_last_error(5)
             return False
         total, active = value
-        information = lsp_process_tree._BasicAccountingInformation.from_address(address)
+        information = lsp_process_tree.BasicAccountingInformation.from_address(address)
         information.total_processes = total
         information.active_processes = active
         return True
@@ -125,11 +125,11 @@ def _install_windows_job_queries(
         if pids is None:
             ctypes.set_last_error(5)
             return False
-        information = lsp_process_tree._BasicProcessIdList.from_address(address)
+        information = lsp_process_tree.BasicProcessIdList.from_address(address)
         information.number_of_assigned_processes = assigned
         information.number_of_process_ids_in_list = len(pids)
         identifiers = (ctypes.c_size_t * len(pids)).from_address(
-            address + lsp_process_tree._BasicProcessIdList.process_id_list.offset
+            address + lsp_process_tree.BasicProcessIdList.process_id_list.offset
         )
         for index, pid in enumerate(pids):
             identifiers[index] = pid
@@ -137,9 +137,9 @@ def _install_windows_job_queries(
 
     def fill(information_class: int, address: int) -> bool:
         """False means the query failed and left its reason in the last error."""
-        if information_class == lsp_process_tree._JOB_OBJECT_BASIC_ACCOUNTING_INFORMATION:
+        if information_class == lsp_process_tree.JOB_OBJECT_BASIC_ACCOUNTING_INFORMATION:
             return fill_accounting(address)
-        if information_class == lsp_process_tree._JOB_OBJECT_BASIC_PROCESS_ID_LIST:
+        if information_class == lsp_process_tree.JOB_OBJECT_BASIC_PROCESS_ID_LIST:
             return fill_process_ids(address)
         raise AssertionError(  # pragma: no cover - assertion boundary
             f"unexpected Job information class: {information_class}"
@@ -162,7 +162,7 @@ def _install_windows_job_queries(
             ctypes.cast(returned, ctypes.POINTER(wintypes.DWORD)).contents.value = _size
             return 1
 
-    monkeypatch.setattr(lsp_process_tree, "_KERNEL32", Kernel())
+    monkeypatch.setattr(lsp_process_tree, "KERNEL32", Kernel())
     return calls
 
 
@@ -325,7 +325,7 @@ def test_public_deadline_spawn_rejects_expiry_before_platform_mutation(
     if os.name == "nt":
         monkeypatch.setattr(
             lsp_process_tree,
-            "_create_windows_job",
+            "create_windows_job",
             lambda: pytest.fail("expired ProcessTree spawn created a Job"),
         )
 
@@ -412,9 +412,9 @@ def test_windows_tree_wait_requires_stable_empty_job_observation(
         observations.append(value)
         return value
 
-    monkeypatch.setattr(lsp_process_tree, "_job_active_processes", active_processes)
+    monkeypatch.setattr(lsp_process_tree, "job_active_processes", active_processes)
 
-    complete, errors = lsp_process_tree._wait_windows_tree(
+    complete, errors = lsp_process_tree.wait_windows_tree(
         ExitedProcess(), 17, time.monotonic() + 1  # type: ignore[arg-type]
     )
 
@@ -440,11 +440,11 @@ def test_windows_tree_wait_treats_captured_pid_as_best_effort_identity(
         return True
 
     monkeypatch.setattr(
-        lsp_process_tree, "_job_active_processes", lambda _job: 0
+        lsp_process_tree, "job_active_processes", lambda _job: 0
     )
-    monkeypatch.setattr(lsp_process_tree, "_windows_pid_alive", pid_alive)
+    monkeypatch.setattr(lsp_process_tree, "windows_pid_alive", pid_alive)
 
-    complete, errors = lsp_process_tree._wait_windows_tree(
+    complete, errors = lsp_process_tree.wait_windows_tree(
         ExitedProcess(), 17, time.monotonic() + 1, tracked_pids=(4242,)  # type: ignore[arg-type]
     )
 
@@ -486,9 +486,9 @@ def _exercise_windows_tree_wait_error_uses_bounded_backoff_and_constant_error_st
         process = WaitingProcess()
         monkeypatch.setattr(lsp_process_tree.time, "monotonic", clock.monotonic)
         monkeypatch.setattr(lsp_process_tree.time, "sleep", clock.sleep)
-        monkeypatch.setattr(lsp_process_tree, "_job_active_processes", lambda _job: 1)
+        monkeypatch.setattr(lsp_process_tree, "job_active_processes", lambda _job: 1)
 
-        complete, errors = lsp_process_tree._wait_windows_tree(
+        complete, errors = lsp_process_tree.wait_windows_tree(
             process, 17, clock.now + probe_seconds  # type: ignore[arg-type]
         )
 
@@ -532,11 +532,11 @@ def _exercise_windows_tree_successful_wait_retry_clears_prior_error(
     monkeypatch.setattr(lsp_process_tree.time, "sleep", clock.sleep)
     monkeypatch.setattr(
         lsp_process_tree,
-        "_job_active_processes",
+        "job_active_processes",
         lambda _job: 0 if process.reaped else 1,
     )
 
-    complete, errors = lsp_process_tree._wait_windows_tree(
+    complete, errors = lsp_process_tree.wait_windows_tree(
         process, 17, clock.now + 1  # type: ignore[arg-type]
     )
 
@@ -556,11 +556,11 @@ def test_windows_job_pid_snapshot_uses_active_not_lifetime_process_count(
         pids=(4101, 4102),
     )
 
-    assert lsp_process_tree._job_process_ids(17) == (4101, 4102)
+    assert lsp_process_tree.job_process_ids(17) == (4101, 4102)
     assert calls == [
-        lsp_process_tree._JOB_OBJECT_BASIC_ACCOUNTING_INFORMATION,
-        lsp_process_tree._JOB_OBJECT_BASIC_PROCESS_ID_LIST,
-        lsp_process_tree._JOB_OBJECT_BASIC_ACCOUNTING_INFORMATION,
+        lsp_process_tree.JOB_OBJECT_BASIC_ACCOUNTING_INFORMATION,
+        lsp_process_tree.JOB_OBJECT_BASIC_PROCESS_ID_LIST,
+        lsp_process_tree.JOB_OBJECT_BASIC_ACCOUNTING_INFORMATION,
     ]
 
 
@@ -581,11 +581,11 @@ def test_windows_job_pid_snapshot_accepts_active_requery_races_and_pid_query_fai
             assigned=assigned,
             pids=pids,
         )
-        assert lsp_process_tree._job_process_ids(17) == expected
+        assert lsp_process_tree.job_process_ids(17) == expected
         assert calls == [
-            lsp_process_tree._JOB_OBJECT_BASIC_ACCOUNTING_INFORMATION,
-            lsp_process_tree._JOB_OBJECT_BASIC_PROCESS_ID_LIST,
-            lsp_process_tree._JOB_OBJECT_BASIC_ACCOUNTING_INFORMATION,
+            lsp_process_tree.JOB_OBJECT_BASIC_ACCOUNTING_INFORMATION,
+            lsp_process_tree.JOB_OBJECT_BASIC_PROCESS_ID_LIST,
+            lsp_process_tree.JOB_OBJECT_BASIC_ACCOUNTING_INFORMATION,
         ]
 
 
@@ -600,25 +600,25 @@ def test_windows_job_pid_snapshot_fails_for_unobservable_or_unbounded_active_cou
         pids=(),
     )
     with pytest.raises(OSError):
-        lsp_process_tree._job_process_ids(17)
+        lsp_process_tree.job_process_ids(17)
 
     _install_windows_job_queries(
         monkeypatch,
-        accounting=[(5000, lsp_process_tree._MAX_JOB_PROCESS_IDS + 1)],
+        accounting=[(5000, lsp_process_tree.MAX_JOB_PROCESS_IDS + 1)],
         assigned=0,
         pids=(),
     )
     with pytest.raises(RuntimeError, match="active process bound"):
-        lsp_process_tree._job_process_ids(17)
+        lsp_process_tree.job_process_ids(17)
 
     _install_windows_job_queries(
         monkeypatch,
-        accounting=[(5000, 1), (5000, lsp_process_tree._MAX_JOB_PROCESS_IDS + 1)],
+        accounting=[(5000, 1), (5000, lsp_process_tree.MAX_JOB_PROCESS_IDS + 1)],
         assigned=1,
         pids=(4401,),
     )
     with pytest.raises(RuntimeError, match="active process bound"):
-        lsp_process_tree._job_process_ids(17)
+        lsp_process_tree.job_process_ids(17)
 
 
 def test_spawn_owns_a_real_descendant_and_terminate_leaves_no_surviving_pid(
@@ -756,8 +756,8 @@ def test_assignment_failure_kills_unassigned_suspended_child_within_budget(
     jobs: list[int] = []
     closed: list[int] = []
     real_popen = lsp_process_tree.subprocess.Popen
-    real_create_job = lsp_process_tree._create_windows_job
-    real_close = lsp_process_tree._close_windows_handle
+    real_create_job = lsp_process_tree.create_windows_job
+    real_close = lsp_process_tree.close_windows_handle
 
     def popen(*args: object, **kwargs: object) -> object:
         child = real_popen(*args, **kwargs)
@@ -774,11 +774,11 @@ def test_assignment_failure_kills_unassigned_suspended_child_within_budget(
         real_close(handle)
 
     monkeypatch.setattr(lsp_process_tree.subprocess, "Popen", popen)
-    monkeypatch.setattr(lsp_process_tree, "_create_windows_job", create_job)
-    monkeypatch.setattr(lsp_process_tree, "_close_windows_handle", close_handle)
+    monkeypatch.setattr(lsp_process_tree, "create_windows_job", create_job)
+    monkeypatch.setattr(lsp_process_tree, "close_windows_handle", close_handle)
     monkeypatch.setattr(
         lsp_process_tree,
-        "_assign_windows_process",
+        "assign_windows_process",
         lambda _job, _process: (_ for _ in ()).throw(OSError("assignment failed")),
     )
     started = time.monotonic()
@@ -826,22 +826,22 @@ def test_assignment_failure_still_kills_child_when_job_close_raises(
             return 1
 
     child = Child()
-    monkeypatch.setattr(lsp_process_tree, "_KERNEL32", Kernel())
-    monkeypatch.setattr(lsp_process_tree, "_create_windows_job", lambda: 17)
+    monkeypatch.setattr(lsp_process_tree, "KERNEL32", Kernel())
+    monkeypatch.setattr(lsp_process_tree, "create_windows_job", lambda: 17)
     monkeypatch.setattr(lsp_process_tree.subprocess, "Popen", lambda *_a, **_kw: child)
     monkeypatch.setattr(
         lsp_process_tree,
-        "_assign_windows_process",
+        "assign_windows_process",
         lambda _job, _process: (_ for _ in ()).throw(OSError("assignment failed")),
     )
     monkeypatch.setattr(
         lsp_process_tree,
-        "_close_windows_handle",
+        "close_windows_handle",
         lambda _job: (_ for _ in ()).throw(RuntimeError("job close failed")),
     )
-    monkeypatch.setattr(lsp_process_tree, "_job_active_processes", lambda _job: 0)
+    monkeypatch.setattr(lsp_process_tree, "job_active_processes", lambda _job: 0)
 
-    with pytest.raises(lsp_process_tree._ProcessTreeSpawnError) as raised:
+    with pytest.raises(lsp_process_tree.ProcessTreeSpawnError) as raised:
         ProcessTree.spawn(_command(), cwd=tmp_path, env=dict(os.environ))
 
     assert isinstance(raised.value.__cause__, OSError)
@@ -857,7 +857,7 @@ def test_popen_failure_retains_job_when_job_close_fails(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    monkeypatch.setattr(lsp_process_tree, "_create_windows_job", lambda: 19)
+    monkeypatch.setattr(lsp_process_tree, "create_windows_job", lambda: 19)
     monkeypatch.setattr(
         lsp_process_tree.subprocess,
         "Popen",
@@ -865,11 +865,11 @@ def test_popen_failure_retains_job_when_job_close_fails(
     )
     monkeypatch.setattr(
         lsp_process_tree,
-        "_close_windows_handle",
+        "close_windows_handle",
         lambda _job: (_ for _ in ()).throw(OSError("job close failed")),
     )
 
-    with pytest.raises(lsp_process_tree._ProcessTreeSpawnError) as raised:
+    with pytest.raises(lsp_process_tree.ProcessTreeSpawnError) as raised:
         ProcessTree.spawn(_command(), cwd=tmp_path, env=dict(os.environ))
 
     assert isinstance(raised.value.__cause__, OSError)
@@ -901,11 +901,11 @@ def test_job_configuration_failure_retains_job_when_close_fails(
         def CloseHandle(_job: int) -> int:
             return 0
 
-    monkeypatch.setattr(lsp_process_tree, "_KERNEL32", Kernel())
+    monkeypatch.setattr(lsp_process_tree, "KERNEL32", Kernel())
     monkeypatch.setattr(lsp_process_tree.ctypes, "get_last_error", lambda: 5)
 
-    with pytest.raises(lsp_process_tree._ProcessTreeSpawnError) as raised:
-        lsp_process_tree._create_windows_job()
+    with pytest.raises(lsp_process_tree.ProcessTreeSpawnError) as raised:
+        lsp_process_tree.create_windows_job()
 
     assert raised.value.tree is None
     assert raised.value.windows_job == 41
@@ -937,10 +937,10 @@ def test_job_configuration_exception_closes_new_job(
             closed.append(job)
             return 1
 
-    monkeypatch.setattr(lsp_process_tree, "_KERNEL32", Kernel())
+    monkeypatch.setattr(lsp_process_tree, "KERNEL32", Kernel())
 
     with pytest.raises(OSError, match="job configuration raised"):
-        lsp_process_tree._create_windows_job()
+        lsp_process_tree.create_windows_job()
 
     assert closed == [42]
 
@@ -967,11 +967,11 @@ def test_job_configuration_exception_retains_job_when_close_fails(
         def CloseHandle(_job: int) -> int:
             return 0
 
-    monkeypatch.setattr(lsp_process_tree, "_KERNEL32", Kernel())
+    monkeypatch.setattr(lsp_process_tree, "KERNEL32", Kernel())
     monkeypatch.setattr(lsp_process_tree.ctypes, "get_last_error", lambda: 6)
 
-    with pytest.raises(lsp_process_tree._ProcessTreeSpawnError) as raised:
-        lsp_process_tree._create_windows_job()
+    with pytest.raises(lsp_process_tree.ProcessTreeSpawnError) as raised:
+        lsp_process_tree.create_windows_job()
 
     assert isinstance(raised.value.__cause__, OSError)
     assert "job configuration raised" in str(raised.value.__cause__)
@@ -996,7 +996,7 @@ def test_setup_rollback_retains_tree_when_final_child_poll_fails(
             raise OSError("final poll failed")
 
     child = Child()
-    monkeypatch.setattr(lsp_process_tree, "_create_windows_job", lambda: 43)
+    monkeypatch.setattr(lsp_process_tree, "create_windows_job", lambda: 43)
     monkeypatch.setattr(
         lsp_process_tree.subprocess,
         "Popen",
@@ -1004,7 +1004,7 @@ def test_setup_rollback_retains_tree_when_final_child_poll_fails(
     )
     monkeypatch.setattr(
         lsp_process_tree,
-        "_assign_windows_process",
+        "assign_windows_process",
         lambda _job, _process: (_ for _ in ()).throw(OSError("assignment failed")),
     )
     monkeypatch.setattr(
@@ -1018,7 +1018,7 @@ def test_setup_rollback_retains_tree_when_final_child_poll_fails(
 
     monkeypatch.setattr(ProcessTree, "close", release_job)
 
-    with pytest.raises(lsp_process_tree._ProcessTreeSpawnError) as raised:
+    with pytest.raises(lsp_process_tree.ProcessTreeSpawnError) as raised:
         ProcessTree.spawn(_command(), cwd=tmp_path, env=dict(os.environ))
 
     assert raised.value.tree is not None
@@ -1084,7 +1084,7 @@ def test_linux_proc_snapshot_treats_all_group_and_session_members_dead(
     _write_proc_stat(tmp_path, 101, state="Z", process_group=77, session=77)
     _write_proc_stat(tmp_path, 102, state="X", process_group=78, session=77)
 
-    assert lsp_process_tree._linux_group_is_inert(tmp_path, 77) is True
+    assert lsp_process_tree.linux_group_is_inert(tmp_path, 77) is True
 
 
 def test_linux_proc_snapshot_rejects_mixed_live_and_zombie_members(
@@ -1093,7 +1093,7 @@ def test_linux_proc_snapshot_rejects_mixed_live_and_zombie_members(
     _write_proc_stat(tmp_path, 101, state="Z", process_group=77, session=77)
     _write_proc_stat(tmp_path, 102, state="S", process_group=78, session=77)
 
-    assert lsp_process_tree._linux_group_is_inert(tmp_path, 77) is False
+    assert lsp_process_tree.linux_group_is_inert(tmp_path, 77) is False
 
 
 @pytest.mark.skipif(not sys.platform.startswith("linux"), reason="Linux /proc contract")
@@ -1115,11 +1115,8 @@ def test_linux_orphan_zombie_does_not_strand_owned_process_group(
     state: str | None = None
     settle_deadline = time.monotonic() + 2
     while time.monotonic() < settle_deadline:
-        try:
-            payload = (Path("/proc") / str(descendant_pid) / "stat").read_text(
-                encoding="ascii"
-            )
-        except FileNotFoundError:
+        payload = _proc_stat(descendant_pid)
+        if payload is None:
             state = None
             break
         closing = payload.rfind(")")
@@ -1153,7 +1150,7 @@ def test_windows_resume_accepts_only_previous_suspend_count_one(
         @staticmethod
         def Thread32First(_snapshot: int, pointer: object) -> int:
             entry = ctypes.cast(
-                pointer, ctypes.POINTER(lsp_process_tree._ThreadEntry32)
+                pointer, ctypes.POINTER(lsp_process_tree.ThreadEntry32)
             ).contents
             entry.owner_process_id = pid
             entry.thread_id = 22
@@ -1172,14 +1169,14 @@ def test_windows_resume_accepts_only_previous_suspend_count_one(
         def ResumeThread(_thread: int) -> int:
             return previous_count
 
-    monkeypatch.setattr(lsp_process_tree, "_KERNEL32", Kernel())
-    monkeypatch.setattr(lsp_process_tree, "_close_windows_handle", lambda _handle: None)
+    monkeypatch.setattr(lsp_process_tree, "KERNEL32", Kernel())
+    monkeypatch.setattr(lsp_process_tree, "close_windows_handle", lambda _handle: None)
 
     if previous_count == 1:
-        lsp_process_tree._resume_windows_process(pid)
+        lsp_process_tree.resume_windows_process(pid)
     else:
         with pytest.raises((OSError, RuntimeError)):
-            lsp_process_tree._resume_windows_process(pid)
+            lsp_process_tree.resume_windows_process(pid)
 
 
 @pytest.mark.skipif(os.name != "nt", reason="Windows thread enumeration contract")
@@ -1199,7 +1196,7 @@ def test_windows_resume_rejects_thread_enumeration_failure(
         @staticmethod
         def Thread32First(_snapshot: int, pointer: object) -> int:
             entry = ctypes.cast(
-                pointer, ctypes.POINTER(lsp_process_tree._ThreadEntry32)
+                pointer, ctypes.POINTER(lsp_process_tree.ThreadEntry32)
             ).contents
             entry.owner_process_id = pid
             entry.thread_id = 22
@@ -1218,13 +1215,13 @@ def test_windows_resume_rejects_thread_enumeration_failure(
         def ResumeThread(_thread: int) -> int:
             return 1
 
-    monkeypatch.setattr(lsp_process_tree, "_KERNEL32", Kernel())
+    monkeypatch.setattr(lsp_process_tree, "KERNEL32", Kernel())
     monkeypatch.setattr(
-        lsp_process_tree, "_close_windows_handle", lambda handle: closed.append(handle)
+        lsp_process_tree, "close_windows_handle", lambda handle: closed.append(handle)
     )
 
     with pytest.raises(OSError) as raised:
-        lsp_process_tree._resume_windows_process(pid)
+        lsp_process_tree.resume_windows_process(pid)
 
     assert raised.value.winerror == 5
     assert closed == [33, 11]
@@ -1263,10 +1260,10 @@ def test_windows_terminate_attempts_direct_kill_when_job_termination_fails(
 
     child = Child()
     tree = ProcessTree(child, 17, None)  # type: ignore[arg-type]
-    monkeypatch.setattr(lsp_process_tree, "_KERNEL32", Kernel())
+    monkeypatch.setattr(lsp_process_tree, "KERNEL32", Kernel())
     monkeypatch.setattr(lsp_process_tree.ctypes, "get_last_error", lambda: 5)
-    monkeypatch.setattr(lsp_process_tree, "_job_process_ids", lambda _job: ())
-    monkeypatch.setattr(lsp_process_tree, "_job_active_processes", lambda _job: 0)
+    monkeypatch.setattr(lsp_process_tree, "job_process_ids", lambda _job: ())
+    monkeypatch.setattr(lsp_process_tree, "job_active_processes", lambda _job: 0)
 
     with pytest.raises(OSError):
         tree.terminate(deadline=time.monotonic() + SHORT_TIMEOUT)
@@ -1306,13 +1303,13 @@ def test_windows_terminate_discards_snapshot_error_after_stable_active_zero(
         return 0
 
     tree = ProcessTree(ReapedChild(), 23, None)  # type: ignore[arg-type]
-    monkeypatch.setattr(lsp_process_tree, "_KERNEL32", Kernel())
+    monkeypatch.setattr(lsp_process_tree, "KERNEL32", Kernel())
     monkeypatch.setattr(
         lsp_process_tree,
-        "_job_process_ids",
+        "job_process_ids",
         lambda _job: (_ for _ in ()).throw(OSError("PID snapshot unavailable")),
     )
-    monkeypatch.setattr(lsp_process_tree, "_job_active_processes", active_processes)
+    monkeypatch.setattr(lsp_process_tree, "job_active_processes", active_processes)
 
     tree.terminate(deadline=time.monotonic() + SHORT_TIMEOUT)
 
@@ -1349,9 +1346,9 @@ def test_windows_terminate_keeps_unknown_or_nonzero_active_state_fail_closed(
         return active
 
     tree = ProcessTree(ReapedChild(), 29, None)  # type: ignore[arg-type]
-    monkeypatch.setattr(lsp_process_tree, "_KERNEL32", Kernel())
-    monkeypatch.setattr(lsp_process_tree, "_job_process_ids", lambda _job: ())
-    monkeypatch.setattr(lsp_process_tree, "_job_active_processes", active_processes)
+    monkeypatch.setattr(lsp_process_tree, "KERNEL32", Kernel())
+    monkeypatch.setattr(lsp_process_tree, "job_process_ids", lambda _job: ())
+    monkeypatch.setattr(lsp_process_tree, "job_active_processes", active_processes)
 
     with pytest.raises((OSError, TimeoutError)):
         tree.terminate(deadline=time.monotonic() + 0.05)
@@ -1409,9 +1406,9 @@ def test_windows_terminate_attempts_every_independent_step_after_error(
         calls.append("query-job")
         return 0
 
-    monkeypatch.setattr(lsp_process_tree, "_KERNEL32", Kernel())
-    monkeypatch.setattr(lsp_process_tree, "_job_process_ids", lambda _job: ())
-    monkeypatch.setattr(lsp_process_tree, "_job_active_processes", active_processes)
+    monkeypatch.setattr(lsp_process_tree, "KERNEL32", Kernel())
+    monkeypatch.setattr(lsp_process_tree, "job_process_ids", lambda _job: ())
+    monkeypatch.setattr(lsp_process_tree, "job_active_processes", active_processes)
 
     with pytest.raises(OSError, match="failed"):
         tree.terminate(deadline=time.monotonic() + SHORT_TIMEOUT)
@@ -1435,10 +1432,10 @@ def test_windows_close_failure_retains_job_handle_for_retry(
             return 0
 
     tree = ProcessTree(ReapedChild(), 23, None)  # type: ignore[arg-type]
-    monkeypatch.setattr(lsp_process_tree, "_job_active_processes", lambda _job: 0)
+    monkeypatch.setattr(lsp_process_tree, "job_active_processes", lambda _job: 0)
     monkeypatch.setattr(
         lsp_process_tree,
-        "_close_windows_handle",
+        "close_windows_handle",
         lambda _job: (_ for _ in ()).throw(OSError("job close failed")),
     )
 
@@ -1446,7 +1443,7 @@ def test_windows_close_failure_retains_job_handle_for_retry(
         tree.close()
 
     assert tree.windows_job == 23
-    monkeypatch.setattr(lsp_process_tree, "_close_windows_handle", lambda _job: None)
+    monkeypatch.setattr(lsp_process_tree, "close_windows_handle", lambda _job: None)
     tree.close()
     assert tree.windows_job is None
 
@@ -1529,10 +1526,51 @@ def test_windows_close_queries_job_when_direct_child_observation_fails(
         return 0
 
     tree = ProcessTree(Child(), 31, None)  # type: ignore[arg-type]
-    monkeypatch.setattr(lsp_process_tree, "_job_active_processes", active_processes)
+    monkeypatch.setattr(lsp_process_tree, "job_active_processes", active_processes)
 
     with pytest.raises(OSError, match="poll failed"):
         tree.close()
 
     assert calls == ["poll", "query-job"]
     assert tree.windows_job == 31
+
+
+@pytest.mark.parametrize("error", [FileNotFoundError(2, "gone"), ProcessLookupError(3, "reaped")])
+def test_proc_test_reader_accepts_only_proven_disappearance(monkeypatch, error) -> None:
+    def read(_path, **_kwargs):
+        raise error
+
+    monkeypatch.setattr(Path, "read_text", read)
+    assert _proc_stat(4242) is None
+
+
+@pytest.mark.parametrize("error", [PermissionError(13, "denied"), OSError(5, "IO failure")])
+def test_proc_test_reader_does_not_hide_unreadable_evidence(monkeypatch, error) -> None:
+    def read(_path, **_kwargs):
+        raise error
+
+    monkeypatch.setattr(Path, "read_text", read)
+    with pytest.raises(type(error)) as caught:
+        _proc_stat(4242)
+    assert caught.value is error
+
+
+@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="Linux /proc contract")
+def test_proc_test_reader_handles_reaping_after_open(monkeypatch) -> None:
+    with (
+        subprocess.Popen(
+            [sys.executable, "-c", "import sys; sys.stdin.buffer.read()"],
+            stdin=subprocess.PIPE,
+        ) as process,
+        open(f"/proc/{process.pid}/stat", "rb", buffering=0) as stream,
+    ):
+        process.stdin.close()
+        process.wait(timeout=SHORT_TIMEOUT)
+
+        def read(_path, **_kwargs):
+            return stream.read().decode("ascii")
+
+        with pytest.raises(ProcessLookupError):
+            read(None)
+        monkeypatch.setattr(Path, "read_text", read)
+        assert _proc_stat(process.pid) is None

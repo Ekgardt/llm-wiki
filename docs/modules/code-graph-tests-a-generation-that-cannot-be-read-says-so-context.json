@@ -1,0 +1,130 @@
+{
+  "encoding": "o200k_base",
+  "max_tokens": 100000,
+  "serialization": "exact-duplicates/v1",
+  "files": [
+    "AGENTS.md",
+    "CLAUDE.md",
+    "docs/AGENTS.md",
+    "docs/STRUCTURE.md",
+    "docs/modules/code-graph-tests-a-generation-that-cannot-be-read-says-so-context.json",
+    "docs/modules/code-graph-tests-a-generation-that-cannot-be-read-says-so.md",
+    "docs/modules/context-bundle.md",
+    "docs/modules/context-records.md",
+    "docs/modules/context-tooling.md",
+    "docs/modules/evidence-graph-tests-evidence-graph-recovery-helpers.md",
+    "docs/modules/model-choice.md",
+    "docs/modules/product-structure.md",
+    "docs/modules/project-governance.md",
+    "docs/modules/test-support.md",
+    "rules/development-laws.md",
+    "scripts/__init__.py",
+    "scripts/llm_wiki/__init__.py",
+    "scripts/llm_wiki/context_bundle.py",
+    "tests/__init__.py",
+    "tests/conftest.py",
+    "tests/evidence_graph_recovery_helpers.py",
+    "tests/module_context.py",
+    "tests/module_context_paths.py",
+    "tests/module_interface.py",
+    "tests/module_interface_render.py",
+    "tests/module_qualification.py",
+    "tests/module_record_context.py",
+    "tests/module_records.py",
+    "tests/shared_fixtures.py",
+    "tests/slow_machine.py",
+    "tests/test_a_generation_that_cannot_be_read_says_so.py"
+  ],
+  "ownership": {
+    "files": [
+      "docs/modules/code-graph-tests-a-generation-that-cannot-be-read-says-so-context.json",
+      "docs/modules/code-graph-tests-a-generation-that-cannot-be-read-says-so.md",
+      "tests/test_a_generation_that_cannot_be_read_says_so.py"
+    ]
+  },
+  "qualified_dependencies": [
+    {
+      "provider": "scripts/code_graph.py",
+      "names": [
+        "active_evidence_graph",
+        "detect_communities",
+        "find_callees",
+        "find_callers",
+        "find_dead_code",
+        "get_architecture"
+      ],
+      "contract_sha256": "f86d550058d93285beb9244bb66bd07254ede126bf68e4a828efcf1e9ce3916e",
+      "integration_tests": [
+        "tests/test_a_code_root_named_knowledge_is_code.py",
+        "tests/test_a_cut_says_what_it_left_out.py",
+        "tests/test_a_dead_code_claim_names_what_it_checked.py"
+      ]
+    },
+    {
+      "provider": "scripts/corpus_snapshot.py",
+      "names": [
+        "COLLECTOR_VERSION",
+        "EXTRACTOR_VERSION",
+        "canonical_source_manifest"
+      ],
+      "contract_sha256": "0cc87152075558d99d4b0d2b958e1f0e14b22fad8777cbca4377e198dd0a442f",
+      "integration_tests": [
+        "tests/test_a_generation_that_cannot_be_read_says_so.py"
+      ]
+    },
+    {
+      "provider": "scripts/evidence_graph.py",
+      "names": [
+        "create_generation_database"
+      ],
+      "contract_sha256": "bfef1ce440404c513f00588bf9861184456252576a1f75d20e4dda19871a75be",
+      "integration_tests": [
+        "tests/test_a_generation_that_cannot_be_read_says_so.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/generation_catalog_store.py",
+      "names": [
+        "GenerationCatalog"
+      ],
+      "contract_sha256": "b18194ebe04bf988b4474379fcb5243516550d43b745a00eaed1453f7844c983",
+      "integration_tests": [
+        "tests/test_a_build_in_flight_is_not_an_orphan.py",
+        "tests/test_a_code_generation_is_not_abandoned.py",
+        "tests/test_a_flow_walk_stops_when_its_caller_has.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/model_choice.py",
+      "names": [
+        "using_root"
+      ],
+      "contract_sha256": "d45f2655cb61963e77617d1dfd7d617b134ad77cc770b59b335d0856e5d65019",
+      "integration_tests": [
+        "tests/test_a_generation_that_cannot_be_read_says_so.py"
+      ]
+    },
+    {
+      "provider": "scripts/reliable_memory.py",
+      "names": [
+        "canonical_json_bytes",
+        "validate_state_root"
+      ],
+      "contract_sha256": "7bba4b535d3f0a73445fece541c540939989b41456c9a79a67f82634748be36b",
+      "integration_tests": [
+        "tests/test_a_generation_that_cannot_be_read_says_so.py"
+      ]
+    },
+    {
+      "provider": "scripts/repository_scope.py",
+      "names": [
+        "resolve_repository_scope",
+        "sanitized_git_environment"
+      ],
+      "contract_sha256": "983dd096d99bafff98ca0aaa2cd722477333e30eed4bfa9297d1830c635e8d90",
+      "integration_tests": [
+        "tests/test_a_generation_that_cannot_be_read_says_so.py"
+      ]
+    }
+  ]
+}

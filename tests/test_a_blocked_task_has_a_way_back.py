@@ -13,7 +13,10 @@ from pathlib import Path
 
 import memory_queue
 import pytest
-from memory_queue import QueueFailure
+import queue_core
+from queue_core import (
+    QueueFailure,
+)
 
 from tests.adopted_vault import adopt
 
@@ -24,7 +27,7 @@ def _cli(
     arguments: list[str],
 ) -> tuple[int, dict[str, object]]:
     monkeypatch.setattr(sys, "argv", ["memory_queue.py", *arguments])
-    code = memory_queue._cli()
+    code = memory_queue.cli()
     return code, json.loads(capsys.readouterr().out)
 
 
@@ -33,7 +36,7 @@ def adopted(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     root, state_root = adopt(tmp_path)
     monkeypatch.setenv("LLM_WIKI_ROOT", str(root))
     monkeypatch.setenv("LLM_WIKI_STATE_ROOT", str(state_root))
-    return memory_queue.active_or_legacy_memory_queue(root, state_root)
+    return queue_core.active_or_legacy_memory_queue(root, state_root)
 
 
 def test_unblock_returns_a_blocked_task_to_the_worker(

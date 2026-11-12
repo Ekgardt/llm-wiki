@@ -1,0 +1,22 @@
+{
+  "schema": "module-records/v1",
+  "source": "docs/AUDIT-2026-09-17.md",
+  "bytes": 196686,
+  "sha256": "7752f10bfd633c3ae0539f00b5cef33dc71f31a9c89c2d67b234f2397ef1cd7a",
+  "records": [
+    {
+      "id": "part-1",
+      "label": "Audit of 2026-09-17, part 1",
+      "start": 0,
+      "end": 136304,
+      "sha256": "9eaccaa7dd5027d248fb87d0de1d7358172896e235da3942f3678bd42b2a6f05"
+    },
+    {
+      "id": "part-2",
+      "label": "Audit of 2026-09-17, part 2",
+      "start": 136304,
+      "end": 196686,
+      "sha256": "fc806ebf3e213b4eb27d22fb967b3e9eef82aa1b415419195b1c88d41dbeabf6"
+    }
+  ]
+}

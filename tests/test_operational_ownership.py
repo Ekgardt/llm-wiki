@@ -4,16 +4,22 @@ import contextlib
 import os
 import sqlite3
 import threading
-from dataclasses import dataclass, replace
-from datetime import datetime, timedelta, timezone
+from dataclasses import replace
+from datetime import timedelta
 from pathlib import Path
 
-import markdown_transaction
 import operational_ownership as ownership
 import process_liveness
 import pytest
 from reliable_memory import capture_runtime_file_identity, sha256_bytes
 
+from tests.operational_ownership_helpers import (
+    _candidate,
+    _expire,
+    _initialize_candidate,
+    _owner_count,
+    _registry,
+)
 from tests.slow_machine import SHORT_TIMEOUT
 
 ALL_ROLES = (
@@ -39,41 +45,6 @@ LONG_ROLES = {
     "queue-operator",
     "repair",
 }
-
-
-@dataclass
-class _Clock:
-    value: datetime
-
-    def __call__(self) -> datetime:
-        return self.value
-
-
-def _candidate(state_root: Path) -> Path:
-    return state_root / "run" / "markdown-transactions-v3.candidate.sqlite3"
-
-
-def _initialize_candidate(state_root: Path) -> Path:
-    path = _candidate(state_root)
-    markdown_transaction.initialize_coordinator_v3_candidate(path, source_v2=None)
-    return path
-
-
-def _registry(
-    state_root: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    *,
-    clock: _Clock | None = None,
-    process_probe=None,
-) -> tuple[ownership.OwnershipRegistry, _Clock]:
-    _initialize_candidate(state_root)
-    current = ownership.ProcessIdentity(pid=31001, start_identity="test-process:1")
-    monkeypatch.setattr(ownership, "current_process_identity", lambda: current)
-    selected_clock = clock or _Clock(datetime(2026, 8, 12, 12, tzinfo=timezone.utc))
-    kwargs = {"clock": selected_clock}
-    if process_probe is not None:
-        kwargs["process_probe"] = process_probe
-    return ownership.OwnershipRegistry(state_root, **kwargs), selected_clock
 
 
 def _marker(state_root: Path, role: str) -> ownership.MarkerIdentity:
@@ -106,20 +77,6 @@ def _acquire(
         token=token,
         marker=marker,
     )
-
-
-def _owner_count(state_root: Path) -> int:
-    with contextlib.closing(sqlite3.connect(_candidate(state_root))) as database:
-        return int(database.execute("SELECT COUNT(*) FROM maintenance_owners").fetchone()[0])
-
-
-def _expire(state_root: Path, lease: ownership.OwnerLease, when: datetime) -> None:
-    with contextlib.closing(sqlite3.connect(_candidate(state_root))) as database:
-        database.execute(
-            "UPDATE maintenance_owners SET expires_at=? WHERE role=? AND scope=?",
-            (when.isoformat().replace("+00:00", "Z"), lease.role, lease.scope),
-        )
-        database.commit()
 
 
 def test_closed_roles_use_only_the_approved_lease_timing(
@@ -193,13 +150,17 @@ def _assert_refused(registry, state_root: Path, code: str) -> None:
 
 
 @pytest.mark.parametrize(
-    ("observed", "expected"),
-    [("linux:boot:10", "alive"), ("linux:boot:11", "dead")],
+    ("reused", "expected"),
+    [(False, "alive"), (True, "dead")],
 )
 def test_pid_reuse_is_dead_only_when_start_identity_differs(
-    monkeypatch: pytest.MonkeyPatch, observed: str, expected: str
+    monkeypatch: pytest.MonkeyPatch, reused: bool, expected: str
 ) -> None:
-    identity = ownership.ProcessIdentity(pid=99, start_identity="linux:boot:10")
+    recorded = process_liveness.process_start_identity(os.getpid())
+    observed = recorded
+    if reused:
+        observed = recorded.rsplit(":", 1)[0] + ":1234567890123456789"
+    identity = ownership.ProcessIdentity(pid=99, start_identity=recorded)
     monkeypatch.setattr(ownership, "process_start_identity", lambda _pid: observed)
 
     assert ownership.process_identity_state(identity) == expected
@@ -399,21 +360,23 @@ def test_marker_identity_change_blocks_release_and_preserves_owner(
 def test_process_identity_dispatch_liveness_and_actor_contracts(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(ownership, "_platform_system", lambda: "Linux")
+    recorded = process_liveness.process_start_identity(os.getpid())
+    monkeypatch.setattr(ownership, "platform_system", lambda: "Linux")
     monkeypatch.setattr(
-        ownership, "process_start_identity", lambda pid: f"linux:boot:{pid}"
+        ownership, "process_start_identity", lambda pid: recorded
     )
     monkeypatch.setattr(ownership.os, "getpid", lambda: 77)
+    monkeypatch.setattr(process_liveness, "linux_procfs_pids", lambda: [b"77"])
     monkeypatch.setattr(ownership.os, "getuid", lambda: 501, raising=False)
 
     identity = ownership.current_process_identity()
 
-    assert identity == ownership.ProcessIdentity(pid=77, start_identity="linux:boot:77")
+    assert identity == ownership.ProcessIdentity(pid=77, start_identity=recorded)
     assert ownership.process_identity_state(identity) == "alive"
     assert ownership.current_actor_identity() == "posix-uid:501"
 
-    monkeypatch.setattr(ownership, "_platform_system", lambda: "Windows")
-    monkeypatch.setattr(ownership, "_windows_actor_identity", lambda: "windows-sid:S-1-5-21")
+    monkeypatch.setattr(ownership, "platform_system", lambda: "Windows")
+    monkeypatch.setattr(ownership, "windows_actor_identity", lambda: "windows-sid:S-1-5-21")
     assert ownership.current_actor_identity() == "windows-sid:S-1-5-21"
 
 
@@ -421,7 +384,7 @@ def test_an_unsupported_platform_refuses_the_identity_by_its_ownership_name(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The probes moved; the refusal callers match on did not."""
-    monkeypatch.setattr(ownership.process_liveness, "_platform_system", lambda: "Plan9")
+    monkeypatch.setattr(ownership.process_liveness, "platform_system", lambda: "Plan9")
 
     with pytest.raises(ownership.OperationalOwnershipError) as refusal:
         ownership.process_start_identity(77)
@@ -483,10 +446,10 @@ def test_scheduled_owner_heartbeat_covers_the_body(
     waits = iter((False, True))
     monkeypatch.setattr(
         ownership,
-        "_wait_for_owner_heartbeat",
+        "wait_for_owner_heartbeat",
         lambda _stop, _seconds: next(waits, True),
     )
-    monkeypatch.setattr(ownership, "_join_owner_heartbeat", lambda thread, _timeout: thread.join())
+    monkeypatch.setattr(ownership, "join_owner_heartbeat", lambda thread, _timeout: thread.join())
 
     with ownership.heartbeat_owner(lease):
         assert wake.wait(SHORT_TIMEOUT)
@@ -504,7 +467,7 @@ def test_marker_release_clears_canonical_before_exact_marker(
         "weekly", state_root=state_root
     )
     observed: list[int] = []
-    real_remove = ownership._remove_exact_marker
+    real_remove = ownership.remove_exact_marker
 
     def observe_remove(root: Path, current: ownership.MarkerIdentity) -> None:
         with contextlib.closing(sqlite3.connect(_candidate(state_root))) as database:
@@ -516,7 +479,23 @@ def test_marker_release_clears_canonical_before_exact_marker(
             )
         real_remove(root, current)
 
-    monkeypatch.setattr(ownership, "_remove_exact_marker", observe_remove)
+    monkeypatch.setattr(ownership, "remove_exact_marker", observe_remove)
     ownership.release_marker_owner(lease, marker)
 
     assert observed == [0]
+
+
+@pytest.mark.parametrize('name', [
+    'WindowsTokenApi', 'windows_token_api', 'windows_open_token',
+    'windows_token_information', 'windows_token_sid_text',
+    'validated_windows_actor', 'windows_actor_identity',
+])
+def test_windows_actor_aliases_retain_original_serialized_identity(name):
+    import pickle
+
+    from llm_wiki import windows_actor
+
+    value = getattr(windows_actor, name)
+    assert getattr(ownership, name) is value
+    assert value.__module__ == 'operational_ownership'
+    assert pickle.loads(pickle.dumps(value, protocol=4)) is value

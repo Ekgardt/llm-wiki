@@ -1,6 +1,6 @@
 """The class-d cuts in the core modules lose nothing silently (law 9, phase 2a).
 
-A claim past the per-page cap is reported like any other dropped claim, and the
+Malformed claims are reported; valid claims share the response budget. The
 navigation answer's CALLS read is anchored on the symbol, so a repository with more
 call edges than the fact bound still finds the symbol's calls. See
 `docs/research/2026-09-27-a-cut-says-what-it-left-out.md` and
@@ -12,9 +12,10 @@ from __future__ import annotations
 import ast
 from pathlib import Path
 
-import compile_memory
-import doctor
 import mcp_server
+from llm_wiki import compile_pipeline_claims, compile_pipeline_prompts, doctor_queue
+
+from tests.script_sources import script_files
 
 
 def _candidate(index: int) -> dict[str, object]:
@@ -26,14 +27,13 @@ def _candidate(index: int) -> dict[str, object]:
     }
 
 
-def test_a_claim_past_the_page_cap_is_reported_as_dropped() -> None:
-    cap = compile_memory.MAX_CLAIMS_PER_OPERATION
-    before = len(compile_memory.DROPPED_CLAIMS)
-
-    kept = compile_memory._admitted_candidates([_candidate(index) for index in range(cap + 2)], "cut-page")
-
-    dropped = compile_memory.DROPPED_CLAIMS[before:]
-    assert (len(kept), [item["slug"] for item in dropped]) == (cap, ["cut-page", "cut-page"])
+def test_admission_preserves_valid_claims_and_reports_only_malformed() -> None:
+    candidates = [_candidate(index) for index in range(10)]
+    before = len(compile_pipeline_claims.DROPPED_CLAIMS)
+    kept = compile_pipeline_prompts.admitted_candidates(candidates + [{"subject": None}], "cut-page")
+    dropped = compile_pipeline_claims.DROPPED_CLAIMS[before:]
+    assert kept == candidates
+    assert [item["slug"] for item in dropped] == ["cut-page"]
 
 
 class _AnchoredGraph:
@@ -53,7 +53,7 @@ class _AnchoredGraph:
 def test_the_calls_read_is_anchored_on_the_symbols_nodes() -> None:
     graph = _AnchoredGraph()
 
-    mcp_server._collected_call_locations(graph, "target", None, "incoming", None, None)
+    mcp_server.collected_call_locations(graph, "target", None, "incoming", None, None)
 
     assert graph.anchors == [{"source": None, "target": ["target-node"]}]
 
@@ -68,7 +68,7 @@ class _ManyNodeGraph(_AnchoredGraph):
 def test_a_common_name_is_read_in_slices_the_reader_accepts() -> None:
     graph = _ManyNodeGraph()
 
-    mcp_server._collected_call_locations(graph, "main", None, "outgoing", None, None)
+    mcp_server.collected_call_locations(graph, "main", None, "outgoing", None, None)
 
     assert [len(anchor["source"]) for anchor in graph.anchors] == [512, 88]
 
@@ -89,12 +89,11 @@ def _names_an_anchor(call: ast.Call) -> bool:
 
 
 def test_every_graph_edge_read_is_anchored_on_nodes() -> None:
-    scripts = sorted((Path(__file__).resolve().parents[1] / "scripts").glob("*.py"))
-    assert [name for path in scripts for name in _unanchored_edge_reads(path)] == []
+    assert [name for path in script_files() for name in _unanchored_edge_reads(path)] == []
 
 
 def test_the_claims_finding_counts_the_pages_it_does_not_name() -> None:
-    pages = doctor.MAX_CLAIM_PAGES_NAMED + 3
+    pages = doctor_queue.MAX_CLAIM_PAGES_NAMED + 3
     details: dict = {"codes": []}
 
     class _Database:
@@ -102,9 +101,9 @@ def test_the_claims_finding_counts_the_pages_it_does_not_name() -> None:
             rows = [("unresolved", f"page-{index}") for index in range(pages)]
             return _Rows(rows if "claim_index_diagnostic" in sql else [(1,)])
 
-    doctor._count_claims(_Database(), details)
+    doctor_queue.count_claims(_Database(), details)
 
-    assert (len(details["pages"]), details["pages_omitted"]) == (doctor.MAX_CLAIM_PAGES_NAMED, 3)
+    assert (len(details["pages"]), details["pages_omitted"]) == (doctor_queue.MAX_CLAIM_PAGES_NAMED, 3)
 
 
 class _Rows:

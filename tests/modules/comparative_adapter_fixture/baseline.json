@@ -1,0 +1,148 @@
+{
+  "adaptive-context-compiler": {
+    "failure": null,
+    "metrics": {
+      "blinded_factual_correctness": 0.68,
+      "cache_tokens": 0,
+      "edge_precision": null,
+      "edge_recall": null,
+      "executable_task_success": null,
+      "freshness": 1.0,
+      "incremental_time_ms": null,
+      "index_size_bytes": 1024,
+      "indexing_time_ms": 10.0,
+      "peak_ram_bytes": 4096,
+      "query_latency_ms": 2.0,
+      "retrieval_quality": 0.68,
+      "uncached_input_tokens": 80,
+      "uncached_output_tokens": 10
+    },
+    "outcome": "success"
+  },
+  "evidence-graph-only": {
+    "failure": null,
+    "metrics": {
+      "blinded_factual_correctness": 0.63,
+      "cache_tokens": 0,
+      "edge_precision": 0.8,
+      "edge_recall": 0.75,
+      "executable_task_success": null,
+      "freshness": 1.0,
+      "incremental_time_ms": null,
+      "index_size_bytes": 1024,
+      "indexing_time_ms": 10.0,
+      "peak_ram_bytes": 4096,
+      "query_latency_ms": 2.0,
+      "retrieval_quality": 0.63,
+      "uncached_input_tokens": 92,
+      "uncached_output_tokens": 10
+    },
+    "outcome": "success"
+  },
+  "graphify-pinned": {
+    "failure": null,
+    "metrics": {
+      "blinded_factual_correctness": 0.6,
+      "cache_tokens": 0,
+      "edge_precision": 0.8,
+      "edge_recall": 0.75,
+      "executable_task_success": null,
+      "freshness": 1.0,
+      "incremental_time_ms": null,
+      "index_size_bytes": 1024,
+      "indexing_time_ms": 10.0,
+      "peak_ram_bytes": 4096,
+      "query_latency_ms": 2.0,
+      "retrieval_quality": 0.6,
+      "uncached_input_tokens": 100,
+      "uncached_output_tokens": 10
+    },
+    "outcome": "success"
+  },
+  "grep-read": {
+    "failure": null,
+    "metrics": {
+      "blinded_factual_correctness": 0.5,
+      "cache_tokens": 0,
+      "edge_precision": null,
+      "edge_recall": null,
+      "executable_task_success": null,
+      "freshness": 1.0,
+      "incremental_time_ms": null,
+      "index_size_bytes": 1024,
+      "indexing_time_ms": 10.0,
+      "peak_ram_bytes": 4096,
+      "query_latency_ms": 2.0,
+      "retrieval_quality": 0.5,
+      "uncached_input_tokens": 120,
+      "uncached_output_tokens": 10
+    },
+    "outcome": "success"
+  },
+  "hybrid-retrieval": {
+    "failure": null,
+    "metrics": {
+      "blinded_factual_correctness": 0.66,
+      "cache_tokens": 0,
+      "edge_precision": null,
+      "edge_recall": null,
+      "executable_task_success": null,
+      "freshness": 1.0,
+      "incremental_time_ms": null,
+      "index_size_bytes": 1024,
+      "indexing_time_ms": 10.0,
+      "peak_ram_bytes": 4096,
+      "query_latency_ms": 2.0,
+      "retrieval_quality": 0.66,
+      "uncached_input_tokens": 85,
+      "uncached_output_tokens": 10
+    },
+    "outcome": "success"
+  },
+  "llm-wiki-current": {
+    "failure": null,
+    "metrics": {
+      "blinded_factual_correctness": 0.62,
+      "cache_tokens": 0,
+      "edge_precision": null,
+      "edge_recall": null,
+      "executable_task_success": null,
+      "freshness": 1.0,
+      "incremental_time_ms": null,
+      "index_size_bytes": 1024,
+      "indexing_time_ms": 10.0,
+      "peak_ram_bytes": 4096,
+      "query_latency_ms": 2.0,
+      "retrieval_quality": 0.62,
+      "uncached_input_tokens": 95,
+      "uncached_output_tokens": 10
+    },
+    "outcome": "success"
+  },
+  "transient-failure": {
+    "failure": {
+      "category": "backend",
+      "code": "fixture-transient-failure",
+      "message": "deterministic retry fixture",
+      "phase": "query",
+      "retryable": true
+    },
+    "metrics": {
+      "blinded_factual_correctness": null,
+      "cache_tokens": 0,
+      "edge_precision": null,
+      "edge_recall": null,
+      "executable_task_success": null,
+      "freshness": null,
+      "incremental_time_ms": null,
+      "index_size_bytes": null,
+      "indexing_time_ms": null,
+      "peak_ram_bytes": null,
+      "query_latency_ms": null,
+      "retrieval_quality": null,
+      "uncached_input_tokens": 10,
+      "uncached_output_tokens": 0
+    },
+    "outcome": "failure"
+  }
+}

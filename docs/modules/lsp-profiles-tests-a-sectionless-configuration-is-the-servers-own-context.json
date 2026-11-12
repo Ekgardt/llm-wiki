@@ -1,0 +1,108 @@
+{
+  "encoding": "o200k_base",
+  "max_tokens": 100000,
+  "serialization": "exact-duplicates/v1",
+  "files": [
+    "AGENTS.md",
+    "CLAUDE.md",
+    "docs/AGENTS.md",
+    "docs/STRUCTURE.md",
+    "docs/modules/context-bundle.md",
+    "docs/modules/context-records.md",
+    "docs/modules/context-tooling.md",
+    "docs/modules/lsp-profiles-tests-a-sectionless-configuration-is-the-servers-own-context.json",
+    "docs/modules/lsp-profiles-tests-a-sectionless-configuration-is-the-servers-own.md",
+    "docs/modules/model-choice.md",
+    "docs/modules/product-structure.md",
+    "docs/modules/project-governance.md",
+    "docs/modules/test-support.md",
+    "rules/development-laws.md",
+    "scripts/__init__.py",
+    "scripts/llm_wiki/__init__.py",
+    "scripts/llm_wiki/context_bundle.py",
+    "tests/__init__.py",
+    "tests/conftest.py",
+    "tests/module_context.py",
+    "tests/module_context_paths.py",
+    "tests/module_interface.py",
+    "tests/module_interface_render.py",
+    "tests/module_qualification.py",
+    "tests/module_record_context.py",
+    "tests/module_records.py",
+    "tests/shared_fixtures.py",
+    "tests/slow_machine.py",
+    "tests/test_a_sectionless_configuration_is_the_servers_own.py"
+  ],
+  "ownership": {
+    "files": [
+      "docs/modules/lsp-profiles-tests-a-sectionless-configuration-is-the-servers-own-context.json",
+      "docs/modules/lsp-profiles-tests-a-sectionless-configuration-is-the-servers-own.md",
+      "tests/test_a_sectionless_configuration_is_the_servers_own.py"
+    ]
+  },
+  "qualified_dependencies": [
+    {
+      "provider": "scripts/llm_wiki/generation_catalog_store.py",
+      "names": [
+        "GenerationCatalog"
+      ],
+      "contract_sha256": "b18194ebe04bf988b4474379fcb5243516550d43b745a00eaed1453f7844c983",
+      "integration_tests": [
+        "tests/test_a_blocked_task_has_a_way_back.py",
+        "tests/test_a_build_in_flight_is_not_an_orphan.py",
+        "tests/test_a_capacity_refusal_does_not_corrupt_a_generation.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/model_choice.py",
+      "names": [
+        "using_root"
+      ],
+      "contract_sha256": "d45f2655cb61963e77617d1dfd7d617b134ad77cc770b59b335d0856e5d65019",
+      "integration_tests": [
+        "tests/test_a_sectionless_configuration_is_the_servers_own.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/pyright_session_progress.py",
+      "names": [
+        "configuration_result"
+      ],
+      "contract_sha256": "0ac7c528391fff4be73764cbc4013b5b2ddbbbb3b5d607a52a1113e57a1852ed",
+      "integration_tests": [
+        "tests/test_a_lapsed_deadline_is_not_a_torn_stream.py",
+        "tests/test_a_sectionless_configuration_is_the_servers_own.py"
+      ]
+    },
+    {
+      "provider": "scripts/lsp_profiles.py",
+      "names": [
+        "REGISTRY"
+      ],
+      "contract_sha256": "590d43df875323bd3412ceffb97e87aae3ccf8c496529a6f1b893187bbccf78d",
+      "integration_tests": [
+        "tests/test_a_sectionless_configuration_is_the_servers_own.py"
+      ]
+    },
+    {
+      "provider": "scripts/reliable_memory.py",
+      "names": [
+        "validate_state_root"
+      ],
+      "contract_sha256": "8680515cd873056a7c8a36e0057d91f2f83f23c48841263697676ff91f7ff964",
+      "integration_tests": [
+        "tests/test_a_sectionless_configuration_is_the_servers_own.py"
+      ]
+    },
+    {
+      "provider": "scripts/repository_scope.py",
+      "names": [
+        "sanitized_git_environment"
+      ],
+      "contract_sha256": "fd550ae20761afad50b37fa3a71044a162485b0e4d4b3e2af9b5b22e143c2bec",
+      "integration_tests": [
+        "tests/test_a_sectionless_configuration_is_the_servers_own.py"
+      ]
+    }
+  ]
+}

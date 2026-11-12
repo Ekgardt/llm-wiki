@@ -1,0 +1,181 @@
+{
+  "encoding": "o200k_base",
+  "max_tokens": 100000,
+  "serialization": "exact-duplicates/v1",
+  "files": [
+    "AGENTS.md",
+    "CLAUDE.md",
+    "docs/AGENTS.md",
+    "docs/STRUCTURE.md",
+    "docs/modules/context-bundle.md",
+    "docs/modules/context-records.md",
+    "docs/modules/context-tooling.md",
+    "docs/modules/model-choice.md",
+    "docs/modules/product-structure.md",
+    "docs/modules/project-governance.md",
+    "docs/modules/pyright-profile-tests-code-kernel-helpers.md",
+    "docs/modules/pyright-session-tests-pyright-session-helpers.md",
+    "docs/modules/script-sources.md",
+    "docs/modules/test-a-failed-server-is-started-again-context.json",
+    "docs/modules/test-a-failed-server-is-started-again.md",
+    "docs/modules/test-support.md",
+    "rules/development-laws.md",
+    "scripts/__init__.py",
+    "scripts/llm_wiki/__init__.py",
+    "scripts/llm_wiki/context_bundle.py",
+    "tests/__init__.py",
+    "tests/code_kernel_helpers.py",
+    "tests/conftest.py",
+    "tests/module_context.py",
+    "tests/module_context_paths.py",
+    "tests/module_interface.py",
+    "tests/module_interface_render.py",
+    "tests/module_qualification.py",
+    "tests/module_record_context.py",
+    "tests/module_records.py",
+    "tests/pyright_session_helpers.py",
+    "tests/script_sources.py",
+    "tests/shared_fixtures.py",
+    "tests/slow_machine.py",
+    "tests/test_a_failed_server_is_started_again.py"
+  ],
+  "ownership": {
+    "files": [
+      "docs/modules/test-a-failed-server-is-started-again-context.json",
+      "docs/modules/test-a-failed-server-is-started-again.md",
+      "tests/test_a_failed_server_is_started_again.py"
+    ]
+  },
+  "qualified_dependencies": [
+    {
+      "provider": "scripts/corpus_snapshot.py",
+      "names": [
+        "CapturedSource",
+        "CorpusSnapshot"
+      ],
+      "contract_sha256": "75a1b27ea7e82513a67ebecfa0706b6279e7e7f5b7dfea7cce493cced2b92267",
+      "integration_tests": [
+        "tests/test_a_failed_server_is_started_again.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/generation_catalog_store.py",
+      "names": [
+        "GenerationCatalog"
+      ],
+      "contract_sha256": "b18194ebe04bf988b4474379fcb5243516550d43b745a00eaed1453f7844c983",
+      "integration_tests": [
+        "tests/test_a_build_in_flight_is_not_an_orphan.py",
+        "tests/test_a_code_generation_is_not_abandoned.py",
+        "tests/test_a_flow_walk_stops_when_its_caller_has.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/model_choice.py",
+      "names": [
+        "using_root"
+      ],
+      "contract_sha256": "d45f2655cb61963e77617d1dfd7d617b134ad77cc770b59b335d0856e5d65019",
+      "integration_tests": [
+        "tests/test_a_failed_server_is_started_again.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/pyright_configuration.py",
+      "names": [
+        "PYRIGHT_PACKAGE_INTEGRITY",
+        "PYRIGHT_PACKAGE_URL"
+      ],
+      "contract_sha256": "1006f9ca9d6c403b9dbb75f82c61e7d4d68818571719b97f22a617db5c0bafe3",
+      "integration_tests": [
+        "tests/modules/pyright_configuration/test_configuration.py",
+        "tests/test_install_pyright.py",
+        "tests/test_pyright_profile.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/pyright_session_core.py",
+      "names": [
+        "PyrightSession"
+      ],
+      "contract_sha256": "db434debb473a9b234e810be11bb9cd8a06592f3dc890b746d1fe6ce2e374c59",
+      "integration_tests": [
+        "tests/test_a_document_is_opened_in_its_own_language.py",
+        "tests/test_a_lapsed_deadline_is_not_a_torn_stream.py",
+        "tests/test_a_retained_cleanup_owner_leaves_the_module_registry.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/pyright_session_startup.py",
+      "names": [
+        "HEALTHY_RUN_SECONDS",
+        "STARTUP_RETRY_BACKOFF"
+      ],
+      "contract_sha256": "848281ef1ba1c2ffb55860d7846af8527461b846bdad0bc53249417567e3e2a9",
+      "integration_tests": [
+        "tests/test_a_failed_server_is_started_again.py",
+        "tests/test_a_startup_that_ran_out_of_time_is_tried_again_later.py",
+        "tests/test_pyright_session.py"
+      ]
+    },
+    {
+      "provider": "scripts/lsp_positions.py",
+      "names": [
+        "SourceAnchor",
+        "SourceDocument"
+      ],
+      "contract_sha256": "18e415cb25ded59fb2848fd91aa95af0f8ad4f6b0f6e7c9d40eed19a85d0caf6",
+      "integration_tests": [
+        "tests/test_a_failed_server_is_started_again.py"
+      ]
+    },
+    {
+      "provider": "scripts/lsp_process.py",
+      "names": [
+        "ProcessState"
+      ],
+      "contract_sha256": "470ddbea1b73e8cb3f670150cc2cd6acd609897847a8e3dbc7d0f341d33adec5",
+      "integration_tests": [
+        "tests/test_a_failed_server_is_started_again.py"
+      ]
+    },
+    {
+      "provider": "scripts/pyright_profile.py",
+      "names": [
+        "PYRIGHT_CONFIGURATION_SHA256",
+        "PYRIGHT_EXECUTED_TREE_RELATIVE",
+        "PYRIGHT_INITIALIZATION_OPTIONS_SHA256",
+        "PYRIGHT_SERVER_RELATIVE",
+        "PyrightIdentity",
+        "build_pyright_install_manifest",
+        "executed_tree_digest"
+      ],
+      "contract_sha256": "ff76b7f440138d25ea8b6c15df411995a1282aa9e1f5be021340d642c73c268a",
+      "integration_tests": [
+        "tests/test_a_failed_server_is_started_again.py"
+      ]
+    },
+    {
+      "provider": "scripts/reliable_memory.py",
+      "names": [
+        "canonical_json_bytes",
+        "validate_state_root"
+      ],
+      "contract_sha256": "7bba4b535d3f0a73445fece541c540939989b41456c9a79a67f82634748be36b",
+      "integration_tests": [
+        "tests/test_a_failed_server_is_started_again.py"
+      ]
+    },
+    {
+      "provider": "scripts/repository_scope.py",
+      "names": [
+        "resolve_repository_scope",
+        "sanitized_git_environment"
+      ],
+      "contract_sha256": "983dd096d99bafff98ca0aaa2cd722477333e30eed4bfa9297d1830c635e8d90",
+      "integration_tests": [
+        "tests/test_a_failed_server_is_started_again.py"
+      ]
+    }
+  ]
+}

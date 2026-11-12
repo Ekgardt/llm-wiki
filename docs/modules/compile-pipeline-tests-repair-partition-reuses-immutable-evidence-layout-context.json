@@ -1,0 +1,181 @@
+{
+  "encoding": "o200k_base",
+  "max_tokens": 100000,
+  "serialization": "exact-duplicates/v1",
+  "files": [
+    "AGENTS.md",
+    "CLAUDE.md",
+    "docs/AGENTS.md",
+    "docs/STRUCTURE.md",
+    "docs/modules/compile-paths.md",
+    "docs/modules/compile-pipeline-batches-tests-repair-capacity-repartitions-complete-source-work-helpers.md",
+    "docs/modules/compile-pipeline-prompts-tests-compile-critic-drop-cannot-complete-source-work-helpers.md",
+    "docs/modules/compile-pipeline-tests-repair-partition-reuses-immutable-evidence-layout-context.json",
+    "docs/modules/compile-pipeline-tests-repair-partition-reuses-immutable-evidence-layout.md",
+    "docs/modules/context-bundle.md",
+    "docs/modules/context-records.md",
+    "docs/modules/context-tooling.md",
+    "docs/modules/llm-client-tests-the-compile-decides-what-the-snapshot-already-knows-helpers.md",
+    "docs/modules/model-choice.md",
+    "docs/modules/product-structure.md",
+    "docs/modules/project-governance.md",
+    "docs/modules/script-sources.md",
+    "docs/modules/test-support.md",
+    "rules/development-laws.md",
+    "scripts/__init__.py",
+    "scripts/llm_wiki/__init__.py",
+    "scripts/llm_wiki/context_bundle.py",
+    "tests/__init__.py",
+    "tests/compile_critic_drop_cannot_complete_source_work_helpers.py",
+    "tests/compile_paths.py",
+    "tests/conftest.py",
+    "tests/module_context.py",
+    "tests/module_context_paths.py",
+    "tests/module_interface.py",
+    "tests/module_interface_render.py",
+    "tests/module_qualification.py",
+    "tests/module_record_context.py",
+    "tests/module_records.py",
+    "tests/repair_capacity_repartitions_complete_source_work_helpers.py",
+    "tests/script_sources.py",
+    "tests/shared_fixtures.py",
+    "tests/slow_machine.py",
+    "tests/test_repair_partition_reuses_immutable_evidence_layout.py",
+    "tests/the_compile_decides_what_the_snapshot_already_knows_helpers.py"
+  ],
+  "ownership": {
+    "files": [
+      "docs/modules/compile-pipeline-tests-repair-partition-reuses-immutable-evidence-layout-context.json",
+      "docs/modules/compile-pipeline-tests-repair-partition-reuses-immutable-evidence-layout.md",
+      "tests/test_repair_partition_reuses_immutable_evidence_layout.py"
+    ]
+  },
+  "qualified_dependencies": [
+    {
+      "provider": "scripts/compile_cache.py",
+      "names": [
+        "CompileCache"
+      ],
+      "contract_sha256": "2f950a945aecf6065663cf128b0cdc4db8f0e8cf0f8d1f1057cc0d1e52d56c95",
+      "integration_tests": [
+        "tests/test_repair_partition_reuses_immutable_evidence_layout.py"
+      ]
+    },
+    {
+      "provider": "scripts/compile_pipeline.py",
+      "names": [
+        "repartition_compile_repair"
+      ],
+      "contract_sha256": "e2f1ca48930f1b37e8d501132384d35086b510310a582a79fe5f98b249542a80",
+      "integration_tests": [
+        "tests/test_repair_partition_reuses_immutable_evidence_layout.py"
+      ]
+    },
+    {
+      "provider": "scripts/evidence_resolver.py",
+      "names": [
+        "daily_entries"
+      ],
+      "contract_sha256": "fcda406ba92e4409edeb9c44df3e55a7800c4649c022ab613b296cd7d42026d0",
+      "integration_tests": [
+        "tests/test_repair_partition_reuses_immutable_evidence_layout.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_client.py",
+      "names": [
+        "LLMResult",
+        "ProviderDescriptor"
+      ],
+      "contract_sha256": "49028d940367f29613fe604096ec06729162f8d7ef981562c8d9511058d73893",
+      "integration_tests": [
+        "tests/test_repair_partition_reuses_immutable_evidence_layout.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/compile_pipeline_batches.py",
+      "names": [
+        "pack_compile_batches"
+      ],
+      "contract_sha256": "42879fb77545b262126891bf818efcf8a9307f66323329e8e70bef806a53fc39",
+      "integration_tests": [
+        "tests/test_repair_partition_reuses_immutable_evidence_layout.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/compile_pipeline_claims.py",
+      "names": [
+        "SOURCE_CHOICE_RESOLVER"
+      ],
+      "contract_sha256": "46ae3f6dc0210a480f59beef7508f66b6139eb8f8fd2085a0098250c4dfda1a5",
+      "integration_tests": [
+        "tests/test_repair_partition_reuses_immutable_evidence_layout.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/compile_pipeline_prompts.py",
+      "names": [
+        "CompileAttempt",
+        "SOURCE_REVIEW_SCHEMA",
+        "critique_prompt",
+        "validated_critique_feedback"
+      ],
+      "contract_sha256": "9309d42736d2111c24ddca5f757aba18fd556779ff694761d615917bedab558f",
+      "integration_tests": [
+        "tests/test_repair_partition_reuses_immutable_evidence_layout.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/compile_pipeline_sources.py",
+      "names": [
+        "snapshot_compile_inputs"
+      ],
+      "contract_sha256": "bf02fc1c5e0236abe974c7bd9563649093ead7a0da80b24feef40a93b2a02969",
+      "integration_tests": [
+        "tests/test_repair_partition_reuses_immutable_evidence_layout.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/generation_catalog_store.py",
+      "names": [
+        "GenerationCatalog"
+      ],
+      "contract_sha256": "b18194ebe04bf988b4474379fcb5243516550d43b745a00eaed1453f7844c983",
+      "integration_tests": [
+        "tests/test_a_blocked_task_has_a_way_back.py",
+        "tests/test_a_build_in_flight_is_not_an_orphan.py",
+        "tests/test_a_capacity_refusal_does_not_corrupt_a_generation.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/model_choice.py",
+      "names": [
+        "using_root"
+      ],
+      "contract_sha256": "d45f2655cb61963e77617d1dfd7d617b134ad77cc770b59b335d0856e5d65019",
+      "integration_tests": [
+        "tests/test_repair_partition_reuses_immutable_evidence_layout.py"
+      ]
+    },
+    {
+      "provider": "scripts/reliable_memory.py",
+      "names": [
+        "validate_state_root"
+      ],
+      "contract_sha256": "8680515cd873056a7c8a36e0057d91f2f83f23c48841263697676ff91f7ff964",
+      "integration_tests": [
+        "tests/test_repair_partition_reuses_immutable_evidence_layout.py"
+      ]
+    },
+    {
+      "provider": "scripts/repository_scope.py",
+      "names": [
+        "sanitized_git_environment"
+      ],
+      "contract_sha256": "fd550ae20761afad50b37fa3a71044a162485b0e4d4b3e2af9b5b22e143c2bec",
+      "integration_tests": [
+        "tests/test_repair_partition_reuses_immutable_evidence_layout.py"
+      ]
+    }
+  ]
+}

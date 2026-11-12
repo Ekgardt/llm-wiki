@@ -1,0 +1,146 @@
+{
+  "encoding": "o200k_base",
+  "max_tokens": 100000,
+  "serialization": "exact-duplicates/v1",
+  "files": [
+    "AGENTS.md",
+    "CLAUDE.md",
+    "docs/AGENTS.md",
+    "docs/STRUCTURE.md",
+    "docs/modules/compile-paths.md",
+    "docs/modules/compile-pipeline-sources-tests-compile-packing-counts-original-entry-metadata-helpers.md",
+    "docs/modules/compile-pipeline-sources-tests-compile-refresh-requalifies-changed-provider-environment-helpers.md",
+    "docs/modules/context-bundle.md",
+    "docs/modules/context-records.md",
+    "docs/modules/context-tooling.md",
+    "docs/modules/llm-client-tests-codex-planning-basis-owns-the-selected-model-helpers.md",
+    "docs/modules/llm-client-tests-compile-refresh-requalifies-changed-codex-configuration-context.json",
+    "docs/modules/llm-client-tests-compile-refresh-requalifies-changed-codex-configuration.md",
+    "docs/modules/model-choice.md",
+    "docs/modules/product-structure.md",
+    "docs/modules/project-governance.md",
+    "docs/modules/script-sources.md",
+    "docs/modules/test-support.md",
+    "rules/development-laws.md",
+    "scripts/__init__.py",
+    "scripts/llm_wiki/__init__.py",
+    "scripts/llm_wiki/context_bundle.py",
+    "tests/__init__.py",
+    "tests/codex_planning_basis_owns_the_selected_model_helpers.py",
+    "tests/compile_packing_counts_original_entry_metadata_helpers.py",
+    "tests/compile_paths.py",
+    "tests/compile_refresh_requalifies_changed_provider_environment_helpers.py",
+    "tests/conftest.py",
+    "tests/module_context.py",
+    "tests/module_context_paths.py",
+    "tests/module_interface.py",
+    "tests/module_interface_render.py",
+    "tests/module_qualification.py",
+    "tests/module_record_context.py",
+    "tests/module_records.py",
+    "tests/script_sources.py",
+    "tests/shared_fixtures.py",
+    "tests/slow_machine.py",
+    "tests/test_compile_refresh_requalifies_changed_codex_configuration.py"
+  ],
+  "ownership": {
+    "files": [
+      "docs/modules/llm-client-tests-compile-refresh-requalifies-changed-codex-configuration-context.json",
+      "docs/modules/llm-client-tests-compile-refresh-requalifies-changed-codex-configuration.md",
+      "tests/test_compile_refresh_requalifies_changed_codex_configuration.py"
+    ]
+  },
+  "qualified_dependencies": [
+    {
+      "provider": "scripts/compile_receipts.py",
+      "names": [
+        "SourceSnapshot"
+      ],
+      "contract_sha256": "02926d8c4ae579f35a373ac76b77bf41a7016f084df2b6a04a4afaeda23c25c1",
+      "integration_tests": [
+        "tests/test_compile_refresh_requalifies_changed_codex_configuration.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_client.py",
+      "names": [
+        "CodexPlanningBasis",
+        "bind_codex_executable",
+        "codex_basis_digest",
+        "codex_basis_file_digest",
+        "prepare_codex",
+        "provider_candidates",
+        "provider_environment"
+      ],
+      "contract_sha256": "91101e6467c95b5d0666925e5e3cf43cf99963970cf9ba429d775d72db5a2b11",
+      "integration_tests": [
+        "tests/test_compile_refresh_requalifies_changed_codex_configuration.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/compile_pipeline_batches.py",
+      "names": [
+        "pack_compile_batches",
+        "refresh_compile_batch"
+      ],
+      "contract_sha256": "aaa36f8ce1722bbb67112c8d919f53a77c5cbbec643df952697fde42e02f0c82",
+      "integration_tests": [
+        "tests/test_compile_refresh_requalifies_changed_codex_configuration.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/compile_pipeline_sources.py",
+      "names": [
+        "CompileInputs",
+        "daily_parts"
+      ],
+      "contract_sha256": "8a111d023fd7cafc0e0ce83d4bb620dbd93e984625a711c3c61a29e46ec80d54",
+      "integration_tests": [
+        "tests/test_compile_refresh_requalifies_changed_codex_configuration.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/generation_catalog_store.py",
+      "names": [
+        "GenerationCatalog"
+      ],
+      "contract_sha256": "b18194ebe04bf988b4474379fcb5243516550d43b745a00eaed1453f7844c983",
+      "integration_tests": [
+        "tests/test_a_blocked_task_has_a_way_back.py",
+        "tests/test_a_build_in_flight_is_not_an_orphan.py",
+        "tests/test_a_capacity_refusal_does_not_corrupt_a_generation.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/model_choice.py",
+      "names": [
+        "using_root"
+      ],
+      "contract_sha256": "d45f2655cb61963e77617d1dfd7d617b134ad77cc770b59b335d0856e5d65019",
+      "integration_tests": [
+        "tests/test_compile_refresh_requalifies_changed_codex_configuration.py"
+      ]
+    },
+    {
+      "provider": "scripts/reliable_memory.py",
+      "names": [
+        "sha256_bytes",
+        "validate_state_root"
+      ],
+      "contract_sha256": "6a7b0b232a73f614931e67eb1d96c7b1a7655d4efe793da9d2bf61430fd1f4c6",
+      "integration_tests": [
+        "tests/test_compile_refresh_requalifies_changed_codex_configuration.py"
+      ]
+    },
+    {
+      "provider": "scripts/repository_scope.py",
+      "names": [
+        "sanitized_git_environment"
+      ],
+      "contract_sha256": "fd550ae20761afad50b37fa3a71044a162485b0e4d4b3e2af9b5b22e143c2bec",
+      "integration_tests": [
+        "tests/test_compile_refresh_requalifies_changed_codex_configuration.py"
+      ]
+    }
+  ]
+}

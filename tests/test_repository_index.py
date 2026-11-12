@@ -17,81 +17,46 @@ from pathlib import Path
 
 import pytest
 
+from tests.repository_index_helpers import (
+    ALPHA,
+    _git,
+    _repository,
+    vault,  # noqa: F401
+)
+
 SCRIPTS = Path(__file__).resolve().parents[1] / "scripts"
 if str(SCRIPTS) not in sys.path:
     sys.path.insert(0, str(SCRIPTS))
 
 
-def _git(root: Path, *arguments: str) -> None:
-    subprocess.run(
-        ["git", "-C", str(root), *arguments],
-        check=True,
-        capture_output=True,
-    )
-
-
-def _repository(root: Path, files: dict[str, str]) -> Path:
-    root.mkdir(parents=True, exist_ok=True)
-    _git(root, "init", "-q", ".")
-    _git(root, "config", "user.email", "test@example.invalid")
-    _git(root, "config", "user.name", "test")
-    for relative, content in files.items():
-        target = root / relative
-        target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text(content, encoding="utf-8")
-    _git(root, "add", "-A")
-    _git(root, "commit", "-qm", "initial")
-    return root
-
-
-ALPHA = "def helper(value):\n    return value + 1\n\n\ndef caller(value):\n    return helper(value) * 2\n"
-
-
-@pytest.fixture
-def vault(tmp_path, monkeypatch):
-    """An isolated vault and state root; nothing here touches the live one."""
-    root = tmp_path / "vault"
-    (root / "knowledge/notes").mkdir(parents=True)
-    (root / "knowledge/projects").mkdir(parents=True)
-    state = tmp_path / "state"
-    state.mkdir()
-    monkeypatch.setenv("LLM_WIKI_STATE_ROOT", str(state))
-    monkeypatch.setenv("LLM_WIKI_ROOT", str(root))
-    import memory_state
-
-    monkeypatch.setattr(memory_state, "ROOT", root, raising=False)
-    monkeypatch.setattr(memory_state, "STATE_ROOT", state, raising=False)
-    return root, state
-
-
 # ---------------------------------------------------------------- admission
 
 
-def test_a_path_that_is_not_a_git_repository_is_refused_by_name(vault, tmp_path):
-    import repository_index
+def test_a_path_that_is_not_a_git_repository_is_refused_by_name(vault, tmp_path):  # noqa: F811
+    import repository_indexing
 
     _root, state = vault
     plain = tmp_path / "plain"
     (plain / "scripts").mkdir(parents=True)
 
-    with pytest.raises(repository_index.RepositoryIndexRefused) as refusal:
-        repository_index.admit_repository(plain, state_root=state)
+    with pytest.raises(repository_indexing.RepositoryIndexRefused) as refusal:
+        repository_indexing.admit_repository(plain, state_root=state)
 
     assert refusal.value.reason == "repository_not_git"
 
 
 def test_a_directory_inside_a_repository_is_refused_and_names_the_root(
-    vault, tmp_path
+    vault, tmp_path  # noqa: F811
 ):
     """cbm registers `/repo/llm-wiki/scripts` as a peer of the repository
     that contains it. A subdirectory is not a repository."""
-    import repository_index
+    import repository_indexing
 
     _root, state = vault
     repository = _repository(tmp_path / "repo", {"scripts/alpha.py": ALPHA})
 
-    with pytest.raises(repository_index.RepositoryIndexRefused) as refusal:
-        repository_index.admit_repository(repository / "scripts", state_root=state)
+    with pytest.raises(repository_indexing.RepositoryIndexRefused) as refusal:
+        repository_indexing.admit_repository(repository / "scripts", state_root=state)
 
     assert refusal.value.reason == "repository_not_checkout_root"
     # The details carry the canonical serialisation, which on Windows has an
@@ -100,23 +65,23 @@ def test_a_directory_inside_a_repository_is_refused_and_names_the_root(
     assert Path(refusal.value.details["checkout_root"]) == repository.resolve()
 
 
-def test_a_symlinked_path_is_refused_and_offers_the_real_path(vault, tmp_path):
-    import repository_index
+def test_a_symlinked_path_is_refused_and_offers_the_real_path(vault, tmp_path):  # noqa: F811
+    import repository_indexing
 
     _root, state = vault
     repository = _repository(tmp_path / "repo", {"scripts/alpha.py": ALPHA})
     link = tmp_path / "link"
     link.symlink_to(repository, target_is_directory=True)
 
-    with pytest.raises(repository_index.RepositoryIndexRefused) as refusal:
-        repository_index.admit_repository(link, state_root=state)
+    with pytest.raises(repository_indexing.RepositoryIndexRefused) as refusal:
+        repository_indexing.admit_repository(link, state_root=state)
 
     assert refusal.value.reason == "repository_path_is_symlinked"
     assert Path(refusal.value.details["real_path"]) == repository.resolve()
 
 
-def test_a_submodule_is_refused_and_names_its_superproject(vault, tmp_path):
-    import repository_index
+def test_a_submodule_is_refused_and_names_its_superproject(vault, tmp_path):  # noqa: F811
+    import repository_indexing
 
     _root, state = vault
     inner = _repository(tmp_path / "inner", {"scripts/alpha.py": ALPHA})
@@ -129,8 +94,8 @@ def test_a_submodule_is_refused_and_names_its_superproject(vault, tmp_path):
     )
     _git(outer, "commit", "-qm", "add submodule")
 
-    with pytest.raises(repository_index.RepositoryIndexRefused) as refusal:
-        repository_index.admit_repository(outer / "vendor", state_root=state)
+    with pytest.raises(repository_indexing.RepositoryIndexRefused) as refusal:
+        repository_indexing.admit_repository(outer / "vendor", state_root=state)
 
     assert refusal.value.reason == "repository_is_submodule"
     # Git prints a Windows working tree with forward slashes, which is also the
@@ -139,44 +104,44 @@ def test_a_submodule_is_refused_and_names_its_superproject(vault, tmp_path):
     assert Path(refusal.value.details["superproject"]) == outer.resolve()
 
 
-def test_the_vault_is_admitted_as_a_repository_like_any_other(vault, tmp_path):
+def test_the_vault_is_admitted_as_a_repository_like_any_other(vault, tmp_path):  # noqa: F811
     """The vault is also a repository; its code lives in a code generation.
 
     It used to be refused with `repository_is_the_vault`, whose reason — the
     nightly builds it — stopped being true when #29.2 emptied VAULT_CODE_ROOTS.
     Decision: `docs/research/2026-09-12-the-vault-is-a-repository-too.md`.
     """
-    import repository_index
+    import repository_indexing
 
     root, state = vault
     _repository(root, {"scripts/alpha.py": ALPHA})
 
-    admission = repository_index.admit_repository(root, state_root=state)
+    admission = repository_indexing.admit_repository(root, state_root=state)
 
     assert admission.root == root.resolve()
 
 
-def test_the_memory_tree_is_excluded_from_the_vault_code_roots(vault, tmp_path):
+def test_the_memory_tree_is_excluded_from_the_vault_code_roots(vault, tmp_path):  # noqa: F811
     """`knowledge/` is the memory generation's, and the receipt says so."""
-    import repository_index
+    import repository_indexing
 
     root, state = vault
     _repository(root, {"scripts/alpha.py": ALPHA, "knowledge/notes/page.md": "# page\n"})
 
-    roots = repository_index.selected_code_roots(root, None, memory_owner=True)
+    roots = repository_indexing.selected_code_roots(root, None, memory_owner=True)
 
     assert "knowledge" not in roots.selected
     assert "knowledge" in roots.excluded
 
 
-def test_asking_a_code_index_for_the_memory_tree_is_refused_by_name(vault, tmp_path):
-    import repository_index
+def test_asking_a_code_index_for_the_memory_tree_is_refused_by_name(vault, tmp_path):  # noqa: F811
+    import repository_indexing
 
     root, state = vault
     _repository(root, {"scripts/alpha.py": ALPHA, "knowledge/notes/page.md": "# page\n"})
 
-    with pytest.raises(repository_index.RepositoryIndexRefused) as refusal:
-        repository_index.selected_code_roots(
+    with pytest.raises(repository_indexing.RepositoryIndexRefused) as refusal:
+        repository_indexing.selected_code_roots(
             root, ["scripts", "knowledge"], memory_owner=True
         )
 
@@ -184,43 +149,43 @@ def test_asking_a_code_index_for_the_memory_tree_is_refused_by_name(vault, tmp_p
 
 
 @pytest.mark.skipif(os.name != "posix", reason="ownership is a POSIX boundary")
-def test_a_repository_owned_by_another_user_is_refused(vault, tmp_path, monkeypatch):
+def test_a_repository_owned_by_another_user_is_refused(vault, tmp_path, monkeypatch):  # noqa: F811
     """There is no second user on this machine, so the euid is what moves.
 
     The boundary under test is ownership, not identity, and it is reached the
     same way either way: `st_uid` does not equal the caller's effective uid.
     """
-    import repository_index
+    import repository_indexing
 
     _root, state = vault
     repository = _repository(tmp_path / "repo", {"scripts/alpha.py": ALPHA})
     monkeypatch.setattr(os, "geteuid", lambda: os.stat(repository).st_uid + 1)
 
-    with pytest.raises(repository_index.RepositoryIndexRefused) as refusal:
-        repository_index.admit_repository(repository, state_root=state)
+    with pytest.raises(repository_indexing.RepositoryIndexRefused) as refusal:
+        repository_indexing.admit_repository(repository, state_root=state)
 
     assert refusal.value.reason == "repository_not_owned_by_caller"
 
 
-def test_a_repository_owned_by_the_caller_passes_the_ownership_gate(vault, tmp_path):
-    import repository_index
+def test_a_repository_owned_by_the_caller_passes_the_ownership_gate(vault, tmp_path):  # noqa: F811
+    import repository_indexing
 
     _root, state = vault
     repository = _repository(tmp_path / "repo", {"scripts/alpha.py": ALPHA})
 
-    admission = repository_index.admit_repository(repository, state_root=state)
+    admission = repository_indexing.admit_repository(repository, state_root=state)
 
     assert admission.root == repository
     assert admission.ownership_checked is (os.name == "posix")
 
 
-def test_a_missing_directory_is_refused_before_anything_is_opened(vault, tmp_path):
-    import repository_index
+def test_a_missing_directory_is_refused_before_anything_is_opened(vault, tmp_path):  # noqa: F811
+    import repository_indexing
 
     _root, state = vault
 
-    with pytest.raises(repository_index.RepositoryIndexRefused) as refusal:
-        repository_index.admit_repository(tmp_path / "absent", state_root=state)
+    with pytest.raises(repository_indexing.RepositoryIndexRefused) as refusal:
+        repository_indexing.admit_repository(tmp_path / "absent", state_root=state)
 
     assert refusal.value.reason == "repository_path_not_a_directory"
 
@@ -234,7 +199,7 @@ def test_tracked_top_level_entries_ignore_untracked_build_output(tmp_path):
     `top.py` is in the answer and `.venv` is not, which is the whole claim: the
     unit is the tracked entry, not the tracked directory.
     """
-    import repository_index
+    import repository_indexing
 
     repository = _repository(
         tmp_path / "repo",
@@ -243,7 +208,7 @@ def test_tracked_top_level_entries_ignore_untracked_build_output(tmp_path):
     (repository / ".venv/lib").mkdir(parents=True)
     (repository / ".venv/lib/huge.py").write_text("y = 2\n", encoding="utf-8")
 
-    assert repository_index.tracked_top_level_entries(repository) == (
+    assert repository_indexing.tracked_top_level_entries(repository) == (
         "docs",
         "scripts",
         "top.py",
@@ -252,14 +217,14 @@ def test_tracked_top_level_entries_ignore_untracked_build_output(tmp_path):
 
 def test_a_foreign_layout_is_indexed_whole_not_refused_for_its_names(tmp_path):
     """`src/` is not this vault's name, and that is not a reason to refuse it."""
-    import repository_index
+    import repository_indexing
 
     repository = _repository(
         tmp_path / "repo",
         {"src/alpha.py": ALPHA, "lib/beta.py": ALPHA, "cmd/main.go": "package main\n"},
     )
 
-    roots = repository_index.selected_code_roots(repository, None)
+    roots = repository_indexing.selected_code_roots(repository, None)
 
     assert roots.selected == ("cmd", "lib", "src")
     assert roots.excluded == ()
@@ -272,14 +237,14 @@ def test_a_tracked_hidden_directory_is_excluded_by_name_not_silently(tmp_path):
     to descend into a hidden directory in *this* vault too -- but the omission
     is carried out, not swallowed.
     """
-    import repository_index
+    import repository_indexing
 
     repository = _repository(
         tmp_path / "repo",
         {"src/alpha.py": ALPHA, ".github/workflows/ci.yml": "on: push\n"},
     )
 
-    roots = repository_index.selected_code_roots(repository, None)
+    roots = repository_indexing.selected_code_roots(repository, None)
 
     assert roots.selected == ("src",)
     assert roots.excluded == (".github",)
@@ -287,14 +252,14 @@ def test_a_tracked_hidden_directory_is_excluded_by_name_not_silently(tmp_path):
 
 def test_a_repository_of_only_pruned_directories_refuses_by_name(tmp_path):
     """Nothing collectable is a refusal, and the refusal says what was pruned."""
-    import repository_index
+    import repository_indexing
 
     repository = _repository(
         tmp_path / "repo", {".github/workflows/ci.yml": "on: push\n"}
     )
 
-    with pytest.raises(repository_index.RepositoryIndexRefused) as refusal:
-        repository_index.selected_code_roots(repository, None)
+    with pytest.raises(repository_indexing.RepositoryIndexRefused) as refusal:
+        repository_indexing.selected_code_roots(repository, None)
 
     assert refusal.value.reason == "repository_has_no_code_roots"
     assert refusal.value.details["excluded_roots"] == [".github"]
@@ -302,15 +267,15 @@ def test_a_repository_of_only_pruned_directories_refuses_by_name(tmp_path):
 
 def test_an_explicitly_requested_pruned_root_is_refused_by_name(tmp_path):
     """`.claude/worktrees/` is a second copy of the repository -- commit 1d06e6a."""
-    import repository_index
+    import repository_indexing
 
     repository = _repository(
         tmp_path / "repo",
         {"src/alpha.py": ALPHA, ".claude/worktrees/agent-a/src/alpha.py": ALPHA},
     )
 
-    with pytest.raises(repository_index.RepositoryIndexRefused) as refusal:
-        repository_index.selected_code_roots(repository, ["src", ".claude"])
+    with pytest.raises(repository_indexing.RepositoryIndexRefused) as refusal:
+        repository_indexing.selected_code_roots(repository, ["src", ".claude"])
 
     assert refusal.value.reason == "repository_root_not_collectable"
     assert refusal.value.details["refused_roots"] == [".claude"]
@@ -318,25 +283,25 @@ def test_an_explicitly_requested_pruned_root_is_refused_by_name(tmp_path):
 
 
 def test_explicit_roots_accept_a_deliberately_narrower_index(tmp_path):
-    import repository_index
+    import repository_indexing
 
     repository = _repository(
         tmp_path / "repo", {"src/alpha.py": ALPHA, "scripts/beta.py": ALPHA}
     )
 
-    roots = repository_index.selected_code_roots(repository, ["scripts"])
+    roots = repository_indexing.selected_code_roots(repository, ["scripts"])
 
     assert roots.selected == ("scripts",)
     assert roots.excluded == ()
 
 
 def test_an_explicit_root_that_does_not_exist_is_refused(tmp_path):
-    import repository_index
+    import repository_indexing
 
     repository = _repository(tmp_path / "repo", {"scripts/alpha.py": ALPHA})
 
-    with pytest.raises(repository_index.RepositoryIndexRefused) as refusal:
-        repository_index.selected_code_roots(repository, ["scripts", "nowhere"])
+    with pytest.raises(repository_indexing.RepositoryIndexRefused) as refusal:
+        repository_indexing.selected_code_roots(repository, ["scripts", "nowhere"])
 
     assert refusal.value.reason == "repository_root_missing"
     assert refusal.value.details["missing_roots"] == ["nowhere"]
@@ -370,10 +335,10 @@ def _assert_receipt(receipt: dict) -> None:
 
 
 def _assert_pointer_untouched_and_scope_resolves(state, repository, receipt) -> None:
-    import generation_catalog
+    from llm_wiki import generation_catalog_store
     from repository_scope import resolve_repository_scope
 
-    catalog = generation_catalog.GenerationCatalog(state)
+    catalog = generation_catalog_store.GenerationCatalog(state)
     assert catalog.get_active() is None, "a foreign index must not move the pointer"
     scope = resolve_repository_scope(repository)
     # A code generation is a code reader's answer, never the pointer path's:
@@ -397,18 +362,18 @@ def _assert_navigation_reads_the_generation(repository, receipt) -> None:
 
 
 def _assert_listing(state, repository) -> None:
-    import repository_index
+    import repository_indexing
 
-    rows = repository_index.list_repositories(state_root=state)["repositories"]
+    rows = repository_indexing.list_repositories(state_root=state)["repositories"]
     assert [Path(row["checkout_root"]) for row in rows] == [repository.resolve()]
     assert rows[0]["code_roots"] == ["scripts"]
     assert rows[0]["active"] is False
 
 
 def _assert_detects_nothing_then_an_edit(state, repository) -> None:
-    import repository_index
+    import repository_indexing
 
-    unchanged = repository_index.detect_repository_changes(repository, state_root=state)
+    unchanged = repository_indexing.detect_repository_changes(repository, state_root=state)
     assert unchanged["stale"] is False
     assert unchanged["counts"] == {"added": 0, "removed": 0, "modified": 0}
     (repository / "scripts/alpha.py").write_text(
@@ -417,7 +382,7 @@ def _assert_detects_nothing_then_an_edit(state, repository) -> None:
     (repository / "scripts/gamma.py").write_text(
         "def added():\n    return 1\n", encoding="utf-8"
     )
-    changed = repository_index.detect_repository_changes(repository, state_root=state)
+    changed = repository_indexing.detect_repository_changes(repository, state_root=state)
     _assert_change_report(changed)
 
 
@@ -429,7 +394,7 @@ def _assert_change_report(changed: dict) -> None:
 
 
 def test_a_second_repository_is_indexed_registered_and_never_activated(
-    vault, tmp_path
+    vault, tmp_path  # noqa: F811
 ):
     """The whole CODE-03 contract in one test.
 
@@ -437,12 +402,12 @@ def test_a_second_repository_is_indexed_registered_and_never_activated(
     `get_active_for_repository` answered None for any other repository, so the
     second repository could not be resolved at all.
     """
-    import repository_index
+    import repository_indexing
 
     _root, state = vault
     repository = _repository(tmp_path / "repo", {"scripts/alpha.py": ALPHA})
 
-    receipt = repository_index.index_repository(repository, state_root=state)
+    receipt = repository_indexing.index_repository(repository, state_root=state)
 
     _assert_receipt(receipt)
     _assert_pointer_untouched_and_scope_resolves(state, repository, receipt)
@@ -452,25 +417,25 @@ def test_a_second_repository_is_indexed_registered_and_never_activated(
 
 
 def test_detect_says_not_indexed_rather_than_pretending_nothing_changed(
-    vault, tmp_path
+    vault, tmp_path  # noqa: F811
 ):
-    import repository_index
+    import repository_indexing
 
     _root, state = vault
     repository = _repository(tmp_path / "repo", {"scripts/alpha.py": ALPHA})
 
-    report = repository_index.detect_repository_changes(repository, state_root=state)
+    report = repository_indexing.detect_repository_changes(repository, state_root=state)
 
     assert report["status"] == "not_indexed"
     assert report["stale"] is True
 
 
-def test_listing_an_empty_catalog_does_not_create_one(vault):
-    import repository_index
+def test_listing_an_empty_catalog_does_not_create_one(vault):  # noqa: F811
+    import repository_indexing
 
     _root, state = vault
 
-    listing = repository_index.list_repositories(state_root=state)
+    listing = repository_indexing.list_repositories(state_root=state)
 
     assert listing["repositories"] == []
     assert not (state / "cache/evidence-graph/catalog.sqlite3").exists()
@@ -486,15 +451,15 @@ def test_the_three_verbs_are_modes_of_get_architecture_not_a_thirteenth_tool():
     modes = set(schema["properties"]["mode"]["enum"])
 
     assert {"index", "repositories", "changes"} <= modes
-    assert len(mcp_server._build_tool_definitions()) in (0, 12)
+    assert len(mcp_server.build_tool_definitions()) in (0, 12)
 
 
 def _mode_contract_errors() -> list:
     import mcp_server
 
     return [
-        (mode in mcp_server._ARCHITECTURE_CONTRACTS)
-        and mcp_server._validate_architecture_arguments(
+        (mode in mcp_server.ARCHITECTURE_CONTRACTS)
+        and mcp_server.validate_architecture_arguments(
             {"directory": "/tmp", "mode": mode}
         )
         for mode in ("index", "repositories", "changes")
@@ -505,11 +470,11 @@ def test_every_new_mode_declares_its_contract_and_rejects_stray_arguments():
     import mcp_server
 
     assert _mode_contract_errors() == [None, None, None]
-    assert mcp_server._validate_architecture_arguments(
+    assert mcp_server.validate_architecture_arguments(
         {"directory": "/tmp", "mode": "changes", "roots": ["scripts"]}
     ) == "arguments are not valid for changes: roots"
     assert (
-        mcp_server._validate_architecture_arguments(
+        mcp_server.validate_architecture_arguments(
             {"directory": "/tmp", "mode": "index", "roots": ["scripts"]}
         )
         is None
@@ -517,25 +482,25 @@ def test_every_new_mode_declares_its_contract_and_rejects_stray_arguments():
 
 
 def test_the_index_mode_argument_passes_the_shared_object_schema():
-    """The new argument goes through `_validate_object_schema`, not around it."""
+    """The new argument goes through `validate_object_schema`, not around it."""
     import mcp_server
 
     schema = mcp_server.TOOL_INPUT_SCHEMAS["get_architecture"]
 
     assert (
-        mcp_server._validate_object_schema(
+        mcp_server.validate_object_schema(
             schema, {"directory": "/tmp", "mode": "index", "roots": ["scripts"]}
         )
         is None
     )
     assert (
-        mcp_server._validate_object_schema(
+        mcp_server.validate_object_schema(
             schema, {"directory": "/tmp", "mode": "index", "roots": "scripts"}
         )
         == "argument 'roots' must be an array"
     )
     assert (
-        mcp_server._validate_object_schema(
+        mcp_server.validate_object_schema(
             schema, {"directory": "/tmp", "mode": "index", "roots": [1]}
         )
         == "argument 'roots' items must be strings"
@@ -545,11 +510,11 @@ def test_the_index_mode_argument_passes_the_shared_object_schema():
 def test_indexing_gets_a_measured_budget_and_the_other_modes_do_not():
     import mcp_server
 
-    assert mcp_server._tool_operation_seconds(
+    assert mcp_server.tool_operation_seconds(
         "get_architecture", {"directory": "/tmp", "mode": "index"}
     ) == mcp_server.MCP_REPOSITORY_INDEX_SECONDS
     assert (
-        mcp_server._tool_operation_seconds(
+        mcp_server.tool_operation_seconds(
             "get_architecture", {"directory": "/tmp", "mode": "repositories"}
         )
         == mcp_server.MCP_OPERATION_SECONDS
@@ -557,7 +522,7 @@ def test_indexing_gets_a_measured_budget_and_the_other_modes_do_not():
 
 
 def test_a_refusal_reaches_the_caller_as_a_named_answer_not_an_exception(
-    vault, tmp_path
+    vault, tmp_path  # noqa: F811
 ):
     import mcp_server
 
@@ -565,7 +530,7 @@ def test_a_refusal_reaches_the_caller_as_a_named_answer_not_an_exception(
     plain = tmp_path / "plain"
     plain.mkdir()
 
-    data = mcp_server._architecture_tool_call(
+    data = mcp_server.architecture_tool_call(
         {"directory": str(plain), "mode": "index"}, deadline=None
     )
 
@@ -577,7 +542,7 @@ def test_an_index_answer_is_not_labelled_a_live_extraction_fallback():
     """It extracts nothing, so the graph-completeness warning would be false."""
     import mcp_server
 
-    quality = mcp_server._quality_of_code_graph(
+    quality = mcp_server.quality_of_code_graph(
         "get_architecture",
         {"schema_version": "repository-index/v1", "status": "ok", "repositories": []},
         {},
@@ -586,7 +551,7 @@ def test_an_index_answer_is_not_labelled_a_live_extraction_fallback():
 
     assert quality["fallback"] is False
     assert quality["warnings"] == []
-    refused = mcp_server._quality_of_code_graph(
+    refused = mcp_server.quality_of_code_graph(
         "get_architecture",
         {
             "schema_version": "repository-index/v1",
@@ -603,7 +568,7 @@ def test_an_index_answer_is_not_labelled_a_live_extraction_fallback():
 def test_an_ordinary_graph_answer_keeps_its_existing_envelope():
     import mcp_server
 
-    quality = mcp_server._quality_of_code_graph(
+    quality = mcp_server.quality_of_code_graph(
         "get_architecture",
         {"fallback": False, "graph_complete": True, "unresolved_count": 0},
         {},
@@ -626,7 +591,7 @@ def _two_repository_catalog(tmp_path):
     """One catalog holding a generation for each of two repositories."""
     from repository_scope import resolve_repository_scope
 
-    from tests.test_generation_catalog import _catalog, _publish
+    from tests.generation_catalog_helpers import _catalog, _publish
 
     scopes = []
     for name in ("first", "second"):
@@ -659,7 +624,7 @@ def test_registered_manifests_skip_a_row_whose_bytes_stopped_matching(tmp_path):
     import sqlite3
     from contextlib import closing
 
-    from tests.test_generation_catalog import _catalog, _publish
+    from tests.generation_catalog_helpers import _catalog, _publish
 
     catalog = _catalog(tmp_path)
     _publish(catalog, "gen-1")
@@ -680,7 +645,7 @@ def test_registered_manifests_skip_a_row_whose_bytes_stopped_matching(tmp_path):
     assert identifiers == {"gen-2"}
 
 
-def test_the_vault_reads_its_own_code_generation_not_its_memory_one(vault, tmp_path):
+def test_the_vault_reads_its_own_code_generation_not_its_memory_one(vault, tmp_path):  # noqa: F811
     """The point of the 2026-09-12 decision, end to end.
 
     One checkout, two generations: the memory one the active pointer names, and
@@ -688,28 +653,28 @@ def test_the_vault_reads_its_own_code_generation_not_its_memory_one(vault, tmp_p
     which is why a code generation says `code_roots` in its manifest and the
     graph opener asks for that first.
     """
-    import repository_index
+    import repository_indexing
     from code_graph import find_callers
 
     root, state = vault
     _repository(root, {"scripts/alpha.py": ALPHA})
 
-    receipt = repository_index.index_repository(root, roots=["scripts"], state_root=state)
+    receipt = repository_indexing.index_repository(root, roots=["scripts"], state_root=state)
 
     answer = find_callers("helper", root, with_report=True)
     assert answer["source_generation"] == receipt["generation_id"]
     assert [row["qualified_name"] for row in answer["callers"]] == ["scripts.alpha.caller"]
 
 
-def test_a_code_generation_names_its_roots_and_a_memory_one_does_not(vault, tmp_path):
+def test_a_code_generation_names_its_roots_and_a_memory_one_does_not(vault, tmp_path):  # noqa: F811
     import json
 
-    import repository_index
+    import repository_indexing
 
     root, state = vault
     _repository(root, {"scripts/alpha.py": ALPHA})
 
-    receipt = repository_index.index_repository(root, roots=["scripts"], state_root=state)
+    receipt = repository_indexing.index_repository(root, roots=["scripts"], state_root=state)
     manifest_path = (
         state / "cache/evidence-graph/generations" / receipt["generation_id"] / "manifest.json"
     )

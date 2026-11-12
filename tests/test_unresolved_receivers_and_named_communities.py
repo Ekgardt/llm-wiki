@@ -161,11 +161,10 @@ def _graph_records() -> dict:
 @pytest.fixture()
 def repository(tmp_path, monkeypatch):
     """An active generation wired into `code_graph`, with the live scan forbidden."""
-    import code_graph
-    from generation_catalog import GenerationCatalog
+    from llm_wiki.generation_catalog_store import GenerationCatalog
     from repository_scope import resolve_repository_scope
 
-    from tests.test_evidence_graph_recovery import _publish
+    from tests.evidence_graph_recovery_helpers import _publish
 
     catalog = GenerationCatalog(tmp_path / "state")
     _publish(
@@ -176,10 +175,9 @@ def repository(tmp_path, monkeypatch):
     )
     catalog.register("active")
     catalog.activate("active", expected_active=None)
-    monkeypatch.setattr(code_graph, "_generation_catalog", lambda directory: catalog)
+    monkeypatch.setattr("llm_wiki.code_graph_generation.generation_catalog", lambda directory: catalog)
     monkeypatch.setattr(
-        code_graph,
-        "_workspace_call_graph",
+        "llm_wiki.code_graph_workspace.workspace_call_graph",
         lambda directory: (_ for _ in ()).throw(AssertionError("live scan used")),
     )
     return tmp_path
@@ -246,7 +244,7 @@ def test_the_attribute_match_does_not_read_underscores_as_wildcards(repository):
     """`LIKE '%.recover_expired_leases'` would also match `recover-expired-leases`."""
     import code_graph
 
-    graph = code_graph._active_evidence_graph(repository)
+    graph = code_graph.active_evidence_graph(repository)
     try:
         counts = tuple(
             graph.unresolved_calls_naming(name)["count"]
@@ -341,11 +339,10 @@ def test_the_community_bound_is_stated_rather_than_implied(repository, monkeypat
     """A cut listing has to say how many communities and members it left out."""
     import code_graph
 
-    monkeypatch.setattr(code_graph, "COMMUNITY_LIMIT", 1)
-    monkeypatch.setattr(code_graph, "COMMUNITY_MEMBER_LIMIT", 1)
+    monkeypatch.setattr("llm_wiki.code_graph_communities.COMMUNITY_LIMIT", 1)
+    monkeypatch.setattr("llm_wiki.code_graph_communities.COMMUNITY_MEMBER_LIMIT", 1)
     monkeypatch.setattr(
-        code_graph,
-        "_stored_communities",
+        "llm_wiki.code_graph_communities.stored_communities",
         lambda graph, edges: [["run_worker", "helper"], ["recover_expired_leases"]],
     )
 

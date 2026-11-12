@@ -33,15 +33,15 @@ def test_a_directory_tool_names_the_commit_of_that_directory(tmp_path, tool) -> 
     import mcp_server
 
     repository, head = _repository(tmp_path / "other")
-    mcp_contract._SOURCE_COMMITS.clear()
+    mcp_contract.SOURCE_COMMITS.clear()
 
-    envelope = mcp_server._tool_call_envelope(tool, {}, {"directory": str(repository)}, False, time.monotonic() + 30)
+    envelope = mcp_server.tool_call_envelope(tool, {}, {"directory": str(repository)}, False, time.monotonic() + 30)
 
     assert envelope["source_commit"] == head
 
 
 def test_a_relative_directory_names_no_commit(tmp_path) -> None:
-    mcp_contract._SOURCE_COMMITS.clear()
+    mcp_contract.SOURCE_COMMITS.clear()
 
     envelope = mcp_contract.build_envelope({}, root=tmp_path, source_root="some/relative")
 

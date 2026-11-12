@@ -1,0 +1,206 @@
+{
+  "encoding": "o200k_base",
+  "max_tokens": 100000,
+  "serialization": "exact-duplicates/v1",
+  "files": [
+    "AGENTS.md",
+    "CLAUDE.md",
+    "docs/AGENTS.md",
+    "docs/STRUCTURE.md",
+    "docs/modules/context-bundle.md",
+    "docs/modules/context-records.md",
+    "docs/modules/context-tooling.md",
+    "docs/modules/formats.md",
+    "docs/modules/llm-client-tests-codex-counts-the-prepared-invocation-context.json",
+    "docs/modules/llm-client-tests-codex-counts-the-prepared-invocation-helpers.md",
+    "docs/modules/llm-client-tests-codex-counts-the-prepared-invocation.md",
+    "docs/modules/llm-client.md",
+    "docs/modules/model-choice.md",
+    "docs/modules/product-structure.md",
+    "docs/modules/project-governance.md",
+    "docs/modules/reliable-memory-tests-llm-descriptors-helpers.md",
+    "docs/modules/test-support.md",
+    "rules/development-laws.md",
+    "scripts/__init__.py",
+    "scripts/llm_client.py",
+    "scripts/llm_wiki/__init__.py",
+    "scripts/llm_wiki/context_bundle.py",
+    "scripts/llm_wiki/formats/__init__.py",
+    "tests/__init__.py",
+    "tests/codex_counts_the_prepared_invocation_helpers.py",
+    "tests/conftest.py",
+    "tests/llm_descriptors_helpers.py",
+    "tests/module_context.py",
+    "tests/module_context_paths.py",
+    "tests/module_interface.py",
+    "tests/module_interface_render.py",
+    "tests/module_qualification.py",
+    "tests/module_record_context.py",
+    "tests/module_records.py",
+    "tests/shared_fixtures.py",
+    "tests/slow_machine.py",
+    "tests/test_codex_counts_the_prepared_invocation.py"
+  ],
+  "ownership": {
+    "files": [
+      "docs/modules/llm-client-tests-codex-counts-the-prepared-invocation-context.json",
+      "docs/modules/llm-client-tests-codex-counts-the-prepared-invocation.md",
+      "tests/test_codex_counts_the_prepared_invocation.py"
+    ]
+  },
+  "qualified_dependencies": [
+    {
+      "provider": "scripts/context_budget.py",
+      "names": [
+        "ContextBudget",
+        "TokenCount",
+        "TokenCounter",
+        "TokenUsage",
+        "count_tokens"
+      ],
+      "contract_sha256": "a42515ef32629a1d6c559b0f288155c89fd825bde041a0365797954474acad7a",
+      "integration_tests": [
+        "tests/test_codex_counts_the_prepared_invocation.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/formats/canonical.py",
+      "names": [
+        "canonical_json_bytes"
+      ],
+      "contract_sha256": "679597eaf19bb4eef12b405f35978a452a06007dd565b01d3f0d04a4f1116c49",
+      "integration_tests": [
+        "tests/test_codex_counts_the_prepared_invocation.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/generation_catalog_store.py",
+      "names": [
+        "GenerationCatalog"
+      ],
+      "contract_sha256": "b18194ebe04bf988b4474379fcb5243516550d43b745a00eaed1453f7844c983",
+      "integration_tests": [
+        "tests/test_a_blocked_task_has_a_way_back.py",
+        "tests/test_a_build_in_flight_is_not_an_orphan.py",
+        "tests/test_a_capacity_refusal_does_not_corrupt_a_generation.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/model_choice.py",
+      "names": [
+        "using_root"
+      ],
+      "contract_sha256": "d45f2655cb61963e77617d1dfd7d617b134ad77cc770b59b335d0856e5d65019",
+      "integration_tests": [
+        "tests/test_codex_counts_the_prepared_invocation.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/model_records.py",
+      "names": [
+        "BackendResponse",
+        "CodexExecutable",
+        "CodexPlanningBasis",
+        "LLMResult",
+        "ProviderDescriptor"
+      ],
+      "contract_sha256": "3e85283b8986e2cb2a45cddb4ba92c15167176c02268acf9c71d1d62bd2fe306",
+      "integration_tests": [
+        "tests/test_codex_counts_the_prepared_invocation.py"
+      ]
+    },
+    {
+      "provider": "scripts/lsp_process_tree.py",
+      "names": [
+        "ProcessTree"
+      ],
+      "contract_sha256": "880a66d117005aa6621dff9c11869822efaa0dfac1221bfafdbd4e10629db3fb",
+      "integration_tests": [
+        "tests/test_codex_counts_the_prepared_invocation.py"
+      ]
+    },
+    {
+      "provider": "scripts/model_dlp.py",
+      "names": [
+        "DLPContentBlocked",
+        "DLPPolicyError",
+        "load_policy",
+        "redact_for_transport",
+        "redact_transport_value",
+        "require_safe_model_output"
+      ],
+      "contract_sha256": "535e87749f74e01ba009978eda085a7f322e8e3048d5ff644495aa52246e6e07",
+      "integration_tests": [
+        "tests/test_codex_counts_the_prepared_invocation.py"
+      ]
+    },
+    {
+      "provider": "scripts/model_selection.py",
+      "names": [
+        "configure",
+        "current",
+        "selected_provider",
+        "using"
+      ],
+      "contract_sha256": "850bba0be8b3e453a578235236023c10493ec769625ad6e7e2ff9ed63ac489cb",
+      "integration_tests": [
+        "tests/test_codex_counts_the_prepared_invocation.py"
+      ]
+    },
+    {
+      "provider": "scripts/process_tree.py",
+      "names": [
+        "PROCESS_CLEANUP_TIMEOUT_SECONDS",
+        "run_process_tree"
+      ],
+      "contract_sha256": "5baec98a345fd7e75534ca193bfe80cb50ea6ebce51b2448f8ebe45ff131a529",
+      "integration_tests": [
+        "tests/test_codex_counts_the_prepared_invocation.py"
+      ]
+    },
+    {
+      "provider": "scripts/reliable_memory.py",
+      "names": [
+        "canonical_json_bytes",
+        "validate_state_root"
+      ],
+      "contract_sha256": "7bba4b535d3f0a73445fece541c540939989b41456c9a79a67f82634748be36b",
+      "integration_tests": [
+        "tests/test_codex_counts_the_prepared_invocation.py"
+      ]
+    },
+    {
+      "provider": "scripts/repository_scope.py",
+      "names": [
+        "sanitized_git_environment"
+      ],
+      "contract_sha256": "fd550ae20761afad50b37fa3a71044a162485b0e4d4b3e2af9b5b22e143c2bec",
+      "integration_tests": [
+        "tests/test_a_code_generation_is_not_abandoned.py",
+        "tests/test_a_directory_link_inside_the_checkout_does_not_refuse_the_revision.py",
+        "tests/test_a_document_is_opened_in_its_own_language.py"
+      ]
+    },
+    {
+      "provider": "scripts/secret_redact.py",
+      "names": [
+        "describe_error",
+        "redact_secrets"
+      ],
+      "contract_sha256": "15e80f37cf33a095390aff6e606c20403cc8c70ffb9983c3c8594ba3d1d1ae67",
+      "integration_tests": [
+        "tests/test_codex_counts_the_prepared_invocation.py"
+      ]
+    },
+    {
+      "provider": "scripts/settings.py",
+      "names": [
+        "tomllib"
+      ],
+      "contract_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "integration_tests": [
+        "tests/test_codex_counts_the_prepared_invocation.py"
+      ]
+    }
+  ]
+}

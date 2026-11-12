@@ -1,0 +1,145 @@
+{
+  "encoding": "o200k_base",
+  "max_tokens": 100000,
+  "serialization": "exact-duplicates/v1",
+  "files": [
+    "AGENTS.md",
+    "CLAUDE.md",
+    "docs/AGENTS.md",
+    "docs/STRUCTURE.md",
+    "docs/modules/context-bundle.md",
+    "docs/modules/context-records.md",
+    "docs/modules/context-tooling.md",
+    "docs/modules/model-choice.md",
+    "docs/modules/product-structure.md",
+    "docs/modules/project-governance.md",
+    "docs/modules/queue-core-tests-work-does-not-count-a-capture-it-cannot-claim-context.json",
+    "docs/modules/queue-core-tests-work-does-not-count-a-capture-it-cannot-claim.md",
+    "docs/modules/test-support.md",
+    "rules/development-laws.md",
+    "scripts/__init__.py",
+    "scripts/llm_wiki/__init__.py",
+    "scripts/llm_wiki/context_bundle.py",
+    "tests/__init__.py",
+    "tests/conftest.py",
+    "tests/module_context.py",
+    "tests/module_context_paths.py",
+    "tests/module_interface.py",
+    "tests/module_interface_render.py",
+    "tests/module_qualification.py",
+    "tests/module_record_context.py",
+    "tests/module_records.py",
+    "tests/shared_fixtures.py",
+    "tests/slow_machine.py",
+    "tests/test_work_does_not_count_a_capture_it_cannot_claim.py"
+  ],
+  "ownership": {
+    "files": [
+      "docs/modules/queue-core-tests-work-does-not-count-a-capture-it-cannot-claim-context.json",
+      "docs/modules/queue-core-tests-work-does-not-count-a-capture-it-cannot-claim.md",
+      "tests/test_work_does_not_count_a_capture_it_cannot_claim.py"
+    ]
+  },
+  "qualified_dependencies": [
+    {
+      "provider": "scripts/llm_wiki/generation_catalog_store.py",
+      "names": [
+        "GenerationCatalog"
+      ],
+      "contract_sha256": "b18194ebe04bf988b4474379fcb5243516550d43b745a00eaed1453f7844c983",
+      "integration_tests": [
+        "tests/test_a_blocked_task_has_a_way_back.py",
+        "tests/test_a_build_in_flight_is_not_an_orphan.py",
+        "tests/test_a_capacity_refusal_does_not_corrupt_a_generation.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/model_choice.py",
+      "names": [
+        "using_root"
+      ],
+      "contract_sha256": "d45f2655cb61963e77617d1dfd7d617b134ad77cc770b59b335d0856e5d65019",
+      "integration_tests": [
+        "tests/test_work_does_not_count_a_capture_it_cannot_claim.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/queue_reader_sources.py",
+      "names": [
+        "insert_adopted_source_fence"
+      ],
+      "contract_sha256": "5b5a303a5a0d6946a0b0882006ab7e0bbf4c91515f76407509d4561af124bd7a",
+      "integration_tests": [
+        "tests/test_work_does_not_count_a_capture_it_cannot_claim.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/queue_store.py",
+      "names": [
+        "daily_logical_path",
+        "utc_now"
+      ],
+      "contract_sha256": "54a98545abd123ebaa756d7bbc9a94abdb542fb290c1cbde03ce0db313b18ae8",
+      "integration_tests": [
+        "tests/test_work_does_not_count_a_capture_it_cannot_claim.py"
+      ]
+    },
+    {
+      "provider": "scripts/markdown_transaction.py",
+      "names": [
+        "MarkdownCoordinator",
+        "initialize_coordinator_v3_candidate"
+      ],
+      "contract_sha256": "c90f28cb4198a1b4e5731bc79a575ed3196c6d31c90e6a45902938a1a2cdabb3",
+      "integration_tests": [
+        "tests/test_work_does_not_count_a_capture_it_cannot_claim.py"
+      ]
+    },
+    {
+      "provider": "scripts/operational_ownership.py",
+      "names": [
+        "OwnershipRegistry",
+        "current_process_identity"
+      ],
+      "contract_sha256": "c8bef25e42b932fd1b10245c6d88470b49bef17e735d272c5226e6bbebd14570",
+      "integration_tests": [
+        "tests/test_work_does_not_count_a_capture_it_cannot_claim.py"
+      ]
+    },
+    {
+      "provider": "scripts/queue_core.py",
+      "names": [
+        "MemoryQueue",
+        "initialize_queue_v3_candidate",
+        "insert_source_fence",
+        "timestamp"
+      ],
+      "contract_sha256": "49f9ce0dd447e662a66bdd2b2abb9c0babbb9f0817b80cc1340b809e63e46658",
+      "integration_tests": [
+        "tests/test_work_does_not_count_a_capture_it_cannot_claim.py"
+      ]
+    },
+    {
+      "provider": "scripts/reliable_memory.py",
+      "names": [
+        "validate_state_root"
+      ],
+      "contract_sha256": "8680515cd873056a7c8a36e0057d91f2f83f23c48841263697676ff91f7ff964",
+      "integration_tests": [
+        "tests/test_work_does_not_count_a_capture_it_cannot_claim.py"
+      ]
+    },
+    {
+      "provider": "scripts/repository_scope.py",
+      "names": [
+        "sanitized_git_environment"
+      ],
+      "contract_sha256": "fd550ae20761afad50b37fa3a71044a162485b0e4d4b3e2af9b5b22e143c2bec",
+      "integration_tests": [
+        "tests/test_a_code_generation_is_not_abandoned.py",
+        "tests/test_a_directory_link_inside_the_checkout_does_not_refuse_the_revision.py",
+        "tests/test_a_document_is_opened_in_its_own_language.py"
+      ]
+    }
+  ]
+}

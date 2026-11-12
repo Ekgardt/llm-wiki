@@ -1,0 +1,167 @@
+{
+  "encoding": "o200k_base",
+  "max_tokens": 100000,
+  "serialization": "exact-duplicates/v1",
+  "files": [
+    "AGENTS.md",
+    "CLAUDE.md",
+    "docs/AGENTS.md",
+    "docs/STRUCTURE.md",
+    "docs/modules/context-bundle.md",
+    "docs/modules/context-records.md",
+    "docs/modules/context-tooling.md",
+    "docs/modules/evidence-graph-context.json",
+    "docs/modules/evidence-graph.md",
+    "docs/modules/formats.md",
+    "docs/modules/model-choice.md",
+    "docs/modules/product-structure.md",
+    "docs/modules/project-governance.md",
+    "docs/modules/test-support.md",
+    "rules/development-laws.md",
+    "scripts/__init__.py",
+    "scripts/evidence_graph.py",
+    "scripts/llm_wiki/__init__.py",
+    "scripts/llm_wiki/context_bundle.py",
+    "scripts/llm_wiki/formats/__init__.py",
+    "tests/__init__.py",
+    "tests/conftest.py",
+    "tests/module_context.py",
+    "tests/module_context_paths.py",
+    "tests/module_interface.py",
+    "tests/module_interface_render.py",
+    "tests/module_qualification.py",
+    "tests/module_record_context.py",
+    "tests/module_records.py",
+    "tests/shared_fixtures.py",
+    "tests/slow_machine.py"
+  ],
+  "ownership": {
+    "files": [
+      "docs/modules/evidence-graph-context.json",
+      "docs/modules/evidence-graph.md",
+      "scripts/evidence_graph.py"
+    ]
+  },
+  "qualified_dependencies": [
+    {
+      "provider": "scripts/bounded_io.py",
+      "names": [
+        "IO_CHUNK_BYTES"
+      ],
+      "contract_sha256": "832f143c7663b746e254455c650afd8b3ccb426152369aa1345298267ee40739",
+      "integration_tests": [
+        "tests/modules/breadcrumb_documents/test_contract.py",
+        "tests/test_a_file_being_written_is_a_changed_corpus_on_every_system.py",
+        "tests/test_a_journal_is_readable_by_every_reader.py"
+      ]
+    },
+    {
+      "provider": "scripts/corpus_snapshot.py",
+      "names": [
+        "validate_canonical_source_manifest"
+      ],
+      "contract_sha256": "8c9af337fb3ba0c81adc09d4bf0941b6e8350a20b36dda9009a84bba5890257c",
+      "integration_tests": [
+        "tests/test_a_capacity_refusal_does_not_corrupt_a_generation.py",
+        "tests/test_a_chunker_that_changes_changes_its_version.py",
+        "tests/test_a_count_that_reached_the_edge_looks_again.py"
+      ]
+    },
+    {
+      "provider": "scripts/graph_storable.py",
+      "names": [
+        "MAX_IDENTITY_KEY_CHARS",
+        "storable_identity_key",
+        "storable_metadata",
+        "valid_graph_text"
+      ],
+      "contract_sha256": "fdf7c53ed56fbd4ff60f0638fb042631c80d6ab4c15e4812cb9b5f7944d9a4e8",
+      "integration_tests": [
+        "tests/modules/graph_storable/test_values.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/evidence_graph_limits.py",
+      "names": [
+        "MAX_VALIDATION_ROWS"
+      ],
+      "contract_sha256": "e0271d3f28aac2461d4543e7d12fd011b8b5b2e56f9c8efbaff103300b4ac7b2",
+      "integration_tests": [
+        "tests/test_evidence_graph_builder.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/formats/canonical.py",
+      "names": [
+        "canonical_json_bytes"
+      ],
+      "contract_sha256": "679597eaf19bb4eef12b405f35978a452a06007dd565b01d3f0d04a4f1116c49",
+      "integration_tests": [
+        "tests/modules/formats/test_primitives.py",
+        "tests/modules/formats/test_queue_payload.py",
+        "tests/modules/pyright_configuration/test_configuration.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/generation_catalog_store.py",
+      "names": [
+        "GenerationCatalog"
+      ],
+      "contract_sha256": "b18194ebe04bf988b4474379fcb5243516550d43b745a00eaed1453f7844c983",
+      "integration_tests": [
+        "tests/test_a_build_in_flight_is_not_an_orphan.py",
+        "tests/test_a_code_generation_is_not_abandoned.py",
+        "tests/test_a_flow_walk_stops_when_its_caller_has.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/model_choice.py",
+      "names": [
+        "using_root"
+      ],
+      "contract_sha256": "d45f2655cb61963e77617d1dfd7d617b134ad77cc770b59b335d0856e5d65019",
+      "integration_tests": [
+        "tests/test_central_model_selection.py",
+        "tests/test_compile_execution_inventory.py"
+      ]
+    },
+    {
+      "provider": "scripts/reliable_memory.py",
+      "names": [
+        "validate_runtime_file",
+        "validate_state_root"
+      ],
+      "contract_sha256": "8d6496bf7c816260fcc296ec050a67bb532dbd88e54cd15a47ff34c033488c8d",
+      "integration_tests": [
+        "tests/test_a_backup_image_carries_what_git_does_not.py",
+        "tests/test_a_changed_task_setting_reaches_an_installed_machine.py",
+        "tests/test_a_committed_source_resolves_an_older_compile_plan.py"
+      ]
+    },
+    {
+      "provider": "scripts/repository_scope.py",
+      "names": [
+        "RepositoryScope",
+        "sanitized_git_environment"
+      ],
+      "contract_sha256": "326d40aac35c4481e07bbe2e6113f897bd139f95b4b8c69e1245517167ef96a6",
+      "integration_tests": [
+        "tests/test_a_code_generation_is_not_abandoned.py",
+        "tests/test_a_directory_link_inside_the_checkout_does_not_refuse_the_revision.py",
+        "tests/test_a_document_is_opened_in_its_own_language.py"
+      ]
+    },
+    {
+      "provider": "scripts/verified_artifacts.py",
+      "names": [
+        "VerifiedArtifacts"
+      ],
+      "contract_sha256": "bd1ed04fc1531f814d3f002f87984a57cda1b73fcc98d454d405c948ad0a5f87",
+      "integration_tests": [
+        "tests/modules/verified_artifacts/test_cache.py",
+        "tests/test_a_verified_digest_is_remembered.py",
+        "tests/test_sealed_fts_query_reuses_the_verified_row_verdict.py"
+      ]
+    }
+  ]
+}

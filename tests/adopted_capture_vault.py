@@ -8,7 +8,23 @@ from pathlib import Path
 SCRIPTS_DIR = Path(__file__).resolve().parent.parent / "scripts"
 
 
-def adopted_capture_vault(tmp_path, monkeypatch, adapter):
+def session_intent_payload(seed: bytes) -> tuple[str, bytes]:
+    """A real, schema-valid retained v1 session intent for lifecycle fixtures."""
+    from integration_adapter import encoded_capture_record
+
+    identity = seed.decode()
+    document, payload = encoded_capture_record({
+        "source_occurrence_id": identity, "source_event_id": identity,
+        "occurred_at": "2026-09-29T00:00:00+00:00", "host": "codex",
+        "event": "session_end", "session": identity, "project_slug": None,
+        "worktree": None, "trigger": None, "checkpoint_reason": None,
+        "chunk_index": 0, "chunk_count": 1,
+        "evidence": [{"role": "transcript", "parts": [{"type": "text", "text": identity}]}],
+    })
+    return str(document["intent_id"]), payload
+
+
+def adopted_capture_vault(tmp_path, monkeypatch):
     """(state root, project directory) of a fresh adopted vault."""
     from installed_memory_repair import repair_installed_vault
 
@@ -29,9 +45,8 @@ def adopted_capture_vault(tmp_path, monkeypatch, adapter):
     )
     if report["overall_status"] != "ok":
         raise AssertionError(report)
-    monkeypatch.setattr(adapter, "ROOT", vault)
     monkeypatch.setenv("LLM_WIKI_ROOT", str(vault))
-    monkeypatch.setattr(adapter, "STATE_ROOT", state_root)
+    monkeypatch.setenv("LLM_WIKI_STATE_ROOT", str(state_root))
     return state_root, project
 
 

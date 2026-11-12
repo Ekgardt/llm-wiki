@@ -508,12 +508,12 @@ def _cost_maps(
 
 def _partition(normalized: tuple[ContextItem, ...]) -> tuple[list[ContextItem], list[ContextItem]]:
     """(mandatory items in priority-class order, optional items in input order)."""
-    mandatory = _in_class_order([item for item in normalized if item.mandatory])
+    mandatory = in_class_order([item for item in normalized if item.mandatory])
     optional = [item for item in normalized if not item.mandatory]
     return mandatory, optional
 
 
-def _in_class_order(items: list[ContextItem]) -> list[ContextItem]:
+def in_class_order(items: list[ContextItem]) -> list[ContextItem]:
     """Priority classes in order; within one, the caller's order stands.
 
     Sorting by `item_id`, a hash, scrambled the sections of one page (audit

@@ -1,0 +1,316 @@
+{
+  "encoding": "o200k_base",
+  "max_tokens": 100000,
+  "serialization": "exact-duplicates/v1",
+  "files": [
+    "AGENTS.md",
+    "CLAUDE.md",
+    "docs/AGENTS.md",
+    "docs/STRUCTURE.md",
+    "docs/modules/a-claude-prompt-takes-the-ingest-path-helpers.md",
+    "docs/modules/context-bundle.md",
+    "docs/modules/context-records.md",
+    "docs/modules/context-tooling.md",
+    "docs/modules/daily-log-append-context.json",
+    "docs/modules/daily-log-append.md",
+    "docs/modules/model-choice.md",
+    "docs/modules/product-structure.md",
+    "docs/modules/project-governance.md",
+    "docs/modules/queue-core-tests-reliability-v3-adoption-helpers.md",
+    "docs/modules/session-end-project-tag.md",
+    "docs/modules/test-support.md",
+    "rules/development-laws.md",
+    "scripts/__init__.py",
+    "scripts/daily_log_append.py",
+    "scripts/llm_wiki/__init__.py",
+    "scripts/llm_wiki/context_bundle.py",
+    "scripts/session_end_project_tag.py",
+    "tests/__init__.py",
+    "tests/a_claude_prompt_takes_the_ingest_path_helpers.py",
+    "tests/conftest.py",
+    "tests/module_context.py",
+    "tests/module_context_paths.py",
+    "tests/module_interface.py",
+    "tests/module_interface_render.py",
+    "tests/module_qualification.py",
+    "tests/module_record_context.py",
+    "tests/module_records.py",
+    "tests/reliability_v3_adoption_helpers.py",
+    "tests/shared_fixtures.py",
+    "tests/slow_machine.py",
+    "tests/test_a_block_opens_one_entry.py",
+    "tests/test_a_redelivery_after_midnight_is_recognised.py",
+    "tests/test_a_redriven_flush_appends_nothing_new.py",
+    "tests/test_a_tool_breadcrumb_waits_in_the_background.py",
+    "tests/test_every_hook_writer_gives_up_before_its_host.py"
+  ],
+  "ownership": {
+    "files": [
+      "docs/modules/daily-log-append-context.json",
+      "docs/modules/daily-log-append.md",
+      "scripts/daily_log_append.py",
+      "tests/test_a_block_opens_one_entry.py",
+      "tests/test_a_redelivery_after_midnight_is_recognised.py",
+      "tests/test_a_redriven_flush_appends_nothing_new.py",
+      "tests/test_a_tool_breadcrumb_waits_in_the_background.py",
+      "tests/test_every_hook_writer_gives_up_before_its_host.py"
+    ]
+  },
+  "qualified_dependencies": [
+    {
+      "provider": "scripts/capture_diagnostics.py",
+      "names": [
+        "record_hook_error"
+      ],
+      "contract_sha256": "6345b1820aa969281fb710f884d51a60e3b188438e673009f0184cbd1d910752",
+      "integration_tests": [
+        "tests/test_a_block_opens_one_entry.py",
+        "tests/test_a_redelivery_after_midnight_is_recognised.py",
+        "tests/test_a_redriven_flush_appends_nothing_new.py",
+        "tests/test_a_tool_breadcrumb_waits_in_the_background.py",
+        "tests/test_every_hook_writer_gives_up_before_its_host.py"
+      ]
+    },
+    {
+      "provider": "scripts/event_envelope.py",
+      "names": [
+        "canonical_agent"
+      ],
+      "contract_sha256": "6f9d5778f4ed067dec355ea8b948649948d9db9a36c8a313bfc7e6fd0bc0afd7",
+      "integration_tests": [
+        "tests/test_a_block_opens_one_entry.py",
+        "tests/test_a_redelivery_after_midnight_is_recognised.py",
+        "tests/test_a_redriven_flush_appends_nothing_new.py",
+        "tests/test_a_tool_breadcrumb_waits_in_the_background.py",
+        "tests/test_every_hook_writer_gives_up_before_its_host.py"
+      ]
+    },
+    {
+      "provider": "scripts/evidence_resolver.py",
+      "names": [
+        "daily_entries"
+      ],
+      "contract_sha256": "fcda406ba92e4409edeb9c44df3e55a7800c4649c022ab613b296cd7d42026d0",
+      "integration_tests": [
+        "tests/test_a_block_opens_one_entry.py"
+      ]
+    },
+    {
+      "provider": "scripts/installed_memory_repair.py",
+      "names": [
+        "repair_installed_vault"
+      ],
+      "contract_sha256": "6ab4497d3ed56413bc24ea5ae9e993acf118980056b046072877a80df4f52a18",
+      "integration_tests": [
+        "tests/test_a_tool_breadcrumb_waits_in_the_background.py"
+      ]
+    },
+    {
+      "provider": "scripts/integration_adapter.py",
+      "names": [
+        "DELEGATE_STARTUP_SECONDS",
+        "DELEGATE_TIMEOUT_SECONDS",
+        "delegate_timeout",
+        "delivery_arguments"
+      ],
+      "contract_sha256": "62b45c3babc0c518b15cd1530975a7822ba95c5193db07717c8c4f9d14711c5c",
+      "integration_tests": [
+        "tests/test_a_tool_breadcrumb_waits_in_the_background.py",
+        "tests/test_every_hook_writer_gives_up_before_its_host.py"
+      ]
+    },
+    {
+      "provider": "scripts/iso_time.py",
+      "names": [
+        "local_now"
+      ],
+      "contract_sha256": "d855ddcfb0adb26bb08531f2c8ab69c7708bd0195d99df5f7e70fb26f0af878b",
+      "integration_tests": [
+        "tests/test_a_block_opens_one_entry.py",
+        "tests/test_a_redelivery_after_midnight_is_recognised.py",
+        "tests/test_a_redriven_flush_appends_nothing_new.py",
+        "tests/test_a_tool_breadcrumb_waits_in_the_background.py",
+        "tests/test_every_hook_writer_gives_up_before_its_host.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_client.py",
+      "names": [
+        "call_llm"
+      ],
+      "contract_sha256": "69cae5b47f126ae4e45e541f3401efae2ad068c9c9cac4da4a08a082d7190feb",
+      "integration_tests": [
+        "tests/test_a_redriven_flush_appends_nothing_new.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/classification_protocol.py",
+      "names": [
+        "classify_response"
+      ],
+      "contract_sha256": "5f4dce363c05d876fb6cef9404d643fb7c85097e622daf05c83dd1a6f724c424",
+      "integration_tests": [
+        "tests/test_a_block_opens_one_entry.py",
+        "tests/test_a_redelivery_after_midnight_is_recognised.py",
+        "tests/test_a_redriven_flush_appends_nothing_new.py",
+        "tests/test_a_tool_breadcrumb_waits_in_the_background.py",
+        "tests/test_every_hook_writer_gives_up_before_its_host.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/generation_catalog_store.py",
+      "names": [
+        "GenerationCatalog"
+      ],
+      "contract_sha256": "b18194ebe04bf988b4474379fcb5243516550d43b745a00eaed1453f7844c983",
+      "integration_tests": [
+        "tests/test_a_blocked_task_has_a_way_back.py",
+        "tests/test_a_build_in_flight_is_not_an_orphan.py",
+        "tests/test_a_capacity_refusal_does_not_corrupt_a_generation.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/markdown_store.py",
+      "names": [
+        "WRITER_LEASE_SECONDS"
+      ],
+      "contract_sha256": "aa32acf8bb6d79fa805f4a14ac1bd14267f29164d398d65e6c84d9ddab7b9843",
+      "integration_tests": [
+        "tests/test_a_block_opens_one_entry.py",
+        "tests/test_a_redelivery_after_midnight_is_recognised.py",
+        "tests/test_a_redriven_flush_appends_nothing_new.py",
+        "tests/test_a_tool_breadcrumb_waits_in_the_background.py",
+        "tests/test_every_hook_writer_gives_up_before_its_host.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/model_choice.py",
+      "names": [
+        "using_root"
+      ],
+      "contract_sha256": "d45f2655cb61963e77617d1dfd7d617b134ad77cc770b59b335d0856e5d65019",
+      "integration_tests": [
+        "tests/test_a_block_opens_one_entry.py",
+        "tests/test_a_redelivery_after_midnight_is_recognised.py",
+        "tests/test_a_redriven_flush_appends_nothing_new.py",
+        "tests/test_a_tool_breadcrumb_waits_in_the_background.py",
+        "tests/test_every_hook_writer_gives_up_before_its_host.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/runtime_roots.py",
+      "names": [
+        "configured_state_root",
+        "configured_vault_root",
+        "daily_dir"
+      ],
+      "contract_sha256": "443cbc1220844f93ea5510aa5d19c948c12b9fdf423efe6ae9acb28defc3421f",
+      "integration_tests": [
+        "tests/test_a_continuation_keeps_its_original_entry.py",
+        "tests/test_a_prompt_checkpoint_does_not_outwait_its_host.py",
+        "tests/test_a_session_marker_survives_a_busy_writer.py"
+      ]
+    },
+    {
+      "provider": "scripts/markdown_transaction.py",
+      "names": [
+        "COORDINATOR_V3_SCHEMA_SHA256",
+        "append_knowledge",
+        "default_coordinator",
+        "initialize_coordinator_v3_candidate",
+        "stable_operation_id",
+        "validate_coordinator_v3_database"
+      ],
+      "contract_sha256": "344cd005158f02a8bd39ab59e1f8e6fa4b104e0bea953a42c2e782ffc4580cf9",
+      "integration_tests": [
+        "tests/test_a_tool_breadcrumb_waits_in_the_background.py"
+      ]
+    },
+    {
+      "provider": "scripts/memory_queue.py",
+      "names": [
+        "manual_processor"
+      ],
+      "contract_sha256": "a88c740612b43a1e82ee858790f1ca2ec8a223cac0db82796dd5bb770c7bf663",
+      "integration_tests": [
+        "tests/test_a_redriven_flush_appends_nothing_new.py"
+      ]
+    },
+    {
+      "provider": "scripts/queue_core.py",
+      "names": [
+        "QUEUE_V3_SCHEMA_SHA256",
+        "harden_owner_only",
+        "initialize_queue_v3_candidate",
+        "validate_queue_v3_database"
+      ],
+      "contract_sha256": "66c9235a0ce0f6ddda3e804b17690f77bdad6d41070a570ab6dfd8efaaf8717a",
+      "integration_tests": [
+        "tests/test_a_block_opens_one_entry.py",
+        "tests/test_a_redelivery_after_midnight_is_recognised.py",
+        "tests/test_a_redriven_flush_appends_nothing_new.py",
+        "tests/test_a_tool_breadcrumb_waits_in_the_background.py",
+        "tests/test_every_hook_writer_gives_up_before_its_host.py"
+      ]
+    },
+    {
+      "provider": "scripts/reliable_memory.py",
+      "names": [
+        "canonical_json_bytes",
+        "capture_runtime_file_identity",
+        "sha256_bytes",
+        "validate_state_root"
+      ],
+      "contract_sha256": "f3f750c31251ccb4ad9ec08857d94fb52c89bf906ed0ca7358102fc80d957a33",
+      "integration_tests": [
+        "tests/test_a_block_opens_one_entry.py",
+        "tests/test_a_redelivery_after_midnight_is_recognised.py",
+        "tests/test_a_redriven_flush_appends_nothing_new.py",
+        "tests/test_a_tool_breadcrumb_waits_in_the_background.py",
+        "tests/test_every_hook_writer_gives_up_before_its_host.py"
+      ]
+    },
+    {
+      "provider": "scripts/repository_scope.py",
+      "names": [
+        "sanitized_git_environment"
+      ],
+      "contract_sha256": "fd550ae20761afad50b37fa3a71044a162485b0e4d4b3e2af9b5b22e143c2bec",
+      "integration_tests": [
+        "tests/test_a_block_opens_one_entry.py",
+        "tests/test_a_redelivery_after_midnight_is_recognised.py",
+        "tests/test_a_redriven_flush_appends_nothing_new.py",
+        "tests/test_a_tool_breadcrumb_waits_in_the_background.py",
+        "tests/test_every_hook_writer_gives_up_before_its_host.py"
+      ]
+    },
+    {
+      "provider": "scripts/secret_redact.py",
+      "names": [
+        "redact_secrets"
+      ],
+      "contract_sha256": "8b925f76433b0c3f5ab03f4b8b41a462551d5616843facdd2918813d103ad6f5",
+      "integration_tests": [
+        "tests/test_a_block_opens_one_entry.py",
+        "tests/test_a_redelivery_after_midnight_is_recognised.py",
+        "tests/test_a_redriven_flush_appends_nothing_new.py",
+        "tests/test_a_tool_breadcrumb_waits_in_the_background.py",
+        "tests/test_every_hook_writer_gives_up_before_its_host.py"
+      ]
+    },
+    {
+      "provider": "scripts/session_start_project_state.py",
+      "names": [
+        "owning_checkout"
+      ],
+      "contract_sha256": "81358eecfb587a11eab044b6cff8528680c7c4d0dc09ef9ec397cee60642298c",
+      "integration_tests": [
+        "tests/test_a_block_opens_one_entry.py",
+        "tests/test_a_redelivery_after_midnight_is_recognised.py",
+        "tests/test_a_redriven_flush_appends_nothing_new.py",
+        "tests/test_a_tool_breadcrumb_waits_in_the_background.py",
+        "tests/test_every_hook_writer_gives_up_before_its_host.py"
+      ]
+    }
+  ]
+}

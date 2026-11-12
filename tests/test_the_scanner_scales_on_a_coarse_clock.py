@@ -62,7 +62,7 @@ def _measure(count: int) -> float:
     """CPU time, not wall time: contention can only pull it towards the truth."""
     value = _joined(count)
     started = time.process_time()
-    result = lsp_security._redact_path(value, ROOT, "<repository>")
+    result = lsp_security.redact_path(value, ROOT, "<repository>")
     elapsed = time.process_time() - started
     assert result.count("<repository>") == count * 3 // 5
     return elapsed
@@ -79,7 +79,7 @@ def test_the_scanner_redacts_every_shape_it_is_asked_to():
         "file:///srv/scratch/../Program%20Files/linear-repository/three.py tail"
     )
 
-    assert lsp_security._redact_path(multiple, ROOT, "<repository>") == (
+    assert lsp_security.redact_path(multiple, ROOT, "<repository>") == (
         "bad=file://server/srv/Program%20Files/linear-repository/one.py,"
         "<repository>;<repository> tail"
     )

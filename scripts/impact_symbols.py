@@ -122,12 +122,12 @@ def _walked_answer(graph, seeds: set[str], deadline: float) -> dict:
 
 def affected_symbols(directory: Path, changed_symbols: list[dict], deadline: float) -> dict:
     """Code symbols reachable backwards from the changed ones, bounded."""
-    from code_graph import _active_evidence_graph
+    from llm_wiki.code_graph_generation import active_evidence_graph
 
     seeds = _seed_ids(changed_symbols)
     if not seeds:
         return _answer([], False, "no changed symbol resolved in the generation")
-    graph = _active_evidence_graph(directory)
+    graph = active_evidence_graph(directory)
     if graph is None:
         return _answer([], False, "no_active_generation")
     try:

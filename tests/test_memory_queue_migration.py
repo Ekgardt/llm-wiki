@@ -6,17 +6,22 @@ import json
 import sqlite3
 import sys
 import time
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
+import queue_core  # noqa: E402
+from llm_wiki import memory_queue_purge
 
 SCRIPTS_DIR = Path(__file__).resolve().parent.parent / "scripts"
 if str(SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_DIR))
 
-import memory_queue  # noqa: E402
-from memory_queue import DEFAULTS, MemoryQueue, QueueFailure  # noqa: E402
+from queue_core import (  # noqa: E402
+    DEFAULTS,
+    MemoryQueue,
+    QueueFailure,
+)
 from reliable_memory import (  # noqa: E402
     OperationalDatabaseContractError,
     canonical_json_bytes,
@@ -36,7 +41,7 @@ def test_queue_v2_backup_migrates_canonical_text_payload_to_identical_blob(
     expected = canonical_json_bytes(queue.get(task_id).payload)
     candidate = tmp_path / "run" / "queue-v3.candidate.sqlite3"
 
-    summary = memory_queue.initialize_queue_v3_candidate(
+    summary = queue_core.initialize_queue_v3_candidate(
         candidate, source_v2=queue.db_path
     )
     with sqlite3.connect(candidate) as database:
@@ -67,7 +72,7 @@ def test_queue_v2_source_rows_reconcile_to_exact_v3_links_and_failures(
     )
     candidate = tmp_path / "run" / "queue-v3.candidate.sqlite3"
 
-    summary = memory_queue.initialize_queue_v3_candidate(
+    summary = queue_core.initialize_queue_v3_candidate(
         candidate, source_v2=queue.db_path
     )
 
@@ -92,10 +97,10 @@ def test_fresh_queue_candidate_rejects_existing_migrated_rows(tmp_path: Path) ->
     queue = MemoryQueue(tmp_path)
     queue.enqueue("query", 1, {"prompt": "already migrated"})
     candidate = tmp_path / "run" / "queue-v3.candidate.sqlite3"
-    memory_queue.initialize_queue_v3_candidate(candidate, source_v2=queue.db_path)
+    queue_core.initialize_queue_v3_candidate(candidate, source_v2=queue.db_path)
 
     with pytest.raises(OperationalDatabaseContractError) as raised:
-        memory_queue.initialize_queue_v3_candidate(candidate, source_v2=None)
+        queue_core.initialize_queue_v3_candidate(candidate, source_v2=None)
 
     assert raised.value.code == "queue_v3_source_conflict"
 
@@ -123,10 +128,10 @@ def test_queue_v2_hash_mismatch_is_preserved_dead_and_never_claimable(
         )
     candidate = tmp_path / "run" / "queue-v3.candidate.sqlite3"
 
-    summary = memory_queue.initialize_queue_v3_candidate(
+    summary = queue_core.initialize_queue_v3_candidate(
         candidate, source_v2=queue.db_path
     )
-    candidate_queue = MemoryQueue._from_v3_candidate(candidate, state_root=tmp_path)
+    candidate_queue = MemoryQueue.from_v3_candidate(candidate, state_root=tmp_path)
 
     with sqlite3.connect(candidate) as database:
         task = database.execute(
@@ -189,7 +194,7 @@ def test_queue_v2_hash_valid_invalid_payload_is_preserved_dead(
         )
     candidate = tmp_path / "run" / "queue-v3.candidate.sqlite3"
 
-    summary = memory_queue.initialize_queue_v3_candidate(
+    summary = queue_core.initialize_queue_v3_candidate(
         candidate, source_v2=queue.db_path
     )
 
@@ -264,7 +269,7 @@ def _statements_starting(prefix: str, statements: list[str]) -> list[str]:
 def test_purge_requires_cutoff_and_export_then_verifies_before_deleting(
     tmp_path: Path,
 ) -> None:
-    now = datetime(2026, 7, 14, tzinfo=timezone.utc)
+    now = datetime(2026, 7, 14, tzinfo=UTC)
     queue = MemoryQueue(tmp_path, clock=lambda: now)
     task_id = queue.enqueue("query", 1, {"prompt": "done"})
     lease = queue.claim("worker")
@@ -304,7 +309,7 @@ def test_purge_requires_cutoff_and_export_then_verifies_before_deleting(
 def test_purge_expired_deadline_creates_no_export_and_deletes_nothing(
     tmp_path: Path,
 ) -> None:
-    now = datetime(2026, 7, 14, tzinfo=timezone.utc)
+    now = datetime(2026, 7, 14, tzinfo=UTC)
     queue = MemoryQueue(tmp_path, clock=lambda: now)
     task_id = queue.enqueue("query", 1, {})
     lease = queue.claim("worker")
@@ -334,7 +339,7 @@ def test_purge_rolls_back_when_deadline_expires_after_delete_before_commit(
 ) -> None:
     from contextlib import contextmanager
 
-    now = datetime(2026, 7, 14, tzinfo=timezone.utc)
+    now = datetime(2026, 7, 14, tzinfo=UTC)
     queue = MemoryQueue(tmp_path, clock=lambda: now)
     task_id = queue.enqueue("query", 1, {})
     lease = queue.claim("worker")
@@ -365,8 +370,8 @@ def test_purge_rolls_back_when_deadline_expires_after_delete_before_commit(
             connection.rollback()
             raise
 
-    real_begin_immediate = memory_queue.begin_immediate
-    monkeypatch.setattr(memory_queue, "begin_immediate", expire_before_commit)
+    real_begin_immediate = memory_queue_purge.begin_immediate
+    monkeypatch.setattr(memory_queue_purge, "begin_immediate", expire_before_commit)
 
     export = tmp_path / "exports" / "purge"
     with pytest.raises(TimeoutError, match="deadline"):
@@ -379,7 +384,7 @@ def test_purge_rolls_back_when_deadline_expires_after_delete_before_commit(
 
     rolled_back = (queue.get(task_id).state, export.exists())
 
-    monkeypatch.setattr(memory_queue, "begin_immediate", real_begin_immediate)
+    monkeypatch.setattr(memory_queue_purge, "begin_immediate", real_begin_immediate)
     receipt = queue.purge(
         terminal_before=now - timedelta(days=30), export_path=export
     )
@@ -395,7 +400,7 @@ def test_purge_rolls_back_when_deadline_expires_after_delete_before_commit(
 def test_purge_build_failure_cleans_staging_and_retry_is_atomic(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    now = datetime(2026, 7, 14, tzinfo=timezone.utc)
+    now = datetime(2026, 7, 14, tzinfo=UTC)
     queue = MemoryQueue(tmp_path, clock=lambda: now)
     task_id = queue.enqueue("query", 1, {})
     lease = queue.claim("worker")
@@ -408,7 +413,7 @@ def test_purge_build_failure_cleans_staging_and_retry_is_atomic(
             ((now - timedelta(days=31)).isoformat(timespec="microseconds"), task_id),
         )
     export = tmp_path / "exports" / "purge"
-    real_write = memory_queue._write_durable_file
+    real_write = memory_queue_purge.write_durable_file
     failed = False
 
     def fail_manifest(path: Path, data: bytes) -> None:
@@ -418,13 +423,13 @@ def test_purge_build_failure_cleans_staging_and_retry_is_atomic(
             raise OSError("secret path must not escape")
         real_write(path, data)
 
-    monkeypatch.setattr(memory_queue, "_write_durable_file", fail_manifest)
+    monkeypatch.setattr(memory_queue_purge, "write_durable_file", fail_manifest)
     with pytest.raises(OSError):
         queue.purge(terminal_before=now - timedelta(days=30), export_path=export)
 
     after_failure = (export.exists(), list(export.parent.glob(".purge.staging-*")))
 
-    monkeypatch.setattr(memory_queue, "_write_durable_file", real_write)
+    monkeypatch.setattr(memory_queue_purge, "write_durable_file", real_write)
     receipt = queue.purge(
         terminal_before=now - timedelta(days=30), export_path=export
     )
@@ -444,14 +449,14 @@ def test_purge_rejects_unsafe_existing_export_parent(
     parent = tmp_path / "exports"
     parent.mkdir()
     monkeypatch.setattr(
-        memory_queue,
-        "_is_owner_only",
+        memory_queue_purge,
+        "is_owner_only",
         lambda path: False if Path(path) == parent else True,
     )
 
-    with pytest.raises(memory_queue.QueueOperationError) as raised:
+    with pytest.raises(queue_core.QueueOperationError) as raised:
         queue.purge(
-            terminal_before=datetime.now(timezone.utc),
+            terminal_before=datetime.now(UTC),
             export_path=parent / "purge",
         )
 
@@ -459,7 +464,7 @@ def test_purge_rejects_unsafe_existing_export_parent(
 
 
 def test_default_retention_excludes_recent_terminal_and_all_dead(tmp_path: Path) -> None:
-    now = datetime(2026, 7, 14, tzinfo=timezone.utc)
+    now = datetime(2026, 7, 14, tzinfo=UTC)
     queue = MemoryQueue(tmp_path, clock=lambda: now)
     succeeded = queue.enqueue("query", 1, {})
     lease = queue.claim("worker")
@@ -473,7 +478,7 @@ def test_default_retention_excludes_recent_terminal_and_all_dead(tmp_path: Path)
 
     export_parent = tmp_path / "exports"
     export_parent.mkdir()
-    memory_queue._harden_owner_only(export_parent, 0o700)
+    queue_core.harden_owner_only(export_parent, 0o700)
     receipt = queue.purge(
         terminal_before=now + timedelta(days=1),
         export_path=export_parent / "export",
@@ -507,7 +512,7 @@ def test_a_dead_task_is_retained_by_default_and_purged_only_when_asked(
     tmp_path: Path,
 ) -> None:
     """Attempts-exhausted work is evidence; retiring it is an explicit action."""
-    now = datetime(2026, 7, 14, tzinfo=timezone.utc)
+    now = datetime(2026, 7, 14, tzinfo=UTC)
     queue = MemoryQueue(tmp_path, clock=lambda: now)
     task_id = _dead_task(queue, now, "never finished")
     cutoff = now - timedelta(days=30)
@@ -533,7 +538,7 @@ def test_a_dead_task_is_retained_by_default_and_purged_only_when_asked(
 
 def test_a_purged_task_can_be_restored_from_its_verified_export(tmp_path: Path) -> None:
     """Deletion without a way back would lose the work, not just its record."""
-    now = datetime(2026, 7, 14, tzinfo=timezone.utc)
+    now = datetime(2026, 7, 14, tzinfo=UTC)
     queue = MemoryQueue(tmp_path, clock=lambda: now)
     task_id = _dead_task(queue, now, "restore me")
     export = tmp_path / "exports" / "restorable"
@@ -553,7 +558,7 @@ def test_a_purged_task_can_be_restored_from_its_verified_export(tmp_path: Path) 
 
 
 def test_a_tampered_export_restores_nothing(tmp_path: Path) -> None:
-    now = datetime(2026, 7, 14, tzinfo=timezone.utc)
+    now = datetime(2026, 7, 14, tzinfo=UTC)
     queue = MemoryQueue(tmp_path, clock=lambda: now)
     _dead_task(queue, now, "tampered")
     export = tmp_path / "exports" / "tampered"
@@ -564,8 +569,19 @@ def test_a_tampered_export_restores_nothing(tmp_path: Path) -> None:
     records[0]["payload"] = {"prompt": "rewritten"}
     (export / "records.json").write_bytes(canonical_json_bytes(records))
 
-    with pytest.raises(memory_queue.QueueOperationError) as raised:
+    with pytest.raises(queue_core.QueueOperationError) as raised:
         queue.restore(export_path=export)
 
     assert raised.value.code == "restore_verification_failed"
     assert queue.list_tasks() == []
+
+
+def test_extracted_sql_definitions_and_schema_fingerprints_are_compatible():
+    from llm_wiki import queue_schema
+
+    baseline = json.loads((Path(__file__).parent /
+        'modules/queue_schema/fixtures/baseline.json').read_text(encoding='utf-8'))
+    for name in baseline['counts']:
+        assert getattr(queue_core, name, getattr(queue_schema, name)) is getattr(queue_schema, name)
+    assert queue_core.QUEUE_V3_SCHEMA_SHA256 == baseline['queue_schema_sha256']
+    assert queue_core.QUEUE_COMPILE_SCHEMA_SHA256 == baseline['compile_schema_sha256']

@@ -1,0 +1,127 @@
+{
+  "encoding": "o200k_base",
+  "max_tokens": 100000,
+  "serialization": "exact-duplicates/v1",
+  "files": [
+    "AGENTS.md",
+    "CLAUDE.md",
+    "docs/AGENTS.md",
+    "docs/STRUCTURE.md",
+    "docs/modules/code-extractor-context.json",
+    "docs/modules/code-extractor.md",
+    "docs/modules/context-bundle.md",
+    "docs/modules/context-records.md",
+    "docs/modules/context-tooling.md",
+    "docs/modules/model-choice.md",
+    "docs/modules/product-structure.md",
+    "docs/modules/project-governance.md",
+    "docs/modules/test-support.md",
+    "rules/development-laws.md",
+    "scripts/__init__.py",
+    "scripts/code_extractor.py",
+    "scripts/llm_wiki/__init__.py",
+    "scripts/llm_wiki/context_bundle.py",
+    "tests/__init__.py",
+    "tests/conftest.py",
+    "tests/module_context.py",
+    "tests/module_context_paths.py",
+    "tests/module_interface.py",
+    "tests/module_interface_render.py",
+    "tests/module_qualification.py",
+    "tests/module_record_context.py",
+    "tests/module_records.py",
+    "tests/shared_fixtures.py",
+    "tests/slow_machine.py",
+    "tests/test_line_numbers_at_the_old_speed.py"
+  ],
+  "ownership": {
+    "files": [
+      "docs/modules/code-extractor-context.json",
+      "docs/modules/code-extractor.md",
+      "scripts/code_extractor.py",
+      "tests/test_line_numbers_at_the_old_speed.py"
+    ]
+  },
+  "qualified_dependencies": [
+    {
+      "provider": "scripts/graph_storable.py",
+      "names": [
+        "storable_identity_key",
+        "storable_metadata"
+      ],
+      "contract_sha256": "0e04bbdaa2422c97b386e1feb1b97934383ed506648921bbe72ace6287bfd3d0",
+      "integration_tests": [
+        "tests/test_line_numbers_at_the_old_speed.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/extractor_versions.py",
+      "names": [
+        "CODE_EXTRACTOR_VERSION"
+      ],
+      "contract_sha256": "0fd60452b69d1235340c6c8208fb6db0deb9d4017d65f8b86ecca8815de04a2e",
+      "integration_tests": [
+        "tests/test_generation_catalog.py",
+        "tests/test_generation_maintenance.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/generation_catalog_store.py",
+      "names": [
+        "GenerationCatalog"
+      ],
+      "contract_sha256": "b18194ebe04bf988b4474379fcb5243516550d43b745a00eaed1453f7844c983",
+      "integration_tests": [
+        "tests/test_a_build_in_flight_is_not_an_orphan.py",
+        "tests/test_a_code_generation_is_not_abandoned.py",
+        "tests/test_a_flow_walk_stops_when_its_caller_has.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/model_choice.py",
+      "names": [
+        "using_root"
+      ],
+      "contract_sha256": "d45f2655cb61963e77617d1dfd7d617b134ad77cc770b59b335d0856e5d65019",
+      "integration_tests": [
+        "tests/test_central_model_selection.py",
+        "tests/test_compile_execution_inventory.py"
+      ]
+    },
+    {
+      "provider": "scripts/python_parse.py",
+      "names": [
+        "PARSE_FAILURES",
+        "parse_python"
+      ],
+      "contract_sha256": "ef4af434da26f18a73b508e9dd372f0201bdcb0381b18b9321ddb5ac64e7ee38",
+      "integration_tests": [
+        "tests/test_line_numbers_at_the_old_speed.py"
+      ]
+    },
+    {
+      "provider": "scripts/reliable_memory.py",
+      "names": [
+        "validate_state_root"
+      ],
+      "contract_sha256": "8680515cd873056a7c8a36e0057d91f2f83f23c48841263697676ff91f7ff964",
+      "integration_tests": [
+        "tests/test_a_backup_image_carries_what_git_does_not.py",
+        "tests/test_a_changed_task_setting_reaches_an_installed_machine.py",
+        "tests/test_a_committed_source_resolves_an_older_compile_plan.py"
+      ]
+    },
+    {
+      "provider": "scripts/repository_scope.py",
+      "names": [
+        "sanitized_git_environment"
+      ],
+      "contract_sha256": "fd550ae20761afad50b37fa3a71044a162485b0e4d4b3e2af9b5b22e143c2bec",
+      "integration_tests": [
+        "tests/test_a_code_generation_is_not_abandoned.py",
+        "tests/test_a_directory_link_inside_the_checkout_does_not_refuse_the_revision.py",
+        "tests/test_a_document_is_opened_in_its_own_language.py"
+      ]
+    }
+  ]
+}

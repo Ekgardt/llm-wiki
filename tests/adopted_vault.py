@@ -10,7 +10,9 @@ SCRIPTS_DIR = Path(__file__).resolve().parent.parent / "scripts"
 if str(SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_DIR))
 
-from installed_memory_repair import repair_installed_vault  # noqa: E402
+from installed_memory_repair import (  # noqa: E402
+    repair_installed_vault,
+)
 
 
 def adopt(tmp_path: Path) -> tuple[Path, Path]:

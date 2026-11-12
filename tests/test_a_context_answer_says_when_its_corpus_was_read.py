@@ -16,22 +16,21 @@ if str(SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_DIR))
 
 import mcp_server  # noqa: E402
-import memory_state  # noqa: E402
 
 
 def test_a_context_answer_carries_the_moment_its_corpus_was_collected(tmp_path: Path, monkeypatch) -> None:
     (tmp_path / "knowledge/notes").mkdir(parents=True)
-    monkeypatch.setattr(memory_state, "ROOT", tmp_path)
-    before = dt.datetime.now(dt.timezone.utc).replace(microsecond=0)
+    monkeypatch.setenv("LLM_WIKI_ROOT", str(tmp_path))
+    before = dt.datetime.now(dt.UTC).replace(microsecond=0)
 
-    data = mcp_server._get_context(["page"])
-    stamp = mcp_server._index_timestamp("get_context", data)
+    data = mcp_server.get_context(["page"])
+    stamp = mcp_server.index_timestamp("get_context", data)
 
-    after = dt.datetime.now(dt.timezone.utc)
+    after = dt.datetime.now(dt.UTC)
     assert before <= dt.datetime.fromisoformat(stamp) <= after
 
 
 def test_a_context_hash_is_never_read_as_a_generation(monkeypatch) -> None:
-    monkeypatch.setattr(mcp_server, "_generation_built_ns", lambda generation: 1)
+    monkeypatch.setattr("llm_wiki.mcp_server_freshness.generation_built_ns", lambda generation: 1)
 
-    assert mcp_server._index_timestamp("get_context", {"corpus_generation": "a" * 64}) is None
+    assert mcp_server.index_timestamp("get_context", {"corpus_generation": "a" * 64}) is None

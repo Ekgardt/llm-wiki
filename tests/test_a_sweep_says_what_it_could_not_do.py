@@ -48,4 +48,4 @@ def test_a_sweep_failure_reaches_the_night_report() -> None:
     result["snapshot"] = {"status": "ok"}
     result["backlog"] = {"failed": []}
 
-    assert reclaim._failures(result) == ["temporaries: PermissionError: .x.tmp"]
+    assert reclaim.failures(result) == ["temporaries: PermissionError: .x.tmp"]

@@ -1,0 +1,289 @@
+{
+  "encoding": "o200k_base",
+  "max_tokens": 100000,
+  "serialization": "exact-duplicates/v1",
+  "files": [
+    "AGENTS.md",
+    "CLAUDE.md",
+    "docs/AGENTS.md",
+    "docs/STRUCTURE.md",
+    "docs/modules/context-bundle.md",
+    "docs/modules/context-records.md",
+    "docs/modules/context-tooling.md",
+    "docs/modules/formats.md",
+    "docs/modules/ledger-context.json",
+    "docs/modules/ledger.md",
+    "docs/modules/model-choice.md",
+    "docs/modules/product-structure.md",
+    "docs/modules/project-governance.md",
+    "docs/modules/test-support.md",
+    "rules/development-laws.md",
+    "scripts/__init__.py",
+    "scripts/ledger.py",
+    "scripts/llm_wiki/__init__.py",
+    "scripts/llm_wiki/context_bundle.py",
+    "scripts/llm_wiki/formats/__init__.py",
+    "tests/__init__.py",
+    "tests/conftest.py",
+    "tests/module_context.py",
+    "tests/module_context_paths.py",
+    "tests/module_interface.py",
+    "tests/module_interface_render.py",
+    "tests/module_qualification.py",
+    "tests/module_record_context.py",
+    "tests/module_records.py",
+    "tests/shared_fixtures.py",
+    "tests/slow_machine.py",
+    "tests/test_a_ledger_posts_once_and_counts_by_code.py",
+    "tests/test_the_ledger_rides_in_the_generation.py"
+  ],
+  "ownership": {
+    "files": [
+      "docs/modules/ledger-context.json",
+      "docs/modules/ledger.md",
+      "scripts/ledger.py",
+      "tests/test_a_ledger_posts_once_and_counts_by_code.py",
+      "tests/test_the_ledger_rides_in_the_generation.py"
+    ]
+  },
+  "qualified_dependencies": [
+    {
+      "provider": "scripts/bounded_io.py",
+      "names": [
+        "MAX_KNOWLEDGE_PAGE_BYTES",
+        "read_stable_bytes"
+      ],
+      "contract_sha256": "87826f93ff8f76c61d945698c7f5ca82bee5b8701fa1315e9efbe307dda3587f",
+      "integration_tests": [
+        "tests/test_a_ledger_posts_once_and_counts_by_code.py",
+        "tests/test_the_ledger_rides_in_the_generation.py"
+      ]
+    },
+    {
+      "provider": "scripts/corpus_snapshot.py",
+      "names": [
+        "collect_corpus"
+      ],
+      "contract_sha256": "7ea12368f51c070a84b0754260f0a82db5ac44b0395b95eabcb01e5053c9f0bb",
+      "integration_tests": [
+        "tests/test_the_ledger_rides_in_the_generation.py"
+      ]
+    },
+    {
+      "provider": "scripts/evidence_graph_builder.py",
+      "names": [
+        "build_full_generation"
+      ],
+      "contract_sha256": "056e93b70cc341eb253323f95833791e52929a5e343d4f8e53acd37f1b2004cd",
+      "integration_tests": [
+        "tests/test_the_ledger_rides_in_the_generation.py"
+      ]
+    },
+    {
+      "provider": "scripts/fact_keys.py",
+      "names": [
+        "KeyStore",
+        "Turn",
+        "key_turns",
+        "store_path"
+      ],
+      "contract_sha256": "233caa546dd59426be1824112996da3acfe7b9d6656c78a7dfb05d3de7f35025",
+      "integration_tests": [
+        "tests/test_a_ledger_posts_once_and_counts_by_code.py",
+        "tests/test_the_ledger_rides_in_the_generation.py"
+      ]
+    },
+    {
+      "provider": "scripts/generation_fts_validation.py",
+      "names": [
+        "GENERATION_FTS_ARTIFACT",
+        "valid_fts_schema"
+      ],
+      "contract_sha256": "563ad9cfc0f7a5a190a90bd1eb10bebd60e07e9b0f1681a33636da4609e1244f",
+      "integration_tests": [
+        "tests/test_the_ledger_rides_in_the_generation.py"
+      ]
+    },
+    {
+      "provider": "scripts/generation_search.py",
+      "names": [
+        "build_generation_fts"
+      ],
+      "contract_sha256": "b2391df99aa883af90d0b8cd8ab8c5b7e83a8d39521b0fa0af81f0a449783354",
+      "integration_tests": [
+        "tests/test_the_ledger_rides_in_the_generation.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/formats/canonical.py",
+      "names": [
+        "sha256_bytes"
+      ],
+      "contract_sha256": "7d34a853c5a6f1be8b00805b2e865ac2a5ca5a6fe3ca141de97ebda61d2a85cf",
+      "integration_tests": [
+        "tests/test_a_ledger_posts_once_and_counts_by_code.py",
+        "tests/test_the_ledger_rides_in_the_generation.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/generation_catalog_store.py",
+      "names": [
+        "GenerationCatalog"
+      ],
+      "contract_sha256": "b18194ebe04bf988b4474379fcb5243516550d43b745a00eaed1453f7844c983",
+      "integration_tests": [
+        "tests/test_a_build_in_flight_is_not_an_orphan.py",
+        "tests/test_a_code_generation_is_not_abandoned.py",
+        "tests/test_a_flow_walk_stops_when_its_caller_has.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/ledger_core.py",
+      "names": [
+        "COLUMNS",
+        "CONFIRMED",
+        "DAILY_DAY",
+        "DAY",
+        "FIELD_ODDS",
+        "INSERT",
+        "LEDGER_DDL",
+        "LEDGER_SCHEMA_VERSION",
+        "LEDGER_SECTION",
+        "LEDGER_TABLE",
+        "LedgerCount",
+        "MATCH_THRESHOLD",
+        "MAX_EVENT_CHARS",
+        "MAX_KIND_CHARS",
+        "MAX_THING_CHARS",
+        "PLURALS",
+        "PROBABLE",
+        "Pointer",
+        "Reconciliation",
+        "Record",
+        "Recurrence",
+        "SAME_EVENT_DAYS",
+        "SELECT",
+        "THING_OVERLAP",
+        "UNDISTINGUISHING",
+        "all_records",
+        "canonical",
+        "canonical_kind",
+        "capture_day",
+        "count",
+        "day_of_path",
+        "days_apart",
+        "ensure_table",
+        "entity_page_bytes",
+        "entity_slug",
+        "event_agrees",
+        "event_quantity",
+        "flattened",
+        "groups",
+        "has_ledger",
+        "match_score",
+        "matching_unit",
+        "missing_lines",
+        "new_event_evidence",
+        "new_page",
+        "page_with_section",
+        "pointer",
+        "pointer_line",
+        "post",
+        "posted_once",
+        "quantity_agrees",
+        "quantity_field",
+        "reconcile",
+        "record_from_row",
+        "record_items",
+        "record_of",
+        "records_by_kind",
+        "records_of",
+        "records_of_kind",
+        "recurrence",
+        "recurring",
+        "rows",
+        "rows_in_store",
+        "same_event",
+        "split_by_touch",
+        "stated_day",
+        "stem",
+        "sum_quantities",
+        "text_field",
+        "thing_agrees",
+        "things_agree",
+        "things_of_every_kind",
+        "tier",
+        "tokens",
+        "touches",
+        "trim_word_start",
+        "weight",
+        "word_character",
+        "word_separators",
+        "word_tokens",
+        "write_table"
+      ],
+      "contract_sha256": "5ba433c5d4b3cb7c672213f51a9d08388401185d29c13963ab7e5e317b101979",
+      "integration_tests": [
+        "tests/test_a_ledger_posts_once_and_counts_by_code.py",
+        "tests/test_the_ledger_rides_in_the_generation.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/model_choice.py",
+      "names": [
+        "using_root"
+      ],
+      "contract_sha256": "d45f2655cb61963e77617d1dfd7d617b134ad77cc770b59b335d0856e5d65019",
+      "integration_tests": [
+        "tests/test_a_ledger_posts_once_and_counts_by_code.py",
+        "tests/test_the_ledger_rides_in_the_generation.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/runtime_roots.py",
+      "names": [
+        "state_root"
+      ],
+      "contract_sha256": "41f0ec7fca196ea9f2d97a7e16a16a3c68c056e34e706069b24d85d3ea42640d",
+      "integration_tests": [
+        "tests/test_a_continuation_keeps_its_original_entry.py",
+        "tests/test_a_prompt_checkpoint_does_not_outwait_its_host.py",
+        "tests/test_a_session_marker_survives_a_busy_writer.py"
+      ]
+    },
+    {
+      "provider": "scripts/markdown_transaction.py",
+      "names": [
+        "mutate_knowledge",
+        "stable_operation_id"
+      ],
+      "contract_sha256": "ec453a4a8ce23b6daa07f805e5ab35371975f95ac4139f9d4bb17a3919b403e6",
+      "integration_tests": [
+        "tests/test_a_ledger_posts_once_and_counts_by_code.py",
+        "tests/test_the_ledger_rides_in_the_generation.py"
+      ]
+    },
+    {
+      "provider": "scripts/reliable_memory.py",
+      "names": [
+        "validate_state_root"
+      ],
+      "contract_sha256": "8680515cd873056a7c8a36e0057d91f2f83f23c48841263697676ff91f7ff964",
+      "integration_tests": [
+        "tests/test_a_ledger_posts_once_and_counts_by_code.py",
+        "tests/test_the_ledger_rides_in_the_generation.py"
+      ]
+    },
+    {
+      "provider": "scripts/repository_scope.py",
+      "names": [
+        "resolve_repository_scope",
+        "sanitized_git_environment"
+      ],
+      "contract_sha256": "983dd096d99bafff98ca0aaa2cd722477333e30eed4bfa9297d1830c635e8d90",
+      "integration_tests": [
+        "tests/test_the_ledger_rides_in_the_generation.py"
+      ]
+    }
+  ]
+}

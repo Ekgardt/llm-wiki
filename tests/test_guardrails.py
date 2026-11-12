@@ -17,15 +17,10 @@ if str(SCRIPTS_DIR) not in sys.path:
 @pytest.fixture
 def fake_knowledge_dir(tmp_path, monkeypatch):
     """Set up a temporary knowledge directory."""
-    import build_guardrails
 
     knowledge = tmp_path / "knowledge" / "notes"
     knowledge.mkdir(parents=True)
-    monkeypatch.setattr(build_guardrails, "KNOWLEDGE", knowledge)
-    monkeypatch.setattr(
-        build_guardrails, "GUARDRAILS_FILE", tmp_path / "knowledge" / "guardrails.md"
-    )
-    monkeypatch.setattr(build_guardrails, "ROOT", tmp_path)
+    monkeypatch.setenv("LLM_WIKI_ROOT", str(tmp_path))
     (tmp_path / "knowledge" / "feedback").mkdir()
     return knowledge
 
@@ -45,7 +40,7 @@ def test_collect_correction_type(fake_knowledge_dir):
 
     make_page(fake_knowledge_dir / "patterns/correction1.md",
               "pattern", "Use JWT", "Always use JWT instead of sessions for auth")
-    corrections = build_guardrails._collect_corrections()
+    corrections = build_guardrails.collect_corrections()
     assert len(corrections) == 1
 
 
@@ -55,7 +50,7 @@ def test_collect_preference_type(fake_knowledge_dir):
 
     make_page(fake_knowledge_dir / "patterns/pref1.md",
               "decision", "Short answers", "Must always prefer concise responses")
-    corrections = build_guardrails._collect_corrections()
+    corrections = build_guardrails.collect_corrections()
     assert len(corrections) == 1
     assert "concise" in corrections[0]["summary"]
 
@@ -66,7 +61,7 @@ def test_collect_pattern_with_imperative(fake_knowledge_dir):
 
     make_page(fake_knowledge_dir / "patterns/rule1.md",
               "pattern", "Backlink rule", "Always add reciprocal backlinks when creating new pages")
-    corrections = build_guardrails._collect_corrections()
+    corrections = build_guardrails.collect_corrections()
     assert len(corrections) == 1
 
 
@@ -76,7 +71,7 @@ def test_collect_ignores_plain_patterns(fake_knowledge_dir):
 
     make_page(fake_knowledge_dir / "patterns/info.md",
               "pattern", "Mirror pipelines", "This pattern describes reusing existing infrastructure shapes")
-    corrections = build_guardrails._collect_corrections()
+    corrections = build_guardrails.collect_corrections()
     assert len(corrections) == 0
 
 
@@ -94,9 +89,9 @@ def test_collect_filters_by_project(fake_knowledge_dir):
     path.write_text(content)
 
     # Should find with project filter
-    assert len(build_guardrails._collect_corrections("project-a")) == 1
+    assert len(build_guardrails.collect_corrections("project-a")) == 1
     # Should NOT find with different project filter
-    assert len(build_guardrails._collect_corrections("project-b")) == 0
+    assert len(build_guardrails.collect_corrections("project-b")) == 0
 
 
 def test_build_guardrails_formats_output(fake_knowledge_dir):
@@ -147,7 +142,7 @@ def test_apply_delegates_guardrails_replacement_with_stable_precondition(
         "Always use JWT instead of sessions for auth",
     )
     before = b"old guardrails\n"
-    build_guardrails.GUARDRAILS_FILE.write_bytes(before)
+    build_guardrails.guardrails_file().write_bytes(before)
     fixed_now = datetime(2026, 7, 16, 12, 0, 0)
     monkeypatch.setattr(
         build_guardrails,
@@ -167,7 +162,7 @@ def test_apply_delegates_guardrails_replacement_with_stable_precondition(
 
     assert len(calls) == 1
     operation_id, changes, kwargs = calls[0]
-    content = changes[build_guardrails.GUARDRAILS_FILE]
+    content = changes[build_guardrails.guardrails_file()]
     before_hash = sha256_bytes(before)
     source_manifest = kwargs["preconditions"]["guardrails_source_manifest"]
     assert source_manifest["entries"] == [
@@ -196,7 +191,7 @@ def test_without_apply_does_not_mutate_guardrails(fake_knowledge_dir, monkeypatc
         "Always use JWT instead of sessions for auth",
     )
     before = b"existing guardrails\n"
-    build_guardrails.GUARDRAILS_FILE.write_bytes(before)
+    build_guardrails.guardrails_file().write_bytes(before)
 
     def unexpected_mutation(*args, **kwargs):
         raise AssertionError("non-apply generation must be read-only")
@@ -205,7 +200,7 @@ def test_without_apply_does_not_mutate_guardrails(fake_knowledge_dir, monkeypatc
     monkeypatch.setattr(sys, "argv", ["build_guardrails.py"])
 
     assert build_guardrails.main() == 0
-    assert build_guardrails.GUARDRAILS_FILE.read_bytes() == before
+    assert build_guardrails.guardrails_file().read_bytes() == before
 
 
 def test_apply_rejects_source_mutation_after_guardrails_snapshot(tmp_path, monkeypatch):
@@ -224,9 +219,6 @@ def test_apply_rejects_source_mutation_after_guardrails_snapshot(tmp_path, monke
     target.write_bytes(before)
     monkeypatch.setenv("LLM_WIKI_ROOT", str(vault))
     monkeypatch.setenv("LLM_WIKI_STATE_ROOT", str(tmp_path / "state"))
-    monkeypatch.setattr(build_guardrails, "ROOT", vault)
-    monkeypatch.setattr(build_guardrails, "KNOWLEDGE", notes)
-    monkeypatch.setattr(build_guardrails, "GUARDRAILS_FILE", target)
     original_mutate = markdown_transaction.mutate_knowledge
 
     def race(operation_id, changes, **kwargs):
@@ -261,9 +253,6 @@ def test_apply_rejects_oversized_guardrails_before_read(tmp_path, monkeypatch):
     target.write_bytes(b"12345")
     monkeypatch.setenv("LLM_WIKI_ROOT", str(vault))
     monkeypatch.setenv("LLM_WIKI_STATE_ROOT", str(tmp_path / "state"))
-    monkeypatch.setattr(build_guardrails, "ROOT", vault)
-    monkeypatch.setattr(build_guardrails, "KNOWLEDGE", notes)
-    monkeypatch.setattr(build_guardrails, "GUARDRAILS_FILE", target)
     monkeypatch.setattr(build_guardrails, "MAX_GUARDRAILS_BYTES", 4, raising=False)
     monkeypatch.setattr(sys, "argv", ["build_guardrails.py", "--apply"])
 

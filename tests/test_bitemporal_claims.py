@@ -7,7 +7,6 @@ claim/v1 records, not hand-made dictionaries that skip the checks.
 from __future__ import annotations
 
 import hashlib
-from datetime import datetime
 from pathlib import Path
 
 import pytest
@@ -19,7 +18,7 @@ from bitemporal_claims import (
     history,
     unclassified_relations,
 )
-from claims import RELATIONS, ClaimPipeline, _validate_interval
+from claims import RELATIONS, ClaimPipeline, validate_interval
 from evidence_resolver import EvidenceResolver
 
 DAILY = "2026-01-02"
@@ -269,39 +268,10 @@ def test_every_frozen_relation_is_classified_as_single_or_multi_valued():
     assert not SINGLE_VALUED_RELATIONS & MULTI_VALUED_RELATIONS
 
 
-def test_every_supported_python_reads_a_one_digit_fraction():
-    """`fromisoformat` took only three or six fractional digits before 3.11.
+def test_a_one_digit_fraction_is_a_valid_strict_timestamp():
+    from llm_wiki.claim_ledger import strict_rfc3339_utc
 
-    This project supports 3.10, where `…:00.5Z` raises `Invalid isoformat
-    string`. The test above passed locally on 3.12 and failed on every 3.10 job
-    in CI on 2026-08-30. This one states the rule itself, so it fails on any
-    interpreter where the padding is wrong rather than only on the old ones.
-    """
-    from claims import _six_digit_fraction
-
-    padded = _six_digit_fraction("2026-08-19T00:00:00.5+00:00")
-
-    assert padded == "2026-08-19T00:00:00.500000+00:00"
-    assert datetime.fromisoformat(padded).microsecond == 500_000
-
-
-def test_padding_changes_nothing_that_was_already_readable():
-    from claims import _six_digit_fraction
-
-    assert (
-        _six_digit_fraction("2026-08-19T00:00:00.123456+00:00")
-        == "2026-08-19T00:00:00.123456+00:00"
-    )
-    assert _six_digit_fraction("2026-08-19T00:00:00+00:00") == "2026-08-19T00:00:00+00:00"
-
-
-def test_more_than_six_digits_is_left_to_be_refused():
-    """Truncating would silently change the instant; refusing names the problem."""
-    from claims import _six_digit_fraction
-
-    text = "2026-08-19T00:00:00.1234567+00:00"
-
-    assert _six_digit_fraction(text) == text
+    assert strict_rfc3339_utc("2026-08-19T00:00:00.5Z", label="valid_from") == "2026-08-19T00:00:00.5Z"
 
 
 def test_a_sub_second_validity_interval_is_not_refused_as_inverted():
@@ -310,7 +280,7 @@ def test_a_sub_second_validity_interval_is_not_refused_as_inverted():
     Comparing them as text made `…:00.5Z` look earlier than `…:00Z`, so a real
     half-second interval was rejected as empty. Ordering is by instant now.
     """
-    interval = _validate_interval(
+    interval = validate_interval(
         {"from": "2026-08-19T00:00:00Z", "to": "2026-08-19T00:00:00.5Z"}
     )
     assert interval["from"] == "2026-08-19T00:00:00Z"

@@ -9,24 +9,24 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import memory_queue
 import pytest
+import queue_core
 
 from tests.adopted_vault import adopt
 
-_SETTLED = memory_queue.DEFAULTS.queue_max_attempts
+_SETTLED = queue_core.DEFAULTS.queue_max_attempts
 
 
 def _refusal(call) -> tuple[str, bool]:
     """The refusal code, and whether it names the option that was refused."""
-    with pytest.raises(memory_queue.QueueOperationError) as raised:
+    with pytest.raises(queue_core.QueueOperationError) as raised:
         call()
     return (raised.value.code, "max_attempts" in str(raised.value))
 
 
 def test_claiming_with_a_caller_s_own_limit_is_refused_by_name(tmp_path: Path) -> None:
     root, state_root = adopt(tmp_path)
-    queue = memory_queue.active_or_legacy_memory_queue(root, state_root)
+    queue = queue_core.active_or_legacy_memory_queue(root, state_root)
     queue.enqueue("compile", 1, {"daily": "one"})
 
     refused = _refusal(lambda: queue.claim("worker", max_attempts=_SETTLED - 1))
@@ -36,7 +36,7 @@ def test_claiming_with_a_caller_s_own_limit_is_refused_by_name(tmp_path: Path) -
 
 def test_the_settled_limit_still_claims(tmp_path: Path) -> None:
     root, state_root = adopt(tmp_path)
-    queue = memory_queue.active_or_legacy_memory_queue(root, state_root)
+    queue = queue_core.active_or_legacy_memory_queue(root, state_root)
     queue.enqueue("compile", 1, {"daily": "one"})
 
     lease = queue.claim("worker", max_attempts=_SETTLED)
@@ -48,13 +48,13 @@ def test_a_worker_told_a_limit_the_queue_refuses_claims_nothing(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     root, state_root = adopt(tmp_path)
-    queue = memory_queue.active_or_legacy_memory_queue(root, state_root)
+    queue = queue_core.active_or_legacy_memory_queue(root, state_root)
     queue.enqueue("compile", 1, {"daily": "one"})
-    monkeypatch.setattr(memory_queue, "_vault_root", lambda: root)
-    monkeypatch.setattr(memory_queue, "_state_root", lambda: state_root)
+    monkeypatch.setenv("LLM_WIKI_ROOT", str(root))
+    monkeypatch.setenv("LLM_WIKI_STATE_ROOT", str(state_root))
 
     refused = _refusal(
-        lambda: memory_queue.run_worker(
+        lambda: queue_core.run_worker(
             lambda _task: True, max_tasks=1, max_attempts=_SETTLED - 1
         )
     )

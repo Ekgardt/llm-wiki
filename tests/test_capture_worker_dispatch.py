@@ -3,21 +3,22 @@ from unittest.mock import Mock
 
 import flush_memory
 import integration_adapter
+import memory_state
 import pytest
 
-from tests.test_capture_terminal import (
+from tests.capture_terminal_helpers import (
     _assert_completed_capture,
     _FakeNoContentProvider,
     _NoContentProcessor,
     _ready_intent_binding,
 )
-from tests.test_queue_v3_capture_links import _coordinator, _queue
+from tests.queue_v3_capture_links_helpers import _coordinator, _queue
 
 
 def test_generic_claim_leaves_capture_for_terminal_worker(tmp_path, monkeypatch):
     queue = _queue(tmp_path)
     coordinator = _coordinator(tmp_path)
-    monkeypatch.setattr(flush_memory, "ROOT", tmp_path / "unused-session-vault")
+    monkeypatch.setenv("LLM_WIKI_ROOT", str(tmp_path / "unused-session-vault"))
     binding = _ready_intent_binding(queue, coordinator, queue.ownership_registry(), "status")
     assert queue.claim("legacy") is None
     assert queue.get(binding.task_id).attempts == 0
@@ -40,8 +41,8 @@ def test_generic_claim_selects_ordinary_work_after_capture(tmp_path):
 def test_capture_drain_processes_more_than_one_and_stops_when_empty(monkeypatch):
     work = Mock(side_effect=["terminal-one", "terminal-two", None])
     spawn = Mock()
-    monkeypatch.setattr(integration_adapter, "spawn_detached", spawn)
-    integration_adapter._drain_capture_work(work)
+    monkeypatch.setattr(memory_state, "spawn_detached", spawn)
+    integration_adapter.drain_capture_work(work)
     assert work.call_count == 3
     spawn.assert_not_called()
 
@@ -50,8 +51,8 @@ def test_capture_drain_schedules_one_successor_at_task_limit(monkeypatch):
     work = Mock(return_value="terminal")
     spawn = Mock()
     monkeypatch.setattr(integration_adapter, "CAPTURE_DRAIN_MAX_TASKS", 2)
-    monkeypatch.setattr(integration_adapter, "spawn_detached", spawn)
-    integration_adapter._drain_capture_work(work)
+    monkeypatch.setattr(memory_state, "spawn_detached", spawn)
+    integration_adapter.drain_capture_work(work)
     assert work.call_count == 2
     spawn.assert_called_once()
     assert spawn.call_args.args[0][-1] == "--capture-worker"
@@ -61,8 +62,8 @@ def test_capture_drain_schedules_successor_at_time_limit(monkeypatch):
     work = Mock(return_value="terminal")
     spawn = Mock()
     monkeypatch.setattr(integration_adapter.time, "monotonic", Mock(side_effect=[0, 451]))
-    monkeypatch.setattr(integration_adapter, "spawn_detached", spawn)
-    integration_adapter._drain_capture_work(work)
+    monkeypatch.setattr(memory_state, "spawn_detached", spawn)
+    integration_adapter.drain_capture_work(work)
     work.assert_called_once()
     spawn.assert_called_once()
 
@@ -71,8 +72,8 @@ def test_capture_drain_schedules_successor_at_time_limit(monkeypatch):
 def test_failed_capture_does_not_spawn_retry_chain(monkeypatch, reason):
     work = Mock(side_effect=RuntimeError(reason))
     spawn = Mock()
-    monkeypatch.setattr(integration_adapter, "spawn_detached", spawn)
+    monkeypatch.setattr(memory_state, "spawn_detached", spawn)
     with pytest.raises(RuntimeError, match=reason):
-        integration_adapter._drain_capture_work(work)
+        integration_adapter.drain_capture_work(work)
     work.assert_called_once()
     spawn.assert_not_called()

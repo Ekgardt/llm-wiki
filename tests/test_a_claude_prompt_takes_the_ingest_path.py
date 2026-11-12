@@ -11,7 +11,6 @@ docs/research/2026-09-25-a-hook-stops-its-delegate-before-the-host-stops-it.md.
 
 from __future__ import annotations
 
-import argparse
 import json
 from pathlib import Path
 from types import SimpleNamespace
@@ -19,14 +18,16 @@ from types import SimpleNamespace
 import integration_adapter
 import pytest
 
+from tests.a_claude_prompt_takes_the_ingest_path_helpers import _effective_host_timeout
+
 ROOT = Path(__file__).resolve().parent.parent
 
 
 @pytest.fixture
 def paths(monkeypatch) -> list[str]:
     taken: list[str] = []
-    monkeypatch.setattr(integration_adapter, "ingest_event", lambda envelope: taken.append("ingest") or {})
-    monkeypatch.setattr(integration_adapter, "_run_own_delegate", lambda args, envelope: taken.append("own"))
+    monkeypatch.setattr(integration_adapter, "ingest_event", lambda envelope, **_options: taken.append("ingest") or {})
+    monkeypatch.setattr(integration_adapter, "run_own_delegate", lambda args, envelope: taken.append("own"))
     return taken
 
 
@@ -40,9 +41,9 @@ def paths(monkeypatch) -> list[str]:
     ],
 )
 def test_a_named_delegate_takes_the_path_its_event_needs(paths, event, delegate, expected) -> None:
-    args = argparse.Namespace(source="claude", delegate=delegate)
+    args = integration_adapter.parser().parse_args(["--source", "claude", "--delegate", delegate])
 
-    integration_adapter._dispatch_cli_event(args, SimpleNamespace(event_type=event))
+    integration_adapter.dispatch_cli_event(args, SimpleNamespace(event_type=event))
 
     assert paths == [expected]
 
@@ -63,7 +64,14 @@ ADAPTER_START_ALLOWANCE_SECONDS = 1.0
 
 def _host_timeouts() -> dict[str, float]:
     settings = json.loads((ROOT / "integrations/claude-code/settings.json").read_text(encoding="utf-8"))
-    return {event: groups[0]["hooks"][0]["timeout"] for event, groups in settings["hooks"].items()}
+    return {event: _effective_host_timeout(event, settings["hooks"][event][0]["hooks"][0]) for event in EVENT_DELEGATES}
+
+
+def test_host_budget_uses_explicit_overrides_and_documented_defaults() -> None:
+    assert _effective_host_timeout("UserPromptSubmit", {"type": "command"}) == 30
+    assert _effective_host_timeout("PostToolUse", {"type": "command"}) == 600
+    assert _effective_host_timeout("UserPromptSubmit", {"type": "command", "timeout": 5}) == 5
+    assert _effective_host_timeout("PostToolUse", {"type": "command", "async": True, "timeout": 5}) == float("inf")
 
 
 def test_every_delegate_stops_before_the_host_stops_its_hook() -> None:

@@ -1,0 +1,143 @@
+{
+  "encoding": "o200k_base",
+  "max_tokens": 100000,
+  "serialization": "exact-duplicates/v1",
+  "files": [
+    "AGENTS.md",
+    "CLAUDE.md",
+    "docs/AGENTS.md",
+    "docs/STRUCTURE.md",
+    "docs/modules/compile-receipts-tests-streamed-compile-source-quotas-context.json",
+    "docs/modules/compile-receipts-tests-streamed-compile-source-quotas.md",
+    "docs/modules/context-bundle.md",
+    "docs/modules/context-records.md",
+    "docs/modules/context-tooling.md",
+    "docs/modules/memory-state-tests-compile-ceiling-counts-only-compile-inputs-helpers.md",
+    "docs/modules/model-choice.md",
+    "docs/modules/product-structure.md",
+    "docs/modules/project-governance.md",
+    "docs/modules/test-support.md",
+    "rules/development-laws.md",
+    "scripts/__init__.py",
+    "scripts/llm_wiki/__init__.py",
+    "scripts/llm_wiki/context_bundle.py",
+    "tests/__init__.py",
+    "tests/compile_ceiling_counts_only_compile_inputs_helpers.py",
+    "tests/conftest.py",
+    "tests/module_context.py",
+    "tests/module_context_paths.py",
+    "tests/module_interface.py",
+    "tests/module_interface_render.py",
+    "tests/module_qualification.py",
+    "tests/module_record_context.py",
+    "tests/module_records.py",
+    "tests/shared_fixtures.py",
+    "tests/slow_machine.py",
+    "tests/test_streamed_compile_source_quotas.py"
+  ],
+  "ownership": {
+    "files": [
+      "docs/modules/compile-receipts-tests-streamed-compile-source-quotas-context.json",
+      "docs/modules/compile-receipts-tests-streamed-compile-source-quotas.md",
+      "tests/test_streamed_compile_source_quotas.py"
+    ]
+  },
+  "qualified_dependencies": [
+    {
+      "provider": "scripts/compile_pipeline.py",
+      "names": [
+        "sha256_bytes"
+      ],
+      "contract_sha256": "7d34a853c5a6f1be8b00805b2e865ac2a5ca5a6fe3ca141de97ebda61d2a85cf",
+      "integration_tests": [
+        "tests/test_streamed_compile_source_quotas.py"
+      ]
+    },
+    {
+      "provider": "scripts/compile_receipts.py",
+      "names": [
+        "MAX_DAILY_BYTES",
+        "SourceSnapshot",
+        "daily_read_budget"
+      ],
+      "contract_sha256": "101ea4096bd4484f3f2639692698d30ed62ad3395d06a01f663237d47b515bdb",
+      "integration_tests": [
+        "tests/test_streamed_compile_source_quotas.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/compile_pipeline_sources.py",
+      "names": [
+        "SourceBudget",
+        "iter_compile_records"
+      ],
+      "contract_sha256": "a21dfc04b4407d884cbe0007b425165a5d1012306b48ee91b2fd88d0064523e7",
+      "integration_tests": [
+        "tests/test_streamed_compile_source_quotas.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/doctor_capture.py",
+      "names": [
+        "settings_check"
+      ],
+      "contract_sha256": "27aa38ad93f67d5a50db54e72f2568eef9afdf7f98686179e7c38388875a1725",
+      "integration_tests": [
+        "tests/test_streamed_compile_source_quotas.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/generation_catalog_store.py",
+      "names": [
+        "GenerationCatalog"
+      ],
+      "contract_sha256": "b18194ebe04bf988b4474379fcb5243516550d43b745a00eaed1453f7844c983",
+      "integration_tests": [
+        "tests/test_a_blocked_task_has_a_way_back.py",
+        "tests/test_a_build_in_flight_is_not_an_orphan.py",
+        "tests/test_a_capacity_refusal_does_not_corrupt_a_generation.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/model_choice.py",
+      "names": [
+        "using_root"
+      ],
+      "contract_sha256": "d45f2655cb61963e77617d1dfd7d617b134ad77cc770b59b335d0856e5d65019",
+      "integration_tests": [
+        "tests/test_streamed_compile_source_quotas.py"
+      ]
+    },
+    {
+      "provider": "scripts/reliable_memory.py",
+      "names": [
+        "validate_state_root"
+      ],
+      "contract_sha256": "8680515cd873056a7c8a36e0057d91f2f83f23c48841263697676ff91f7ff964",
+      "integration_tests": [
+        "tests/test_streamed_compile_source_quotas.py"
+      ]
+    },
+    {
+      "provider": "scripts/repository_scope.py",
+      "names": [
+        "sanitized_git_environment"
+      ],
+      "contract_sha256": "fd550ae20761afad50b37fa3a71044a162485b0e4d4b3e2af9b5b22e143c2bec",
+      "integration_tests": [
+        "tests/test_streamed_compile_source_quotas.py"
+      ]
+    },
+    {
+      "provider": "scripts/settings.py",
+      "names": [
+        "SettingsError",
+        "effective"
+      ],
+      "contract_sha256": "8afe06c763063cb6db04d00a4b1854a7c2ede0283865d03565f272072c48a71a",
+      "integration_tests": [
+        "tests/test_streamed_compile_source_quotas.py"
+      ]
+    }
+  ]
+}

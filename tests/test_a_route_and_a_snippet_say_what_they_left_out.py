@@ -72,13 +72,13 @@ def _modules(root: Path, count: int, definitions: int) -> None:
 def test_a_file_reports_every_definition_line() -> None:
     lines = "def frob():\n    pass\n".splitlines() * SERVICES
 
-    assert len(symbol_snippet._definition_lines(lines, "frob")) == SERVICES
+    assert len(symbol_snippet.definition_lines(lines, "frob")) == SERVICES
 
 
 def test_a_snippet_answer_counts_the_nodes_and_definitions_it_leaves_out(tmp_path: Path) -> None:
     _modules(tmp_path, SERVICES, 2)
 
-    answer = symbol_snippet._graph_snippets(_Graph(SERVICES), tmp_path, "frob", time.monotonic() + 30)
+    answer = symbol_snippet.graph_snippets(_Graph(SERVICES), tmp_path, "frob", time.monotonic() + 30)
 
     shown = symbol_snippet.MAX_LOCATIONS
     assert len(answer["snippets"]) == shown

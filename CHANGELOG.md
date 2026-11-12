@@ -6,16 +6,250 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+- The module ownership gate covers the tokenizer vocabulary that budget measurement vendors under `tests/data/tiktoken/` only through its pin: the file name must be the SHA-1 of its source URL, its bytes must have the SHA-256 that the installed tiktoken itself verifies, no other tracked file may sit in that directory, and no module may also claim it (`docs/research/2026-11-11-the-tokenizer-vocabulary-is-pinned-data.md`). The report counts it in `pinned_count`, apart from `owned_count`, and an untracked file beside it is not inventory. The new `benchmark/__init__.py` belongs to the `benchmark-run-benchmark` module. The MCP `CallToolResult` type is detected on its own import, so a missing resource helper no longer turns off structured tool results, and a missing `mcp.server` no longer reports them as available.
+
+- Test inputs no longer look like credentials to a secret scanner that reads the target branch's configuration: the queue record fixtures name operations, packages, fences and leases with one repeated hexadecimal digit, the two digests the code recomputes from neighbouring bytes were recomputed, and the credential-shaped strings in Python tests are assembled at run time. The five allowlists that named the old values are gone (`docs/research/2026-11-03-native-ci-fixture-secret-findings.md`). `import scripts.code_graph` works again without `scripts/` on the path, the MCP server keeps its core tools when the optional resource types are missing, `benchmark/` is one package for type checking, the Python 3.10 `tomli` fallback is gone, and `[tool.deptry]` names the packages loaded by name through `importlib`.
+
+- Every function this change touches nests `if`, `for`, `while`, `with` and `try` at most two levels deep; inner blocks moved into small named helpers and adjacent `with` blocks were joined, without changing a public name or a test assertion. Unused private functions and constants that the split left behind are removed (`_draft_schema`, `_part_holds_reference`, `_review_verdicts`, `_proved_lease_only`, `_names_of_kind`, `_streamed_rows`, `_resource_identity_matches`, `_directory_bytes`, `doctor_repair.CHECKOUT_ROOT`); `doctor_lsp`'s `database_identity` stays, because `test_observation_detects_database_replacement_with_the_same_epochs` fails without it. The two benchmark runners import their sibling modules by name so the coverage run can import them, fixture-only test parameters use `pytest.mark.usefixtures`, parametrized cases carry stable ids so parallel workers collect the same tests, and the secret-scan allowlist names each synthetic test value exactly: every entry checked against the extracted secret is one anchored literal (the six queue-evidence digests, the one task lease digest, the curl test credentials and the install smoke token), and `tests/test_quality_guards.py::test_a_secret_allowlist_names_exact_values_not_a_class` refuses a character class such as `^[0-9a-f]{64}$`, which would also exempt a real token committed to the same fixture.
+
+- Every tracked file belongs to a module or is pinned vendored data, and `tests/test_module_registry_integration.py::test_every_tracked_file_belongs_to_a_module` now fails on one that does not; before, the real-registry test only checked that its counts were consistent, so a new unowned file left CI green. `docs/MODULES.md` and the decomposition plan record completion with the measured numbers, and the `archive-read-only` guide no longer claims `evidence_resolver` re-exports its name.
+
+- The packet planner rebuilt each manifest's `files` from what it could derive, so a replan dropped data a test opens by path — the Python qualification gold and `pyproject.toml` — and two module tests failed with "Undeclared context read". Such files are now declared in a manifest's `reads`; the planner keeps them on every replan and the declared reader accepts them. A test replans twice and reads the declared file.
+
+- On Windows the queue's result file and a capture's temporary transcript were opened in text mode, so every `\n` they wrote became `\r\n`; both now ask for `O_BINARY`. The scan that should have caught them read every `flags = ...` in a file as one name, so a reader elsewhere in the same file that asked for `O_BINARY` covered both writers. It now reads each function's own assignments, and a test shows a neighbour's flags no longer cover a text-mode writer. Five limits that lost their stated basis in the split state it again, the T06 parity gold names the file `_flush_started` moved to, and a test helper with three `if`s is split.
+
+- `queue_core.py` and `integration_adapter.py` become facades over concern modules: the bounded worker (`llm_wiki/queue_worker.py`), result publication, failures, purge, source checks and the v2 migration (`llm_wiki/memory_queue_*.py`, `llm_wiki/queue_v2_migration.py`), and the integration events, lifecycle, session start, settings, delegates, transcripts, capture records and transient files (`llm_wiki/integration_*.py`). Aliases that no caller read are gone; tests patch the part that defines a name, and the patch guard fails on a patch that reaches no code.
+
+- The compile draft hash is computed after the native-evidence schema is complete. When the split moved the schema extension into the facade, the hash in `compile_pipeline_base.py` was taken over the unextended schema, so it no longer described the schema in use and would not change when the native-evidence part did. This defect existed only on this branch; it never reached a release.
+
+- Shared calls are read through their module at call time — `reliable_memory.fsync_*`, `windows_acl`, `sqlite_transactions.begin_immediate`, `markdown_store.utc_now`, `llm_client.call_llm_result` in `build_advisory.py` — so a test that replaces one of them reaches every caller. Before, `archive_daily`'s cheap-check patches replaced a copy the code no longer read and checked nothing. `archive_path_is_read_only` moves to `llm_wiki/archive_read_only.py`, the daily archive takes its month entry limit as a parameter, and `llm_wiki/monotonic_deadline.py` gives every deadline check one patchable clock.
+
+- The large test files that no packet could hold under 100000 tokens are split by concern: doctor, integration injection, search ranking, memory queue, module legacy aliases, the MCP server helpers, precise requests, navigation manager and tool calls, and the platform fixture controls. Every test function is kept; the CI installer job still selects the installer tests from `tests/test_integration_injection.py`. Shared helpers stop taking a module as a parameter, so a packet carries only what a test really reaches.
+
+- The vault and state roots are read from the environment on every call, in one place: `scripts/llm_wiki/runtime_roots.py`. Before, each script copied them into constants at import. From a Git worktree, the queue and the transactions then wrote to the worktree while the rest wrote to the main checkout. An empty `LLM_WIKI_STATE_ROOT` meant the current directory; it now means the vault. The old path constants are gone. `vault_log.vault_log_path(vault)` replaces three copies of the private log path. `tests/test_roots_are_read_at_call_time.py` fails on a module that reads a root at import. Two checks in `compile_controller` still imported the removed `compile_pipeline.ROOT` inside a function, which fails only when publication runs; `tests/test_every_imported_name_is_bound.py` now fails on any first-party import, at any scope, of a name its module does not bind. See `docs/research/2026-11-10-roots-are-read-at-call-time.md`.
+
+- 92 product scripts now each belong to a module with the tests that exercise them most (`docs/MODULES.md` → Script modules). A script that no test exercises most joins the script whose tests reach it most, and a module whose own tests do not cross a described boundary cites the repository tests that exercise its script. Every existing packet now carries the guides of the new owners and still fits 100000 tokens. Two unused kernel test helpers that passed a parameter removed on 2026-09-18 are gone.
+
+- `scripts/doctor.py` run without `LLM_WIKI_ROOT` checks the checkout again: after the split its fallback root had resolved to `scripts/`. A test refuses any part under `scripts/llm_wiki/` that steps up only one directory from `__file__`. The writer inventory lists the transaction apply step's writes in `markdown_operations.py`, where they now live; the legacy-path invariant reads nested script files; the corpus contract names `generation_maintenance.run_generation_maintenance()`, and a documents check fails on a `module.function()` reference that no longer resolves. The curl redaction keeps cmd.exe's caret-escaped `^&` and `^|` inside the command, so a `-u user:password` after them is hidden. The two research notes now cite only pages read in full.
+
+- The four files too large for any module — `doctor.py`, `markdown_transaction.py`, the adopted-queue reader in `queue_core.py` and `compile_pipeline.py` — keep their paths as facades over concern modules under `scripts/llm_wiki/`. Callers and tests import and patch the part that defines a name; checks that a removed legacy function stays gone read every part; parts name the schema directory explicitly, because a part lives one directory deeper than the file it came from. See `docs/research/2026-11-10-giant-files-become-concern-modules.md`.
+
+- The import cycle that joined the scripts is gone: shared code moved below its former callers, `compile_memory.py` and `repository_index.py` stay thin commands over `compile_pipeline.py` and `repository_indexing.py`, and `tests/test_the_import_graph_stays_acyclic.py` fails on a new cycle or on a copied global its module rebinds. See `docs/research/2026-11-09-the-import-graph-has-no-cycle.md`.
+
+- `search_memory` no longer reports a stale embedder state, and the update's Python bound probe names `nightly_budget` directly.
+
+- The queue engine moves to `scripts/queue_core.py`; `scripts/memory_queue.py` stays the operator command at its documented path and keeps the historical pickle names. Generation maintenance leaves `doctor.py` and the nightly time budget leaves `scheduled_nightly.py`, so the import cycle no longer runs through them.
+
+- The one import cycle that joined 77 scripts shrinks to 45: model choice, process-tree handling, claim-ledger parsing, evidence references, compile-receipt authority, the read-only queue readers and the adoption admission checks each move to their own module, with every caller and test patch retargeted.
+
+- `docs/STRUCTURE.md` keeps the layout, environment contracts and rules; detailed contracts moved to `docs/contracts/` and the module map to `docs/MODULES.md`, so every module packet carries about 19000 fewer tokens. The documentation checks read all of these files as one reference.
+
+- `OLLAMA_NO_CLOUD=1` now refuses a saved model from any other provider before a call is made, and `doctor` names the conflict, so a saved cloud model can no longer override the local-only setup.
+
+- Every module packet is measured against the 100000-token limit in CI, `python -m tests.regenerate_module_records <catalog>` rebuilds a record catalog after its source changes, schemas, queries and data fixtures get owner packets, and generated guides and catalog labels are English only.
+
+- `scripts/memory_queue.py` loses 42 private aliases that nothing read; a test now fails on a self-alias without a consumer.
+
+- Finish the data and history part of the module decomposition: 149 new packets own the lock file, benchmark data, studies, plans and leaf code groups, each at most 100000 tokens. `scripts/memory_queue.py` drops under the limit by moving task lineage, export proof, the v3 candidate check and operator compile recovery into their own modules. 1297 code files remain unassigned until interface-only dependencies are qualified.
+
+- Name every unsupported field when a compile plan is refused, sorted, so a rejection can be told apart as model noise or a field the allow-list lacks. The message has no limit of its own: each place that stores a failure already bounds its text.
+
+- The nightly code update refuses a commit whose `requires-python` no interpreter on this machine meets, stays on working code and names the reason in `doctor`. A nightly that finds its environment on an older Python than the checkout requires fetches the interpreter through uv, moves the environment onto it keeping the chosen extras and groups, and reruns itself; each way that can stop says why.
+
+- Keep closing brackets and backticks after text that is already `[REDACTED]`, so a safe quotation survives transport and the output guard; a marker still never hides more credential text. Mask `curl` credentials after a Windows `^` line continuation, and redact the lines an installer takeover reports and the doctor stderr in a failed install smoke.
+
+- Decide SQLite contention by the error's code alone. The Python 3.10 text fallback and every other 3.10 shim, comment and skip are gone; an error without a code is not contention, and a static test keeps these from returning.
+
+- The model chooser no longer aborts an unattended install when no provider can be selected or a saved model is now refused: the settings stay as they were and the installer says why. A model asked for by name still fails.
+
+- Mask `curl` credentials placed after a quoted body that spans several lines.
+
+- Retire the per-interpreter dependency-audit matrix and its `accepted` filelock advisories: with Python 3.14 the only interpreter, the universal pylock audit and its coverage verifier read every locked version, and no Python 3.10 fork is left to accept.
+
+- Preserve original daily source context in versioned compile receipts and enforce canonical receipt authority across compilation, archive, retrieval, diagnostics and operator actions.
+
+- Report a deferred compiler's outcome as unknown instead of predicting that the nightly service stops a compiler owned elsewhere.
+
+- Share the durable literal schema with compile draft quotations and binding, preventing refusal of complete source lines solely by a divergent 4000-character cutoff.
+
+- Collect only the daily evidence used by nightly fact keys, honor exclusions at direct traversal roots, and share the step deadline and existing daily-file read contract.
+
+- Stop repeated claim assessment of an immutable compile target snapshot that has already changed; preserve the source for resolution against fresh context and retain transactional conflict checks.
+
+- Avoid calculating discarded lexical weights on the dense search path, retaining identical trust-weighted admission and ranking.
+
+- Choose shared path prefixes by complete answer cost instead of an unsupported character cutoff, preserving exact paths.
+
+- Continue draining independent captures after a durably recorded failure, preserving retry, exhaustion and ownership errors.
+
+- Recognize an exact source compiled by a later authoritative receipt even when its accepted page names differ from a retained refused proposal.
+
+- Reuse sealed model vectors across extractor namespaces only when exact source, span and model identity remains verified.
+
+- Resolve historical citations with shared source boundaries and exact current-part hashes, removing the unsupported candidate cutoff while retaining source integrity checks.
+
+- Reuse immutable UTF-8 compile measurements instead of repeatedly serializing the schema and scanning unrelated daily parts; retain exact source selection and full model token counting.
+
+- Finish owned CLI process cleanup after interruption while preserving the original failure and naming unverified cleanup.
+
+- Exclude whitespace-only retrieval fragments in the shared versioned chunker, preserving original source bytes and strict FTS validation.
+
+- Preserve selected context spans by default instead of repeating whole pages and losing evidence under the shared budget.
+
+- Allow a retained append to retry beyond historical CAS refusals while preserving deadlines, cancellation and publication checks.
+
+- Preserve explicitly adopted shared-resource and profile changes through update rollback and uninstall.
+
+- Let durable Claude and Codex prompt/tool capture use the host budget instead of an unsupported five-second cutoff.
+
+- Preserve live SQLite locks when adoption and Doctor inspect operational database identity.
+
+- Keep corpus source seals valid during unrelated directory entry changes while preserving source-file, replacement, permission and ownership checks.
+
+- Keep capture admission and health SQLite queries available as valid operational databases grow; retain file safety, deadlines and deletion safeguards.
+
+- Separate normal capture admission from complete retained-history certification, preserve full diagnostic checks, and invalidate cached admission when either adopted database file is replaced.
+
+
+- Preserve every verified compile claim within the existing whole-response and page byte budgets instead of dropping claims after an unexplained per-page count of eight.
+
+
+- Prompt and tool occurrences are saved durably in the foreground. Their existing fenced capture worker applies recoverable project checkpoints before terminal completion; interrupted writes retain the capture for retry.
+
+
+### Fixed
+
+- Breadcrumb publication and queue registration reuse one canonical capture owner, validating supplied ownership and retaining complete evidence on registration failure.
+
+- Capture verifies retained transcript bytes while native hosts append, and refuses replacement, shrink and rewriting for both whole and excerpt reads.
+
+- Queue health streams all retained task and owner facts, counts source records and modern artifacts completely within its deadline, and preserves result and deletion checks beyond the old row ceiling.
+
+- Generation collection now uses its existing canonical Markdown writer fence and cancellation; doctor repair preserves the same coordinator.
+
+- Grounded answers preserve automatic semantic retrieval when no profile is supplied, including dense signals for graph queries; explicit caller profiles keep their declared behavior.
+
+- Grounded questions use the existing complete prompt window rather than a separate character ceiling; oversized prompts refuse before query analysis and fitting questions remain whole.
+
+- Grounded answers reuse the verified published corpus and safely recheck selected current Markdown; cached citation paths and line numbers must match their source, and changed sources, redirected paths and expired deadlines remain refusals.
+
+- Measure claim health against its actual note and project-state inputs, excluding project journals; keep the claim reader’s overflow checks.
+
+- Count compiler input sizes using its actual source selectors, excluding daily receipts and archived notes while including metadata snapshots.
+
+- Symbol snippets preserve the complete definition in indexed, fresh-file and heuristic reads instead of cutting source after an unexplained 120 lines; the existing MCP answer budget still reports any response-level omission.
+
+- Codex model calls retain reported completed-turn token usage beside the final answer, preserving unknown counters, CLI failures and the common DLP boundary.
+
+- Pending capture recovery verifies an existing ready successor when another publisher finishes after discovery, avoiding a false loss while still refusing missing or damaged evidence.
+
+- Compile related links share the existing complete response and page budgets; the earlier-interface import regression runs in its own process to preserve claim class identities across the full suite.
+
+- Search counts follow caller budgets with representable SQLite candidate limits; common symbol names use the existing graph reader contract and preserve omission counts instead of separate numeric refusals.
+
+- OKF migration derives text and its precondition from one stable source snapshot within the existing Markdown target budget, replacing its separate read ceiling.
+
+- Codex installer configuration-status commands emit LF on every platform, so Bash can recognize native Windows output and rewrite the earlier owned entry.
+
+- Compiled claims use the exact verified source span when evidence is widened, keeping literal text and its digest consistent without weakening validation.
+
+- Blackboard descriptions, signals, resource sets, and claim JSON use the existing journal budget; resource lookups avoid SQL variable-count ceilings while preserving current database identity constraints.
+
+- Daily compile readers share the existing daily-evidence byte contract and respect the configured total source budget, preserving complete parts above the older separate read bound.
+
+- Scheduled maintenance now answers help and rejects unknown arguments before taking ownership; claims reuse the established database-open boundary during live updates.
+
+- Database-parent locking checks no longer create nested runtime directories in backup images; preserve platform-specific seal verification and installer cleanup.
+
+- Keep temporary SQLite locking probes in the existing runtime `run/` and avoid redundant chmod, so diagnostics and cooperating writers do not invalidate the sealed vault root.
+
+- Corpus collection and knowledge extraction defaults share the existing discovery entry budget, avoiding separate 10,000-source refusals while preserving explicit operator limits.
+
+- Archive and restore pages within the existing Markdown transaction target budget instead of a separate unmeasured read ceiling.
+
+- Preserve redacted causes of refused runtime observations and distinguish live-source verification failures from immutable generation corruption; deletion remains blocked.
+
+- Write byte-exact capacity fixtures on Windows and record measured shard weights for new regression files.
+
+- Foreground prompt checkpoint follow-up tries writer admission without waiting beyond the host timeout; contended handoffs remain pending for existing recovery.
+
+- Replay a stale pending capture descriptor from its exact verified ready bytes when another publisher has completed it; preserve fences, full-source validation and one original task.
+
+- Distinguish configured live-corpus capacity refusals from immutable index corruption; report unverified freshness without raising limits or hiding malformed artifacts.
+
+- Retire all eligible own-call transcripts within the existing deadline instead of stopping at 2000 files; preserve files when classification exhausts that deadline.
+
+- Retry a refused permanent breadcrumb source as a linked new transaction attempt while retaining create-only publication and current capture fences.
+
+- Validate adopted database invariants in one explicit read transaction, preventing a writer from interrupting validation between schema and integrity checks.
+
+- Cumulative failure counters retain earlier kinds instead of silently dropping their totals when a thirty-third kind is recorded.
+
+- Retain observed checkpoint event identities while they fit the shared state byte budget, avoiding replay admission caused by a separate 256-entry eviction.
+
+- Unattended checkpoint recovery advances an idle project's debounce with the maintenance observation clock while preserving event timestamps, retained evidence and replay/claim fences.
+
+- Configuration backup retention keeps recent verified preimages under the existing age and byte controls instead of deleting the eleventh small copy.
+
+- Checkpoint reducer caches retain every project that fits the existing state byte budget, avoiding duplicate admission caused by a separate 128-entry eviction.
+
+- Retrieval accepts valid long strings under the caller deadline; MCP page reading and freshness hashing use the existing shared knowledge-page ceiling.
+
+- Fresh Python 3.10 installer planning no longer imports TOML settings before dependencies are provisioned; backup retention still validates the same settings when used.
+
+- Health observation uses the existing doctor owner and compares admission epochs before/after validation, so capture can persist during it. Intervening activity, database replacement, lost ownership and deadlines refuse quiescence; the offline exclusive fence remains unchanged.
+
+- Reject NUL root paths before repair backend access on every Python/platform; qualify byte-preserving preimages, archive paths, lease timing and process-state fixtures on Windows.
+
+- Keep coordinator schema migrations inside the SQLite write transaction; inspect bare Python 3.10 environments without requiring their TOML parser; preserve persisted owners with unknown process birth identity on every platform.
+
+- Update the locked PyJWT and virtualenv packages for current security advisories, with both dependency audit feeds retained.
+- Catalog registrations and activation history use the existing database byte budget instead of unexplained row ceilings; complete listings honor deadlines and cancellation during SQL execution.
+
+- Context page and compatibility lists use the existing caller budget instead of arbitrary count/length refusals.
+
+- Store every proven argument binding instead of cutting evidence after eight pairs or 256 bytes.
+
+- Graph name-prefix exclusions use one bound query parameter and no longer refuse valid lists after 32 entries.
+- Prompt and tool events enter durable capture before journal writes and follow-ups; complete linked evidence remains verifiable through terminal completion and search. Removed the replaced direct-write suppression module. Existing full-session readers remain supported.
+- Repeated historical evidence lookups reuse content-bound offsets within one operation; same-size edits still invalidate them. A fully compiled source retires its old failure only after all committed part receipts validate.
+- Valid long re-export chains, long literal route paths and graph pipelines beyond three steps retain their evidence; cycles and caller deadlines remain enforced. Short technical terms no longer bypass citation relevance. Test timing refuses a failed pytest run instead of replacing weights with partial results.
+- Compile retry-ordinal search follows retained refusal history under the caller's deadline and cancellation instead of permanently exhausting after 100 quarantined attempts; committed siblings and parent evidence remain intact.
+
 ### Changed
 - The three READMEs are rewritten to match the code as it is: removed features (loop detector, agent timeline, feedback capture) and the unverifiable comparison table are gone; the agents, hooks, search, maintenance, backup and code navigation are described as they work today.
 
 ### Security
-- The lock moves seven packages past their published advisories, so the dependency audit passes again: certifi 2026.10.23, filelock 4.2.9 on Python 3.11 and later, mcp 1.30.0, msgpack 1.2.4, pyjwt 2.15.1, setuptools 84.2.1 and virtualenv 21.15.5 (distlib, packaging and python-discovery follow virtualenv). No fixed filelock supports Python 3.10: a constraint keeps it on 3.29.7, which carries the same nine advisories as before instead of the seventeen of 4.1.0. The audit now runs once per supported Python and on Windows, because pip-audit skips every pin whose marker does not match its own interpreter and the single Python 3.12 run never read the 3.10 or Windows pins; the nine filelock advisories are accepted by name on the 3.10 legs only, and a test requires the legs together to read every locked version. The HTTP MCP server now closes a session idle for 30 minutes and holds at most 10 000, the SDK's fix for unbounded sessions (docs/research/2026-11-06-seven-locked-packages-move-past-their-advisories.md).
+- The lock moves seven packages past their published advisories, so the dependency audit passes again: certifi 2026.10.23, filelock 4.2.9, mcp 1.30.0, msgpack 1.2.4, pyjwt 2.15.1, setuptools 84.2.1 and virtualenv 21.15.6 (distlib, packaging and python-discovery 1.9.5 follow virtualenv). The audit exports the whole lock and verifies that it read every locked version, so a pin whose marker does not match the auditing interpreter is no longer skipped. The HTTP MCP server now closes a session idle for 30 minutes and holds at most 10 000, the SDK's fix for unbounded sessions (docs/research/2026-11-06-seven-locked-packages-move-past-their-advisories.md).
 
 ### Fixed
 - The shared reader `bounded_io.read_stable_bytes` and the compile cache now notice a file rewritten in place with the same size within one clock tick. `bounded_io.settled_lstat` waits until the file's change stamp is a tick old before it trusts the stat. That stamp is ctime on POSIX, where `os.utime` cannot set it, and mtime on Windows. Only a file written that recently waits, at most 40 ms per look (20 ms for a stamp that is now). If the file is written again during the wait, the reader looks again, so a burst of writes is read once it stops. A file still being written after one second is refused with `SourceChangedDuringRead` ("still being written"); a caller's deadline that ends sooner ends the wait with `TimeoutError`. The path's ancestors are checked after the wait, so a parent directory swapped for a symlink meanwhile is refused. A stamp more than 20 ms in the future is read normally, because no write before the clock reaches that tick can carry it. On RAM-backed storage the old compile cache missed such a rewrite in 27 of 30 runs. Without the wait, `read_stable_bytes` missed 185 of 200 even with the change time compared. `test_fd_read_rejects_same_inode_change_between_lstat_and_open` again rewrites in place without moving the mtime. Other readers that keep their own stat identity are listed with the condition for each (docs/research/2026-11-06-a-rewrite-in-the-same-tick-is-a-change.md).
 - `scripts/` is a regular package (an empty `__init__.py`), so a type check such as `mypy scripts` no longer stops at the relative imports of `code_graph.py`, and another package named `scripts` later on the path can no longer take the name. Running a script by its path and installing are unchanged. Whether the check then finishes depends on its mypy and target Python: numpy 2.5.1's stubs stop older mypy versions targeting below 3.12 (docs/research/2026-11-05-scripts-is-a-regular-package.md).
 - A failed installer update no longer quarantines itself on a file it never wrote: its revert undoes only what it wrote, keeps the forward failure as `error.cause`, and `install_control.py rollback` now leaves an existing quarantine. `--adopt <resource-id>` (`install.sh`, `install.ps1`) takes over a file changed outside the installer and keeps its content as the rollback point; schedulers cannot be adopted (docs/research/2026-09-28-a-rollback-undoes-only-what-it-did.md).
+- Doctor reads an adopted queue's owner by its v3 columns (`owner_token`, `process_id`, `domain_role`) and runs every check isolated: a check that raises becomes its own named `error` and the report is still printed. It printed nothing whenever a v3 queue worker held its lease, which stopped the installer's smoke with "Doctor did not return valid JSON".
+- The installer and the nightly update sync an installed vault exactly, naming every extra and dependency group it has (`self_update.sync_selection`; a group counts when a package only it brings is installed), so packages the lock no longer names are removed: 2.7 GB of CUDA wheels and the retired LanceDB stayed behind on the owner's vault under `--inexact`. Manual hints and `sync_memory`'s baseline step stay inexact.
+- A day compiled again no longer fails the compile on a claim its page already holds: the claim id is its date and semantic fingerprint, so the page's copy is kept once, and only one id with another fingerprint is refused (the owner's nightly of 2026-09-29 failed with "compile claim id already exists in target ledger").
+- The installers ask which model the memory pipeline calls, from those the provider answers with: Claude's aliases (`sonnet`, `opus`, `haiku`, `fable`) are each asked once, Codex, Ollama and OpenAI list theirs; the chosen model is checked with one short call and persisted into the hooks' env and the scheduler units. Without a terminal `--model` / `-Model` sets it, else the last choice or the provider default stays (`scripts/choose_model.py`, docs/research/2026-09-29-the-installer-asks-which-model.md).
+- Every install brings every component: the installers and the nightly update sync the `full` extra (vector search, reranker, code index) with Pyright, instead of `semantic` alone; Linux takes torch from PyTorch's CPU index (`explicit`), so no CUDA wheels arrive for a CPU-only reranker. Language servers for TypeScript, Go and Rust stay one command each. The installers' "Optional enhancements" lines are gone (docs/research/2026-09-29-every-install-brings-every-component.md).
+- Claude's tool-capture hooks (`PostToolUse`, `PostToolUseFailure`) run in the background (`async: true`, `--background`), and their breadcrumb waits out one full writer lease (32.5 s) instead of giving up after 2.5 s; the owner's vault lost 738 breadcrumbs on 2026-09-28 to gate holds and a busy CPU, and every Edit, Write and Bash call no longer waits for the capture. The prompt hook, which returns context, stays in the foreground (docs/research/2026-09-29-a-tool-breadcrumb-waits-in-the-background.md).
+- A model output the DLP boundary refuses names the rules that fired and how often (`REDACTED_GITHUB_TOKEN x2`), never the matched text; 72 captures on the owner's vault were refused on every retry with no way to tell a secret from a false positive.
+- `sync_memory.py` exits 2 only when an action could not run, its own work failed, or the final doctor errs in a check the install owns; a finding about the vault (refused writes, queue attention) exits 1, so an install that did every step ends "installed with warnings" naming the checks instead of `[FAIL] Runtime synchronization failed`.
+- The installers keep the production smoke's JSON report in `logs/install-smoke.json` (`install_smoke.py --report`) instead of printing about 15 kB of it into the terminal; the smoke's own lines still show.
+- A failed installer update removes the copy it made of a unit it did not end up replacing (the file is untouched or reverted), so retries no longer pile up copies under `run/install/displaced/`; a copy whose original was not restored stays.
+- An update takes over the Claude and Codex hook blocks an older release wrote (recognised by our command marker), instead of stopping with `install_resource_ownership_ambiguous`; only blocks whose roots name another vault are refused, and every ownership refusal names the resource, its path and the way on.
+- Doctor waits out a busy database before it judges the adoption record, through the same `require_adopted_through_contention` the writers use; a moment's lock no longer reads as "Every Markdown writer is refused" and no longer stops an update in the installer's smoke. When doctor's reply is not a report, the smoke names its exit code and the end of its stderr.
+- A language-server protocol warning reaches the MCP server's stderr as `llm-wiki lsp: <message>` (a failed server request's redacted cause, an oversized frame, a diagnostic flood); production built the protocol without a warning callback, so each was dropped. tests/test_a_protocol_warning_reaches_the_log.py refuses an unwired `LspProtocol`.
+- The queue's claim and eligible count (legacy and adopted) match a source fence by the payload's identity fields, through the same rule as the enqueue: a task that only carries a timestamp of the fenced day is claimed and counted, and the legacy count no longer names a fenced task its claim skips.
+- A fallback in an answer path names its cause: the reranker, the graph backend and neighbour boost record the exception in `vault_status.retrieval_degradations`; the code graph's regex fallback and an uninferable call carry `parser_fallback_reason` / `semantic_error`; navigation warnings name the callback's exception class (its text stays out, as before); a failed language-server request is passed with its redacted cause to the protocol's warning callback, which production does not wire yet. The broad-handler guard now refuses any handler that names a failure without the exception, and any value fallback in the answer modules.
+- Install warnings the owner could not act on now say what happens or what to do. An earlier LLM-Wiki Codex MCP entry is rewritten with a verified preimage; another entry is replaced only with `--replace-codex-mcp` / `-ReplaceCodexMcp`, and `enabled = false` is left alone; no line asks for a manual merge. Doctor names the one `/hooks` trust step Codex needs from a person. An existing managed Pyright is revalidated and a pre-digest install is repaired. A dead queue task that a redrive already answered is no longer counted, and the queue message names the count and age. Lost-capture and tool-failure lines say the total and that the last one was within seven days. The final banner says a completed install with warnings is not a failure.
+- The adopted queue counts as remaining work only what `work` can claim: count and claim share one predicate, so a task under a source fence is no longer counted either (the capture half is PR #49's fix, ported with its test).
+- The installer tells an owner only what it knows (docs/research/2026-09-28-a-check-names-its-cause.md). Four things behind that. First, a Reliability V3 check that meets a busy database says `unreadable` with the cause (`reliability_v3_state_unreadable`, `OperationalError: database is locked`), not `conflict`, and neither the installer nor doctor calls capture disabled on that ground. Second, the repair command's error report carries the path-free cause and gains `--summary`, one plain line per state that both installers print. Third, every broad handler in scripts/ that answered with a verdict now carries what it caught (build_tiers, the doctor Pyright probe, llm_client DLP), and tests/test_a_broad_handler_carries_its_cause.py refuses a new one. Fourth, the install syncs `--extra semantic` (about 22 MB: onnxruntime, tokenizers), so the e5 weights it fetches are used; the reranker (torch, about 1.3 GB on Linux) stays opt-in.
+- A day whose part the compile budget cannot take fails alone and is recorded; the other days of the run still pack and compile, where the refusal used to stop them all.
+- A daily entry longer than one compile part is cut inside itself (at a block start, blank line or line end, else a character boundary), so a busy day always compiles: one 49 964-byte entry on 2026-09-27 had stopped every day's compile; days whose entries fit are cut exactly as before.
+- The `rollback` of an update that moved a hand-added unit line into `50-local.conf` now removes that drop-in first, so the restored unit never runs the line twice; the drop-in is a resource of that update only, reverted with it on failure, and no later update, rollback or uninstall touches it (an existing `50-local.conf` is never touched). Copies under `run/install/displaced/` older than `retention.config_backup_days` (90) are retired by the next install, except the one the current rollback point needs. A profile moved to another shell's file is now one update that writes the new block before it removes the old one, and `rollback` restores it; a change to or from cron or a Windows task, which cannot be read back, is still taken back first, and the installer says so and names the entry and the uninstall command (docs/research/2026-09-28-what-an-update-created-its-rollback-takes-back.md).
+- An update no longer stops on a systemd unit, launchd plist or OpenCode plugin changed by hand: the installer owns those files whole and replaces them, keeps a readable copy under `run/install/displaced/` (the rollback point too), moves a line added to a unit into `<unit>.d/50-local.conf`, a drop-in handed to the operator, and reports what it could not carry over; `--adopt` of such a file still works and says it is no longer needed, and shared files keep their fragment rules. A rerun that only drops a resource is now one update that writes the new set before it takes the dropped one back, so a failure reverts both, and `rollback` puts the dropped one back; the doctor's stale-unit advice says the same (docs/research/2026-09-28-an-update-replaces-what-it-owns.md).
+- An installer refusal on a shared file changed outside it now names the resource, where it lives, and the command to go on (`--adopt <resource-id>`, or restore/uninstall for a cron entry or Windows task); the recorded error code stays bare (docs/research/2026-09-28-a-changed-file-is-named-and-can-be-taken-over.md).
+- A failed installer update no longer quarantines itself on a file it never wrote: its revert undoes only what it wrote, keeps the forward failure as `error.cause`, and `install_control.py rollback` now leaves an existing quarantine. `--adopt <resource-id>` (`install.sh`, `install.ps1`) takes over a file changed outside the installer and keeps its content as the rollback point; a cron entry or a Windows task cannot be adopted (docs/research/2026-09-28-a-rollback-undoes-only-what-it-did.md).
 - A transaction that appends keeps only the bytes it added and the before length instead of two full images of the file (plan v2; v1 plans stay readable): on the live vault one day's 7 026 appends held 2.58 GB of images for 9.67 MB they added; undo, abort and recovery rebuild the bytes from the target and check them against the recorded hash.
 - private_vault_backup.py meets laws 5 and 9 like every other module (two functions split, four limit bases written), so the two-if and limit guards now allow no exception.
 - On Windows only a pipe is left for its owner thread to close; a socket-backed stream is closed as before, since a Winsock shutdown does not wake a receive already in progress (every socket-backed LSP close timed out on Windows CI).

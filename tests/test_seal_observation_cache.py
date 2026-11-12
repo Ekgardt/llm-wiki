@@ -19,6 +19,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 
+import generation_search
 import search_memory  # noqa: E402
 
 
@@ -32,21 +33,21 @@ def _settled_artifact(tmp_path: Path, body: bytes = b"artifact-bytes") -> Path:
 
 @pytest.fixture(autouse=True)
 def _clean_observations():
-    search_memory._reset_seal_observations()
+    search_memory.reset_seal_observations()
     yield
-    search_memory._reset_seal_observations()
+    search_memory.reset_seal_observations()
 
 
 @pytest.fixture()
 def hashes(monkeypatch):
     counted: list[str] = []
-    real = search_memory._hashed_seal
+    real = generation_search.hashed_seal
 
     def counting(path, before, expected, **stop):
         counted.append(path.name)
         return real(path, before, expected, **stop)
 
-    monkeypatch.setattr(search_memory, "_hashed_seal", counting)
+    monkeypatch.setattr(generation_search, "hashed_seal", counting)
     return counted
 
 
@@ -55,7 +56,7 @@ def hashes(monkeypatch):
 # the same size would be served unchecked — the cache is deliberately inert on
 # such a host. Measured 2026-08-30: this was found by the Windows jobs, and
 # `test_a_rewrite_that_forges_mtime_is_still_caught_by_ctime` is what found it.
-CACHE_IS_TRUSTWORTHY = search_memory._CTIME_IS_A_CHANGE_TIME
+CACHE_IS_TRUSTWORTHY = generation_search.CTIME_IS_A_CHANGE_TIME
 
 
 def test_nothing_is_cached_where_ctime_is_not_a_change_time(tmp_path, hashes):
@@ -64,8 +65,8 @@ def test_nothing_is_cached_where_ctime_is_not_a_change_time(tmp_path, hashes):
         pytest.skip("this host stamps a change time, so the cache is warranted")
     path = _settled_artifact(tmp_path)
 
-    search_memory._sealed_file(path)
-    search_memory._sealed_file(path)
+    generation_search.sealed_file(path)
+    generation_search.sealed_file(path)
 
     assert hashes == ["search.sqlite3", "search.sqlite3"]
 
@@ -77,8 +78,8 @@ def test_nothing_is_cached_where_ctime_is_not_a_change_time(tmp_path, hashes):
 def test_an_unchanged_artifact_is_hashed_once_and_seals_the_same(tmp_path, hashes):
     path = _settled_artifact(tmp_path)
 
-    first = search_memory._sealed_file(path)
-    repeats = [search_memory._sealed_file(path) for _ in range(4)]
+    first = generation_search.sealed_file(path)
+    repeats = [generation_search.sealed_file(path) for _ in range(4)]
 
     assert hashes == ["search.sqlite3"], "the seal re-read bytes it had already hashed"
     assert repeats == [first] * 4
@@ -86,10 +87,10 @@ def test_an_unchanged_artifact_is_hashed_once_and_seals_the_same(tmp_path, hashe
 
 def test_an_in_place_rewrite_of_the_same_size_is_still_caught(tmp_path, hashes):
     path = _settled_artifact(tmp_path, b"aaaaaaaa")
-    before = search_memory._sealed_file(path)
+    before = generation_search.sealed_file(path)
 
     path.write_bytes(b"bbbbbbbb")
-    after = search_memory._sealed_file(path)
+    after = generation_search.sealed_file(path)
 
     assert len(hashes) == 2
     assert after != before
@@ -99,13 +100,13 @@ def test_an_in_place_rewrite_of_the_same_size_is_still_caught(tmp_path, hashes):
 def test_a_rewrite_that_forges_mtime_is_still_caught_by_ctime(tmp_path, hashes):
     """No syscall can set ctime: the kernel stamps it on every inode change."""
     path = _settled_artifact(tmp_path, b"aaaaaaaa")
-    before = search_memory._sealed_file(path)
+    before = generation_search.sealed_file(path)
     status = path.stat()
     stamps = (status.st_atime, status.st_mtime)
 
     path.write_bytes(b"bbbbbbbb")
     os.utime(path, stamps)
-    after = search_memory._sealed_file(path)
+    after = generation_search.sealed_file(path)
 
     assert path.stat().st_mtime == stamps[1], "the test failed to forge mtime"
     assert len(hashes) == 2
@@ -114,12 +115,12 @@ def test_a_rewrite_that_forges_mtime_is_still_caught_by_ctime(tmp_path, hashes):
 
 def test_a_replaced_file_is_caught_even_at_the_same_size(tmp_path, hashes):
     path = _settled_artifact(tmp_path, b"aaaaaaaa")
-    before = search_memory._sealed_file(path)
+    before = generation_search.sealed_file(path)
 
     other = tmp_path / "other"
     other.write_bytes(b"bbbbbbbb")
     os.replace(other, path)
-    after = search_memory._sealed_file(path)
+    after = generation_search.sealed_file(path)
 
     assert len(hashes) == 2
     assert after[-1] != before[-1]
@@ -130,8 +131,8 @@ def test_a_just_written_artifact_is_not_remembered(tmp_path, hashes):
     path = tmp_path / "search.sqlite3"
     path.write_bytes(b"fresh")
 
-    search_memory._sealed_file(path)
-    search_memory._sealed_file(path)
+    generation_search.sealed_file(path)
+    generation_search.sealed_file(path)
 
     assert len(hashes) == 2, "a same-tick write would have been indistinguishable"
 
@@ -140,8 +141,8 @@ def test_a_different_expected_descriptor_is_hashed_again(tmp_path, hashes):
     path = _settled_artifact(tmp_path, b"aaaaaaaa")
     digest = hashlib.sha256(b"aaaaaaaa").hexdigest()
 
-    search_memory._sealed_file(path, {"size": 8, "sha256": digest})
-    search_memory._sealed_file(path, None)
+    generation_search.sealed_file(path, {"size": 8, "sha256": digest})
+    generation_search.sealed_file(path, None)
 
     assert len(hashes) == 2, "the manifest's expectation is part of what was proved"
 
@@ -149,22 +150,22 @@ def test_a_different_expected_descriptor_is_hashed_again(tmp_path, hashes):
 def test_an_artifact_that_stops_matching_its_manifest_still_raises(tmp_path):
     path = _settled_artifact(tmp_path, b"aaaaaaaa")
     digest = hashlib.sha256(b"aaaaaaaa").hexdigest()
-    search_memory._sealed_file(path, {"size": 8, "sha256": digest})
+    generation_search.sealed_file(path, {"size": 8, "sha256": digest})
 
     path.write_bytes(b"bbbbbbbb")
 
     with pytest.raises(ValueError, match="does not match active manifest"):
-        search_memory._sealed_file(path, {"size": 8, "sha256": digest})
+        generation_search.sealed_file(path, {"size": 8, "sha256": digest})
 
 
 def test_the_observation_store_stays_bounded(tmp_path):
-    for index in range(search_memory._SEAL_OBSERVATION_LIMIT * 2):
+    for index in range(generation_search.SEAL_OBSERVATION_LIMIT * 2):
         path = tmp_path / f"artifact-{index}.bin"
         path.write_bytes(b"x" * (index + 1))
         time.sleep(0.002)
-        search_memory._sealed_file(path)
+        generation_search.sealed_file(path)
 
-    assert len(search_memory._seal_observations) <= search_memory._SEAL_OBSERVATION_LIMIT
+    assert len(generation_search.seal_observations) <= generation_search.SEAL_OBSERVATION_LIMIT
 
 
 @pytest.mark.skipif(
@@ -174,8 +175,8 @@ def test_the_observation_store_stays_bounded(tmp_path):
 @pytest.mark.parametrize(
     ("age_ns", "hashed"),
     [
-        (search_memory.TIMESTAMP_SETTLE_NS, 1),
-        (search_memory.TIMESTAMP_SETTLE_NS - 1, 2),
+        (generation_search.TIMESTAMP_SETTLE_NS, 1),
+        (generation_search.TIMESTAMP_SETTLE_NS - 1, 2),
     ],
     ids=["a-window-old-is-remembered", "younger-than-a-window-is-not"],
 )
@@ -188,10 +189,10 @@ def test_an_observation_is_kept_only_once_its_change_stamp_is_a_window_old(
 ) -> None:
     path = tmp_path / "search.sqlite3"
     path.write_bytes(b"artifact-bytes")
-    stamped_ns = search_memory.change_stamp_ns(path.lstat())
+    stamped_ns = generation_search.change_stamp_ns(path.lstat())
     monkeypatch.setattr(search_memory.time, "time_ns", lambda: stamped_ns + age_ns)
 
-    search_memory._sealed_file(path)
-    search_memory._sealed_file(path)
+    generation_search.sealed_file(path)
+    generation_search.sealed_file(path)
 
     assert len(hashes) == hashed

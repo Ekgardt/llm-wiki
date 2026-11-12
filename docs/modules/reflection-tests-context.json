@@ -1,0 +1,373 @@
+{
+  "encoding": "o200k_base",
+  "max_tokens": 100000,
+  "serialization": "exact-duplicates/v1",
+  "files": [
+    "AGENTS.md",
+    "CLAUDE.md",
+    "docs/AGENTS.md",
+    "docs/STRUCTURE.md",
+    "docs/modules/context-bundle.md",
+    "docs/modules/context-records.md",
+    "docs/modules/context-tooling.md",
+    "docs/modules/formats.md",
+    "docs/modules/markdown-store.md",
+    "docs/modules/markdown-transaction-tests-markdown-coordinator-parts.md",
+    "docs/modules/model-choice.md",
+    "docs/modules/product-structure.md",
+    "docs/modules/project-governance.md",
+    "docs/modules/rebuild-memory-index.md",
+    "docs/modules/reflection-tests-context.json",
+    "docs/modules/reflection-tests.md",
+    "docs/modules/reflection.md",
+    "docs/modules/test-support.md",
+    "rules/development-laws.md",
+    "scripts/__init__.py",
+    "scripts/llm_wiki/__init__.py",
+    "scripts/llm_wiki/context_bundle.py",
+    "scripts/llm_wiki/formats/__init__.py",
+    "scripts/llm_wiki/markdown_store.py",
+    "scripts/rebuild_memory_index.py",
+    "scripts/reflection.py",
+    "tests/__init__.py",
+    "tests/conftest.py",
+    "tests/markdown_coordinator_parts.py",
+    "tests/module_context.py",
+    "tests/module_context_paths.py",
+    "tests/module_interface.py",
+    "tests/module_interface_render.py",
+    "tests/module_qualification.py",
+    "tests/module_record_context.py",
+    "tests/module_records.py",
+    "tests/shared_fixtures.py",
+    "tests/slow_machine.py",
+    "tests/sqlite_errors.py",
+    "tests/test_automatic_writer_integration.py"
+  ],
+  "ownership": {
+    "files": [
+      "docs/modules/reflection-tests-context.json",
+      "docs/modules/reflection-tests.md",
+      "tests/test_automatic_writer_integration.py"
+    ]
+  },
+  "qualified_dependencies": [
+    {
+      "provider": "scripts/blackboard.py",
+      "names": [
+        "append_jsonl"
+      ],
+      "contract_sha256": "545fdfbf325ff6d413a4701f0b757633400939dbdbea574be2981a3ec26cbbac",
+      "integration_tests": [
+        "tests/test_automatic_writer_integration.py",
+        "tests/test_blackboard.py",
+        "tests/test_blackboard_inputs_use_the_journal_contract.py"
+      ]
+    },
+    {
+      "provider": "scripts/bounded_io.py",
+      "names": [
+        "IO_CHUNK_BYTES",
+        "MAX_KNOWLEDGE_PAGE_BYTES",
+        "VerifiedByteRange",
+        "read_stable_bytes"
+      ],
+      "contract_sha256": "32d4c4bd5f21da562c3792f6e2ffa42494a34f6ac18359bd87f966ce33942bcf",
+      "integration_tests": [
+        "tests/test_automatic_writer_integration.py"
+      ]
+    },
+    {
+      "provider": "scripts/check_knowledge_writers.py",
+      "names": [
+        "discover_repository_entrypoints",
+        "discover_repository_writers"
+      ],
+      "contract_sha256": "c316e430a99b4eff2e8d3621aa496a96510b7a830e575fa76e9ed09269a16fda",
+      "integration_tests": [
+        "tests/test_automatic_writer_integration.py"
+      ]
+    },
+    {
+      "provider": "scripts/claim_tree_manifest.py",
+      "names": [
+        "ClaimTreeChanged",
+        "snapshot_claim_tree"
+      ],
+      "contract_sha256": "8a5f15f3a1ae2306a33cad66a301bad4020f7588a9f02cbe7acf4e3e48a9c630",
+      "integration_tests": [
+        "tests/test_automatic_writer_integration.py"
+      ]
+    },
+    {
+      "provider": "scripts/claims.py",
+      "names": [
+        "claim_json_bytes",
+        "parse_claim_ledger",
+        "reflection_history_boundary",
+        "reflection_history_spans"
+      ],
+      "contract_sha256": "4c09e2746162a0a7464323ec24b42465e7da07dbc4442d6623f4c5f10f86fd88",
+      "integration_tests": [
+        "tests/test_automatic_writer_integration.py"
+      ]
+    },
+    {
+      "provider": "scripts/daily_log_append.py",
+      "names": [
+        "append_knowledge",
+        "locked_append"
+      ],
+      "contract_sha256": "c1027838764aeaed4e8d4523050428f63a04578e10ba0137b547ad22fa15ea03",
+      "integration_tests": [
+        "tests/test_a_block_opens_one_entry.py",
+        "tests/test_a_blocked_task_has_a_way_back.py",
+        "tests/test_a_claude_prompt_takes_the_ingest_path.py"
+      ]
+    },
+    {
+      "provider": "scripts/iso_time.py",
+      "names": [
+        "utc_text"
+      ],
+      "contract_sha256": "b7151d094646f6efb0895d5e32f0237918a40d0f8e12b5eb0af3e60484d51a03",
+      "integration_tests": [
+        "tests/test_automatic_writer_integration.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_client.py",
+      "names": [
+        "call_llm"
+      ],
+      "contract_sha256": "69cae5b47f126ae4e45e541f3401efae2ad068c9c9cac4da4a08a082d7190feb",
+      "integration_tests": [
+        "tests/test_automatic_writer_integration.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/claim_ledger.py",
+      "names": [
+        "claim_ledger_match"
+      ],
+      "contract_sha256": "3d4dceb9c02424023e469ef3c60c1015d22417cbacb8482f48281fcb2e005808",
+      "integration_tests": [
+        "tests/test_automatic_writer_integration.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/formats/canonical.py",
+      "names": [
+        "sha256_bytes"
+      ],
+      "contract_sha256": "7d34a853c5a6f1be8b00805b2e865ac2a5ca5a6fe3ca141de97ebda61d2a85cf",
+      "integration_tests": [
+        "tests/test_automatic_writer_integration.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/generation_catalog_store.py",
+      "names": [
+        "GenerationCatalog"
+      ],
+      "contract_sha256": "b18194ebe04bf988b4474379fcb5243516550d43b745a00eaed1453f7844c983",
+      "integration_tests": [
+        "tests/test_a_blocked_task_has_a_way_back.py",
+        "tests/test_a_build_in_flight_is_not_an_orphan.py",
+        "tests/test_a_capacity_refusal_does_not_corrupt_a_generation.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/markdown_records.py",
+      "names": [
+        "RefusedOperation",
+        "TargetBoundaryFailure",
+        "TargetPathBoundaryError"
+      ],
+      "contract_sha256": "9706158bdb8a2ff0a0a0b06580e38af57580da44c351394c7e8e41e864cbcb86",
+      "integration_tests": [
+        "tests/test_automatic_writer_integration.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/model_choice.py",
+      "names": [
+        "using_root"
+      ],
+      "contract_sha256": "d45f2655cb61963e77617d1dfd7d617b134ad77cc770b59b335d0856e5d65019",
+      "integration_tests": [
+        "tests/test_automatic_writer_integration.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/reliability_defaults.py",
+      "names": [
+        "DEFAULTS"
+      ],
+      "contract_sha256": "f37296a83c15073e42a6cc8b86b88c2d19c548ac19a4ef6d0ca2f7af925c90c8",
+      "integration_tests": [
+        "tests/test_automatic_writer_integration.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/runtime_roots.py",
+      "names": [
+        "index_file",
+        "notes_dir",
+        "vault_root"
+      ],
+      "contract_sha256": "da13d2621b143ba87e8432b5db61e9ee4e8e770ddb92be8549f1d40e69148115",
+      "integration_tests": [
+        "tests/test_a_continuation_keeps_its_original_entry.py",
+        "tests/test_a_prompt_checkpoint_does_not_outwait_its_host.py",
+        "tests/test_a_session_marker_survives_a_busy_writer.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/sqlite_deadlines.py",
+      "names": [
+        "busy_database"
+      ],
+      "contract_sha256": "c16bee6911734076e435ddf6dbe450d95aa07c94fca70e9934b295ca61ab5643",
+      "integration_tests": [
+        "tests/test_automatic_writer_integration.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/windows_acl.py",
+      "names": [
+        "harden_windows_acl"
+      ],
+      "contract_sha256": "00f5518fe95d49ad1a1cd73f49f5d0a8c78260eccb059bbc0440fe39f8eef9fa",
+      "integration_tests": [
+        "tests/test_automatic_writer_integration.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/windows_native.py",
+      "names": [
+        "windows_kernel32"
+      ],
+      "contract_sha256": "14b51993282554a7a9c7484a32c9a4a0cc4eb28a22d5c9942c166c407fdf1089",
+      "integration_tests": [
+        "tests/test_automatic_writer_integration.py"
+      ]
+    },
+    {
+      "provider": "scripts/markdown_transaction.py",
+      "names": [
+        "ABSENT",
+        "MarkdownChange",
+        "MarkdownCoordinator",
+        "TransactionDriftError",
+        "TransactionFailure",
+        "append_knowledge",
+        "mutate_knowledge",
+        "stable_operation_id"
+      ],
+      "contract_sha256": "9b31dc91fde00b8601e6caf7a120abbba6b342fe834d6e69265252bca195e141",
+      "integration_tests": [
+        "tests/test_a_backup_image_carries_what_git_does_not.py",
+        "tests/test_a_backup_snapshots_what_hooks_write.py",
+        "tests/test_a_backup_takes_what_any_installed_vault_holds.py"
+      ]
+    },
+    {
+      "provider": "scripts/migrate_to_okf.py",
+      "names": [],
+      "contract_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "integration_tests": [
+        "tests/test_migrate_to_okf_exemptions.py",
+        "tests/test_okf_migration_binds_content_to_its_source_snapshot.py"
+      ]
+    },
+    {
+      "provider": "scripts/operational_ownership.py",
+      "names": [
+        "ProcessIdentity",
+        "process_identity_state"
+      ],
+      "contract_sha256": "ad2b4e680b4994b37496b0612fe6cfa831f3d1ba487957e02e55e7d921a75305",
+      "integration_tests": [
+        "tests/test_automatic_writer_integration.py"
+      ]
+    },
+    {
+      "provider": "scripts/page_status.py",
+      "names": [
+        "is_retired"
+      ],
+      "contract_sha256": "49ad14e3e3d61b1a684408df0b40800edf20acd42b02998db97d07538d63ebe8",
+      "integration_tests": [
+        "tests/test_automatic_writer_integration.py"
+      ]
+    },
+    {
+      "provider": "scripts/process_liveness.py",
+      "names": [
+        "owner_alive"
+      ],
+      "contract_sha256": "43a93650e5db69f95a022901e1dc186127c6b792e0f8e8f2e13af548be8ebc1b",
+      "integration_tests": [
+        "tests/test_automatic_writer_integration.py"
+      ]
+    },
+    {
+      "provider": "scripts/reliable_memory.py",
+      "names": [
+        "set_owner_only",
+        "validate_state_root"
+      ],
+      "contract_sha256": "198ed0781a8dc0c0db8ab2e77a6b456a0cd629f6972347281772dab6b3cab2c9",
+      "integration_tests": [
+        "tests/test_automatic_writer_integration.py"
+      ]
+    },
+    {
+      "provider": "scripts/repository_scope.py",
+      "names": [
+        "sanitized_git_environment"
+      ],
+      "contract_sha256": "fd550ae20761afad50b37fa3a71044a162485b0e4d4b3e2af9b5b22e143c2bec",
+      "integration_tests": [
+        "tests/test_a_code_generation_is_not_abandoned.py",
+        "tests/test_a_directory_link_inside_the_checkout_does_not_refuse_the_revision.py",
+        "tests/test_a_document_is_opened_in_its_own_language.py"
+      ]
+    },
+    {
+      "provider": "scripts/retrieval_telemetry.py",
+      "names": [
+        "make_event",
+        "record_events"
+      ],
+      "contract_sha256": "6cdd28847e80c3b80c668674ce787b3769de8d5b760564dea61bfd0c126fbba3",
+      "integration_tests": [
+        "tests/test_a_dropped_telemetry_write_is_recorded.py",
+        "tests/test_access_tracking.py",
+        "tests/test_automatic_writer_integration.py"
+      ]
+    },
+    {
+      "provider": "scripts/secret_redact.py",
+      "names": [
+        "redact_secrets"
+      ],
+      "contract_sha256": "8b925f76433b0c3f5ab03f4b8b41a462551d5616843facdd2918813d103ad6f5",
+      "integration_tests": [
+        "tests/test_automatic_writer_integration.py"
+      ]
+    },
+    {
+      "provider": "scripts/settings.py",
+      "names": [
+        "raise_hint",
+        "setting_value"
+      ],
+      "contract_sha256": "6996986733aff8ab379a49ff913796288b35a03330b3f3d67951ced08a779207",
+      "integration_tests": [
+        "tests/test_automatic_writer_integration.py"
+      ]
+    }
+  ]
+}

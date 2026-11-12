@@ -21,7 +21,7 @@ SCRIPTS = ROOT / "scripts"
 if str(SCRIPTS) not in sys.path:
     sys.path.insert(0, str(SCRIPTS))
 
-from tests.test_repository_index import ALPHA, _repository  # noqa: E402
+from tests.repository_index_helpers import ALPHA, _repository  # noqa: E402
 
 # ------------------------------------------------------------ what was searched
 
@@ -125,7 +125,7 @@ def _hinted_repository(tmp_path: Path, state: Path) -> Path:
     repository = _repository(tmp_path / "repo", {"pkg/alpha.py": ALPHA})
     scope = resolve_repository_scope(repository)
     rows = [("helper", "pkg.alpha.helper", "function", "pkg/alpha.py", 1, 1, 0)]
-    code_hints.write_hints(state, code_hints._meta(scope, "generation-x", len(rows)), rows)
+    code_hints.write_hints(state, code_hints.hint_meta(scope, "generation-x", len(rows)), rows)
     return repository
 
 
@@ -187,20 +187,22 @@ def _handlers(path: Path, event: str) -> list[dict]:
 
 
 def test_the_claude_template_carries_the_hint_and_the_reminder_as_ours():
-    from integration_hook_config import _claude_command_is_ours
+    from integration_hook_config import claude_command_is_ours
 
     template = ROOT / "integrations" / "claude-code" / "settings.json"
     handlers = _handlers(template, "PreToolUse") + _handlers(template, "SubagentStart")
     commands = {handler["command"] for handler in handlers}
     assert (len(handlers), len(commands)) == (2, 1)
-    assert all(_claude_command_is_ours(handler) for handler in handlers)
+    assert all(claude_command_is_ours(handler) for handler in handlers)
     assert commands.pop().endswith("scripts/graph_hint.py --source claude")
 
 
 def test_the_codex_ownership_predicate_knows_the_hint_and_nothing_foreign():
-    from codex_memory import _is_llm_wiki_hook
+    from codex_hook_identity import (
+        is_llm_wiki_hook,
+    )
 
     template = ROOT / "integrations" / "codex" / "hooks.json"
     ours = _handlers(template, "PostToolUse") + _handlers(template, "SubagentStart")
     foreign = {"type": "command", "command": "python graph_hint.py --source claude"}
-    assert (all(map(_is_llm_wiki_hook, ours)), _is_llm_wiki_hook(foreign)) == (True, False)
+    assert (all(map(is_llm_wiki_hook, ours)), is_llm_wiki_hook(foreign)) == (True, False)

@@ -21,11 +21,13 @@ import sys
 import time
 from pathlib import Path
 
+import reliability_v3_validation
+
 SCRIPTS_DIR = Path(__file__).resolve().parent.parent / "scripts"
 if str(SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_DIR))
 
-import integration_adapter  # noqa: E402
+import project_checkpoint  # noqa: E402
 import reclaim_runtime_state as reclaim  # noqa: E402
 
 
@@ -90,28 +92,28 @@ def test_the_unattended_drain_waits_where_the_hook_may_not(monkeypatch) -> None:
     def record(slug, queue_key, **kwargs):
         budgets.append(kwargs["state_lock_seconds"])
 
-    monkeypatch.setattr(integration_adapter, "_pending_backlog_slugs", lambda: ["demo"])
-    monkeypatch.setattr(integration_adapter, "_pending_backlog_depth", lambda slug: 0)
-    monkeypatch.setattr(integration_adapter, "_drain_project_checkpoints", record)
+    monkeypatch.setattr(project_checkpoint, "pending_backlog_slugs", lambda: ["demo"])
+    monkeypatch.setattr(project_checkpoint, "pending_backlog_depth", lambda slug: 0)
+    monkeypatch.setattr(project_checkpoint, "drain_project_checkpoints", record)
 
-    integration_adapter.drain_pending_backlog(5.0)
+    project_checkpoint.drain_pending_backlog(5.0)
 
-    assert budgets == [integration_adapter.BACKLOG_STATE_LOCK_SECONDS]
-    assert integration_adapter.BACKLOG_STATE_LOCK_SECONDS > (
-        integration_adapter.PENDING_STATE_LOCK_SECONDS
+    assert budgets == [project_checkpoint.BACKLOG_STATE_LOCK_SECONDS]
+    assert project_checkpoint.BACKLOG_STATE_LOCK_SECONDS > (
+        project_checkpoint.PENDING_STATE_LOCK_SECONDS
     )
 
 
 def test_the_drain_reports_what_it_actually_moved(monkeypatch) -> None:
     depths = iter([2485, 2385])
 
-    monkeypatch.setattr(integration_adapter, "_pending_backlog_slugs", lambda: ["demo"])
-    monkeypatch.setattr(integration_adapter, "_pending_backlog_depth", lambda slug: next(depths))
+    monkeypatch.setattr(project_checkpoint, "pending_backlog_slugs", lambda: ["demo"])
+    monkeypatch.setattr(project_checkpoint, "pending_backlog_depth", lambda slug: next(depths))
     monkeypatch.setattr(
-        integration_adapter, "_drain_project_checkpoints", lambda *a, **k: None
+        project_checkpoint, "drain_project_checkpoints", lambda *a, **k: None
     )
 
-    result = integration_adapter.drain_pending_backlog(5.0)
+    result = project_checkpoint.drain_pending_backlog(5.0)
 
     assert result["drained"] == {"demo": 100}
 
@@ -125,19 +127,19 @@ def test_a_stuck_project_cannot_hang_the_pass(monkeypatch) -> None:
         time.sleep(0.05)
 
     monkeypatch.setattr(
-        integration_adapter, "_pending_backlog_slugs", lambda: ["a", "b", "c", "d"]
+        project_checkpoint, "pending_backlog_slugs", lambda: ["a", "b", "c", "d"]
     )
-    monkeypatch.setattr(integration_adapter, "_pending_backlog_depth", lambda slug: 0)
-    monkeypatch.setattr(integration_adapter, "_drain_project_checkpoints", slow)
+    monkeypatch.setattr(project_checkpoint, "pending_backlog_depth", lambda slug: 0)
+    monkeypatch.setattr(project_checkpoint, "drain_project_checkpoints", slow)
 
-    integration_adapter.drain_pending_backlog(0.0)
+    project_checkpoint.drain_pending_backlog(0.0)
 
     assert visited == ["a"]
 
 
 def test_the_hook_path_keeps_its_own_impatience() -> None:
     """A session hook must not block; that budget is not what changed here."""
-    assert integration_adapter.PENDING_STATE_LOCK_SECONDS == 0.5
+    assert project_checkpoint.PENDING_STATE_LOCK_SECONDS == 0.5
 
 
 def test_settled_transactions_are_pruned_by_the_pass(monkeypatch) -> None:
@@ -182,12 +184,11 @@ def test_a_failed_prune_does_not_stop_the_rest(monkeypatch) -> None:
 def test_the_undo_window_is_one_number_in_one_place() -> None:
     """It was thirty in four files, and the drift is how it went unpruned."""
     import archive_daily
-    import doctor
-    import installed_memory_repair
     import markdown_transaction
+    from llm_wiki import markdown_store
 
     window = markdown_transaction.UNDO_RETENTION_DAYS
 
-    assert doctor.UNDO_RETENTION_DAYS == window
+    assert markdown_store.UNDO_RETENTION_DAYS == window
     assert archive_daily.DEFAULT_TRANSACTION_RETENTION_DAYS == window
-    assert installed_memory_repair._UNDO_RETENTION_DAYS == window
+    assert reliability_v3_validation.UNDO_RETENTION_DAYS == window

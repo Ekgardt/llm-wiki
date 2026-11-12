@@ -1,0 +1,242 @@
+{
+  "encoding": "o200k_base",
+  "max_tokens": 100000,
+  "serialization": "exact-duplicates/v1",
+  "files": [
+    "AGENTS.md",
+    "CLAUDE.md",
+    "benchmark/__init__.py",
+    "benchmark/retrieval_v2_aggregation.py",
+    "docs/AGENTS.md",
+    "docs/STRUCTURE.md",
+    "docs/modules/benchmark-retrieval-v2-aggregation-context.json",
+    "docs/modules/benchmark-retrieval-v2-aggregation.md",
+    "docs/modules/benchmark-run-benchmark.md",
+    "docs/modules/context-bundle.md",
+    "docs/modules/context-records.md",
+    "docs/modules/context-tooling.md",
+    "docs/modules/model-choice.md",
+    "docs/modules/product-structure.md",
+    "docs/modules/project-governance.md",
+    "docs/modules/reliable-memory-tests-retrieval-v2-benchmark.md",
+    "docs/modules/test-support.md",
+    "rules/development-laws.md",
+    "scripts/__init__.py",
+    "scripts/llm_wiki/__init__.py",
+    "scripts/llm_wiki/context_bundle.py",
+    "tests/__init__.py",
+    "tests/conftest.py",
+    "tests/module_context.py",
+    "tests/module_context_paths.py",
+    "tests/module_interface.py",
+    "tests/module_interface_render.py",
+    "tests/module_qualification.py",
+    "tests/module_record_context.py",
+    "tests/module_records.py",
+    "tests/retrieval_v2_helpers.py",
+    "tests/retrieval_v2_reports_helpers.py",
+    "tests/shared_fixtures.py",
+    "tests/slow_machine.py",
+    "tests/test_retrieval_v2_aggregation.py"
+  ],
+  "ownership": {
+    "files": [
+      "benchmark/retrieval_v2_aggregation.py",
+      "docs/modules/benchmark-retrieval-v2-aggregation-context.json",
+      "docs/modules/benchmark-retrieval-v2-aggregation.md",
+      "tests/test_retrieval_v2_aggregation.py"
+    ]
+  },
+  "qualified_dependencies": [
+    {
+      "provider": "benchmark/retrieval_v2_contract.py",
+      "names": [
+        "Candidate",
+        "DEFAULT_SCHEMA",
+        "EFFECTIVENESS_FIELDS",
+        "FROZEN_CORPUS_IDS",
+        "MAX_CORPUS_BYTES",
+        "ModelSelection",
+        "REPORT_FIELDS",
+        "ScoredCandidate",
+        "THRESHOLDS",
+        "WorkerPayload"
+      ],
+      "contract_sha256": "671db45b0f9e60bb533088d4434fbd35570969ec47dc00bc5ea9e2ee39483e5b",
+      "integration_tests": [
+        "tests/test_retrieval_v2_adapters.py",
+        "tests/test_retrieval_v2_benchmark.py",
+        "tests/test_retrieval_v2_contract.py"
+      ]
+    },
+    {
+      "provider": "benchmark/retrieval_v2_corpus.py",
+      "names": [
+        "build_candidates",
+        "filter_candidates",
+        "load_corpus"
+      ],
+      "contract_sha256": "b4c085a45cf1840e44b05d664c565d1ba8dab2c13efd679dca21c5eb890c31f4",
+      "integration_tests": [
+        "tests/test_retrieval_v2_adapters.py",
+        "tests/test_retrieval_v2_aggregation.py",
+        "tests/test_retrieval_v2_benchmark.py"
+      ]
+    },
+    {
+      "provider": "benchmark/retrieval_v2_environment.py",
+      "names": [
+        "environment_provenance",
+        "matrix_policy_fingerprint",
+        "observed_runtime_environment",
+        "runner_sha256",
+        "sha256_json"
+      ],
+      "contract_sha256": "175f8476bff85525b797d8ae872c12170dc82d0eda8c571d8de6ec809ea6f845",
+      "integration_tests": [
+        "tests/test_retrieval_v2_aggregation.py",
+        "tests/test_retrieval_v2_benchmark.py",
+        "tests/test_retrieval_v2_environment.py"
+      ]
+    },
+    {
+      "provider": "benchmark/retrieval_v2_matrix.py",
+      "names": [
+        "load_model_selection",
+        "require_exact_keys",
+        "required_candidate_specs"
+      ],
+      "contract_sha256": "aa55c0d36176d973847a085e6cf3e0506fcfda718cf1ca1afa2a5c7b9b74eccf",
+      "integration_tests": [
+        "tests/test_retrieval_v2_adapters.py",
+        "tests/test_retrieval_v2_aggregation.py",
+        "tests/test_retrieval_v2_matrix.py"
+      ]
+    },
+    {
+      "provider": "benchmark/retrieval_v2_metrics.py",
+      "names": [
+        "aggregate",
+        "evaluation_row",
+        "expand_parents",
+        "macro_average",
+        "query_scope"
+      ],
+      "contract_sha256": "638e23cff6b76000350297276c0ec4419c46217f082f2dd34a4a83cd9824c952",
+      "integration_tests": [
+        "tests/test_retrieval_v2_benchmark.py",
+        "tests/test_retrieval_v2_corpus.py",
+        "tests/test_retrieval_v2_metrics.py"
+      ]
+    },
+    {
+      "provider": "benchmark/retrieval_v2_outputs.py",
+      "names": [
+        "canonical_report_bytes",
+        "is_reparse_point",
+        "write_new_bytes",
+        "write_new_output"
+      ],
+      "contract_sha256": "06eacb21bed28d9ed178a711f05df415188a1b6938d017e1940522062d445e1f",
+      "integration_tests": [
+        "tests/test_retrieval_v2_aggregation.py",
+        "tests/test_retrieval_v2_benchmark.py",
+        "tests/test_retrieval_v2_orchestration.py"
+      ]
+    },
+    {
+      "provider": "benchmark/retrieval_v2_recompute.py",
+      "names": [
+        "candidate_key",
+        "candidate_policy",
+        "recompute_report_metrics",
+        "verified_baseline_metrics"
+      ],
+      "contract_sha256": "d225de3222f55555747c3f9f3b606a7d8be33ec8e758ea88eebe86607687001e",
+      "integration_tests": [
+        "tests/test_retrieval_v2_aggregation.py",
+        "tests/test_retrieval_v2_recompute.py"
+      ]
+    },
+    {
+      "provider": "benchmark/retrieval_v2_selection_gates.py",
+      "names": [
+        "CANDIDATE_REPORT_EQUALITIES",
+        "CANDIDATE_REPORT_IDENTITIES",
+        "RERANKER_DEPTH_KEYS",
+        "fields_equal",
+        "fields_identical",
+        "first_candidate_selection",
+        "objective_dominates",
+        "recompute_reranker_depth_metrics",
+        "selection_report_gates"
+      ],
+      "contract_sha256": "ffc0c3770b17f45a0ed033b6ec031a75570441815c1fbb6909c95ec811a9a5ff",
+      "integration_tests": [
+        "tests/test_retrieval_v2_aggregation.py",
+        "tests/test_retrieval_v2_orchestration.py",
+        "tests/test_retrieval_v2_selection_gates.py"
+      ]
+    },
+    {
+      "provider": "scripts/bounded_io.py",
+      "names": [
+        "read_stable_bytes"
+      ],
+      "contract_sha256": "e570dc41e0fd70556ec6a4e887a3da194bcc13122684e515651b13dd19d7d5c1",
+      "integration_tests": [
+        "tests/modules/breadcrumb_documents/test_contract.py",
+        "tests/test_a_file_being_written_is_a_changed_corpus_on_every_system.py",
+        "tests/test_a_journal_is_readable_by_every_reader.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/generation_catalog_store.py",
+      "names": [
+        "GenerationCatalog"
+      ],
+      "contract_sha256": "b18194ebe04bf988b4474379fcb5243516550d43b745a00eaed1453f7844c983",
+      "integration_tests": [
+        "tests/test_a_blocked_task_has_a_way_back.py",
+        "tests/test_a_build_in_flight_is_not_an_orphan.py",
+        "tests/test_a_capacity_refusal_does_not_corrupt_a_generation.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/model_choice.py",
+      "names": [
+        "using_root"
+      ],
+      "contract_sha256": "d45f2655cb61963e77617d1dfd7d617b134ad77cc770b59b335d0856e5d65019",
+      "integration_tests": [
+        "tests/test_central_model_selection.py",
+        "tests/test_compile_execution_inventory.py"
+      ]
+    },
+    {
+      "provider": "scripts/reliable_memory.py",
+      "names": [
+        "canonical_json_bytes",
+        "validate_state_root"
+      ],
+      "contract_sha256": "7bba4b535d3f0a73445fece541c540939989b41456c9a79a67f82634748be36b",
+      "integration_tests": [
+        "tests/test_a_backup_image_carries_what_git_does_not.py",
+        "tests/test_a_changed_task_setting_reaches_an_installed_machine.py",
+        "tests/test_a_committed_source_resolves_an_older_compile_plan.py"
+      ]
+    },
+    {
+      "provider": "scripts/repository_scope.py",
+      "names": [
+        "sanitized_git_environment"
+      ],
+      "contract_sha256": "fd550ae20761afad50b37fa3a71044a162485b0e4d4b3e2af9b5b22e143c2bec",
+      "integration_tests": [
+        "tests/test_a_code_generation_is_not_abandoned.py",
+        "tests/test_a_directory_link_inside_the_checkout_does_not_refuse_the_revision.py",
+        "tests/test_a_document_is_opened_in_its_own_language.py"
+      ]
+    }
+  ]
+}

@@ -10,10 +10,11 @@ import threading
 import unicodedata
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict
-from pathlib import Path, PurePosixPath
+from pathlib import Path
 
 import pytest
 import reliable_memory
+from llm_wiki import runtime_environment, sqlite_io
 from reliable_memory import (
     DEFAULTS,
     UnsafeStateRoot,
@@ -22,10 +23,29 @@ from reliable_memory import (
     fsync_directory,
     fsync_file,
     open_operational_db,
-    restricted_relative_path,
     sha256_bytes,
     validate_state_root,
 )
+
+
+def test_defaults_facade_and_legacy_serialization_remain_identical():
+    import json
+    import pickle
+    from dataclasses import replace
+
+    from llm_wiki.reliability_defaults import DEFAULTS as owned_defaults
+    from llm_wiki.reliability_defaults import ReliableMemoryDefaults
+
+    baseline = Path(__file__).parent / 'modules/reliability_defaults/fixtures/legacy-pickle.json'
+    samples = json.loads(baseline.read_text(encoding='utf-8'))['samples']
+    objects = {'class': ReliableMemoryDefaults, 'defaults': owned_defaults,
+               'custom': replace(owned_defaults, dead_task_retention_days=60, queue_busy_ms=2500)}
+    assert reliable_memory.DEFAULTS is owned_defaults
+    assert reliable_memory.ReliableMemoryDefaults is ReliableMemoryDefaults
+    for name, value in objects.items():
+        data = bytes.fromhex(samples[name])
+        assert pickle.dumps(value, protocol=4) == data
+        assert pickle.loads(data) == value
 
 
 def test_defaults_are_the_approved_bounded_values():
@@ -84,70 +104,14 @@ def test_sha256_is_stable_for_equal_logical_objects():
     assert sha256_bytes(b"") == ("e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855")
 
 
-def test_begin_immediate_rolls_back_when_precommit_fence_expires():
-    connection = sqlite3.connect(":memory:")
-    connection.execute("CREATE TABLE values_table(value INTEGER)")
-
-    with pytest.raises(TimeoutError, match="deadline"):
-        with begin_immediate(
-            connection,
-            before_commit=lambda: (_ for _ in ()).throw(
-                TimeoutError("deadline expired before commit")
-            ),
-        ):
-            connection.execute("INSERT INTO values_table VALUES (1)")
-
-    assert connection.execute("SELECT value FROM values_table").fetchall() == []
 
 
-def test_begin_immediate_commits_when_precommit_fence_succeeds():
-    connection = sqlite3.connect(":memory:")
-    checked = []
-    connection.execute("CREATE TABLE values_table(value INTEGER)")
-
-    with begin_immediate(connection, before_commit=lambda: checked.append(True)):
-        connection.execute("INSERT INTO values_table VALUES (1)")
-
-    assert checked == [True]
-    assert connection.execute("SELECT value FROM values_table").fetchall() == [(1,)]
 
 
-def test_begin_immediate_preserves_body_exception_when_rollback_fails():
-    class BrokenRollbackConnection:
-        def execute(self, statement):
-            assert statement == "BEGIN IMMEDIATE"
-
-        def commit(self):
-            pytest.fail("commit must not run after a body failure")
-
-        def rollback(self):
-            raise OSError("rollback failed")
-
-    original = RuntimeError("body failed")
-
-    with pytest.raises(RuntimeError, match="body failed") as raised:
-        with begin_immediate(BrokenRollbackConnection()):
-            raise original
-
-    assert raised.value is original
-    assert isinstance(raised.value.__context__, OSError)
 
 
-@pytest.mark.parametrize(
-    "value",
-    ["", ".", "../x", "a/../../x", "/absolute", "C:/absolute", "a\\b", "a//b"],
-)
-def test_restricted_relative_path_rejects_unsafe_values(value):
-    with pytest.raises(ValueError):
-        restricted_relative_path(value, ("knowledge", "run/transactions"))
 
 
-def test_restricted_relative_path_accepts_only_allowed_roots():
-    assert restricted_relative_path("knowledge/daily/2026-01-01.md", ("knowledge",)) == (
-        PurePosixPath("knowledge/daily/2026-01-01.md")
-    )
-    with pytest.raises(ValueError, match="allowed root"):
-        restricted_relative_path("cache/private.json", ("knowledge",))
 
 
 def test_operational_connection_uses_required_pragmas_and_row_factory(tmp_path):
@@ -292,6 +256,29 @@ def test_runtime_file_identity_round_trips_through_create_only_publication(
     assert published.volume
     assert published.file_id
     assert destination.read_bytes() == b'{"value":1}'
+
+
+def test_absent_runtime_file_keeps_its_actual_error(tmp_path: Path) -> None:
+    with pytest.raises(FileNotFoundError):
+        reliable_memory.read_runtime_bytes(tmp_path / "missing", tmp_path, max_bytes=1024)
+
+
+def test_runtime_file_outside_root_is_still_refused(tmp_path: Path) -> None:
+    root = tmp_path / "state"
+    root.mkdir()
+    outside = tmp_path / "outside"
+    outside.write_bytes(b"outside")
+    with pytest.raises(PermissionError, match="outside"):
+        reliable_memory.read_runtime_bytes(outside, root, max_bytes=1024)
+
+
+def test_runtime_file_symlink_is_still_refused(tmp_path: Path) -> None:
+    target = tmp_path / "target"
+    target.write_bytes(b"target")
+    link = tmp_path / "link"
+    link.symlink_to(target)
+    with pytest.raises(PermissionError, match="regular file"):
+        reliable_memory.read_runtime_bytes(link, tmp_path, max_bytes=1024)
 
 
 def test_runtime_identity_capture_allows_a_live_writer(tmp_path: Path) -> None:
@@ -535,7 +522,7 @@ def test_state_root_accepts_normal_local_sqlite_locking(tmp_path):
 
 
 def test_state_root_rejects_known_network_path(tmp_path, monkeypatch):
-    monkeypatch.setattr("reliable_memory._known_network_path", lambda path: True)
+    monkeypatch.setattr('llm_wiki.runtime_environment.known_network_path', lambda path: True)
     with pytest.raises(UnsafeStateRoot, match="local filesystem"):
         validate_state_root(tmp_path)
 
@@ -546,14 +533,14 @@ def test_posix_network_mount_detection_uses_longest_mount_point(monkeypatch):
 37 36 8:1 / /srv/local rw,relatime - ext4 /dev/sda1 rw
 38 36 0:44 / /srv/network rw,relatime - cifs //server/share rw
 """
-    monkeypatch.setattr(reliable_memory, "_platform_system", lambda: "Linux", raising=False)
+    monkeypatch.setattr(runtime_environment, "platform_system", lambda: "Linux", raising=False)
     monkeypatch.setattr(
-        reliable_memory, "_read_posix_mount_data", lambda: (mount_data, True), raising=False
+        runtime_environment, "read_posix_mount_data", lambda: (mount_data, True), raising=False
     )
     monkeypatch.setattr(type(Path("/")), "resolve", lambda self, *, strict=False: self)
-    assert reliable_memory._known_network_path(Path("/uncovered")) is True
-    assert reliable_memory._known_network_path(Path("/srv/local/state")) is False
-    assert reliable_memory._known_network_path(Path("/srv/network/state")) is True
+    assert reliable_memory.known_network_path(Path("/uncovered")) is True
+    assert reliable_memory.known_network_path(Path("/srv/local/state")) is False
+    assert reliable_memory.known_network_path(Path("/srv/network/state")) is True
 
 
 def test_posix_mount_detection_resolves_symlink_target(monkeypatch):
@@ -568,23 +555,23 @@ def test_posix_mount_detection_resolves_symlink_target(monkeypatch):
         calls.append((self, strict))
         return Path("/mnt/network/state")
 
-    monkeypatch.setattr(reliable_memory, "_platform_system", lambda: "Linux")
-    monkeypatch.setattr(reliable_memory, "_read_posix_mount_data", lambda: (mount_data, True))
+    monkeypatch.setattr(runtime_environment, "platform_system", lambda: "Linux")
+    monkeypatch.setattr(runtime_environment, "read_posix_mount_data", lambda: (mount_data, True))
     monkeypatch.setattr(type(link), "resolve", resolve)
 
-    assert reliable_memory._known_network_path(link) is True
+    assert reliable_memory.known_network_path(link) is True
     assert calls == [(link, False)]
 
 
 def test_posix_proc_mounts_network_types_are_detected(monkeypatch):
     mounts = "server:/nfs /mnt/nfs nfs rw 0 0\nsshfs /mnt/ssh fuse.sshfs rw 0 0\n"
-    monkeypatch.setattr(reliable_memory, "_platform_system", lambda: "Linux", raising=False)
+    monkeypatch.setattr(runtime_environment, "platform_system", lambda: "Linux", raising=False)
     monkeypatch.setattr(
-        reliable_memory, "_read_posix_mount_data", lambda: (mounts, False), raising=False
+        runtime_environment, "read_posix_mount_data", lambda: (mounts, False), raising=False
     )
     monkeypatch.setattr(type(Path("/")), "resolve", lambda self, *, strict=False: self)
-    assert reliable_memory._known_network_path(Path("/mnt/nfs/state")) is True
-    assert reliable_memory._known_network_path(Path("/mnt/ssh/state")) is True
+    assert reliable_memory.known_network_path(Path("/mnt/nfs/state")) is True
+    assert reliable_memory.known_network_path(Path("/mnt/ssh/state")) is True
 
 
 def test_darwin_mount_detection_handles_spaces_escapes_and_longest_match(monkeypatch):
@@ -594,28 +581,28 @@ server:/team on /Volumes/Team Share (nfs, nodev, nosuid)
 /dev/disk4s1 on /Volumes/Team Share/local (apfs, local)
 //user@server/share on /Volumes/SMB\\040Share (smbfs, nodev, nosuid)
 """
-    monkeypatch.setattr(reliable_memory, "_platform_system", lambda: "Darwin")
-    monkeypatch.setattr(reliable_memory, "_read_posix_mount_data", lambda: ("", True))
+    monkeypatch.setattr(runtime_environment, "platform_system", lambda: "Darwin")
+    monkeypatch.setattr(runtime_environment, "read_posix_mount_data", lambda: ("", True))
     monkeypatch.setattr(
-        reliable_memory, "_query_darwin_mounts", lambda: mount_output, raising=False
+        runtime_environment, "query_darwin_mounts", lambda: mount_output, raising=False
     )
     monkeypatch.setattr(type(Path("/")), "resolve", lambda self, *, strict=False: self)
 
-    assert reliable_memory._known_network_path(Path("/Volumes/Team Share/project")) is True
-    assert reliable_memory._known_network_path(Path("/Volumes/Team Share/local/state")) is False
-    assert reliable_memory._known_network_path(Path("/Volumes/SMB Share/state")) is True
+    assert reliable_memory.known_network_path(Path("/Volumes/Team Share/project")) is True
+    assert reliable_memory.known_network_path(Path("/Volumes/Team Share/local/state")) is False
+    assert reliable_memory.known_network_path(Path("/Volumes/SMB Share/state")) is True
 
 
 def test_darwin_mount_query_timeout_fails_open_for_unknown_path(monkeypatch):
-    monkeypatch.setattr(reliable_memory, "_platform_system", lambda: "Darwin")
-    monkeypatch.setattr(reliable_memory, "_read_posix_mount_data", lambda: ("", True))
+    monkeypatch.setattr(runtime_environment, "platform_system", lambda: "Darwin")
+    monkeypatch.setattr(runtime_environment, "read_posix_mount_data", lambda: ("", True))
 
     def timeout(*args, **kwargs):
         raise subprocess.TimeoutExpired(args[0], kwargs["timeout"])
 
     monkeypatch.setattr(reliable_memory.subprocess, "run", timeout)
-    assert reliable_memory._query_darwin_mounts() == ""
-    assert reliable_memory._known_network_path(Path("/Users/local/state")) is False
+    assert reliable_memory.query_darwin_mounts() == ""
+    assert reliable_memory.known_network_path(Path("/Users/local/state")) is False
 
 
 def test_darwin_mount_query_is_bounded(monkeypatch):
@@ -626,14 +613,14 @@ def test_darwin_mount_query_is_bounded(monkeypatch):
         return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
 
     monkeypatch.setattr(reliable_memory.subprocess, "run", completed)
-    assert reliable_memory._query_darwin_mounts() == ""
+    assert reliable_memory.query_darwin_mounts() == ""
     assert observed["timeout"] <= 2
     assert observed["check"] is False
 
 
 def test_owner_permission_errors_are_not_suppressed(tmp_path, monkeypatch):
     monkeypatch.setattr(
-        reliable_memory, "_owner_permissions_supported", lambda path: True, raising=False
+        runtime_environment, "owner_permissions_supported", lambda path: True, raising=False
     )
 
     def deny_chmod(self, mode):
@@ -648,7 +635,7 @@ def test_owner_mode_must_match_after_chmod(tmp_path, monkeypatch):
     root = tmp_path / "state"
     root.mkdir(mode=0o755)
     monkeypatch.setattr(
-        reliable_memory, "_owner_permissions_supported", lambda path: True, raising=False
+        runtime_environment, "owner_permissions_supported", lambda path: True, raising=False
     )
     monkeypatch.setattr(Path, "chmod", lambda self, mode: None)
     with pytest.raises(PermissionError, match="owner-only"):
@@ -657,21 +644,21 @@ def test_owner_mode_must_match_after_chmod(tmp_path, monkeypatch):
 
 def test_unsupported_owner_bits_skip_chmod_explicitly(tmp_path, monkeypatch):
     monkeypatch.setattr(
-        reliable_memory, "_owner_permissions_supported", lambda path: False, raising=False
+        runtime_environment, "owner_permissions_supported", lambda path: False, raising=False
     )
     monkeypatch.setattr(
         Path,
         "chmod",
         lambda self, mode: pytest.fail("chmod must not run when modes are unsupported"),
     )
-    monkeypatch.setattr(reliable_memory, "_sqlite_lock_probe", lambda path: True)
+    monkeypatch.setattr(sqlite_io, "sqlite_lock_probe", lambda path: True)
     validate_state_root(tmp_path / "state")
 
 
 def test_state_root_rejects_windows_reparse_point(tmp_path, monkeypatch):
-    monkeypatch.setattr("reliable_memory._windows_reparse_point", lambda path: True)
+    monkeypatch.setattr('llm_wiki.runtime_environment.windows_reparse_point', lambda path: True)
     monkeypatch.setattr(
-        "reliable_memory._known_network_path",
+        'llm_wiki.runtime_environment.known_network_path',
         lambda path: pytest.fail("network probing must follow reparse rejection"),
     )
     with pytest.raises(UnsafeStateRoot, match="reparse"):
@@ -679,7 +666,7 @@ def test_state_root_rejects_windows_reparse_point(tmp_path, monkeypatch):
 
 
 def test_state_root_rejects_abnormal_sqlite_lock_probe(tmp_path, monkeypatch):
-    monkeypatch.setattr("reliable_memory._sqlite_lock_probe", lambda path: False)
+    monkeypatch.setattr("llm_wiki.sqlite_io.sqlite_lock_probe", lambda path: False)
     with pytest.raises(UnsafeStateRoot, match="locking"):
         validate_state_root(tmp_path)
 
@@ -717,16 +704,17 @@ def test_concurrent_state_root_validation_uses_unique_probe_databases(tmp_path, 
         return real_connect(database, *args, **kwargs)
 
     monkeypatch.setattr(reliable_memory.sqlite3, "connect", recording_connect)
-    monkeypatch.setattr(reliable_memory, "_known_network_path", lambda path: False)
-    monkeypatch.setattr(reliable_memory, "_windows_reparse_point", lambda path: False)
-    monkeypatch.setattr(reliable_memory, "_set_owner_only", lambda path, mode: True)
+    monkeypatch.setattr(runtime_environment, "known_network_path", lambda path: False)
+    monkeypatch.setattr(sqlite_io, "windows_reparse_point", lambda path: False)
+    monkeypatch.setattr(sqlite_io, "set_owner_only", lambda path, mode: True)
     with ThreadPoolExecutor(max_workers=24) as executor:
         results = list(executor.map(lambda _index: validate_state_root(root), range(64)))
 
     assert results == [None] * 64
     probes = {path for path in connected_paths if path.name.startswith(".llm-wiki-lock-probe-")}
     assert len(probes) == 64
-    assert not list(root.glob(".llm-wiki-lock-probe-*"))
+    assert {path.parent for path in probes} == {root / "run"}
+    assert not list(root.rglob(".llm-wiki-lock-probe-*"))
 
 
 def _posix_locks_on_inode(inode: int) -> int:
@@ -768,3 +756,80 @@ def test_reopening_an_operational_database_keeps_existing_locks(tmp_path: Path) 
 
     assert before > 0
     assert after == before
+
+
+def _runtime_directory_link(link: Path, target: Path) -> None:
+    try:
+        link.symlink_to(target, target_is_directory=True)
+    except OSError as error:
+        pytest.skip(f'directory symlinks unavailable: {error}')
+
+
+def test_runtime_containment_does_not_accept_a_sibling_prefix(tmp_path: Path) -> None:
+    root = tmp_path / 'state'
+    root.mkdir()
+    sibling = tmp_path / 'state-other'
+    sibling.mkdir()
+    path = sibling / 'record'
+    path.write_bytes(b'outside')
+    with pytest.raises(PermissionError, match='outside'):
+        reliable_memory.read_runtime_bytes(path, root, max_bytes=1024)
+
+
+def _assert_inside_runtime_directory_link(path: Path, root: Path) -> None:
+    if os.name == "nt":
+        with pytest.raises(PermissionError, match="bounded regular file"):
+            reliable_memory.read_runtime_bytes(path, root, max_bytes=1024)
+        return
+    assert reliable_memory.read_runtime_bytes(path, root, max_bytes=1024) == b"inside"
+
+
+def test_runtime_parent_authority_is_fresh_after_symlink_retarget(tmp_path: Path) -> None:
+    root = tmp_path / 'state'
+    root.mkdir()
+    inside = root / 'inside'
+    outside = tmp_path / 'outside'
+    inside.mkdir()
+    outside.mkdir()
+    (inside / 'record').write_bytes(b'inside')
+    (outside / 'record').write_bytes(b'outside')
+    link = root / 'linked'
+    _runtime_directory_link(link, inside)
+    _assert_inside_runtime_directory_link(link / 'record', root)
+    link.unlink()
+    _runtime_directory_link(link, outside)
+    with pytest.raises(PermissionError, match='outside'):
+        reliable_memory.read_runtime_bytes(link / 'record', root, max_bytes=1024)
+
+
+def test_runtime_root_authority_is_fresh_after_symlink_retarget(tmp_path: Path) -> None:
+    first = tmp_path / 'first'
+    second = tmp_path / 'second'
+    first.mkdir()
+    second.mkdir()
+    (first / 'record').write_bytes(b'first')
+    (second / 'record').write_bytes(b'second')
+    root = tmp_path / 'root'
+    _runtime_directory_link(root, first)
+    assert reliable_memory.read_runtime_bytes(first / 'record', root, max_bytes=1024) == b'first'
+    root.unlink()
+    _runtime_directory_link(root, second)
+    with pytest.raises(PermissionError, match='outside'):
+        reliable_memory.read_runtime_bytes(first / 'record', root, max_bytes=1024)
+    assert reliable_memory.read_runtime_bytes(second / 'record', root, max_bytes=1024) == b'second'
+
+
+def test_formats_facades_preserve_single_type_and_function_identity():
+    import compile_cache
+    import compile_pipeline
+    from llm_wiki.formats import canonical, receipts, schema, source
+
+    assert reliable_memory.canonical_json_bytes is canonical.canonical_json_bytes
+    assert reliable_memory.sha256_bytes is canonical.sha256_bytes
+    assert reliable_memory.SchemaValidationError is schema.SchemaValidationError
+    assert reliable_memory.validate_schema is schema.validate_schema
+    assert reliable_memory.validate_schema_object is schema.validate_schema_object
+    assert compile_cache.SourceDescriptor is source.SourceDescriptor
+    assert compile_cache.SourceOccurrenceBounds is source.SourceOccurrenceBounds
+    assert compile_pipeline.parse_compile_receipt_version is receipts.parse_compile_receipt_version
+    assert compile_pipeline.UnsupportedCompileReceiptVersion is receipts.UnsupportedCompileReceiptVersion

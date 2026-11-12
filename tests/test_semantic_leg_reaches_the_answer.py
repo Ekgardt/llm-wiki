@@ -17,7 +17,9 @@ from __future__ import annotations
 
 import time
 
+import generation_search
 import pytest
+from llm_wiki import retrieval_optional_stages
 
 from tests.slow_machine import LONG_TIMEOUT
 
@@ -57,38 +59,35 @@ def test_an_optional_stage_may_outlast_a_warm_dense_leg() -> None:
     import retrieval
 
     deadline = time.monotonic() + 60.0
-    value = retrieval._run_optional_bounded(
+    value = retrieval.run_optional_bounded(
         lambda: (time.sleep(0.8), "dense rows")[1],
         deadline=deadline,
         cancelled=None,
     )
 
     assert value == "dense rows"
-    assert retrieval.OPTIONAL_STAGE_MAX_SECONDS > 1.33
+    assert retrieval_optional_stages.OPTIONAL_STAGE_MAX_SECONDS > 1.33
 
 
 def test_the_lower_entry_point_resolves_its_own_query_encoder() -> None:
     """`search()` resolves an encoder before delegating; this entry must too."""
     import retrieval
-    import search_memory
 
-    encoder, model_id, revision = retrieval._resolved_query_encoder(
-        search_memory, semantic=True, embedder=None, model_id=None, model_revision=None
+    encoder, model_id, revision = retrieval.resolved_query_encoder(
+        semantic=True, embedder=None, model_id=None, model_revision=None
     )
 
     assert callable(encoder)
-    assert model_id == search_memory.EMBEDDING_MODEL
-    assert revision == search_memory.EMBEDDING_MODEL_REVISION
+    assert model_id == generation_search.EMBEDDING_MODEL
+    assert revision == generation_search.EMBEDDING_MODEL_REVISION
 
 
 def test_a_supplied_encoder_is_left_exactly_as_the_caller_passed_it() -> None:
     import retrieval
-    import search_memory
 
     supplied = object()
 
-    resolved = retrieval._resolved_query_encoder(
-        search_memory,
+    resolved = retrieval.resolved_query_encoder(
         semantic=True,
         embedder=supplied,
         model_id="m",
@@ -100,10 +99,9 @@ def test_a_supplied_encoder_is_left_exactly_as_the_caller_passed_it() -> None:
 
 def test_no_encoder_is_resolved_when_the_caller_did_not_ask_for_meaning() -> None:
     import retrieval
-    import search_memory
 
-    resolved = retrieval._resolved_query_encoder(
-        search_memory, semantic=False, embedder=None, model_id=None, model_revision=None
+    resolved = retrieval.resolved_query_encoder(
+        semantic=False, embedder=None, model_id=None, model_revision=None
     )
 
     assert resolved == (None, None, None)
@@ -111,10 +109,10 @@ def test_no_encoder_is_resolved_when_the_caller_did_not_ask_for_meaning() -> Non
 
 def test_an_unavailable_model_yields_no_vector_rather_than_raising(monkeypatch) -> None:
     """The generation reader already treats an unusable query vector as no dense."""
-    import search_memory
+    import generation_search
 
-    monkeypatch.setattr(search_memory, "_get_embedder", lambda: None)
-    encode = search_memory._lazy_generation_query_encoder()
+    monkeypatch.setattr(generation_search, "get_embedder", lambda: None)
+    encode = generation_search.lazy_generation_query_encoder()
 
     assert encode(["question"]) == []
 
@@ -131,7 +129,7 @@ def test_the_grounded_answer_does_not_cap_its_own_candidate_pool(monkeypatch) ->
         return []
 
     monkeypatch.setattr(retrieval, "retrieve_via_search_memory", fake_retrieve)
-    query_memory._default_candidates(
+    query_memory.default_candidates(
         "вопрос", profile="HYBRID", deadline=time.monotonic() + LONG_TIMEOUT
     )
 
@@ -143,7 +141,7 @@ def test_a_fenced_answer_is_still_an_answer() -> None:
     """A correct answer was thrown away for three backticks."""
     import query_memory
 
-    parsed = query_memory._parsed_answer('```json\n{"status": "answered"}\n```')
+    parsed = query_memory.parsed_answer('```json\n{"status": "answered"}\n```')
 
     assert parsed == {"status": "answered"}
 
@@ -158,7 +156,7 @@ def test_prose_wrapped_around_a_fence_no_longer_throws_the_answer_away() -> None
     """
     import query_memory
 
-    parsed = query_memory._parsed_answer(
+    parsed = query_memory.parsed_answer(
         'here you go:\n```json\n{"a": 1}\n```\nhope that helps'
     )
 
@@ -169,7 +167,7 @@ def test_a_reply_that_is_only_prose_is_still_refused() -> None:
     import query_memory
 
     with pytest.raises(query_memory.GroundedQAError):
-        query_memory._parsed_answer("here you go: the answer is 600 followers")
+        query_memory.parsed_answer("here you go: the answer is 600 followers")
 
 
 def test_an_agent_worktree_belongs_to_the_checkout_that_owns_it() -> None:

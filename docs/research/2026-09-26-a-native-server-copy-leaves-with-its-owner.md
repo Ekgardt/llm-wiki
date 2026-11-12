@@ -32,3 +32,29 @@ cannot be removed.
 ## Files
 - scripts/lsp_process.py
 - tests/test_a_native_server_copy_leaves_with_its_owner.py
+
+## Qualification correction, 2026-09-30
+
+The isolated namespace-aware candidate exposed an incomplete test record:
+`test_a_dead_failure_root_keeps_its_records_and_drops_the_copy` stored only
+`owner_pid`. The host stopped at this failure after 643 passing tests and two
+skips (user-provided output, 106.10 seconds). A local run reproduced the same
+failure. For the same reaped child, the current reader returns `unknown` without
+its recorded identity and `dead` with the identity captured while it was alive.
+The former must not authorize deletion in Linux: the PID may name an invisible
+owner in another namespace.
+
+The test-only correction reuses the existing synchronized `finished_process`
+helper and records `owner_start_identity`. It still requires removal of the
+launch copy and now checks both retained records byte for byte. Additional cases
+require all files to survive for a live owner, a PID-only Linux record, and an
+unqualified old Linux identity. Runtime cleanup and ownership checks are unchanged.
+Related sweep and ownership scenarios passed before the correction (58 tests).
+
+Before editing, the isolated native index was refreshed to
+`generation-18d9f6fbc16390c9-c59b69bc`; change detection reported no stale sources.
+Graph caller/callee results were supplemented with source inspection because
+the graph reports incomplete coverage. This corrects a fixture for the existing
+ownership contract, without a new architecture, dependency, runtime path or limit.
+The candidate is not installed; full host qualification and safe cutover remain
+open. Evidence is retained under `logs/audit-2026-09-30-native-copy-*`.

@@ -40,9 +40,7 @@ def test_corrupt_generation_still_goes_through_retrieve(tmp_path, monkeypatch):
     notes = vault / "knowledge" / "notes"
     notes.mkdir(parents=True)
     (notes / "page.md").write_text("# Page\nCorrupt needle.\n", encoding="utf-8")
-    monkeypatch.setattr(search_memory, "ROOT", vault)
-    monkeypatch.setattr(search_memory, "KNOWLEDGE_DIR", notes)
-    monkeypatch.setattr(search_memory, "WIKI_DIR", notes)
+    monkeypatch.setenv("LLM_WIKI_ROOT", str(vault))
 
     class Catalog:
         generations_path = tmp_path / "generations"
@@ -57,7 +55,7 @@ def test_corrupt_generation_still_goes_through_retrieve(tmp_path, monkeypatch):
         seen["retrieve"] += 1
         return real(*a, **k)
 
-    monkeypatch.setattr(retrieval, "retrieve", wrap)
+    monkeypatch.setattr("llm_wiki.retrieval_execution.retrieve", wrap)
 
     results = search_memory.search(
         "corrupt needle",
@@ -79,6 +77,8 @@ def test_corrupt_generation_still_goes_through_retrieve(tmp_path, monkeypatch):
 
 
 def test_seal_change_refuses_dense_and_falls_back_base(tmp_path, monkeypatch):
+    import generation_fts_validation
+    import generation_search
     import search_memory
     from repository_scope import resolve_repository_scope
 
@@ -86,9 +86,7 @@ def test_seal_change_refuses_dense_and_falls_back_base(tmp_path, monkeypatch):
     notes = vault / "knowledge" / "notes"
     notes.mkdir(parents=True)
     (notes / "a.md").write_text("# A\nSeal needle.\n", encoding="utf-8")
-    monkeypatch.setattr(search_memory, "ROOT", vault)
-    monkeypatch.setattr(search_memory, "KNOWLEDGE_DIR", notes)
-    monkeypatch.setattr(search_memory, "WIKI_DIR", notes)
+    monkeypatch.setenv("LLM_WIKI_ROOT", str(vault))
 
     # Force generation open path with seal flip after first check.
     seals = {"n": 0}
@@ -97,10 +95,10 @@ def test_seal_change_refuses_dense_and_falls_back_base(tmp_path, monkeypatch):
         seals["n"] += 1
         return ("seal-a",) if seals["n"] == 1 else ("seal-b",)
 
-    monkeypatch.setattr(search_memory, "_generation_consumption_seal", seal)
+    monkeypatch.setattr(generation_search, "generation_consumption_seal", seal)
     monkeypatch.setattr(
-        search_memory,
-        "_generation_consumption_unchanged",
+        generation_search,
+        "generation_consumption_unchanged",
         lambda *_a, **_k: False,
     )
 
@@ -118,13 +116,13 @@ def test_seal_change_refuses_dense_and_falls_back_base(tmp_path, monkeypatch):
                 "source_manifest_sha256": "1" * 64,
                 "collector_version": "c",
                 "extractor_version": "e",
-                "tokenizer_version": search_memory.GENERATION_TOKENIZER_VERSION,
-                "tokenizer_config_sha256": search_memory.GENERATION_TOKENIZER_CONFIG_SHA256,
+                "tokenizer_version": generation_fts_validation.GENERATION_TOKENIZER_VERSION,
+                "tokenizer_config_sha256": generation_fts_validation.GENERATION_TOKENIZER_CONFIG_SHA256,
                 "schema_version": "corpus-generation/v1",
             }
 
     # Open generation fails connection → generation_unavailable path still retrieve.
-    monkeypatch.setattr(search_memory, "_generation_connection", lambda *_a, **_k: None)
+    monkeypatch.setattr(generation_search, "generation_connection", lambda *_a, **_k: None)
 
     results = search_memory.search(
         "seal needle",
@@ -199,7 +197,7 @@ def test_trace_includes_reranker_diagnostics(monkeypatch):
     assert result.trace.reranker_model_revision == "rev"
     assert result.trace.reranker_depth == 20
     assert result.trace.reranker_duration_ms == 3
-    payload = mcp_server._reported_trace(dataclasses.asdict(result.trace))
+    payload = mcp_server.reported_trace(dataclasses.asdict(result.trace))
     validate_schema(payload, SCHEMAS / "retrieval-trace-v1.json")
     rows = retrieval.candidates_to_legacy(result, display_meta=result.display_meta)
     assert rows[0]["reranker_applied"] is True

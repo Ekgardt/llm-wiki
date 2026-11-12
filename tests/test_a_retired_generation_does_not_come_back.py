@@ -16,8 +16,7 @@ for directory in (TESTS.parent / "scripts", TESTS):
     if str(directory) not in sys.path:
         sys.path.insert(0, str(directory))
 
-from test_generation_catalog import _catalog, _publish  # noqa: E402
-
+from tests.generation_catalog_helpers import _catalog, _publish  # noqa: E402
 from tests.slow_machine import LONG_TIMEOUT  # noqa: E402
 
 

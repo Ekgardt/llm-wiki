@@ -59,7 +59,7 @@ def test_only_a_section_that_cannot_change_what_git_reads_is_ignored(
     content: bytes, inert: bool
 ) -> None:
     """The fence tolerates `[safe]`'s two keys and nothing else it did not before."""
-    assert workspace_revision._safe_ignored_git_config(content) is inert
+    assert workspace_revision.safe_ignored_git_config(content) is inert
 
 
 def test_the_runner_system_config_lets_the_private_read_arm(tmp_path, monkeypatch) -> None:
@@ -67,7 +67,7 @@ def test_the_runner_system_config_lets_the_private_read_arm(tmp_path, monkeypatc
     config = tmp_path / "system-gitconfig"
     config.write_bytes(RUNNER_SYSTEM_CONFIG)
     monkeypatch.setattr(
-        workspace_revision, "_SYSTEM_GIT_CONFIG_PATHS", (config,), raising=False
+        workspace_revision, "SYSTEM_GIT_CONFIG_PATHS", (config,), raising=False
     )
 
-    assert workspace_revision._safe_ignored_git_config(config.read_bytes()) is True
+    assert workspace_revision.safe_ignored_git_config(config.read_bytes()) is True

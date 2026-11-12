@@ -1,0 +1,265 @@
+{
+  "encoding": "o200k_base",
+  "max_tokens": 100000,
+  "serialization": "exact-duplicates/v1",
+  "files": [
+    "AGENTS.md",
+    "CLAUDE.md",
+    "benchmark/__init__.py",
+    "benchmark/navigation_benchmark_deadlines.py",
+    "benchmark/navigation_benchmark_environment.py",
+    "benchmark/navigation_benchmark_git.py",
+    "benchmark/navigation_benchmark_metrics.py",
+    "benchmark/navigation_benchmark_mutation.py",
+    "benchmark/navigation_benchmark_operator_corpus.py",
+    "benchmark/navigation_benchmark_ownership.py",
+    "benchmark/navigation_benchmark_queries.py",
+    "benchmark/navigation_benchmark_schema.py",
+    "benchmark/run_code_navigation.py",
+    "docs/AGENTS.md",
+    "docs/STRUCTURE.md",
+    "docs/modules/benchmark-run-benchmark.md",
+    "docs/modules/context-bundle.md",
+    "docs/modules/context-records.md",
+    "docs/modules/context-tooling.md",
+    "docs/modules/model-choice.md",
+    "docs/modules/product-structure.md",
+    "docs/modules/project-governance.md",
+    "docs/modules/run-code-navigation.md",
+    "docs/modules/test-an-ownership-failure-says-what-and-when-context.json",
+    "docs/modules/test-an-ownership-failure-says-what-and-when.md",
+    "docs/modules/test-support.md",
+    "rules/development-laws.md",
+    "scripts/__init__.py",
+    "scripts/llm_wiki/__init__.py",
+    "scripts/llm_wiki/context_bundle.py",
+    "tests/__init__.py",
+    "tests/conftest.py",
+    "tests/module_context.py",
+    "tests/module_context_paths.py",
+    "tests/module_interface.py",
+    "tests/module_interface_render.py",
+    "tests/module_qualification.py",
+    "tests/module_record_context.py",
+    "tests/module_records.py",
+    "tests/shared_fixtures.py",
+    "tests/slow_machine.py",
+    "tests/test_an_ownership_failure_says_what_and_when.py"
+  ],
+  "ownership": {
+    "files": [
+      "docs/modules/test-an-ownership-failure-says-what-and-when-context.json",
+      "docs/modules/test-an-ownership-failure-says-what-and-when.md",
+      "tests/test_an_ownership_failure_says_what_and_when.py"
+    ]
+  },
+  "qualified_dependencies": [
+    {
+      "provider": "benchmark/generate_python_qualification.py",
+      "names": [
+        "CALL_QUERIES",
+        "DEFINITION_QUERIES",
+        "FIXTURE_LINES",
+        "FIXTURE_SEED",
+        "GoldLocation",
+        "GoldQuery",
+        "MUTATION_CYCLES",
+        "QualificationRepository",
+        "REFERENCE_QUERIES",
+        "WORKLOAD_CATALOG_PATH",
+        "current_gold_sha256",
+        "current_source_manifest_sha256",
+        "generate_qualification_repository",
+        "workload_catalog_bytes"
+      ],
+      "contract_sha256": "dcd69d24eb88e1bfb98bd5cc6a5b17e73812f453034b45b066c351e22a8ea1e6",
+      "integration_tests": [
+        "tests/test_code_navigation_benchmark.py",
+        "tests/test_code_navigation_benchmark_gates_and_schemas.py",
+        "tests/test_code_navigation_benchmark_mutation_and_tokens.py"
+      ]
+    },
+    {
+      "provider": "benchmark/navigation_benchmark_gates.py",
+      "names": [
+        "evaluate_gates"
+      ],
+      "contract_sha256": "acaca9e85c345264df82974cc35172b080480390844f16090d1103729a32fe67",
+      "integration_tests": [
+        "tests/test_code_navigation_benchmark_gates_and_schemas.py",
+        "tests/test_code_navigation_benchmark_run_deadlines_and_cli.py",
+        "tests/test_code_navigation_benchmark_run_evidence.py"
+      ]
+    },
+    {
+      "provider": "scripts/code_intelligence.py",
+      "names": [
+        "Capability",
+        "PositionEncoding"
+      ],
+      "contract_sha256": "adf311d873eaad68dd0a1c40541c3108c34c405038648a5adacc4139828d8a8d",
+      "integration_tests": [
+        "tests/test_an_ownership_failure_says_what_and_when.py"
+      ]
+    },
+    {
+      "provider": "scripts/code_navigation.py",
+      "names": [
+        "CodeNavigation",
+        "NavigationLocation",
+        "NavigationRequest",
+        "NavigationResult",
+        "NavigationStatus"
+      ],
+      "contract_sha256": "0a2206bc16a81f17375eb40005e5249c578a1cb71d33ea701f133a1aeddb69b7",
+      "integration_tests": [
+        "tests/test_an_ownership_failure_says_what_and_when.py"
+      ]
+    },
+    {
+      "provider": "scripts/code_navigation_renderer.py",
+      "names": [
+        "estimate_tokens",
+        "render_navigation"
+      ],
+      "contract_sha256": "05d945aacd98ec45294f424e422c4853e5a5145892537e4a300aede95b6acf14",
+      "integration_tests": [
+        "tests/test_an_ownership_failure_says_what_and_when.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/generation_catalog_store.py",
+      "names": [
+        "GenerationCatalog"
+      ],
+      "contract_sha256": "b18194ebe04bf988b4474379fcb5243516550d43b745a00eaed1453f7844c983",
+      "integration_tests": [
+        "tests/test_a_build_in_flight_is_not_an_orphan.py",
+        "tests/test_a_code_generation_is_not_abandoned.py",
+        "tests/test_a_flow_walk_stops_when_its_caller_has.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/model_choice.py",
+      "names": [
+        "using_root"
+      ],
+      "contract_sha256": "d45f2655cb61963e77617d1dfd7d617b134ad77cc770b59b335d0856e5d65019",
+      "integration_tests": [
+        "tests/test_an_ownership_failure_says_what_and_when.py"
+      ]
+    },
+    {
+      "provider": "scripts/lsp_positions.py",
+      "names": [
+        "SourceDocument"
+      ],
+      "contract_sha256": "39a690cd293a87827a31a419f2ea174a18e6429c88bce9001a54cf013c5927aa",
+      "integration_tests": [
+        "tests/test_an_ownership_failure_says_what_and_when.py"
+      ]
+    },
+    {
+      "provider": "scripts/lsp_process.py",
+      "names": [
+        "coordinator_has_ownership"
+      ],
+      "contract_sha256": "df470b4e84f7fe6161f2d91d61a08c456a1e7cb7a2fbf1f3e747a6b9ae845899",
+      "integration_tests": [
+        "tests/test_an_ownership_failure_says_what_and_when.py"
+      ]
+    },
+    {
+      "provider": "scripts/lsp_protocol.py",
+      "names": [
+        "CancellationSource",
+        "RequestCancelled"
+      ],
+      "contract_sha256": "d0cc4bf188c8e4e7ea182a68a7c3d8c6ef0720c1a74afec9dcf7491d6b1aa230",
+      "integration_tests": [
+        "tests/test_an_ownership_failure_says_what_and_when.py"
+      ]
+    },
+    {
+      "provider": "scripts/lsp_security.py",
+      "names": [
+        "normalize_provider_uri",
+        "read_repository_source_bytes"
+      ],
+      "contract_sha256": "b2d4dfe89ce17e33f1538f09f6d187ed6a4aeda00c1e7c75ff34992c0b1c425c",
+      "integration_tests": [
+        "tests/test_an_ownership_failure_says_what_and_when.py"
+      ]
+    },
+    {
+      "provider": "scripts/pyright_profile.py",
+      "names": [
+        "PyrightIdentity",
+        "discover_pyright"
+      ],
+      "contract_sha256": "1bab7282b669c2e4bd1e47a65bb82d429a3e9fed503734ba7b1bd5bd4f230c18",
+      "integration_tests": [
+        "tests/test_an_ownership_failure_says_what_and_when.py"
+      ]
+    },
+    {
+      "provider": "scripts/pyright_session.py",
+      "names": [
+        "LspLocation",
+        "PyrightSession"
+      ],
+      "contract_sha256": "0469594ca78ec999fbe06ffe2dc4965879280b0a0786fe3db197e2bbb88d9ef9",
+      "integration_tests": [
+        "tests/test_code_navigation.py",
+        "tests/test_code_navigation_query_fence.py",
+        "tests/test_code_navigation_setup_failures_and_targets.py"
+      ]
+    },
+    {
+      "provider": "scripts/reliable_memory.py",
+      "names": [
+        "validate_state_root"
+      ],
+      "contract_sha256": "8680515cd873056a7c8a36e0057d91f2f83f23c48841263697676ff91f7ff964",
+      "integration_tests": [
+        "tests/test_an_ownership_failure_says_what_and_when.py"
+      ]
+    },
+    {
+      "provider": "scripts/repository_scope.py",
+      "names": [
+        "RepositoryScope",
+        "resolve_repository_scope",
+        "sanitized_git_environment"
+      ],
+      "contract_sha256": "983dd096d99bafff98ca0aaa2cd722477333e30eed4bfa9297d1830c635e8d90",
+      "integration_tests": [
+        "tests/test_an_ownership_failure_says_what_and_when.py"
+      ]
+    },
+    {
+      "provider": "scripts/windows_workspace.py",
+      "names": [
+        "close_handle",
+        "file_modified_time_ns",
+        "file_size",
+        "identity",
+        "open_exclusive_readonly_source_file"
+      ],
+      "contract_sha256": "b89c259704db28cd529873898e6943608649b2f0451131a5649d094075eb1d9e",
+      "integration_tests": [
+        "tests/test_an_ownership_failure_says_what_and_when.py"
+      ]
+    },
+    {
+      "provider": "scripts/workspace_revision.py",
+      "names": [
+        "compute_workspace_revision"
+      ],
+      "contract_sha256": "fc7205e39b642841c7cd3770452541388a3f38be3eebee26c46cf149080b7552",
+      "integration_tests": [
+        "tests/test_an_ownership_failure_says_what_and_when.py"
+      ]
+    }
+  ]
+}

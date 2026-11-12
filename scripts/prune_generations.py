@@ -45,13 +45,10 @@ from collections.abc import Callable
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from generation_catalog import (  # noqa: E402
-    ABANDONED_AFTER_SECONDS,
-    RETAINED_ANCESTOR_GENERATIONS,
-    GenerationCatalog,
-    untouched_for,
-)
-from memory_state import STATE_ROOT  # noqa: E402
+from llm_wiki import runtime_roots  # noqa: E402
+from llm_wiki.generation_catalog_store import GenerationCatalog
+from llm_wiki.generation_limits import RETAINED_ANCESTOR_GENERATIONS
+from llm_wiki.generation_lineage import ABANDONED_AFTER_SECONDS, untouched_for
 
 # One prune reads the catalog, walks two directories and unlinks whole trees on
 # a local disk. Twenty minutes is the same budget the generation refresh gets
@@ -90,7 +87,7 @@ def _generation_directories(generations_path: Path) -> set[str]:
     return {entry.name for entry in generations_path.iterdir() if entry.is_dir()}
 
 
-def _directory_bytes(path: Path) -> int:
+def directory_bytes(path: Path) -> int:
     """Bytes this generation occupies, refusing a tree that is no longer one."""
     total = 0
     seen = 0
@@ -135,7 +132,7 @@ def _interrupted_discards(
     return ((registered - on_disk) & activated) - set(retained)
 
 
-def _memory_publications(catalog: GenerationCatalog) -> set[str]:
+def memory_publications(catalog: GenerationCatalog) -> set[str]:
     """Registrations whose readable manifest holds no code.
 
     A code generation is only ever registered, never activated: code answers find
@@ -176,7 +173,7 @@ def plan_prune(
     candidates = _prune_candidates(retained, registered, on_disk)
     # Only memory publications wait for activation; a code generation is never
     # activated by design, so counting it as pending hid a real stuck one.
-    unactivated_memory = (candidates - activated) & _memory_publications(catalog)
+    unactivated_memory = (candidates - activated) & memory_publications(catalog)
     abandoned = _abandoned_publications(catalog, unactivated_memory)
     return PrunePlan(
         retained,
@@ -192,7 +189,7 @@ def _discard_one(
     catalog: GenerationCatalog, identifier: str, retained_ancestors: int, deadline: float
 ) -> tuple[str, int]:
     """Size the tree before it goes, so the report can say what was reclaimed."""
-    reclaimed = _directory_bytes(catalog.generations_path / identifier)
+    reclaimed = directory_bytes(catalog.generations_path / identifier)
     catalog.discard_superseded(
         identifier,
         retained_ancestors=retained_ancestors,
@@ -236,7 +233,7 @@ def _discard_abandoned(catalog: GenerationCatalog, identifier: str, deadline: fl
 
 
 def _discard_one_abandoned(catalog: GenerationCatalog, identifier: str, deadline: float) -> tuple[str, int]:
-    reclaimed = _directory_bytes(catalog.generations_path / identifier)
+    reclaimed = directory_bytes(catalog.generations_path / identifier)
     catalog.discard_unactivated(identifier, deadline=deadline)
     return f"removed abandoned {identifier} ({reclaimed} bytes)", reclaimed
 
@@ -307,15 +304,15 @@ def prune_generations(
 ) -> list[str]:
     """Report the retention decision; only `apply` removes anything."""
     deadline = time.monotonic() + budget_seconds
-    catalog = GenerationCatalog(state_root or STATE_ROOT)
+    catalog = GenerationCatalog(state_root or runtime_roots.state_root())
     plan = plan_prune(catalog, retained_ancestors=retained_ancestors)
-    retention = _retention_lines(plan, bool(_memory_publications(catalog)))
+    retention = _retention_lines(plan, bool(memory_publications(catalog)))
     if not apply:
         return retention + _planned(plan)
     return retention + _applied(catalog, plan, retained_ancestors, deadline)
 
 
-def _count_prefixed(outcomes: list[str], prefix: str) -> int:
+def count_prefixed(outcomes: list[str], prefix: str) -> int:
     return len([line for line in outcomes if line.startswith(prefix)])
 
 
@@ -324,13 +321,13 @@ def _print_lines(outcomes: list[str]) -> None:
         print(f"  {line}")
 
 
-def _report(outcomes: list[str]) -> int:
+def report(outcomes: list[str]) -> int:
     """A pending publication or an orphan tree is normal and does not fail the pass;
     a registration whose tree is missing is a half-finished operation."""
     _print_lines(outcomes)
-    failures = _count_prefixed(outcomes, "ERROR:")
-    unpaired = _count_prefixed(outcomes, "UNPAIRED:")
-    pending = _count_prefixed(outcomes, "PENDING:")
+    failures = count_prefixed(outcomes, "ERROR:")
+    unpaired = count_prefixed(outcomes, "UNPAIRED:")
+    pending = count_prefixed(outcomes, "PENDING:")
     print(
         f"prune_generations: {failures} failed, {unpaired} unpaired, "
         f"{pending} pending activation"
@@ -353,7 +350,7 @@ def main(argv: list[str] | None = None) -> int:
     arguments = parser.parse_args(argv)
     if arguments.retained_ancestors < 0:
         parser.error("--retained-ancestors cannot be negative")
-    return _report(
+    return report(
         prune_generations(
             retained_ancestors=arguments.retained_ancestors,
             apply=arguments.apply,

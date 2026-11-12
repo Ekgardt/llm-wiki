@@ -23,7 +23,7 @@ def _item(item_id: str, priority_class: str = "evidence") -> context_budget.Cont
 def test_mandatory_items_keep_the_callers_order_within_a_class() -> None:
     items = [_item("f" * 8), _item("0" * 8), _item("9" * 8)]
 
-    assert [item.item_id for item in context_budget._in_class_order(items)] == ["f" * 8, "0" * 8, "9" * 8]
+    assert [item.item_id for item in context_budget.in_class_order(items)] == ["f" * 8, "0" * 8, "9" * 8]
 
 
 @dataclass
@@ -42,6 +42,6 @@ def test_the_lists_name_the_items_without_repeating_their_text() -> None:
     snapshot = SimpleNamespace(corpus_sha256="0" * 64)
     selection = {"selected_paths": set(), "missing": []}
 
-    result = mcp_server._context_result(compiled, snapshot, selection, 100, None)
+    result = mcp_server.context_result(compiled, snapshot, selection, 100, None)
 
     assert ("text" in result["items"][0], result["text"]) == (False, "text of " + "a" * 8)

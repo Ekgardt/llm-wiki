@@ -1,0 +1,22 @@
+{
+  "schema": "module-records/v1",
+  "source": "docs/superpowers/plans/2026-07-21-code-kernel-foundation-python.md",
+  "bytes": 226716,
+  "sha256": "b4a7a6874428c066d52d45c1610f01d2c2294e211c7327f2e8fb818f46450248",
+  "records": [
+    {
+      "id": "part-1",
+      "label": "# Code Kernel Foundation and Python Vertical Slice Implementation Plan",
+      "start": 0,
+      "end": 132145,
+      "sha256": "678055163a5f488cd95107974407ee1cab857f3b9875a3428c68778aba55f870"
+    },
+    {
+      "id": "part-2",
+      "label": "### Task 11: Add The Sole Supported Capture-To-Publication Orchestrati",
+      "start": 132145,
+      "end": 226716,
+      "sha256": "7a4d3d08f8737e4558d3de6503d28a010263cffccbf717adf796c5658f685d91"
+    }
+  ]
+}

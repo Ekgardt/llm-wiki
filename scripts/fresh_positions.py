@@ -1,7 +1,7 @@
 """Lines read from the file, when the file has moved on without the index.
 
 A generation is rebuilt by the nightly pass, so a definition edited today keeps
-answering with yesterday's line until then: measured 2026-09-13, `_page_diverse`
+answering with yesterday's line until then: measured 2026-09-13, `page_diverse`
 moved from 3030 to 3054 and the answer still said 3030 while the other tool
 already said 3054, because its index watches the tree.
 

@@ -9,7 +9,7 @@ The checks (`CHECK_NAMES` is the full list; Phase 2 expanded the original seven 
  3. orphan_daily_logs — daily logs with no compile recorded in state.json.
  4. stale_compiled — daily log hash changed after last compile.
  5. missing_backlinks — page A links to page B, but B does not link back.
- 6. sparse_pages — pages under a word-count floor (default 200 words).
+ 6. sparse_pages — empty page bodies, or an explicitly requested word-count floor.
  7. contradictions — LLM-judged conflicts between pages (opt-in, --contradictions).
  8. missing_frontmatter — page has no YAML `---` block (OKF violation).
  9. missing_required_type — frontmatter exists but `type:` is absent/empty.
@@ -50,9 +50,10 @@ from claim_tree_manifest import (  # noqa: E402
     PROJECT_CLAIM_FILES,
 )
 from claims import (  # noqa: E402
-    CANDIDATE_SCHEMA,
     MAX_CLAIM_PAGE_BYTES,
+    claim_json_bytes,
     parse_claim_ledger,
+    validate_claim_candidate,
     validate_claim_record,
 )
 from evidence_resolver import (  # noqa: E402
@@ -60,22 +61,14 @@ from evidence_resolver import (  # noqa: E402
     EvidenceResolver,
     extract_evidence_references,
 )
-from memory_state import (  # noqa: E402
-    REPORTS_DIR,
-    ROOT,
-    STATE_ROOT,
-    daily_logs,
-    file_hash,
-    load_state,
-    update_state,
-)
+from llm_wiki import runtime_roots
+from memory_state import daily_logs, file_hash, load_state, update_state
 from okf_types import CANONICAL_TYPES as VALID_TYPES  # noqa: E402
 from okf_types import (
     INBOX_TYPES,  # noqa: E402
     TYPE_ALIASES,  # noqa: E402
 )
 from page_status import is_retired  # noqa: E402
-from reliable_memory import canonical_json_bytes, validate_schema  # noqa: E402
 from vault_editorial import (  # noqa: E402
     BACKLINK_EXEMPT_NAMES,
     BROKEN_LINK_SKIP_NAMES,
@@ -83,16 +76,13 @@ from vault_editorial import (  # noqa: E402
 )
 
 # Three-zone layout: one knowledge tree, notes under it, one vault index.
-VAULT = ROOT / "knowledge"
-NOTES = VAULT / "notes"
-DAILY_DIR = VAULT / "daily"
-VAULT_INDEX = VAULT / "index.md"
 
-REPORTS = REPORTS_DIR
 WIKILINK_RE = re.compile(r"\[\[([^\]|#]+?)(?:\|[^\]]+)?\]\]")
 WORD_RE = re.compile(r"\b\w+\b")
 
-DEFAULT_SPARSE_WORDS = 200
+# Nonempty body, not a length quota; --sparse-words can request an editorial floor.
+# See docs/research/2026-09-29-a-short-page-still-needs-evidence.md.
+DEFAULT_SPARSE_WORDS = 1
 # The claim tree's ceiling: lint reads the same project journals the claim
 # index does, so it accepts what the journal may be. See
 # `docs/research/2026-09-10-one-ceiling-for-every-reader-of-a-journal.md`.
@@ -144,7 +134,7 @@ def _iter_tree_md(tree: Path) -> list[Path]:
 
 
 def _rel(p: Path) -> str:
-    return p.relative_to(ROOT).as_posix()
+    return p.relative_to(runtime_roots.vault_root()).as_posix()
 
 
 def _is_body_line(line: str) -> bool:
@@ -155,8 +145,9 @@ def _is_body_line(line: str) -> bool:
     return not line.lstrip().startswith("#")
 
 
-def _word_count(md: Path) -> int:
+def word_count(md: Path) -> int:
     text = md.read_text(encoding="utf-8", errors="ignore")
+    text = FRONTMATTER_RE.sub("", text, count=1)
     body = "\n".join(line for line in text.splitlines() if _is_body_line(line))
     return len(WORD_RE.findall(body))
 
@@ -168,7 +159,7 @@ def _extract_links(md: Path) -> list[str]:
 
 def _resolve_path_style_link(target: str) -> Path | None:
     """A target with a slash is anchored at the vault root, with or without .md."""
-    for candidate in ((ROOT / (target + ".md")).resolve(), (ROOT / target).resolve()):
+    for candidate in ((runtime_roots.vault_root() / (target + ".md")).resolve(), (runtime_roots.vault_root() / target).resolve()):
         if candidate.is_file():
             return candidate
     return None
@@ -192,7 +183,12 @@ def _resolve_link(target: str, search_roots: list[Path]) -> Path | None:
 
 def check_evidence_references(pages: list[Path]) -> list[str]:
     """Resolve every canonical logical evidence reference and fail closed."""
-    resolver = EvidenceResolver(ROOT, state_root=STATE_ROOT)
+    resolver = EvidenceResolver(runtime_roots.vault_root(), state_root=runtime_roots.state_root())
+    with resolver.captured_sources() as captured:
+        return _captured_evidence_findings(pages, captured)
+
+
+def _captured_evidence_findings(pages, resolver):
     findings: list[str] = []
     for page in pages:
         try:
@@ -206,11 +202,17 @@ def check_evidence_references(pages: list[Path]) -> list[str]:
         except (OSError, UnicodeDecodeError, ValueError) as exc:
             findings.append(f"{_rel(page)}: evidence scan failed: {exc}")
             continue
-        for reference in references:
-            try:
-                resolver.resolve(reference)
-            except (EvidenceResolutionError, OSError, ValueError) as exc:
-                findings.append(f"{_rel(page)}: {reference}: {exc}")
+        findings.extend(_unresolved_reference_findings(page, references, resolver))
+    return findings
+
+
+def _unresolved_reference_findings(page, references, resolver):
+    findings: list[str] = []
+    for reference in references:
+        try:
+            resolver.resolve(reference)
+        except (EvidenceResolutionError, OSError, ValueError) as exc:
+            findings.append(f"{_rel(page)}: {reference}: {exc}")
     return findings
 
 
@@ -221,7 +223,7 @@ def check_evidence_references(pages: list[Path]) -> list[str]:
 GIT_LS_FILES_TIMEOUT_SECONDS = 30
 
 
-def _git_tracked_paths() -> set[str] | None:
+def git_tracked_paths() -> set[str] | None:
     """Return repo-relative posix paths of git-tracked files, or None if unavailable.
 
     Used so CI (clean checkout) and local worktrees agree: a wikilink that only
@@ -230,7 +232,7 @@ def _git_tracked_paths() -> set[str] | None:
     try:
         out = subprocess.check_output(
             ["git", "-c", "core.fsmonitor=false", "ls-files", "-z"],
-            cwd=str(ROOT),
+            cwd=str(runtime_roots.vault_root()),
             stderr=subprocess.DEVNULL,
             timeout=GIT_LS_FILES_TIMEOUT_SECONDS,
         )
@@ -249,7 +251,7 @@ def _git_tracked_paths() -> set[str] | None:
 def _vault_relative(path: Path) -> str | None:
     """Path inside the vault, or None when it points outside."""
     try:
-        return path.resolve().relative_to(ROOT.resolve()).as_posix()
+        return path.resolve().relative_to(runtime_roots.vault_root().resolve()).as_posix()
     except ValueError:
         return None
 
@@ -260,7 +262,7 @@ def _scannable_page(md: Path, tracked: set[str] | None) -> bool:
     Both are skipped as link sources; links *to* an untracked page still fail
     below, because a clean checkout would not have that page.
     """
-    if DAILY_DIR in md.parents or md.name in BROKEN_LINK_SKIP_NAMES:
+    if runtime_roots.daily_dir() in md.parents or md.name in BROKEN_LINK_SKIP_NAMES:
         return False
     if tracked is None:
         return True
@@ -318,7 +320,7 @@ def _page_link_findings(
 
 
 def check_broken_links(pages: list[Path], search_roots: list[Path]) -> list[str]:
-    tracked = _git_tracked_paths()
+    tracked = git_tracked_paths()
     out: list[str] = []
     for md in pages:
         if _scannable_page(md, tracked):
@@ -328,7 +330,7 @@ def check_broken_links(pages: list[Path], search_roots: list[Path]) -> list[str]
 
 def _indexed(md: Path, index_text: str) -> bool:
     """The index may cite a page by stem or by full relative path."""
-    relative = md.relative_to(ROOT).with_suffix("").as_posix()
+    relative = md.relative_to(runtime_roots.vault_root()).with_suffix("").as_posix()
     return md.stem in index_text or relative in index_text
 
 
@@ -355,7 +357,7 @@ def _is_published(md: Path) -> bool:
     """Whether this repository publishes the page, by the same rule the index uses."""
     from rebuild_memory_index import published_paths
 
-    named, _hidden = published_paths(ROOT, [_rel(md)])
+    named, _hidden = published_paths(runtime_roots.vault_root(), [_rel(md)])
     return bool(named)
 
 
@@ -384,7 +386,7 @@ def check_orphans_against_index(pages: list[Path], index: Path) -> list[str]:
 
 def _daily_logs() -> list[Path]:
     """Only `YYYY-MM-DD.md` is a daily log; `README.md` next to them is not."""
-    return daily_logs(DAILY_DIR)
+    return daily_logs(runtime_roots.daily_dir())
 
 
 def check_orphan_daily_logs(state: dict) -> list[str]:
@@ -433,13 +435,22 @@ def _backlink_pairs(link_map: dict[Path, list[Path]]) -> list[tuple[Path, Path]]
 def _pair_owes_backlink(source: Path, target: Path) -> bool:
     if source == target or _is_backlink_exempt(source):
         return False
-    if _is_retired(target):
-        # A superseded or archived page is history. Making it link forward to
-        # every later page that mentions it would rewrite that history, which
-        # the vault forbids for decisions — and the repair pass would have to
-        # edit an immutable page to clear a finding nobody wants cleared.
+    content = read_stable_bytes(target, MAX_LINT_PAGE_BYTES, label="backlink target")
+    if not backlink_target_is_mutable(content):
         return False
     return not _is_backlink_exempt(target)
+
+
+def backlink_target_is_mutable(content: bytes) -> bool:
+    """A later mention cannot rewrite an immutable decision or retired page."""
+    from corpus_snapshot import read_frontmatter
+
+    metadata = read_frontmatter(content)
+    return (
+        metadata.problem is None
+        and metadata.mapping.get("type") != "decision"
+        and not is_retired(metadata.mapping.get("status"))
+    )
 
 
 def missing_backlink_pairs(
@@ -481,8 +492,8 @@ def check_sparse_pages(pages: list[Path], min_words: int) -> list[str]:
     for md in pages:
         if md.name in EDITORIAL_NAMES:
             continue
-        wc = _word_count(md)
-        if wc < min_words:
+        wc = word_count(md)
+        if wc == 0 or wc < min_words:
             out.append(f"{_rel(md)} ({wc} words < {min_words})")
     return out
 
@@ -504,6 +515,11 @@ TYPE_FIELD_RE = re.compile(r"^type:\s*(.+?)\s*$", re.MULTILINE)
 SUPERSEDED_BY_RE = re.compile(r"^superseded_by:\s*\[?\[?([^\]\n]+?)\]?\]?\s*$", re.MULTILINE)
 SOURCES_FIELD_RE = re.compile(r"^sources:", re.MULTILINE)
 SOURCE_SECTION_RE = re.compile(r"^##\s*(?:Source|Evidence|Provenance)", re.MULTILINE)
+SOURCE_LINE_RE = re.compile(
+    r"^(?:Source(?:[^\S\r\n]*/[^\S\r\n]*Evidence)?|Evidence|Provenance):"
+    r"(?:[^\S\r\n]+\S|(?:[^\S\r\n]*\r?\n)+[^\S\r\n]*[-+*][^\S\r\n]+\S)",
+    re.MULTILINE,
+)
 CANDIDATE_JSON_RE = re.compile(r"(?ms)```json[ \t]*\r?\n([^\r\n]+)\r?\n```")
 
 
@@ -644,13 +660,13 @@ def _page_type_of(text: str) -> str | None:
     return _declared_type(frontmatter.group(1))
 
 
-def _candidate_record(page: Path, text: str) -> dict:
+def candidate_record(page: Path, text: str) -> dict:
     """One inbox claim candidate: exactly one canonical JSON record, validated."""
-    candidate_root = (ROOT / "knowledge" / "inbox" / "claims").resolve(strict=False)
+    candidate_root = (runtime_roots.vault_root() / "knowledge" / "inbox" / "claims").resolve(strict=False)
     if candidate_root not in Path(page).resolve(strict=True).parents:
         raise ValueError("claim-candidate is allowed only under knowledge/inbox/claims")
     candidate = _embedded_canonical_record(text)
-    validate_schema(candidate, CANDIDATE_SCHEMA)
+    validate_claim_candidate(candidate)
     validate_claim_record(candidate["claim"])
     return candidate["claim"]
 
@@ -661,7 +677,7 @@ def _embedded_canonical_record(text: str) -> dict:
         raise ValueError("claim-candidate must embed exactly one JSON record")
     encoded = matches[0].encode("utf-8")
     candidate = json.loads(encoded)
-    if canonical_json_bytes(candidate) != encoded:
+    if claim_json_bytes(candidate) != encoded:
         raise ValueError("claim-candidate record is not restricted canonical JSON")
     return candidate
 
@@ -677,11 +693,11 @@ def _ledger_records(raw: bytes) -> list[dict]:
 
 def _claim_records(page: Path, raw: bytes, text: str) -> list[dict]:
     if _page_type_of(text) in INBOX_TYPES:
-        return [_candidate_record(page, text)]
+        return [candidate_record(page, text)]
     return _ledger_records(raw)
 
 
-def _require_evidence_matches(resolver: EvidenceResolver, record: dict) -> None:
+def require_evidence_matches(resolver: EvidenceResolver, record: dict) -> None:
     evidence = record["evidence"]
     resolved = resolver.resolve(evidence["reference"])
     same_bytes = resolved.bytes.decode("utf-8", errors="strict") == evidence["text"]
@@ -693,7 +709,7 @@ def _validate_one_claim_page(resolver: EvidenceResolver, page: Path) -> None:
     raw = read_stable_bytes(page, MAX_CLAIM_PAGE_BYTES, label="lint claim page")
     text = raw.decode("utf-8", errors="strict")
     for record in _claim_records(page, raw, text):
-        _require_evidence_matches(resolver, record)
+        require_evidence_matches(resolver, record)
 
 
 def _page_label(page: Path) -> str:
@@ -705,7 +721,12 @@ def _page_label(page: Path) -> str:
 
 def check_claim_schemas(pages: list[Path]) -> list[str]:
     """Validate canonical claim ledgers and quarantined inbox candidates."""
-    resolver = EvidenceResolver(ROOT, state_root=STATE_ROOT)
+    resolver = EvidenceResolver(runtime_roots.vault_root(), state_root=runtime_roots.state_root())
+    with resolver.captured_sources() as captured:
+        return _captured_claim_findings(pages, captured)
+
+
+def _captured_claim_findings(pages, resolver):
     findings: list[str] = []
     for page in pages:
         try:
@@ -717,7 +738,7 @@ def check_claim_schemas(pages: list[Path]) -> list[str]:
 
 
 
-def _project_claim_pages(projects_root: Path) -> list[Path]:
+def project_claim_pages(projects_root: Path) -> list[Path]:
     """Return bounded-lint project documents that may carry claim ledgers."""
     if not projects_root.exists():
         return []
@@ -729,16 +750,10 @@ def _project_claim_pages(projects_root: Path) -> list[Path]:
 
 
 def _needs_source_citation(md: Path) -> bool:
-    """Claim-bearing pages long enough to have said something.
-
-    Skills, rules, and project state are operational and cite nothing; a page
-    under fifty words is a stub, not yet a claim.
-    """
+    """A claim-bearing page needs provenance regardless of its word count."""
     if md.name in EDITORIAL_NAMES:
         return False
-    if _page_type(md) not in CLAIM_BEARING_TYPES:
-        return False
-    return _word_count(md) >= 50
+    return _page_type(md) in CLAIM_BEARING_TYPES
 
 
 def _cites_a_source(md: Path) -> bool:
@@ -746,7 +761,7 @@ def _cites_a_source(md: Path) -> bool:
         content = md.read_text(encoding="utf-8", errors="ignore")
     except OSError:
         return True
-    if SOURCE_SECTION_RE.search(content):
+    if SOURCE_SECTION_RE.search(content) or SOURCE_LINE_RE.search(content):
         return True
     frontmatter = FRONTMATTER_RE.match(content)
     return bool(frontmatter and SOURCES_FIELD_RE.search(frontmatter.group(1)))
@@ -783,7 +798,7 @@ def check_invalid_supersede_chain(pages: list[Path]) -> list[str]:
     out: list[str] = []
     for md in pages:
         target = _supersede_target(md)
-        if target and _resolve_link(target, [VAULT, NOTES]) is None:
+        if target and _resolve_link(target, [runtime_roots.knowledge_dir(), runtime_roots.notes_dir()]) is None:
             out.append(f"{_rel(md)} -> superseded_by [[{target}]] (target not found)")
     return out
 
@@ -1025,7 +1040,7 @@ def _declares_none(answer: str) -> bool:
     return answer.strip().strip("*_`.").upper() == "NO_CONTRADICTIONS"
 
 
-def _contradiction_findings(answer: str | None) -> list[str]:
+def contradiction_findings(answer: str | None) -> list[str]:
     """Findings, nothing when the reply says there are none, or why it said nothing usable.
 
     No reply, and a reply that was neither findings nor the token, used to read as
@@ -1062,9 +1077,9 @@ def check_contradictions(
         max_tokens=2000,
     )
     if answer is None:
-        return _contradiction_findings(answer)
+        return contradiction_findings(answer)
     _move_contradiction_cursor(window.following)
-    return _contradiction_findings(answer) + window.notes()
+    return contradiction_findings(answer) + window.notes()
 
 
 # ---------- driver ----------
@@ -1111,16 +1126,16 @@ def _notes_scope(scope: str) -> list[tuple[str, list[Path], Path]]:
     """Notes are one tree; the legacy scope labels stay as aliases."""
     if scope not in ("memory", "wiki", "all"):
         return []
-    pages = [p for p in _iter_tree_md(NOTES) if p.name not in EDITORIAL_NAMES]
+    pages = [p for p in _iter_tree_md(runtime_roots.notes_dir()) if p.name not in EDITORIAL_NAMES]
     label = "notes" if scope == "all" else scope
-    return [(label, pages, VAULT_INDEX)]
+    return [(label, pages, runtime_roots.index_file())]
 
 
 def _state_findings(findings: dict[str, list[str]]) -> None:
     state = load_state()
     findings["orphan_daily_logs"] = check_orphan_daily_logs(state)
     findings["stale_compiled"] = check_stale_compiled(state)
-    project_pages = _project_claim_pages(ROOT / "knowledge" / "projects")
+    project_pages = project_claim_pages(runtime_roots.vault_root() / "knowledge" / "projects")
     findings["invalid_claim_schema"] += _labelled(
         "projects", check_claim_schemas(project_pages)
     )
@@ -1133,8 +1148,8 @@ def _page_checks(
     sparse_words: int,
 ) -> dict[str, list[str]]:
     """Every per-page check for one scope, already labelled."""
-    tree = _unique_by_resolved_path(list(_iter_tree_md(NOTES)))
-    search_roots = [VAULT, NOTES]
+    tree = _unique_by_resolved_path(list(_iter_tree_md(runtime_roots.notes_dir())))
+    search_roots = [runtime_roots.knowledge_dir(), runtime_roots.notes_dir()]
     results = {
         "broken_wikilinks": check_broken_links(tree, search_roots),
         "orphan_pages": check_orphans_against_index(pages, index),
@@ -1156,7 +1171,7 @@ def _page_checks(
 
 def _frontmatter_only_findings(findings: dict[str, list[str]]) -> None:
     """Skills and rules carry OKF frontmatter but no wikilinks or backlinks."""
-    for label, root in (("skills", ROOT / "skills"), ("rules", ROOT / "rules")):
+    for label, root in (("skills", runtime_roots.vault_root() / "skills"), ("rules", runtime_roots.vault_root() / "rules")):
         pages = _iter_tree_md(root)
         findings["missing_frontmatter"] += _labelled(
             label, check_missing_frontmatter(pages)
@@ -1165,7 +1180,7 @@ def _frontmatter_only_findings(findings: dict[str, list[str]]) -> None:
             label, check_missing_required_type(pages)
         )
     findings["invalid_claim_schema"] += _labelled(
-        "inbox", check_claim_schemas(_iter_tree_md(ROOT / "knowledge" / "inbox"))
+        "inbox", check_claim_schemas(_iter_tree_md(runtime_roots.vault_root() / "knowledge" / "inbox"))
     )
 
 
@@ -1218,9 +1233,9 @@ def _section_lines(section: str, items: list[str]) -> list[str]:
 
 
 def write_report(findings: dict[str, list[str]], args: argparse.Namespace) -> Path:
-    REPORTS.mkdir(parents=True, exist_ok=True)
+    runtime_roots.reports_dir().mkdir(parents=True, exist_ok=True)
     today = datetime.now().strftime("%Y-%m-%d")
-    out = REPORTS / f"lint-{today}.md"
+    out = runtime_roots.reports_dir() / f"lint-{today}.md"
     total = sum(len(items) for items in findings.values())
     lines = [
         f"# Vault lint — {today}",
@@ -1240,7 +1255,7 @@ def write_report(findings: dict[str, list[str]], args: argparse.Namespace) -> Pa
 def _report_display(report: Path) -> str:
     """Vault-relative when it lives inside the vault, absolute otherwise."""
     try:
-        return report.relative_to(ROOT).as_posix()
+        return report.relative_to(runtime_roots.vault_root()).as_posix()
     except ValueError:
         return report.as_posix()
 

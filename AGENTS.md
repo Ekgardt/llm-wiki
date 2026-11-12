@@ -11,6 +11,9 @@ it loads.
 
 ## 0. Process rules (mandatory)
 
+### Обязательные законы разработки
+Перед началом работы обязательно прочитай [Обязательные законы разработки](rules/development-laws.md) полностью и соблюдай все девять законов при исследовании, проектировании, разработке, тестировании, установке изменений и сопровождении системы. Файл содержит текст законов пользователя с прямо согласованными им изменениями; сведения о редакции указаны в самом файле. Изменять, ослаблять или обходить эти законы без прямого указания пользователя запрещено. Если требование невозможно выполнить, прямо сообщи об этом; не выдавай невыполненное за выполненное.
+
 ### How to talk to the user
 - Write in **plain human language**. Short sentences.
 - Avoid jargon stacks, audit IDs, severity tables unless the user explicitly
@@ -71,6 +74,8 @@ run/       # state, transactions, queue results, locks, install ownership
 - `$LLM_WIKI_STATE_ROOT` → runtime root. **Default: the vault itself** →
   `cache/`, `logs/`, `run/` at vault root, all gitignored.
   Override for multi-disk setups or hermetic tests.
+  Both are read on every call through `scripts/llm_wiki/runtime_roots.py`;
+  no module keeps an import-time copy, and an empty value names nothing.
 - `$MEMORY_LLM_PROVIDER` → `fake` (tests), or one of
   `opencode|codex|claude|openai|ollama` (runtime, auto-detected).
 - `$LLM_WIKI_DLP_POLICY` → optional absolute external policy path. Invalid or
@@ -194,7 +199,7 @@ the sealed code workspace, the `code_capture` manifest section, the verified-ana
 records and the `evidence-graph/v3` schema they filled -- was removed from the code
 (`docs/research/2026-09-18-the-superseded-plan-a-seam-leaves-the-code.md`).
 The replacement plan implements the production-quality,
-Python 3.10-compatible read-only LSP path through four pinned managed language
+Python 3.14 read-only LSP path through four pinned managed language
 servers: paths, positions, bounded protocol, startup evidence, leased
 platform-qualified lifecycle ownership, repository containment, safe log redaction,
 explicit profile installation, document synchronization, session-manager capacity,
@@ -266,10 +271,13 @@ report kept whole up to 8 000 characters. Retention never depends on
 a judgement made before the question exists; the classifier decides only whether
 a session also deserves a compiled page. That directory is private by default
 (`knowledge/raw/**` is denied in `.gitignore`), the record is bounded, and a
-failed write never breaks capture. Session evidence is not yet a member of the
-corpus generation, so it is on disk and greppable but not yet part of hybrid
-retrieval — adding it requires the corpus collector to carry a `session` source
-kind. See `knowledge/notes/session-evidence-retention-decision.md`.
+failed write never breaks capture. Ordinary session dumps remain outside the
+corpus generation. The durable breadcrumb repair admits only verified linked
+breadcrumb heads and complete parts through the existing `session` source kind;
+physical source hashes and citation spans are retained. Prompt/tool producers use
+the common durable ingress, installed on 2026-09-30 after regression, retrieval,
+answer-cost and fenced-ownership qualification. See the durable breadcrumb repair contract
+in `docs/contracts/reliability-and-capture.md`. See `knowledge/notes/session-evidence-retention-decision.md`.
 
 **Forbidden at vault root:** `wiki/`, `memory/`, `outputs/`, `state/`,
 `LLM-wiki-state/` (legacy sibling layout — removed). Runtime lives **inside**
@@ -308,7 +316,8 @@ writes to it. See `docs/research/2026-09-14-the-vault-log-is-private.md`.
   line for it in `.gitignore`. Since 2026-09-10 no page is published: the
   architecture decision pages this file refers to are the owner's private
   record, and a fresh install starts with an empty memory (issue #19). The
-  contracts themselves are stated here and in `docs/STRUCTURE.md`.
+  contracts themselves are stated here and in `docs/STRUCTURE.md` with the
+  files it links.
 - Running `compile_memory.py`, `flush_memory.py` or any pipeline script here is
   **correct**, because here is the vault. It was forbidden when a second,
   private directory existed to run them against.
@@ -461,14 +470,24 @@ The memory pipeline needs an LLM for classification, compilation,
 contradiction checks, and playbook crystallization. Backend is
 **auto-detected** via `scripts/llm_client.py` — no API keys required.
 
-Priority: OpenCode (only when `OPENCODE_SERVER_PASSWORD` protects its server) →
+The saved `[llm]` selection in the private `llm-wiki.toml` is authoritative for
+all memory calls. `scripts/choose_model.py show|list|set|select` is the common
+operator command. `model` is `provider/model-id`; Codex also stores `reasoning`.
+The chooser verifies one short protected request before saving. A catalog is not
+proof of subscription entitlement. The saved choice overrides historical model
+and provider environment copies; endpoint credentials and DLP/local-only settings
+remain separate. Explicit `fake` is reserved for tests. Stop old background jobs before activating this configuration section during an
+upgrade. Standard MCP supervisors reload workers on the next idle request after
+a source update; unsupervised long-lived clients need an explicit restart.
+
+Without a saved selection, compatibility priority is OpenCode (only when `OPENCODE_SERVER_PASSWORD` protects its server) →
 Codex → Claude CLI → OpenAI → Ollama. If none answers, the call returns
 nothing: a capture already sits in `run/queue.sqlite3` and waits an hour before
 its next attempt, and every other caller skips or fails its step; nothing else is
 queued for later (2026-09-25). A `run/queue/` directory left by a release before
 v4.0.0 is refused and named by `doctor`, never imported (2026-09-23).
 
-Override via `MEMORY_LLM_PROVIDER` env var. `fake` returns a canned response
+Before central selection, override via `MEMORY_LLM_PROVIDER` env var. `fake` returns a canned response
 for tests/e2e. A value that names no provider calls none, and `doctor` names it.
 
 **Zero-cost path:** no paid API beyond existing agent subscriptions. Ollama remains
@@ -487,7 +506,7 @@ uv run python scripts/compile_memory.py            # compile daily logs → note
 uv run python scripts/lookup_mode.py               # show retrieval tier
 uv run python scripts/mcp_server.py                # MCP server (12 tools, stdio; base install)
 uv run python scripts/doctor.py                    # local health; --repair is explicit
-# v4.0 optional features (require --extra flags):
+# v4.0 features (every install brings them; other language servers: install_language_server.py):
 uv run python scripts/repository_index.py index .  # index a repository's code (a generation)
 uv run python scripts/code_graph.py .              # read-only live parse summary
 uv run python scripts/impact_analysis.py           # git diff → stale wiki pages
@@ -499,3 +518,24 @@ uv run python scripts/build_tiers.py --all          # generate L1 overviews
 Runtime state is gitignored and never committed. `cache/` and `logs/` are
 regenerable; `run/` is operational state and follows the deletion contract in
 section 1.
+
+## Approved formats module (2026-11-02)
+
+`scripts/llm_wiki/formats/` owns canonical bytes, JSON-schema validation, source
+descriptors, receipt formats and canonical queue payload validation. It imports
+only the standard library and its
+own modules. Tests: `tests/modules/formats/`; contract: `docs/modules/formats.md`.
+No runtime state or publication authority belongs to this module. Existing
+public helper imports may expose the same objects; duplicated implementations
+and private parser imports from the compiler are forbidden. The complete owned
+context including instructions and test data must be at most 100,000 tokens.
+See `docs/STRUCTURE.md` and the 2026-11-02 modularity validation study.
+
+**Queue data contracts (2026-11-02):** `scripts/llm_wiki/queue_contracts.py` owns
+20 public queue records and errors. Consumers import types directly from that
+module; operations live in `queue_core`. The old public names are identical
+objects, and `__module__ = "memory_queue"` preserves existing pickle names.
+Import and construction need only stdlib; serialization may load the old facade.
+Own tests and complete maintenance context are declared in
+`docs/modules/queue-contracts-context.json` and must remain <=100,000 tokens.
+See `docs/modules/queue-contracts.md` for integration scope and qualification.

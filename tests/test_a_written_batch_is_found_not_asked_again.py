@@ -48,15 +48,15 @@ def _log_to(vault: Path, monkeypatch) -> Path:
 def test_a_lost_checkpoint_costs_no_second_call_and_no_second_block(tmp_path, monkeypatch):
     vault = _vault(tmp_path)
     log = _log_to(vault, monkeypatch)
-    monkeypatch.setattr(consolidation, "_record_consolidation", lambda *a: None)
+    monkeypatch.setattr(consolidation, "record_consolidation", lambda *a: None)
 
     def lost(day, progress):
         raise OSError("state lock timed out")
 
-    monkeypatch.setattr(consolidation, "_save_progress", lost)
+    monkeypatch.setattr(consolidation, "save_progress", lost)
     with pytest.raises(OSError):
         consolidation.consolidate_day(vault, DAY, call=lambda _p: REPLY, state={})
-    monkeypatch.setattr(consolidation, "_save_progress", lambda day, progress: None)
+    monkeypatch.setattr(consolidation, "save_progress", lambda day, progress: None)
     calls: list[str] = []
 
     outcome = consolidation.consolidate_day(vault, DAY, call=lambda p: calls.append(p) or REPLY, state={})
@@ -67,8 +67,8 @@ def test_a_lost_checkpoint_costs_no_second_call_and_no_second_block(tmp_path, mo
 def test_the_batch_marker_is_the_last_line_so_the_entry_keeps_its_id(tmp_path, monkeypatch):
     vault = _vault(tmp_path)
     log = _log_to(vault, monkeypatch)
-    monkeypatch.setattr(consolidation, "_record_consolidation", lambda *a: None)
-    monkeypatch.setattr(consolidation, "_save_progress", lambda day, progress: None)
+    monkeypatch.setattr(consolidation, "record_consolidation", lambda *a: None)
+    monkeypatch.setattr(consolidation, "save_progress", lambda day, progress: None)
 
     consolidation.consolidate_day(vault, DAY, call=lambda _p: REPLY, state={})
     lines = log.read_text(encoding="utf-8").splitlines()

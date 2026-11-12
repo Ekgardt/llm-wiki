@@ -31,7 +31,7 @@ SCRIPTS_DIR = ROOT / "scripts"
 if str(SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_DIR))
 
-import integration_adapter  # noqa: E402
+import project_checkpoint  # noqa: E402
 
 
 def _backlog(count: int) -> dict:
@@ -41,7 +41,7 @@ def _backlog(count: int) -> dict:
 
 def _claimed(state: dict, owner: str = "owner-1") -> list[dict]:
     claimed: list = []
-    integration_adapter._claim_pending_state(state, "demo", owner, claimed)
+    project_checkpoint.claim_pending_state(state, "demo", owner, claimed)
     if not claimed:
         return []
     return claimed[0][0]
@@ -53,7 +53,7 @@ def test_a_cycle_claims_a_window_and_not_the_backlog() -> None:
 
     items = _claimed(state)
 
-    assert len(items) == integration_adapter.PENDING_CLAIM_WINDOW
+    assert len(items) == project_checkpoint.PENDING_CLAIM_WINDOW
 
 
 def test_the_window_is_the_head_of_the_queue() -> None:
@@ -63,7 +63,7 @@ def test_the_window_is_the_head_of_the_queue() -> None:
     items = _claimed(state)
 
     assert [item["event_id"] for item in items] == [
-        f"e{index}" for index in range(integration_adapter.PENDING_CLAIM_WINDOW)
+        f"e{index}" for index in range(project_checkpoint.PENDING_CLAIM_WINDOW)
     ]
 
 
@@ -83,7 +83,7 @@ def test_nothing_outside_the_window_is_claimed_or_lost() -> None:
     queue = state["project_checkpoint_pending"]["demo"]
 
     assert len(queue) == 2537
-    window = integration_adapter.PENDING_CLAIM_WINDOW
+    window = project_checkpoint.PENDING_CLAIM_WINDOW
     assert all("claim_owner" in item for item in queue[:window])
     assert not any("claim_owner" in item for item in queue[window:])
 
@@ -103,13 +103,13 @@ def test_a_claim_held_beyond_the_window_does_not_block_the_cycle() -> None:
     state["project_checkpoint_pending"]["demo"][900]["claim_owner"] = "someone-else"
     state["project_checkpoint_pending"]["demo"][900]["claim_until"] = 1 << 40
 
-    assert len(_claimed(state)) == integration_adapter.PENDING_CLAIM_WINDOW
+    assert len(_claimed(state)) == project_checkpoint.PENDING_CLAIM_WINDOW
 
 
 def test_the_window_covers_the_largest_batch_a_cycle_can_flush() -> None:
     """A smaller window would silently change how many events one batch carries."""
-    assert integration_adapter.PENDING_CLAIM_WINDOW >= 100
+    assert project_checkpoint.PENDING_CLAIM_WINDOW >= 100
     assert (
-        integration_adapter.PENDING_CLAIM_WINDOW
-        >= integration_adapter.MAX_PENDING_CHECKPOINT_ITEMS
+        project_checkpoint.PENDING_CLAIM_WINDOW
+        >= project_checkpoint.MAX_PENDING_CHECKPOINT_ITEMS
     )

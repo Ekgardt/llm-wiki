@@ -13,7 +13,8 @@ from __future__ import annotations
 
 import sqlite3
 import sys
-from datetime import datetime, timezone
+import time
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -21,6 +22,9 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 
 import doctor  # noqa: E402
+from llm_wiki import doctor_queue, doctor_transactions
+
+from tests.slow_machine import LONG_TIMEOUT  # noqa: E402
 
 # The row cap the transaction scans used to have; a vault past it is ordinary.
 OLD_SCAN_CAP = 10_000
@@ -107,12 +111,12 @@ def _build_vault(
 
 
 def _check(state_root: Path, now: datetime) -> dict:
-    return doctor._transaction_check(state_root, now, deadline=float("inf"))
+    return doctor_transactions.transaction_check(state_root, now, deadline=float("inf"))
 
 
 @pytest.fixture(name="now")
 def _now() -> datetime:
-    return datetime.now(timezone.utc)
+    return datetime.now(UTC)
 
 
 def test_an_operation_table_over_the_ceiling_is_not_called_corrupt(
@@ -330,13 +334,26 @@ def test_a_quarantined_transaction_with_a_plan_still_owns_operations(
 
 
 def test_an_undo_listing_past_its_bound_refuses_deletion_without_accusing(
-    tmp_path: Path, now: datetime
+    tmp_path: Path, now: datetime, monkeypatch
 ) -> None:
-    """Directories the listing never reached are unknown, not missing."""
-    _build_vault(tmp_path, now, transactions=doctor.MAX_RUNTIME_ENTRIES + 50, operations_each=1)
+    """Directories beyond the inspection deadline are unknown, not missing."""
+    _build_vault(tmp_path, now, transactions=doctor_queue.MAX_RUNTIME_ENTRIES + 50, operations_each=1)
+    clock = [time.monotonic()]
+    deadline = clock[0] + LONG_TIMEOUT
+    inspected = []
+    original_kind = doctor_transactions.artifact_kind
 
-    details = _check(tmp_path, now)["details"]
+    def expire_after_entry(path, root):
+        kind = original_kind(path, root)
+        inspected.append(path)
+        clock[0] = deadline + 1
+        return kind
 
+    monkeypatch.setattr(doctor.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(doctor_transactions, "artifact_kind", expire_after_entry)
+    details = doctor_transactions.transaction_check(tmp_path, now, deadline=deadline)["details"]
+
+    assert len(inspected) == 1
     assert (
         "transaction_artifact_state_unknown" in details["deletion_codes"],
         "transaction_metadata_corrupt" in details["codes"],

@@ -68,15 +68,15 @@ def test_strict_names_the_archived_paths_that_differ_from_the_working_tree(
     import export_vault
 
     repo = _repository_with_one_commit(tmp_path)
-    monkeypatch.setattr(export_vault, "ROOT", repo)
+    monkeypatch.setenv("LLM_WIKI_ROOT", str(repo))
 
-    assert export_vault._paths_differing_from_ref("HEAD") == ()
+    assert export_vault.paths_differing_from_ref("HEAD") == ()
 
     (repo / "untracked.md").write_text("never archived\n", encoding="utf-8")
-    assert export_vault._paths_differing_from_ref("HEAD") == ()
+    assert export_vault.paths_differing_from_ref("HEAD") == ()
 
     (repo / "tracked.md").write_text("edited after the commit\n", encoding="utf-8")
-    assert export_vault._paths_differing_from_ref("HEAD") == ("tracked.md",)
+    assert export_vault.paths_differing_from_ref("HEAD") == ("tracked.md",)
 
 
 def test_strict_refuses_and_names_the_path(tmp_path, monkeypatch, capsys):
@@ -84,7 +84,7 @@ def test_strict_refuses_and_names_the_path(tmp_path, monkeypatch, capsys):
     import export_vault
 
     repo = _repository_with_one_commit(tmp_path)
-    monkeypatch.setattr(export_vault, "ROOT", repo)
+    monkeypatch.setenv("LLM_WIKI_ROOT", str(repo))
     (repo / "tracked.md").write_text("edited after the commit\n", encoding="utf-8")
     monkeypatch.setattr(
         sys, "argv", ["export_vault.py", "--strict", "--output", str(tmp_path / "out.zip")]

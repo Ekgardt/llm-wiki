@@ -137,10 +137,3 @@ def test_candidate_is_closed_quarantined_and_contains_one_claim() -> None:
         invalid["claim"]["lifecycle"] = lifecycle
         with pytest.raises(SchemaValidationError):
             validate_schema(invalid, SCHEMAS / "claim-candidate-v1.json")
-
-
-def test_claim_candidate_is_not_a_durable_okf_type() -> None:
-    from okf_types import CANONICAL_TYPES, INBOX_TYPES
-
-    assert "claim-candidate" not in CANONICAL_TYPES
-    assert INBOX_TYPES == frozenset({"claim-candidate"})

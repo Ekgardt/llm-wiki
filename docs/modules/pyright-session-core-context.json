@@ -1,0 +1,300 @@
+{
+  "encoding": "o200k_base",
+  "max_tokens": 100000,
+  "serialization": "exact-duplicates/v1",
+  "files": [
+    "AGENTS.md",
+    "CLAUDE.md",
+    "docs/AGENTS.md",
+    "docs/STRUCTURE.md",
+    "docs/modules/context-bundle.md",
+    "docs/modules/context-records.md",
+    "docs/modules/context-tooling.md",
+    "docs/modules/model-choice.md",
+    "docs/modules/product-structure.md",
+    "docs/modules/project-governance.md",
+    "docs/modules/pyright-session-core-context.json",
+    "docs/modules/pyright-session-core.md",
+    "docs/modules/test-support.md",
+    "rules/development-laws.md",
+    "scripts/__init__.py",
+    "scripts/llm_wiki/__init__.py",
+    "scripts/llm_wiki/context_bundle.py",
+    "scripts/llm_wiki/pyright_session_core.py",
+    "tests/__init__.py",
+    "tests/conftest.py",
+    "tests/module_context.py",
+    "tests/module_context_paths.py",
+    "tests/module_interface.py",
+    "tests/module_interface_render.py",
+    "tests/module_qualification.py",
+    "tests/module_record_context.py",
+    "tests/module_records.py",
+    "tests/shared_fixtures.py",
+    "tests/slow_machine.py"
+  ],
+  "ownership": {
+    "files": [
+      "docs/modules/pyright-session-core-context.json",
+      "docs/modules/pyright-session-core.md",
+      "scripts/llm_wiki/pyright_session_core.py"
+    ]
+  },
+  "qualified_dependencies": [
+    {
+      "provider": "scripts/code_intelligence.py",
+      "names": [
+        "PositionEncoding"
+      ],
+      "contract_sha256": "5ef06a096045922eaa35fea355895051db7d32af0dcb1ce8933ad0ff60ee6594",
+      "integration_tests": [
+        "tests/test_code_intelligence.py",
+        "tests/test_code_navigation.py",
+        "tests/test_code_navigation_benchmark.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/generation_catalog_store.py",
+      "names": [
+        "GenerationCatalog"
+      ],
+      "contract_sha256": "b18194ebe04bf988b4474379fcb5243516550d43b745a00eaed1453f7844c983",
+      "integration_tests": [
+        "tests/test_a_blocked_task_has_a_way_back.py",
+        "tests/test_a_build_in_flight_is_not_an_orphan.py",
+        "tests/test_a_capacity_refusal_does_not_corrupt_a_generation.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/model_choice.py",
+      "names": [
+        "using_root"
+      ],
+      "contract_sha256": "d45f2655cb61963e77617d1dfd7d617b134ad77cc770b59b335d0856e5d65019",
+      "integration_tests": [
+        "tests/test_central_model_selection.py",
+        "tests/test_compile_execution_inventory.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/pyright_session_bootstrap.py",
+      "names": [
+        "SessionBootstrap"
+      ],
+      "contract_sha256": "1c2b5158efff766690643d8eef92760ab9d250fc7df3fd501c342ce0b18c3d64",
+      "integration_tests": [
+        "tests/test_a_document_is_opened_in_its_own_language.py",
+        "tests/test_a_progress_gate_waits_only_for_an_opened_token.py",
+        "tests/test_a_retained_cleanup_owner_leaves_the_module_registry.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/pyright_session_calls.py",
+      "names": [
+        "SessionCalls"
+      ],
+      "contract_sha256": "24d67235b7ae0e0d46405baceb613f6a24c3ba7a59f87692929ca35826501b93",
+      "integration_tests": [
+        "tests/test_a_document_is_opened_in_its_own_language.py",
+        "tests/test_a_progress_gate_waits_only_for_an_opened_token.py",
+        "tests/test_a_retained_cleanup_owner_leaves_the_module_registry.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/pyright_session_close.py",
+      "names": [
+        "SessionClose"
+      ],
+      "contract_sha256": "cd6e5994d7940e454afc068e745501fa5ec8c5896f11bbc218df3350cf5e4515",
+      "integration_tests": [
+        "tests/test_a_document_is_opened_in_its_own_language.py",
+        "tests/test_a_progress_gate_waits_only_for_an_opened_token.py",
+        "tests/test_a_retained_cleanup_owner_leaves_the_module_registry.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/pyright_session_diagnostics.py",
+      "names": [
+        "SessionDiagnostics"
+      ],
+      "contract_sha256": "e17652f6e27585eda6e36cc0dba549dd546a257a2256031600dc40da3c1bede6",
+      "integration_tests": [
+        "tests/test_pyright_session_diagnostics.py",
+        "tests/test_pyright_session_synchronize.py",
+        "tests/test_the_last_cuts_say_what_they_left_out.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/pyright_session_documents.py",
+      "names": [
+        "SessionDocuments"
+      ],
+      "contract_sha256": "af80d916f4df54d38d1df4466077df1e3d4bbde7357995a545e457ef72d2236b",
+      "integration_tests": [
+        "tests/test_pyright_session_documents.py",
+        "tests/test_pyright_session_synchronize.py",
+        "tests/test_the_open_documents_make_room_for_the_next_file.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/pyright_session_progress.py",
+      "names": [
+        "SessionProgress"
+      ],
+      "contract_sha256": "d83194047ba726fd5f834a57696d8aab81f81c33f942ac02ac36452cd676f325",
+      "integration_tests": [
+        "tests/test_a_lapsed_deadline_is_not_a_torn_stream.py",
+        "tests/test_a_sectionless_configuration_is_the_servers_own.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/pyright_session_queries.py",
+      "names": [
+        "SessionQueries"
+      ],
+      "contract_sha256": "cba3b74800a764518d88560cf804d1f057a62b2ff733eb0ac3a0ce2a9894ea55",
+      "integration_tests": [
+        "tests/test_a_document_is_opened_in_its_own_language.py",
+        "tests/test_a_progress_gate_waits_only_for_an_opened_token.py",
+        "tests/test_a_retained_cleanup_owner_leaves_the_module_registry.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/pyright_session_recovery.py",
+      "names": [
+        "SessionRecovery"
+      ],
+      "contract_sha256": "67ca9af5e0e6f7e4aaaea99109995b01897f72283c24126fe22d7074d57112f1",
+      "integration_tests": [
+        "tests/test_a_document_is_opened_in_its_own_language.py",
+        "tests/test_a_progress_gate_waits_only_for_an_opened_token.py",
+        "tests/test_a_retained_cleanup_owner_leaves_the_module_registry.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/pyright_session_startup.py",
+      "names": [
+        "SessionStartup"
+      ],
+      "contract_sha256": "de28bb842b4f5a86049a1005a476e8cac6ba3eb7b728b9c38e2f992ea4a16af5",
+      "integration_tests": [
+        "tests/test_a_failed_server_is_started_again.py",
+        "tests/test_a_startup_that_ran_out_of_time_is_tried_again_later.py",
+        "tests/test_pyright_session.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/pyright_session_values.py",
+      "names": [
+        "DiagnosticSnapshot",
+        "OWNER_CLEANUP_SECONDS",
+        "OpenDocument",
+        "validated_deadline"
+      ],
+      "contract_sha256": "8420ab01f9191342527f7df89e4073188cd4f08c65e82e48fdb50d5ef92c7220",
+      "integration_tests": [
+        "tests/test_a_document_is_opened_in_its_own_language.py",
+        "tests/test_code_navigation.py",
+        "tests/test_code_navigation_benchmark.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/pyright_session_wire.py",
+      "names": [
+        "SessionWire"
+      ],
+      "contract_sha256": "ae6602b0366ef6d3dfef2f0ae104992a060affe6a0d7a3e87b04491d5e4e94ca",
+      "integration_tests": [
+        "tests/test_a_document_is_opened_in_its_own_language.py",
+        "tests/test_a_progress_gate_waits_only_for_an_opened_token.py",
+        "tests/test_a_retained_cleanup_owner_leaves_the_module_registry.py"
+      ]
+    },
+    {
+      "provider": "scripts/lsp_process.py",
+      "names": [
+        "LspProcess",
+        "StartupCleanupError"
+      ],
+      "contract_sha256": "e4b4a8b233768ca1db3a4785abd0c5cacc0c40df08a34f83dbcadee0017a7352",
+      "integration_tests": [
+        "tests/test_a_dead_owner_root_is_swept_when_the_next_server_starts.py",
+        "tests/test_a_failed_server_is_started_again.py",
+        "tests/test_a_failed_server_leaves_its_redacted_last_words.py"
+      ]
+    },
+    {
+      "provider": "scripts/lsp_profiles.py",
+      "names": [
+        "PYRIGHT_PROFILE"
+      ],
+      "contract_sha256": "ae59d63f1bb6f6917436d220f8dd8b06677b1706252ba9e2480ef18ab844b5cd",
+      "integration_tests": [
+        "tests/modules/lsp_profiles/test_registry.py",
+        "tests/test_a_document_is_opened_in_its_own_language.py",
+        "tests/test_a_lapsed_deadline_is_not_a_torn_stream.py"
+      ]
+    },
+    {
+      "provider": "scripts/lsp_server_profile.py",
+      "names": [
+        "LanguageServerProfile"
+      ],
+      "contract_sha256": "005a15d1fdf1abf3f7d7bcbbf5439510a0b4574b8a3be7ba66c62db7b6dfe794",
+      "integration_tests": [
+        "tests/modules/lsp_install_manifest/test_contract.py",
+        "tests/modules/lsp_profiles/test_registry.py",
+        "tests/modules/lsp_server_profile/test_values.py"
+      ]
+    },
+    {
+      "provider": "scripts/pyright_profile.py",
+      "names": [
+        "PyrightIdentity"
+      ],
+      "contract_sha256": "85809561bdda220617d92c8cc000de59aaf12ca45393ef3487561f4cc02cd31c",
+      "integration_tests": [
+        "tests/test_a_document_is_opened_in_its_own_language.py",
+        "tests/test_a_lapsed_deadline_is_not_a_torn_stream.py",
+        "tests/test_a_retained_cleanup_owner_leaves_the_module_registry.py"
+      ]
+    },
+    {
+      "provider": "scripts/reliable_memory.py",
+      "names": [
+        "validate_state_root"
+      ],
+      "contract_sha256": "8680515cd873056a7c8a36e0057d91f2f83f23c48841263697676ff91f7ff964",
+      "integration_tests": [
+        "tests/test_a_backup_image_carries_what_git_does_not.py",
+        "tests/test_a_changed_task_setting_reaches_an_installed_machine.py",
+        "tests/test_a_committed_source_resolves_an_older_compile_plan.py"
+      ]
+    },
+    {
+      "provider": "scripts/repository_scope.py",
+      "names": [
+        "RepositoryScope",
+        "sanitized_git_environment"
+      ],
+      "contract_sha256": "326d40aac35c4481e07bbe2e6113f897bd139f95b4b8c69e1245517167ef96a6",
+      "integration_tests": [
+        "tests/test_a_code_generation_is_not_abandoned.py",
+        "tests/test_a_directory_link_inside_the_checkout_does_not_refuse_the_revision.py",
+        "tests/test_a_document_is_opened_in_its_own_language.py"
+      ]
+    },
+    {
+      "provider": "scripts/workspace_revision.py",
+      "names": [
+        "WorkspaceRevision"
+      ],
+      "contract_sha256": "4cbdaf8e929aa14e38ebd54d7d3f9d8cb01b326a6002661b5a541b7aa8ccdc87",
+      "integration_tests": [
+        "tests/test_a_cloned_checkout_keeps_the_private_read.py",
+        "tests/test_a_directory_link_inside_the_checkout_does_not_refuse_the_revision.py",
+        "tests/test_a_failed_git_status_is_a_navigation_degradation.py"
+      ]
+    }
+  ]
+}

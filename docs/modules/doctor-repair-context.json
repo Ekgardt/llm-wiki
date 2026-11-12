@@ -1,0 +1,273 @@
+{
+  "encoding": "o200k_base",
+  "max_tokens": 100000,
+  "serialization": "exact-duplicates/v1",
+  "files": [
+    "AGENTS.md",
+    "CLAUDE.md",
+    "docs/AGENTS.md",
+    "docs/STRUCTURE.md",
+    "docs/modules/context-bundle.md",
+    "docs/modules/context-records.md",
+    "docs/modules/context-tooling.md",
+    "docs/modules/doctor-repair-context.json",
+    "docs/modules/doctor-repair.md",
+    "docs/modules/model-choice.md",
+    "docs/modules/product-structure.md",
+    "docs/modules/project-governance.md",
+    "docs/modules/test-support.md",
+    "rules/development-laws.md",
+    "scripts/__init__.py",
+    "scripts/llm_wiki/__init__.py",
+    "scripts/llm_wiki/context_bundle.py",
+    "scripts/llm_wiki/doctor_repair.py",
+    "tests/__init__.py",
+    "tests/conftest.py",
+    "tests/module_context.py",
+    "tests/module_context_paths.py",
+    "tests/module_interface.py",
+    "tests/module_interface_render.py",
+    "tests/module_qualification.py",
+    "tests/module_record_context.py",
+    "tests/module_records.py",
+    "tests/shared_fixtures.py",
+    "tests/slow_machine.py"
+  ],
+  "ownership": {
+    "files": [
+      "docs/modules/doctor-repair-context.json",
+      "docs/modules/doctor-repair.md",
+      "scripts/llm_wiki/doctor_repair.py"
+    ]
+  },
+  "qualified_dependencies": [
+    {
+      "provider": "scripts/archive_daily.py",
+      "names": [
+        "DailyArchiver"
+      ],
+      "contract_sha256": "3124f02d815b082f823b6d42e73b83e6f1db251a39f6e1ce109c25792be7ebbd",
+      "integration_tests": [
+        "tests/test_a_generation_snapshot_uses_the_writer_gate.py",
+        "tests/test_one_failed_repair_does_not_cancel_the_others.py"
+      ]
+    },
+    {
+      "provider": "scripts/claims.py",
+      "names": [
+        "ClaimIndex"
+      ],
+      "contract_sha256": "c66d3b1b1d8bfad960288ad5ea53a74adcb686e240fe70cc4bb08d27c96b80b0",
+      "integration_tests": [
+        "tests/test_a_generation_snapshot_uses_the_writer_gate.py",
+        "tests/test_one_failed_repair_does_not_cancel_the_others.py"
+      ]
+    },
+    {
+      "provider": "scripts/generation_maintenance.py",
+      "names": [
+        "MaintenanceFenceLost",
+        "MaintenanceHeartbeat",
+        "acquire_maintenance_owner",
+        "build_or_refresh_generation",
+        "release_maintenance_owner",
+        "repair_generation_catalog",
+        "result",
+        "safe_kind"
+      ],
+      "contract_sha256": "5863ea23151298e486f0a8e4076ae86ab680394077c5af461778742cb1b5b477",
+      "integration_tests": [
+        "tests/test_a_generation_snapshot_uses_the_writer_gate.py",
+        "tests/test_one_failed_repair_does_not_cancel_the_others.py"
+      ]
+    },
+    {
+      "provider": "scripts/installed_memory_repair.py",
+      "names": [
+        "QUARANTINE_DIRECTORIES"
+      ],
+      "contract_sha256": "49d05201a42b7399779632511da8a412ba5c75a304838ceb508b6ef12f5354fd",
+      "integration_tests": [
+        "tests/test_a_generation_snapshot_uses_the_writer_gate.py",
+        "tests/test_one_failed_repair_does_not_cancel_the_others.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/adoption_admission.py",
+      "names": [
+        "ReliabilityV3ValidationError",
+        "STRAY_CANDIDATE_NAMES",
+        "retire_stray_candidates"
+      ],
+      "contract_sha256": "6498aa6f298f6b867a3ffd685b81a08e6bd9fa00bdbb8ffc040eb21fdc1044b5",
+      "integration_tests": [
+        "tests/test_a_generation_snapshot_uses_the_writer_gate.py",
+        "tests/test_one_failed_repair_does_not_cancel_the_others.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/doctor_base.py",
+      "names": [
+        "MAX_OPERATIONAL_ROWS",
+        "archive_path"
+      ],
+      "contract_sha256": "db4e60100385b49b5285eade3f8c2b10e9e021ba4d79319e39a18be5cfc0dd49",
+      "integration_tests": [
+        "tests/test_a_provider_call_fails_closed.py",
+        "tests/test_doctor_releases_snapshot_before_artifact_work.py",
+        "tests/test_install_control.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/doctor_deletion.py",
+      "names": [
+        "claim_check"
+      ],
+      "contract_sha256": "30411375a63e17d42c33f4957ec87d1a2e83ed084006e11ba6fba7ccde97a094",
+      "integration_tests": [
+        "tests/test_a_generation_snapshot_uses_the_writer_gate.py",
+        "tests/test_one_failed_repair_does_not_cancel_the_others.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/doctor_integrations.py",
+      "names": [
+        "DEFERRED_BY_ACTION",
+        "RepairContext",
+        "repair_runtime"
+      ],
+      "contract_sha256": "4b1f02bec2c98464a9d9114d46b1251bd2232299e598bad732a0a88afeb5ee89",
+      "integration_tests": [
+        "tests/test_codex_provider_bundle_manifest_proves_desired.py",
+        "tests/test_one_failed_repair_does_not_cancel_the_others.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/doctor_queue.py",
+      "names": [
+        "archive_check"
+      ],
+      "contract_sha256": "ba922a9d4be3a88bcdcb5333b819caff4e58dbc15036678af696f0b93e4a12e0",
+      "integration_tests": [
+        "tests/test_a_generation_snapshot_uses_the_writer_gate.py",
+        "tests/test_one_failed_repair_does_not_cancel_the_others.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/generation_catalog_store.py",
+      "names": [
+        "GenerationCatalog"
+      ],
+      "contract_sha256": "b18194ebe04bf988b4474379fcb5243516550d43b745a00eaed1453f7844c983",
+      "integration_tests": [
+        "tests/test_a_blocked_task_has_a_way_back.py",
+        "tests/test_a_build_in_flight_is_not_an_orphan.py",
+        "tests/test_a_capacity_refusal_does_not_corrupt_a_generation.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/model_choice.py",
+      "names": [
+        "using_root"
+      ],
+      "contract_sha256": "d45f2655cb61963e77617d1dfd7d617b134ad77cc770b59b335d0856e5d65019",
+      "integration_tests": [
+        "tests/test_a_generation_snapshot_uses_the_writer_gate.py",
+        "tests/test_one_failed_repair_does_not_cancel_the_others.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/monotonic_deadline.py",
+      "names": [
+        "deadline_reached"
+      ],
+      "contract_sha256": "780a284b7c14768802bc81209d0e77dcd0f7a79885a4888eaaca663eda331414",
+      "integration_tests": [
+        "tests/test_a_backup_image_carries_what_git_does_not.py",
+        "tests/test_a_backup_snapshots_what_hooks_write.py",
+        "tests/test_a_backup_takes_what_any_installed_vault_holds.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/runtime_roots.py",
+      "names": [
+        "state_root_for",
+        "vault_root"
+      ],
+      "contract_sha256": "fd3b89380c4745d13e861ba28292a0649b1ea43bfe8106d0179487d0fdc1f100",
+      "integration_tests": [
+        "tests/test_a_continuation_keeps_its_original_entry.py",
+        "tests/test_a_prompt_checkpoint_does_not_outwait_its_host.py",
+        "tests/test_a_session_marker_survives_a_busy_writer.py"
+      ]
+    },
+    {
+      "provider": "scripts/markdown_transaction.py",
+      "names": [
+        "reliability_v3_records_present",
+        "require_adopted_through_contention"
+      ],
+      "contract_sha256": "433afd6f8ad3ef61feabb5e9a00492d6d3cc4166ed3a04e699693bedca7820bf",
+      "integration_tests": [
+        "tests/test_a_generation_snapshot_uses_the_writer_gate.py",
+        "tests/test_one_failed_repair_does_not_cancel_the_others.py"
+      ]
+    },
+    {
+      "provider": "scripts/queue_core.py",
+      "names": [
+        "active_or_legacy_memory_queue"
+      ],
+      "contract_sha256": "5fbd5ab2089d4430890ba7c20d902469debeb43890daaad0a754596413a4f51b",
+      "integration_tests": [
+        "tests/test_a_generation_snapshot_uses_the_writer_gate.py",
+        "tests/test_one_failed_repair_does_not_cancel_the_others.py"
+      ]
+    },
+    {
+      "provider": "scripts/reliable_memory.py",
+      "names": [
+        "validate_state_root"
+      ],
+      "contract_sha256": "8680515cd873056a7c8a36e0057d91f2f83f23c48841263697676ff91f7ff964",
+      "integration_tests": [
+        "tests/test_a_generation_snapshot_uses_the_writer_gate.py",
+        "tests/test_one_failed_repair_does_not_cancel_the_others.py"
+      ]
+    },
+    {
+      "provider": "scripts/repository_scope.py",
+      "names": [
+        "sanitized_git_environment"
+      ],
+      "contract_sha256": "fd550ae20761afad50b37fa3a71044a162485b0e4d4b3e2af9b5b22e143c2bec",
+      "integration_tests": [
+        "tests/test_a_generation_snapshot_uses_the_writer_gate.py",
+        "tests/test_one_failed_repair_does_not_cancel_the_others.py"
+      ]
+    },
+    {
+      "provider": "scripts/secret_redact.py",
+      "names": [
+        "describe_error",
+        "describe_error_chain"
+      ],
+      "contract_sha256": "884e5e05013d225e77560cc5211c6b673e5a2eb93f21415faed38c0cb7c412e2",
+      "integration_tests": [
+        "tests/test_a_generation_snapshot_uses_the_writer_gate.py",
+        "tests/test_one_failed_repair_does_not_cancel_the_others.py"
+      ]
+    },
+    {
+      "provider": "scripts/settings.py",
+      "names": [
+        "setting_value"
+      ],
+      "contract_sha256": "ec6d2a43d91dba48c174aad5e9505790a05fd66f1bf1e5292264857f320a9881",
+      "integration_tests": [
+        "tests/test_a_generation_snapshot_uses_the_writer_gate.py",
+        "tests/test_one_failed_repair_does_not_cancel_the_others.py"
+      ]
+    }
+  ]
+}

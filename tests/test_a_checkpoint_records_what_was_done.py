@@ -4,7 +4,7 @@ Measured on the live vault 2026-08-29: `knowledge/projects/llm-wiki/journal.md`
 held 1 000 events and every one carried `checkpoint-none` closes on all three
 scalars and empty lists on the other six — zero events with a single list
 operation. `state.md` read `Goal: None, Phase: None`, and always had.
-`_checkpoint_delta` reads `payload["project_delta"]`, which nothing in
+`checkpoint_delta` reads `payload["project_delta"]`, which nothing in
 `scripts/`, `integrations/`, `skills/` or `rules/` ever writes.
 
 What to derive is settled by measurement rather than taste. The cold-start
@@ -20,7 +20,7 @@ See `docs/research/2026-08-29-what-a-project-checkpoint-should-record.md`.
 from __future__ import annotations
 
 import sys
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 SCRIPTS_DIR = Path(__file__).resolve().parent.parent / "scripts"
@@ -28,8 +28,9 @@ if str(SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_DIR))
 
 import integration_adapter  # noqa: E402
+import project_checkpoint  # noqa: E402
 
-AT = datetime(2026, 8, 29, 21, 57, tzinfo=timezone.utc)
+AT = datetime(2026, 8, 29, 21, 57, tzinfo=UTC)
 
 
 def _edit_event(**overrides):
@@ -48,7 +49,7 @@ def _edit_event(**overrides):
 
 
 def test_a_changed_file_is_recorded_by_its_path() -> None:
-    delta = integration_adapter._derived_delta(_edit_event())
+    delta = project_checkpoint.derived_delta(_edit_event())
 
     assert delta["changed_files"] == [
         {
@@ -61,14 +62,14 @@ def test_a_changed_file_is_recorded_by_its_path() -> None:
 
 def test_editing_the_same_file_twice_stays_one_item() -> None:
     """The id is the path, so churn on one file does not fill the projection."""
-    first = integration_adapter._derived_delta(_edit_event())
-    second = integration_adapter._derived_delta(_edit_event())
+    first = project_checkpoint.derived_delta(_edit_event())
+    second = project_checkpoint.derived_delta(_edit_event())
 
     assert first["changed_files"][0]["id"] == second["changed_files"][0]["id"]
 
 
 def test_a_tool_that_changed_nothing_records_no_file() -> None:
-    delta = integration_adapter._derived_delta(_edit_event(changed=False))
+    delta = project_checkpoint.derived_delta(_edit_event(changed=False))
 
     assert delta["changed_files"] == []
 
@@ -76,7 +77,7 @@ def test_a_tool_that_changed_nothing_records_no_file() -> None:
 def test_a_command_is_recorded_and_keyed_by_its_own_text() -> None:
     event = _edit_event(tool_name="Bash", tool_input={"command": "uv run pytest -q"})
 
-    delta = integration_adapter._derived_delta(event)
+    delta = project_checkpoint.derived_delta(event)
 
     assert delta["commands"] == [
         {
@@ -91,19 +92,19 @@ def test_a_failure_opens_a_blocker_keyed_by_what_failed() -> None:
     """Keyed by the failing thing, not the moment, so a repeat is one blocker."""
     event = _edit_event(severity="error")
 
-    delta = integration_adapter._derived_delta(event)
+    delta = project_checkpoint.derived_delta(event)
 
     assert delta["blockers"][0]["id"] == "failed:Edit:scripts/retrieval.py"
     assert "Edit failed" in delta["blockers"][0]["value"]
 
 
 def test_a_successful_run_opens_no_blocker() -> None:
-    assert integration_adapter._derived_delta(_edit_event())["blockers"] == []
+    assert project_checkpoint.derived_delta(_edit_event())["blockers"] == []
 
 
 def test_the_current_task_is_one_id_that_is_always_replaced() -> None:
     """Thousands of tool events must leave one line, not thousands."""
-    delta = integration_adapter._derived_delta(_edit_event())
+    delta = project_checkpoint.derived_delta(_edit_event())
 
     assert delta["current_task"]["id"] == "observed"
     assert delta["current_task"]["value"].startswith("Edit scripts/retrieval.py")
@@ -111,7 +112,7 @@ def test_the_current_task_is_one_id_that_is_always_replaced() -> None:
 
 def test_every_derived_value_carries_its_date() -> None:
     """Staleness is the dominant failure of carried state; an undated item hides it."""
-    delta = integration_adapter._derived_delta(_edit_event())
+    delta = project_checkpoint.derived_delta(_edit_event())
     values = [delta["current_task"]["value"], delta["changed_files"][0]["value"]]
 
     assert all(value.endswith("2026-08-29T21:57:00+00:00") for value in values)
@@ -119,11 +120,11 @@ def test_every_derived_value_carries_its_date() -> None:
 
 def test_a_stated_delta_still_wins() -> None:
     """An agent that says what it is doing is not overruled by the derivation."""
-    stated = integration_adapter._empty_delta()
+    stated = project_checkpoint.empty_delta()
     stated["goal"] = {"id": "g1", "action": "upsert", "value": "ship rotation"}
     event = _edit_event(project_delta=stated)
 
-    assert integration_adapter._checkpoint_delta(event)["goal"]["value"] == (
+    assert project_checkpoint.checkpoint_delta(event)["goal"]["value"] == (
         "ship rotation"
     )
 
@@ -134,7 +135,7 @@ def test_an_observation_with_no_tool_records_nothing_but_a_close() -> None:
         "claude", "stop", {"session_id": "s1", "cwd": "/tmp"}, occurred_at=AT
     )
 
-    delta = integration_adapter._derived_delta(event)
+    delta = project_checkpoint.derived_delta(event)
 
     assert delta["current_task"]["action"] == "close"
     assert delta["changed_files"] == []
@@ -145,7 +146,7 @@ def test_an_observed_tool_reaches_the_journal_without_being_narrated() -> None:
 
     `has_project_delta` records whether the *agent* supplied a `project_delta`.
     No hook ever does, so it is False on every event this system has seen — and
-    `_has_pending_delta` asked it first and returned, discarding the delta that
+    `has_pending_delta` asked it first and returned, discarding the delta that
     had already been derived from the observation itself.
 
     Measured 2026-09-05: 3713 events across 71 projects, every delta empty. The
@@ -153,32 +154,32 @@ def test_an_observed_tool_reaches_the_journal_without_being_narrated() -> None:
     all computed and then dropped, which is why the layer meant to hand work
     between agents held nothing but timestamps.
     """
-    import integration_adapter
+    import project_checkpoint
 
     checkpoint = {
         "delta": {
-            **integration_adapter._empty_delta(),
+            **project_checkpoint.empty_delta(),
             "current_task": {"id": "observed", "action": "upsert", "value": "Edit alpha.py"},
         }
     }
 
-    assert integration_adapter._has_pending_delta(
+    assert project_checkpoint.has_pending_delta(
         {"has_project_delta": False, "checkpoint_event": checkpoint}
     )
 
 
 def test_an_item_carrying_nothing_is_still_nothing() -> None:
-    import integration_adapter
+    import project_checkpoint
 
-    empty = {"delta": integration_adapter._empty_delta()}
+    empty = {"delta": project_checkpoint.empty_delta()}
 
-    assert not integration_adapter._has_pending_delta(
+    assert not project_checkpoint.has_pending_delta(
         {"has_project_delta": False, "checkpoint_event": empty}
     )
 
 
 def test_without_a_checkpoint_event_the_flag_still_decides() -> None:
-    import integration_adapter
+    import project_checkpoint
 
-    assert integration_adapter._has_pending_delta({"has_project_delta": True})
-    assert not integration_adapter._has_pending_delta({"has_project_delta": False})
+    assert project_checkpoint.has_pending_delta({"has_project_delta": True})
+    assert not project_checkpoint.has_pending_delta({"has_project_delta": False})

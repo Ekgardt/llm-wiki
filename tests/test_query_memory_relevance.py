@@ -13,19 +13,19 @@ if str(SCRIPTS_DIR) not in sys.path:
 
 def test_a_span_stating_a_different_figure_is_refused():
     """The shape an operator acts on: right page, wrong number."""
-    from query_memory import GroundedQAError, _require_citation_touches_claim
+    from query_memory import GroundedQAError, require_citation_touches_claim
 
     with pytest.raises(GroundedQAError, match="different figures"):
-        _require_citation_touches_claim(
+        require_citation_touches_claim(
             "the owner lease expires after 30 seconds",
             "the owner lease is refreshed every 10 seconds",
         )
 
 
 def test_a_span_carrying_the_same_figure_passes():
-    from query_memory import _require_citation_touches_claim
+    from query_memory import require_citation_touches_claim
 
-    _require_citation_touches_claim(
+    require_citation_touches_claim(
         "the owner lease expires after 30 seconds",
         "expiry is 30 seconds after the last heartbeat",
     )
@@ -33,19 +33,42 @@ def test_a_span_carrying_the_same_figure_passes():
 
 def test_a_span_without_figures_may_still_support_a_numeric_claim():
     """A span can spell the number out, so silence there is not a refusal."""
-    from query_memory import _require_citation_touches_claim
+    from query_memory import require_citation_touches_claim
 
-    _require_citation_touches_claim(
+    require_citation_touches_claim(
         "the window is 90 days",
         "the retention window is ninety days for every hot artifact",
     )
 
 
 def test_a_flag_that_differs_is_refused_like_a_number():
-    from query_memory import GroundedQAError, _require_citation_touches_claim
+    from query_memory import GroundedQAError, require_citation_touches_claim
 
     with pytest.raises(GroundedQAError, match="different figures"):
-        _require_citation_touches_claim(
+        require_citation_touches_claim(
             "retire dead tasks with --include-dead",
             "purge exports first with --export before anything is removed",
         )
+
+
+@pytest.mark.parametrize("term", ["Go", "C", "IP", "R"])
+def test_a_short_term_does_not_bypass_citation_relevance(term):
+    from query_memory import GroundedQAError, require_citation_touches_claim
+
+    with pytest.raises(GroundedQAError):
+        require_citation_touches_claim(term, "unrelated storage policy")
+
+
+@pytest.mark.parametrize("term", ["Go", "C", "IP", "R"])
+def test_a_short_term_can_match_its_actual_evidence(term):
+    from query_memory import content_tokens, require_citation_touches_claim
+
+    assert term.casefold() in content_tokens(term)
+    require_citation_touches_claim(term, f"The configured choice is {term}.")
+
+
+def test_short_function_words_do_not_create_support():
+    from query_memory import GroundedQAError, require_citation_touches_claim
+
+    with pytest.raises(GroundedQAError):
+        require_citation_touches_claim("storage is on disk", "the calendar is on paper")

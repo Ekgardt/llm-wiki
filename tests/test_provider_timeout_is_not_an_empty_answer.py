@@ -8,7 +8,7 @@ The nightly pass of 2026-08-26 failed its compile step and left this line in
 
 `empty_response` means "the provider answered, and the answer was empty". The
 same daily log compiled cleanly nine hours later from the same vault, so that
-was not what happened. `_call_claude` turned a `TimeoutExpired` into `""`, and
+was not what happened. `call_claude` turned a `TimeoutExpired` into `""`, and
 `_outcome_of` calls every empty string `empty_response`. The operator reading
 that log could not tell a silent provider from a slow one.
 """
@@ -29,12 +29,12 @@ def test_a_claude_call_that_runs_out_of_time_raises_instead_of_answering_nothing
     monkeypatch,
 ):
     monkeypatch.setattr(llm_client.shutil, "which", lambda name: "/usr/bin/claude")
-    monkeypatch.setattr(llm_client, "_claude_cli_flags", lambda: frozenset())
-    monkeypatch.setattr(llm_client, "_run_cli", _raise_timeout)
+    monkeypatch.setattr(llm_client, "claude_cli_flags", lambda: frozenset())
+    monkeypatch.setattr(llm_client, "run_cli", _raise_timeout)
     descriptor = llm_client.provider_candidates("claude", max_tokens=2000)[0]
 
     with pytest.raises(llm_client.ProviderTimeout):
-        llm_client._call_claude(descriptor, "prompt", "system")
+        llm_client.call_claude(descriptor, "prompt", "system")
 
 
 def test_a_timed_out_provider_is_not_reported_as_an_empty_answer(monkeypatch):
@@ -42,7 +42,7 @@ def test_a_timed_out_provider_is_not_reported_as_an_empty_answer(monkeypatch):
         raise llm_client.ProviderTimeout("claude did not answer within 90s")
 
     descriptor = llm_client.provider_candidates("fake", max_tokens=10)[0]
-    monkeypatch.setitem(llm_client._BACKENDS, "fake", _timed_out)
+    monkeypatch.setitem(llm_client.BACKENDS, "fake", _timed_out)
 
     result = llm_client.call_candidate(
         descriptor, "prompt", "system", max_tokens=10, available=True
@@ -60,12 +60,24 @@ def test_the_lineage_names_the_timeout_so_a_log_reader_can_tell_them_apart(
         raise llm_client.ProviderTimeout("claude did not answer within 90s")
 
     descriptor = llm_client.provider_candidates("fake", max_tokens=10)[0]
-    monkeypatch.setitem(llm_client._BACKENDS, "fake", _timed_out)
+    monkeypatch.setitem(llm_client.BACKENDS, "fake", _timed_out)
 
     result = llm_client.call_candidate(
         descriptor, "prompt", "system", max_tokens=10, available=True
     )
 
-    item = llm_client._llm_fallback_item(result)
+    item = llm_client.llm_fallback_item(result)
     assert item.endswith(":provider_timeout")
     assert "empty_response" not in item
+
+
+def test_a_bad_timeout_override_is_refused_by_name(monkeypatch):
+    """Audit L5: `MEMORY_LLM_TIMEOUT_S=abc` names the variable, not `int()`."""
+    import llm_client
+    import pytest
+
+    monkeypatch.setenv("MEMORY_LLM_TIMEOUT_S", "abc")
+    with pytest.raises(ValueError, match="MEMORY_LLM_TIMEOUT_S must be a positive integer"):
+        llm_client.timeout_s()
+    monkeypatch.setenv("MEMORY_LLM_TIMEOUT_S", "45")
+    assert llm_client.timeout_s() == 45

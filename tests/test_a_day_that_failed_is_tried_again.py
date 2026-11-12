@@ -34,7 +34,7 @@ def _vault(tmp_path: Path, records: int) -> Path:
 def _state_after_failure(vault: Path, monkeypatch) -> dict:
     """Run a two-batch day whose second reply cannot be read; return the state it left."""
     saved: dict = {}
-    monkeypatch.setattr(consolidation, "_save_progress", lambda day, p: saved.update({day: p.as_state()}))
+    monkeypatch.setattr(consolidation, "save_progress", lambda day, p: saved.update({day: p.as_state()}))
     replies = iter(["[]", "not json at all"])
     outcome = consolidation.consolidate_day(vault, DAY, call=lambda _p: next(replies), state={})
     assert outcome["status"] == "partial"
@@ -48,7 +48,7 @@ def test_a_rerun_skips_the_batch_that_already_finished(tmp_path, monkeypatch):
     recorded: dict = {}
     monkeypatch.setattr(
         consolidation,
-        "_record_consolidation",
+        "record_consolidation",
         lambda d, c, r, digest, failed=(): recorded.update(day=d, digest=digest),
     )
 
@@ -62,7 +62,7 @@ def test_a_rerun_skips_the_batch_that_already_finished(tmp_path, monkeypatch):
 
 def test_a_provider_that_returns_nothing_leaves_the_day_pending(tmp_path, monkeypatch):
     vault = _vault(tmp_path, 1)
-    monkeypatch.setattr(consolidation, "_save_progress", lambda *a: pytest.fail("nothing finished"))
+    monkeypatch.setattr(consolidation, "save_progress", lambda *a: pytest.fail("nothing finished"))
 
     with pytest.raises(consolidation.ConsolidationUnavailable):
         consolidation.consolidate_day(vault, DAY, call=lambda _p: None, state={})

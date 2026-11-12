@@ -10,16 +10,20 @@ from dataclasses import dataclass
 
 from corpus_snapshot import CapturedSource
 from knowledge_extractor import (
-    MAX_RECORDS,
     ExtractionResult,
-    _evidence,
-    _identifier,
-    _node,
-    _occurrence,
+    identifier,
+    node,
+    occurrence_record,
+    record_budget_at_capacity,
+    record_budget_exceeded,
+    require_optional_record_budget,
     source_ceiling,
 )
+from knowledge_extractor import (
+    evidence as evidence,
+)
+from llm_wiki.formats.canonical import canonical_json_bytes
 from project_journal import parse_journal_events
-from reliable_memory import canonical_json_bytes
 from settings import raise_hint
 
 EXTRACTOR_VERSION = "project-extractor/v1"
@@ -52,7 +56,7 @@ def extract_projects(
     sources: Sequence[CapturedSource],
     *,
     max_sources: int | None = None,
-    max_records: int = MAX_RECORDS,
+    max_records: int | None = None,
     deadline: float | None = None,
     monotonic: Callable[[], float] = time.monotonic,
     cancelled: Callable[[], bool] | None = None,
@@ -63,7 +67,7 @@ def extract_projects(
     _check_stop(deadline, monotonic, cancelled)
     _require_intact_sources(sources)
     extraction = _ProjectExtraction(
-        min(max_records, MAX_RECORDS), lambda: _check_stop(deadline, monotonic, cancelled)
+        max_records, lambda: _check_stop(deadline, monotonic, cancelled)
     )
     for source in sorted(sources, key=lambda item: item.record.relative_path):
         extraction.add_source(source)
@@ -71,11 +75,11 @@ def extract_projects(
 
 
 def _require_extraction_options(
-    sources: object, max_sources: int, max_records: int, cancelled: Callable[[], bool] | None
+    sources: object, max_sources: int, max_records: int | None, cancelled: Callable[[], bool] | None
 ) -> None:
     _require_source_sequence(sources)
     _require_positive("max_sources", max_sources)
-    _require_positive("max_records", max_records)
+    require_optional_record_budget(max_records)
     if cancelled is not None and not callable(cancelled):
         raise TypeError("cancelled must be callable")
     if len(sources) > max_sources:
@@ -157,9 +161,9 @@ def _ordered(rows: Mapping[str, dict[str, object]], key: str) -> tuple[dict[str,
 
 
 class _ProjectExtraction:
-    """Nodes, occurrences, assertions and evidence of every project journal, under one ceiling."""
+    """Nodes, occurrences, assertions and evidence of every project journal, with an optional caller record budget."""
 
-    def __init__(self, record_limit: int, check_stop: Callable[[], None]) -> None:
+    def __init__(self, record_limit: int | None, check_stop: Callable[[], None]) -> None:
         self.record_limit = record_limit
         self.check_stop = check_stop
         self.nodes: dict[str, dict[str, object]] = {}
@@ -172,11 +176,11 @@ class _ProjectExtraction:
 
     def check_work(self) -> None:
         self.check_stop()
-        if self._record_count() >= self.record_limit:
+        if record_budget_at_capacity(self._record_count, self.record_limit):
             raise ValueError("project extraction record ceiling exceeded")
 
     def relation(self, source: CapturedSource, source_node: str, edge: str, target: str, start: int, end: int) -> None:
-        assertion_id = _identifier(
+        assertion_id = identifier(
             "assertion",
             f"{source.record.logical_id}:{source_node}:{edge}:{target}:{start}:{end}",
         )
@@ -191,7 +195,7 @@ class _ProjectExtraction:
             "resolution": "resolved",
             "extractor": EXTRACTOR_VERSION,
         }
-        row = _evidence(source, assertion_id, start, end)
+        row = evidence(source, assertion_id, start, end)
         self.evidence[str(row["evidence_id"])] = row
 
     def add_source(self, source: object) -> None:
@@ -204,8 +208,8 @@ class _ProjectExtraction:
         self._add_journal(source, path.rsplit("/", 2)[-2])
 
     def _add_journal(self, source: CapturedSource, slug: str) -> None:
-        project_id = _identifier("project", slug)
-        self.nodes[project_id] = _node(project_id, "project", "project-slug/v1", slug)
+        project_id = identifier("project", slug)
+        self.nodes[project_id] = node(project_id, "project", "project-slug/v1", slug)
         events = parse_journal_events(slug, source.content)
         search_start = 0
         for event in events:
@@ -222,22 +226,22 @@ class _ProjectExtraction:
         span = _EventSpan(source, slug, checkpoint_id, event_start, event_end)
         self._add_delta(span, event["delta"])
         self._add_evidence_events(span, event["evidence_event_ids"])
-        if self._record_count() > self.record_limit:
+        if record_budget_exceeded(self._record_count, self.record_limit):
             raise ValueError("project extraction record ceiling exceeded")
         return event_end
 
     def _add_checkpoint(
         self, source: CapturedSource, slug: str, event: Mapping[str, object], event_start: int, event_end: int
     ) -> str:
-        checkpoint_id = _identifier("checkpoint", f"{slug}:{event['sequence']}")
+        checkpoint_id = identifier("checkpoint", f"{slug}:{event['sequence']}")
         session = str(event["provenance"]["session"])
-        session_id = _identifier("session", session)
-        self.nodes[checkpoint_id] = _node(
+        session_id = identifier("session", session)
+        self.nodes[checkpoint_id] = node(
             checkpoint_id, "checkpoint", "project-sequence/v1",
             f"{slug}:{event['sequence']}", sequence=event["sequence"],
         )
-        self.nodes[session_id] = _node(session_id, "session", "session-id/v1", session)
-        occurrence = _occurrence(source, checkpoint_id, "event", event_start, event_end)
+        self.nodes[session_id] = node(session_id, "session", "session-id/v1", session)
+        occurrence = occurrence_record(source, checkpoint_id, "event", event_start, event_end)
         self.occurrences[str(occurrence["occurrence_id"])] = occurrence
         return checkpoint_id
 
@@ -260,8 +264,8 @@ class _ProjectExtraction:
     def _add_operation(self, span: _EventSpan, operation: Mapping, kind: str, edge: str, cursor: int) -> int:
         value = str(operation["value"])
         start, end = _literal_span(span, canonical_json_bytes(value), cursor)
-        target_id = _identifier(kind, f"{span.slug}:{operation['id']}")
-        self.nodes[target_id] = _node(
+        target_id = identifier(kind, f"{span.slug}:{operation['id']}")
+        self.nodes[target_id] = node(
             target_id, kind, f"project-{kind}-id/v1", f"{span.slug}:{operation['id']}", value=value
         )
         self.relation(span.source, span.checkpoint_id, edge, target_id, start, end)
@@ -274,8 +278,8 @@ class _ProjectExtraction:
             start = span.source.content.find(token, span.start, span.end)
             if start < 0:
                 raise ValueError("project evidence event ID is absent from event bytes")
-            target_id = _identifier("event", str(event_id))
-            self.nodes[target_id] = _node(target_id, "evidence", "event-id/v1", str(event_id))
+            target_id = identifier("event", str(event_id))
+            self.nodes[target_id] = node(target_id, "evidence", "event-id/v1", str(event_id))
             self.relation(
                 span.source, span.checkpoint_id, "CHECKPOINT_EVIDENCED_BY_EVENT", target_id, start, start + len(token)
             )

@@ -11,27 +11,20 @@ from __future__ import annotations
 import contextlib
 import sqlite3
 import sys
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 
-import markdown_transaction  # noqa: E402
 import operational_ownership as ownership  # noqa: E402
 
-MARKER = "run/maintenance.lock"
-
-
-def _candidate(state_root: Path) -> Path:
-    path = state_root / "run/markdown-transactions-v3.candidate.sqlite3"
-    markdown_transaction.initialize_coordinator_v3_candidate(path, source_v2=None)
-    return path
+from tests.a_dead_owner_is_reclaimed_without_its_marker_helpers import MARKER, _candidate
 
 
 def _expire_owner(candidate: Path, lease: ownership.OwnerLease) -> None:
-    past = (datetime.now(timezone.utc) - timedelta(seconds=1)).isoformat().replace(
+    past = (datetime.now(UTC) - timedelta(seconds=1)).isoformat().replace(
         "+00:00", "Z"
     )
     with contextlib.closing(sqlite3.connect(candidate)) as database:
@@ -72,7 +65,7 @@ def test_a_dead_nightly_whose_marker_is_gone_is_reclaimed(tmp_path):
     try:
         assert lease.epoch == dead.epoch + 1
         assert _roles(candidate) == ["nightly"]
-        assert (state_root / MARKER).read_bytes() == ownership._marker_payload()
+        assert (state_root / MARKER).read_bytes() == ownership.marker_payload()
     finally:
         ownership.release_marker_owner(lease, marker)
 

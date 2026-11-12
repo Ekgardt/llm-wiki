@@ -21,7 +21,7 @@ from pathlib import Path
 
 import pytest
 
-pytest_plugins = ("tests.code_kernel_helpers",)
+pytest_plugins = ("tests.shared_fixtures",)
 collect_ignore_glob = ["fixtures/code_kernel/python/tests/test_service.py"]
 
 VAULT_ROOT = Path(__file__).resolve().parent.parent
@@ -196,6 +196,7 @@ SHIPPED_APPEND_BUDGETS = "shipped_append_budgets"
 _APPEND_BUDGETS = (
     "daily_log_append.BREADCRUMB_APPEND_BUDGET_SECONDS",
     "daily_log_append.LIFECYCLE_APPEND_BUDGET_SECONDS",
+    "daily_log_append.BACKGROUND_APPEND_BUDGET_SECONDS",
 )
 
 
@@ -275,3 +276,12 @@ def pytest_runtest_logstart(nodeid, location):  # noqa: ARG001
             progress.write(f"{nodeid}\n")
     except OSError:
         return
+
+
+@pytest.fixture
+def unconfigured_model_settings(tmp_path):
+    """Legacy-provider cases must not inherit the installed vault's model choice."""
+    from llm_wiki import model_choice
+
+    with model_choice.using_root(tmp_path):
+        yield

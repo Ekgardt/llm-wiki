@@ -119,7 +119,7 @@ def test_a_snapshot_can_be_taken_while_the_vault_is_written(tmp_path: Path) -> N
 
     import corpus_snapshot
 
-    original = corpus_snapshot._capture
+    original = corpus_snapshot.capture
 
     def writing_capture(root, policy, deadline, cancelled, pruned=frozenset()):
         writes["n"] += 1
@@ -130,7 +130,7 @@ def test_a_snapshot_can_be_taken_while_the_vault_is_written(tmp_path: Path) -> N
         return original(root, policy, deadline, cancelled, pruned)
 
     with pytest.MonkeyPatch.context() as patch:
-        patch.setattr(corpus_snapshot, "_capture", writing_capture)
+        patch.setattr(corpus_snapshot, "capture", writing_capture)
         snapshot = corpus_snapshot.collect_corpus(vault)
 
     assert writes["n"] == 3

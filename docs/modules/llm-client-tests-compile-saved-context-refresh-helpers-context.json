@@ -1,0 +1,173 @@
+{
+  "encoding": "o200k_base",
+  "max_tokens": 100000,
+  "serialization": "exact-duplicates/v1",
+  "files": [
+    "AGENTS.md",
+    "CLAUDE.md",
+    "docs/AGENTS.md",
+    "docs/STRUCTURE.md",
+    "docs/modules/compile-paths.md",
+    "docs/modules/compile-pipeline-prompts-tests-compile-critic-drop-cannot-complete-source-work-helpers.md",
+    "docs/modules/context-bundle.md",
+    "docs/modules/context-records.md",
+    "docs/modules/context-tooling.md",
+    "docs/modules/llm-client-tests-compile-saved-context-refresh-helpers-context.json",
+    "docs/modules/llm-client-tests-compile-saved-context-refresh-helpers.md",
+    "docs/modules/llm-client-tests-the-compile-decides-what-the-snapshot-already-knows-helpers.md",
+    "docs/modules/model-choice.md",
+    "docs/modules/product-structure.md",
+    "docs/modules/project-governance.md",
+    "docs/modules/script-sources.md",
+    "docs/modules/test-support.md",
+    "rules/development-laws.md",
+    "scripts/__init__.py",
+    "scripts/llm_wiki/__init__.py",
+    "scripts/llm_wiki/context_bundle.py",
+    "tests/__init__.py",
+    "tests/compile_critic_drop_cannot_complete_source_work_helpers.py",
+    "tests/compile_paths.py",
+    "tests/compile_saved_context_refresh_helpers.py",
+    "tests/conftest.py",
+    "tests/module_context.py",
+    "tests/module_context_paths.py",
+    "tests/module_interface.py",
+    "tests/module_interface_render.py",
+    "tests/module_qualification.py",
+    "tests/module_record_context.py",
+    "tests/module_records.py",
+    "tests/script_sources.py",
+    "tests/shared_fixtures.py",
+    "tests/slow_machine.py",
+    "tests/the_compile_decides_what_the_snapshot_already_knows_helpers.py"
+  ],
+  "ownership": {
+    "files": [
+      "docs/modules/llm-client-tests-compile-saved-context-refresh-helpers-context.json",
+      "docs/modules/llm-client-tests-compile-saved-context-refresh-helpers.md",
+      "tests/compile_saved_context_refresh_helpers.py"
+    ]
+  },
+  "qualified_dependencies": [
+    {
+      "provider": "scripts/compile_cache.py",
+      "names": [
+        "CompileCache"
+      ],
+      "contract_sha256": "2f950a945aecf6065663cf128b0cdc4db8f0e8cf0f8d1f1057cc0d1e52d56c95",
+      "integration_tests": [
+        "tests/test_compile_atomic_capture.py",
+        "tests/test_compile_planned_execution.py",
+        "tests/test_compile_saved_context_refresh.py",
+        "tests/test_compile_shared_run_planning.py"
+      ]
+    },
+    {
+      "provider": "scripts/context_budget.py",
+      "names": [
+        "TokenUsage"
+      ],
+      "contract_sha256": "bde088db86ce68f91e9a4e3f1416339f5cecdd6c3a2e40390f25bf4fb954af76",
+      "integration_tests": [
+        "tests/compile_repair_child_helpers.py",
+        "tests/compile_saved_context_refresh_helpers.py",
+        "tests/test_a_context_answer_sends_its_text_once.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_client.py",
+      "names": [
+        "BACKENDS",
+        "BackendResponse",
+        "LLMResult",
+        "ProviderDescriptor"
+      ],
+      "contract_sha256": "a63539457e7b1a4a986d773fd3c7525dcb3dbeb5b801c245ec41545475f65f55",
+      "integration_tests": [
+        "tests/test_compile_atomic_capture.py",
+        "tests/test_compile_planned_execution.py",
+        "tests/test_compile_saved_context_refresh.py",
+        "tests/test_compile_shared_run_planning.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/compile_pipeline_prompts.py",
+      "names": [
+        "CompileAttempt",
+        "SOURCE_REVIEW_SCHEMA",
+        "critique_prompt"
+      ],
+      "contract_sha256": "3ac0177410f6b9270e4e0cf2f772cdace777ab10981c0898d25c0d0d4d6c0211",
+      "integration_tests": [
+        "tests/test_compile_atomic_capture.py",
+        "tests/test_compile_planned_execution.py",
+        "tests/test_compile_saved_context_refresh.py",
+        "tests/test_compile_shared_run_planning.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/compile_pipeline_sources.py",
+      "names": [
+        "snapshot_compile_inputs"
+      ],
+      "contract_sha256": "bf02fc1c5e0236abe974c7bd9563649093ead7a0da80b24feef40a93b2a02969",
+      "integration_tests": [
+        "tests/test_compile_atomic_capture.py",
+        "tests/test_compile_planned_execution.py",
+        "tests/test_compile_saved_context_refresh.py",
+        "tests/test_compile_shared_run_planning.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/generation_catalog_store.py",
+      "names": [
+        "GenerationCatalog"
+      ],
+      "contract_sha256": "b18194ebe04bf988b4474379fcb5243516550d43b745a00eaed1453f7844c983",
+      "integration_tests": [
+        "tests/test_a_blocked_task_has_a_way_back.py",
+        "tests/test_a_build_in_flight_is_not_an_orphan.py",
+        "tests/test_a_capacity_refusal_does_not_corrupt_a_generation.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/model_choice.py",
+      "names": [
+        "using_root"
+      ],
+      "contract_sha256": "d45f2655cb61963e77617d1dfd7d617b134ad77cc770b59b335d0856e5d65019",
+      "integration_tests": [
+        "tests/test_compile_atomic_capture.py",
+        "tests/test_compile_planned_execution.py",
+        "tests/test_compile_saved_context_refresh.py",
+        "tests/test_compile_shared_run_planning.py"
+      ]
+    },
+    {
+      "provider": "scripts/reliable_memory.py",
+      "names": [
+        "validate_state_root"
+      ],
+      "contract_sha256": "8680515cd873056a7c8a36e0057d91f2f83f23c48841263697676ff91f7ff964",
+      "integration_tests": [
+        "tests/test_compile_atomic_capture.py",
+        "tests/test_compile_planned_execution.py",
+        "tests/test_compile_saved_context_refresh.py",
+        "tests/test_compile_shared_run_planning.py"
+      ]
+    },
+    {
+      "provider": "scripts/repository_scope.py",
+      "names": [
+        "sanitized_git_environment"
+      ],
+      "contract_sha256": "fd550ae20761afad50b37fa3a71044a162485b0e4d4b3e2af9b5b22e143c2bec",
+      "integration_tests": [
+        "tests/test_compile_atomic_capture.py",
+        "tests/test_compile_planned_execution.py",
+        "tests/test_compile_saved_context_refresh.py",
+        "tests/test_compile_shared_run_planning.py"
+      ]
+    }
+  ]
+}

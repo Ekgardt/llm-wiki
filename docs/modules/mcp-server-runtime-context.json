@@ -1,0 +1,481 @@
+{
+  "encoding": "o200k_base",
+  "max_tokens": 100000,
+  "serialization": "exact-duplicates/v1",
+  "files": [
+    "AGENTS.md",
+    "CLAUDE.md",
+    "docs/AGENTS.md",
+    "docs/STRUCTURE.md",
+    "docs/modules/context-bundle.md",
+    "docs/modules/context-records.md",
+    "docs/modules/context-tooling.md",
+    "docs/modules/mcp-server-freshness.md",
+    "docs/modules/mcp-server-limits.md",
+    "docs/modules/mcp-server-quality.md",
+    "docs/modules/mcp-server-runtime-context.json",
+    "docs/modules/mcp-server-runtime.md",
+    "docs/modules/mcp-server-sanitize.md",
+    "docs/modules/mcp-server-tools.md",
+    "docs/modules/mcp-server-workers.md",
+    "docs/modules/model-choice.md",
+    "docs/modules/product-structure.md",
+    "docs/modules/project-governance.md",
+    "docs/modules/test-support.md",
+    "rules/development-laws.md",
+    "scripts/__init__.py",
+    "scripts/llm_wiki/__init__.py",
+    "scripts/llm_wiki/context_bundle.py",
+    "scripts/llm_wiki/mcp_server_freshness.py",
+    "scripts/llm_wiki/mcp_server_limits.py",
+    "scripts/llm_wiki/mcp_server_quality.py",
+    "scripts/llm_wiki/mcp_server_runtime.py",
+    "scripts/llm_wiki/mcp_server_sanitize.py",
+    "scripts/llm_wiki/mcp_server_tools.py",
+    "scripts/llm_wiki/mcp_server_workers.py",
+    "tests/__init__.py",
+    "tests/conftest.py",
+    "tests/module_context.py",
+    "tests/module_context_paths.py",
+    "tests/module_interface.py",
+    "tests/module_interface_render.py",
+    "tests/module_qualification.py",
+    "tests/module_record_context.py",
+    "tests/module_records.py",
+    "tests/shared_fixtures.py",
+    "tests/slow_machine.py"
+  ],
+  "ownership": {
+    "files": [
+      "docs/modules/mcp-server-runtime-context.json",
+      "docs/modules/mcp-server-runtime.md",
+      "scripts/llm_wiki/mcp_server_runtime.py"
+    ]
+  },
+  "qualified_dependencies": [
+    {
+      "provider": "scripts/answer_budget.py",
+      "names": [
+        "shape_code_answer"
+      ],
+      "contract_sha256": "87b4cf7e70227b70c74ca161b6e9de03f9a1205b36cd92b72ea250b64dd55299",
+      "integration_tests": [
+        "tests/modules/answer_budget/test_contract.py",
+        "tests/modules/answer_cost/test_contract.py",
+        "tests/test_a_context_answer_fits_the_budget_it_was_given.py"
+      ]
+    },
+    {
+      "provider": "scripts/answer_cost.py",
+      "names": [
+        "attach_answer_cost"
+      ],
+      "contract_sha256": "c3fd14c85a69094243ddd699e0b79c6e40c82624187531e890fd78f88c3b3a20",
+      "integration_tests": [
+        "tests/modules/answer_cost/test_contract.py",
+        "tests/test_a_context_answer_fits_the_budget_it_was_given.py",
+        "tests/test_answer_cost.py"
+      ]
+    },
+    {
+      "provider": "scripts/bounded_io.py",
+      "names": [
+        "MAX_KNOWLEDGE_PAGE_BYTES",
+        "read_stable_bytes"
+      ],
+      "contract_sha256": "87826f93ff8f76c61d945698c7f5ca82bee5b8701fa1315e9efbe307dda3587f",
+      "integration_tests": [
+        "tests/modules/breadcrumb_documents/test_contract.py",
+        "tests/test_a_file_being_written_is_a_changed_corpus_on_every_system.py",
+        "tests/test_a_journal_is_readable_by_every_reader.py"
+      ]
+    },
+    {
+      "provider": "scripts/capture_diagnostics.py",
+      "names": [
+        "record_capture_failure"
+      ],
+      "contract_sha256": "454709501c56cad9797159a61893aabc86a83cb5b8e1da109156fd6f48807484",
+      "integration_tests": [
+        "tests/test_a_capture_that_fails_says_so.py",
+        "tests/test_a_codex_turn_is_not_a_session.py",
+        "tests/test_a_dropped_telemetry_write_is_recorded.py"
+      ]
+    },
+    {
+      "provider": "scripts/corpus_snapshot.py",
+      "names": [
+        "memory_source_would_be_collected"
+      ],
+      "contract_sha256": "224145b019545f0b5b2a0b1eae5338ed6c37436fa1379b8604799b5fe3c68afb",
+      "integration_tests": [
+        "tests/test_a_capacity_refusal_does_not_corrupt_a_generation.py",
+        "tests/test_a_chunker_that_changes_changes_its_version.py",
+        "tests/test_a_count_that_reached_the_edge_looks_again.py"
+      ]
+    },
+    {
+      "provider": "scripts/doctor.py",
+      "names": [
+        "degraded_summary"
+      ],
+      "contract_sha256": "0e76554bef45bf9c36bc8e0a3ad486fbfb89ff1be819104e448aecc878101313",
+      "integration_tests": [
+        "tests/test_a_check_is_judged_when_it_ends.py",
+        "tests/test_a_late_check_is_unfinished_not_broken.py",
+        "tests/test_a_snapshot_says_when_it_last_looked.py"
+      ]
+    },
+    {
+      "provider": "scripts/evidence_graph.py",
+      "names": [
+        "MAX_SOURCE_MANIFEST_BYTES"
+      ],
+      "contract_sha256": "9caf211d92a5c4b74278e9a42b9cf97f95c5ce7421ca857bb3a7859b4ffb4a9f",
+      "integration_tests": [
+        "tests/test_a_publication_that_is_out_of_time_does_not_link.py",
+        "tests/test_a_question_is_answered_by_its_own_kind_of_generation.py",
+        "tests/test_a_verified_digest_is_remembered.py"
+      ]
+    },
+    {
+      "provider": "scripts/graph_query.py",
+      "names": [
+        "run_graph_query"
+      ],
+      "contract_sha256": "ba7a5b3ac44755f0ffb10e59c3fdb70e8fd53c03bab2f114facf961bbc47e53b",
+      "integration_tests": [
+        "tests/test_graph_query.py"
+      ]
+    },
+    {
+      "provider": "scripts/impact_symbols.py",
+      "names": [
+        "affected_symbols"
+      ],
+      "contract_sha256": "3895d430b6b1297c2e38a773647bca1e43a3285b0706a34e6f098806c464d3fc",
+      "integration_tests": [
+        "tests/test_query_surface.py"
+      ]
+    },
+    {
+      "provider": "scripts/inference_threads.py",
+      "names": [
+        "settle"
+      ],
+      "contract_sha256": "2f261c286e3f9ccb218fabd28f5946bf695d0ab8663278237d994fc5e80d8644",
+      "integration_tests": [
+        "tests/modules/inference_threads/test_values.py",
+        "tests/test_foreground_retrieval_preempts_warmup.py",
+        "tests/test_no_model_running_at_exit.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/code_graph_flows.py",
+      "names": [
+        "find_argument_flows",
+        "find_service_paths"
+      ],
+      "contract_sha256": "24ea7426def85a47ca67df1733ac72dfb2e54bdfaa131bd325643d8f63abe489",
+      "integration_tests": [
+        "tests/test_a_definition_and_a_service_walk_say_what_they_left_out.py",
+        "tests/test_a_flow_mode_stops_when_its_caller_stopped_waiting.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/generation_catalog_store.py",
+      "names": [
+        "GenerationCatalog"
+      ],
+      "contract_sha256": "b18194ebe04bf988b4474379fcb5243516550d43b745a00eaed1453f7844c983",
+      "integration_tests": [
+        "tests/test_a_blocked_task_has_a_way_back.py",
+        "tests/test_a_build_in_flight_is_not_an_orphan.py",
+        "tests/test_a_capacity_refusal_does_not_corrupt_a_generation.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/mcp_server_architecture.py",
+      "names": [
+        "analyze_change_impact",
+        "architecture_answer",
+        "find_dead_code_answer",
+        "get_architecture_mode",
+        "with_generation_freshness"
+      ],
+      "contract_sha256": "51efb8c9b8e0aedf4c4793ab9ddc703d4b7190c797c4060d9ef25037e63d548a",
+      "integration_tests": [
+        "tests/test_a_refresh_runs_on_its_checkout.py",
+        "tests/test_a_refresh_that_never_started_is_asked_for_again.py",
+        "tests/test_answer_budget.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/mcp_server_doctor.py",
+      "names": [
+        "doctor"
+      ],
+      "contract_sha256": "fa6a90a1aa4edf61b9b6bd314962b031870a9bf1c2ce3bd9237a6e8039846f85",
+      "integration_tests": [
+        "tests/test_mcp_server_resources.py",
+        "tests/test_mcp_server_tool_calls.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/mcp_server_navigation.py",
+      "names": [
+        "close_navigation_session_manager",
+        "get_precise_architecture",
+        "normalized_navigation_failure"
+      ],
+      "contract_sha256": "9df601ef7a6972fd088fba4c9ca94f7d5e4f1553a33b5dfaaa81833f86e44e3b",
+      "integration_tests": [
+        "tests/test_mcp_server_navigation_adapters.py",
+        "tests/test_mcp_server_precise_requests.py",
+        "tests/test_the_last_cuts_say_what_they_left_out.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/mcp_server_schemas.py",
+      "names": [
+        "TOOL_INPUT_SCHEMAS"
+      ],
+      "contract_sha256": "d0a7a0bdd1a0aa13c79cd64a2bb84c52a36b36b9fbb52e2886227cc826fc05d0",
+      "integration_tests": [
+        "tests/test_a_context_answer_fits_the_budget_it_was_given.py",
+        "tests/test_a_position_names_its_units.py",
+        "tests/test_an_answer_names_the_commit_it_read.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/mcp_server_validation.py",
+      "names": [
+        "build_tool_definitions",
+        "meta",
+        "validate_tool_arguments",
+        "validated_code_directory"
+      ],
+      "contract_sha256": "e11660e9c1510bbb5b0ad5c73f68745099ba9b594df0ad531e8b3117a9100e0a",
+      "integration_tests": [
+        "tests/test_dead_code_and_dependencies_answer_truthfully.py",
+        "tests/test_mcp_server_precise_requests.py",
+        "tests/test_mcp_server_tool_calls.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/mcp_server_vault.py",
+      "names": [
+        "agent_row",
+        "check_contradiction",
+        "get_context",
+        "get_decisions",
+        "log_decision",
+        "read_page",
+        "retrieval_trace",
+        "search_vault",
+        "trigger_compile",
+        "vault_status",
+        "wiki_overview"
+      ],
+      "contract_sha256": "85712020b55e3a1f1760dc26b9b2f4c30e2695c25a45e9c20b90b9e4060447c5",
+      "integration_tests": [
+        "tests/test_mcp_http.py",
+        "tests/test_mcp_server_helpers.py",
+        "tests/test_mcp_server_resources.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/mcp_server_warmup.py",
+      "names": [
+        "start_encoder_warmup"
+      ],
+      "contract_sha256": "043bd8d643cf06cfedbd72f3d02bf396b7f40ee115d17eae42975c94fff8852e",
+      "integration_tests": [
+        "tests/test_foreground_retrieval_preempts_warmup.py",
+        "tests/test_mcp_server_warmup_and_queries.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/model_choice.py",
+      "names": [
+        "using_root"
+      ],
+      "contract_sha256": "d45f2655cb61963e77617d1dfd7d617b134ad77cc770b59b335d0856e5d65019",
+      "integration_tests": [
+        "tests/test_central_model_selection.py",
+        "tests/test_compile_execution_inventory.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/runtime_roots.py",
+      "names": [
+        "state_root",
+        "vault_root"
+      ],
+      "contract_sha256": "904b31835161d11b79ab937c4651d91dd6966bdaa1f33e93b9ea768f519d2d3b",
+      "integration_tests": [
+        "tests/test_a_continuation_keeps_its_original_entry.py",
+        "tests/test_a_prompt_checkpoint_does_not_outwait_its_host.py",
+        "tests/test_a_session_marker_survives_a_busy_writer.py"
+      ]
+    },
+    {
+      "provider": "scripts/mcp_contract.py",
+      "names": [
+        "build_envelope"
+      ],
+      "contract_sha256": "c89df2987e5ba876c2b052329eebc0b2c99170e882ac832086ee9842d7f7dfbd",
+      "integration_tests": [
+        "tests/test_a_structural_answer_says_its_own_freshness.py",
+        "tests/test_an_answer_names_the_commit_it_read.py",
+        "tests/test_answer_cost.py"
+      ]
+    },
+    {
+      "provider": "scripts/page_facts.py",
+      "names": [
+        "UNSTATED_CONFIDENCE",
+        "read_page_facts"
+      ],
+      "contract_sha256": "f4edadfcd95e3f7856725ead026ef9ce0975020390371d6d264f9c2d8ee976fd",
+      "integration_tests": [
+        "tests/modules/page_facts/test_contract.py"
+      ]
+    },
+    {
+      "provider": "scripts/path_coverage.py",
+      "names": [
+        "coverage_for_path"
+      ],
+      "contract_sha256": "16b0115285a0c1aae705f1b8de29985eeb42059cb41ca17c48a5f3a97122e817",
+      "integration_tests": [
+        "tests/test_coverage_reads_only_inside_the_repository.py",
+        "tests/test_one_hard_python_file_does_not_freeze_the_index.py",
+        "tests/test_path_coverage.py"
+      ]
+    },
+    {
+      "provider": "scripts/provenance_join.py",
+      "names": [
+        "join_symbol_provenance"
+      ],
+      "contract_sha256": "0047aa81871df9b5c57086e418d456ef5958d2d074e8dd8263886b7500250ea0",
+      "integration_tests": [
+        "tests/test_a_cut_says_what_it_left_out.py",
+        "tests/test_a_name_is_resolved_before_the_graph_is_asked.py",
+        "tests/test_provenance_join.py"
+      ]
+    },
+    {
+      "provider": "scripts/query_memory.py",
+      "names": [
+        "QA_DEADLINE_SECONDS",
+        "grounded_qa"
+      ],
+      "contract_sha256": "9d1a1a018251a286966c8c6da245c81ad2cdc37bc79c8c600af80d18096c7d9e",
+      "integration_tests": [
+        "tests/test_a_claim_no_single_span_can_carry.py",
+        "tests/test_a_count_that_reached_the_edge_looks_again.py",
+        "tests/test_a_counting_question_opens_the_pass_itself.py"
+      ]
+    },
+    {
+      "provider": "scripts/reliable_memory.py",
+      "names": [
+        "validate_state_root"
+      ],
+      "contract_sha256": "8680515cd873056a7c8a36e0057d91f2f83f23c48841263697676ff91f7ff964",
+      "integration_tests": [
+        "tests/test_a_backup_image_carries_what_git_does_not.py",
+        "tests/test_a_changed_task_setting_reaches_an_installed_machine.py",
+        "tests/test_a_committed_source_resolves_an_older_compile_plan.py"
+      ]
+    },
+    {
+      "provider": "scripts/repository_indexing.py",
+      "names": [
+        "RepositoryIndexRefused",
+        "detect_repository_changes",
+        "index_repository",
+        "list_repositories"
+      ],
+      "contract_sha256": "725bc5d5a345cde96b66435d402df04e8b6c2ef47ee26918538295529038585f",
+      "integration_tests": [
+        "tests/test_a_ceiling_is_a_named_refusal.py",
+        "tests/test_a_code_generation_is_not_abandoned.py",
+        "tests/test_a_code_generation_needs_no_vectors.py"
+      ]
+    },
+    {
+      "provider": "scripts/repository_scope.py",
+      "names": [
+        "sanitized_git_environment"
+      ],
+      "contract_sha256": "fd550ae20761afad50b37fa3a71044a162485b0e4d4b3e2af9b5b22e143c2bec",
+      "integration_tests": [
+        "tests/test_a_code_generation_is_not_abandoned.py",
+        "tests/test_a_directory_link_inside_the_checkout_does_not_refuse_the_revision.py",
+        "tests/test_a_document_is_opened_in_its_own_language.py"
+      ]
+    },
+    {
+      "provider": "scripts/retrieval.py",
+      "names": [
+        "PROFILE_SIGNALS"
+      ],
+      "contract_sha256": "72a77303e7c31a9cd4fbac90198172b2515465593386bce0bc5e5cb2167c7c1b",
+      "integration_tests": [
+        "tests/test_a_fallback_names_its_cause.py",
+        "tests/test_a_grounded_answer_keeps_automatic_search.py",
+        "tests/test_a_link_list_is_not_an_answer.py"
+      ]
+    },
+    {
+      "provider": "scripts/secret_redact.py",
+      "names": [
+        "redact_secrets"
+      ],
+      "contract_sha256": "8b925f76433b0c3f5ab03f4b8b41a462551d5616843facdd2918813d103ad6f5",
+      "integration_tests": [
+        "tests/modules/secret_redact/test_pattern_prerequisites.py",
+        "tests/modules/secret_redact/test_security_invariants.py",
+        "tests/modules/secret_redact/test_structure.py"
+      ]
+    },
+    {
+      "provider": "scripts/settings.py",
+      "names": [
+        "setting_value"
+      ],
+      "contract_sha256": "ec6d2a43d91dba48c174aad5e9505790a05fd66f1bf1e5292264857f320a9881",
+      "integration_tests": [
+        "tests/test_a_compile_asked_through_mcp_takes_the_compile_lock.py",
+        "tests/test_a_generation_snapshot_uses_the_writer_gate.py",
+        "tests/test_a_rerank_has_the_window_it_was_measured_to_need.py"
+      ]
+    },
+    {
+      "provider": "scripts/symbol_search.py",
+      "names": [
+        "search_symbols"
+      ],
+      "contract_sha256": "eecd0dc30e646784fb3994cc124b9034f30faa322331083dcc08c5edc298c3a7",
+      "integration_tests": [
+        "tests/test_every_structural_answer_carries_its_freshness.py",
+        "tests/test_query_surface.py"
+      ]
+    },
+    {
+      "provider": "scripts/symbol_snippet.py",
+      "names": [
+        "snippet_for_symbol"
+      ],
+      "contract_sha256": "64787e65025265ca7201788a2872fc395fc35c1b0e8242395064c044cf7bd562",
+      "integration_tests": [
+        "tests/test_a_definition_and_a_service_walk_say_what_they_left_out.py",
+        "tests/test_a_fresh_line_belongs_to_the_symbol_it_names.py",
+        "tests/test_a_name_is_resolved_before_the_graph_is_asked.py"
+      ]
+    }
+  ]
+}

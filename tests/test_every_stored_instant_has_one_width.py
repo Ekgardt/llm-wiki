@@ -6,20 +6,24 @@ from __future__ import annotations
 
 import ast
 import re
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta, timezone
+from functools import partial
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
-WHOLE = datetime(2026, 9, 26, 10, 0, 0, tzinfo=timezone.utc)
+from tests.script_sources import script_files, script_key
+
+WHOLE = datetime(2026, 9, 26, 10, 0, 0, tzinfo=UTC)
 
 
-@pytest.mark.parametrize("module_name", ["iso_time", "markdown_transaction", "project_journal"])
+@pytest.mark.parametrize("module_name", ["iso_time", "llm_wiki.markdown_store", "project_journal"])
 def test_a_whole_second_sorts_before_the_half_second_after_it(module_name) -> None:
     import importlib
 
     module = importlib.import_module(module_name)
-    write = getattr(module, "utc_text", None) or module._timestamp
+    write = getattr(module, "utc_text", None) or getattr(module, "stored_timestamp_text", None) or module._timestamp
 
     earlier, later = write(WHOLE), write(WHOLE + timedelta(milliseconds=500))
 
@@ -49,14 +53,15 @@ def _bare_isoformat_lines(tree: ast.AST) -> list[int]:
 
 
 def test_a_module_that_compares_times_in_sql_writes_them_in_one_width() -> None:
+    scripts = Path(__file__).resolve().parents[1] / "scripts"
     offenders = {}
-    for path in sorted((Path(__file__).resolve().parents[1] / "scripts").glob("*.py")):
+    for path in sorted(scripts.rglob("*.py")):
         source = path.read_text(encoding="utf-8")
         if _SQL_TIME_COMPARISON.search(source):
-            offenders[path.name] = _bare_isoformat_lines(ast.parse(source))
+            offenders[path.relative_to(scripts).as_posix()] = _bare_isoformat_lines(ast.parse(source))
 
     assert {name: lines for name, lines in offenders.items() if lines} == {}
-    assert "markdown_transaction.py" in offenders
+    assert {"llm_wiki/markdown_coordinator_base.py", "llm_wiki/queue_store.py"} <= offenders.keys()
 
 
 # The microsecond `Z` form `utc_text` owns; `trace_ingest` keeps its own
@@ -73,7 +78,74 @@ def _hand_rolled_lines(path: Path) -> list[int]:
 
 def test_one_module_writes_the_fixed_width_instant() -> None:
     """Four copies of the writer drifted apart (audit 2026-09-27 C-18); only iso_time may hold it."""
-    scripts = sorted((Path(__file__).resolve().parents[1] / "scripts").glob("*.py"))
-    copies = {path.name: _hand_rolled_lines(path) for path in scripts if path.name != "iso_time.py"}
+    copies = {script_key(path): _hand_rolled_lines(path) for path in script_files() if path.name != "iso_time.py"}
 
     assert {name: lines for name, lines in copies.items() if lines} == {}
+
+
+def _adapter_event(at):
+    from event_envelope import build_event_envelope
+
+    return build_event_envelope(event_type="session_end", payload={"reason": "clear", "transcript_path": None},
+                                occurred_at=at, captured_at=at, agent="codex", session="clock-test")
+
+
+def _later_clock(at):
+    return at + timedelta(hours=1)
+
+
+@pytest.mark.parametrize("at", [WHOLE, WHOLE + timedelta(microseconds=500001)])
+def test_adapter_pending_clock_keeps_width_and_actual_reducer_roundtrip(at):
+    import project_checkpoint
+
+    envelope = _adapter_event(at)
+    pending = project_checkpoint.pending_checkpoint(envelope, "demo", "demo:clock-test")
+    assert pending["occurred_at"] == at.isoformat(timespec="microseconds")
+    decision = project_checkpoint.observe_pending_item(pending, {}, {})
+    assert decision is not None and decision.checkpoint_at == at
+
+
+@pytest.mark.parametrize("at", [WHOLE, WHOLE + timedelta(microseconds=500001)])
+def test_adapter_inflight_clock_keeps_width_and_recovery_roundtrip(at):
+    import project_checkpoint
+    from project_journal import CheckpointDecision
+
+    pending = project_checkpoint.pending_checkpoint(_adapter_event(at), "demo", "demo:clock-test")
+    pending["claim_owner"] = "clock-owner"
+    state = {"project_checkpoint_pending": {"demo": [pending]}}
+    project_checkpoint.record_inflight_state(state, "demo", "clock-owner", [pending],
+                                   CheckpointDecision("session_end", checkpoint_at=at))
+    inflight = state[project_checkpoint.INFLIGHT_STATE_KEY]["demo"]
+    assert inflight["checkpoint_at"] == at.isoformat(timespec="microseconds")
+    replayed = project_checkpoint.inflight_plan([pending], {}, inflight)
+    assert replayed is not None and replayed[-1].checkpoint_at == at
+
+
+@pytest.mark.parametrize("at", [WHOLE, WHOLE + timedelta(microseconds=500001)])
+def test_adapter_capture_clock_keeps_width_and_session_filing_roundtrip(at):
+    import flush_memory
+    import integration_adapter as adapter
+
+    record = adapter.capture_source_record(_adapter_event(at), "demo", "clear", "source")
+    assert record["occurred_at"] == at.isoformat(timespec="microseconds")
+    assert flush_memory.session_time(record, partial(_later_clock, at)) == at
+
+
+def test_adapter_clock_readers_keep_historical_width_and_absent_clock():
+    import flush_memory
+    import integration_adapter as adapter
+    import project_checkpoint
+
+    assert project_checkpoint.inflight_time({"checkpoint_at": WHOLE.isoformat()}) == WHOLE
+    assert flush_memory.intent_time({"occurred_at": WHOLE.isoformat()}) == WHOLE
+    assert project_checkpoint.inflight_time({"checkpoint_at": None}) is None
+    assert adapter.capture_occurred_at(SimpleNamespace(occurred_at=None)) is None
+
+
+def test_adapter_capture_clock_preserves_an_existing_offset():
+    import integration_adapter as adapter
+
+    at = WHOLE.astimezone(timezone(timedelta(hours=5, minutes=30)))
+    encoded = adapter.capture_occurred_at(SimpleNamespace(occurred_at=at))
+    assert encoded == at.isoformat(timespec="microseconds")
+    assert datetime.fromisoformat(encoded) == WHOLE

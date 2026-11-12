@@ -17,9 +17,10 @@ from pathlib import Path
 import fresh_positions
 import install_pyright
 import mcp_server
-import pyright_session as pyright_session_module
 import pytest
-from pyright_session import ProviderDiagnostics, PyrightSession
+from llm_wiki import pyright_session_diagnostics
+from llm_wiki.pyright_session_core import PyrightSession
+from llm_wiki.pyright_session_values import ProviderDiagnostics
 from repository_scope import resolve_repository_scope
 
 from tests.code_kernel_helpers import create_semantic_pyright_fixture
@@ -37,7 +38,7 @@ def test_a_diagnostics_publication_past_the_budget_is_answered_as_partial_at_onc
 ) -> None:
     fixture = create_semantic_pyright_fixture(repository, config={"push_diagnostics": False})
     session = PyrightSession(resolve_repository_scope(repository), fixture.identity, state_root=state_root)
-    monkeypatch.setattr(pyright_session_module, "_MAX_DIAGNOSTIC_BYTES", 512)
+    monkeypatch.setattr(pyright_session_diagnostics, "MAX_DIAGNOSTIC_BYTES", 512)
     try:
         document = session.open_document("pkg/service.py", deadline=time.monotonic() + SHORT_TIMEOUT)
         _publish(session, document.source.uri, "x" * 2048)
@@ -59,14 +60,14 @@ def _chained(depth: int) -> BaseException:
 
 
 def test_a_cause_chain_deeper_than_it_prints_says_so(capsys: pytest.CaptureFixture[str]) -> None:
-    install_pyright._print_cause_chain(_chained(install_pyright.MAX_CAUSE_DEPTH + 2))
+    install_pyright.print_cause_chain(_chained(install_pyright.MAX_CAUSE_DEPTH + 2))
     printed = capsys.readouterr().err
     assert printed.count("caused by:") == install_pyright.MAX_CAUSE_DEPTH
     assert "further causes not shown" in printed
 
 
 def test_a_short_cause_chain_prints_no_note(capsys: pytest.CaptureFixture[str]) -> None:
-    install_pyright._print_cause_chain(_chained(2))
+    install_pyright.print_cause_chain(_chained(2))
     assert "further causes not shown" not in capsys.readouterr().err
 
 
@@ -83,9 +84,9 @@ def test_the_navigation_cache_evicts_the_oldest_source_instead_of_refusing(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     scope = resolve_repository_scope(tmp_path)
-    monkeypatch.setattr(mcp_server, "MAX_NAVIGATION_SOURCE_CACHE_BYTES", 8)
-    monkeypatch.setattr(mcp_server, "_navigation_source_bytes", lambda *_a, **_k: b"12345")
-    cache = mcp_server._NavigationSourceCache()
+    monkeypatch.setattr("llm_wiki.mcp_server_limits.MAX_NAVIGATION_SOURCE_CACHE_BYTES", 8)
+    monkeypatch.setattr("llm_wiki.mcp_server_navigation.navigation_source_bytes", lambda *_a, **_k: b"12345")
+    cache = mcp_server.NavigationSourceCache()
     deadline = time.monotonic() + SHORT_TIMEOUT
     answers = [cache.read(scope, name, deadline=deadline) for name in ("a.py", "b.py", "c.py")]
     assert [answer[0] for answer in answers] == [b"12345"] * 3

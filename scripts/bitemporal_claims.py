@@ -4,10 +4,10 @@ Two clocks, both already carried by `claim/v1` and neither invented here:
 
 * **valid time** — when the fact was true in the world. `validity.from` /
   `validity.to`, half-open `[from, to)`, already order-checked by
-  `claims._require_ordered_interval`. A claim that declares none is read as
+  `llm_wiki.claim_ledger.require_ordered_interval`. A claim that declares none is read as
   valid from its own observation.
 * **transaction time** — when this vault learned it. `observed_at`, which
-  `claims._require_observation` binds to the exact daily block the evidence was
+  `llm_wiki.claim_ledger.require_observation` binds to the exact daily block the evidence was
   cited from, so it is proved by evidence rather than asserted by a writer.
 
 The third thing a bitemporal store needs is the *end* of the transaction-time
@@ -35,10 +35,12 @@ from claims import (
     RELATIONS,
     IndexedClaim,
     NormalizedClaim,
-    _canonical_time,
-    _instant_of,
 )
-from reliable_memory import canonical_json_bytes
+from llm_wiki.claim_ledger import (
+    canonical_time,
+    instant_of,
+)
+from llm_wiki.formats.canonical import canonical_json_bytes
 
 # A relation is single-valued when a subject can hold exactly one value for it
 # at one instant. Only those take part in automatic invalidation.
@@ -178,7 +180,7 @@ def _require_validity_shape(validity: object) -> None:
 def _instant_text(value: object, *, label: str) -> str:
     """Canonical text, refusing by name rather than coercing an unreadable time."""
     try:
-        canonical = _canonical_time(value, nullable=False, label=label)
+        canonical = canonical_time(value, nullable=False, label=label)
     except (TypeError, ValueError) as exc:
         raise BitemporalRefusal(f"bitemporal_time_invalid: {exc}") from exc
     assert isinstance(canonical, str)
@@ -192,7 +194,7 @@ def _optional_instant_text(value: object, *, label: str) -> str | None:
 
 
 def _instant(value: object, *, label: str) -> datetime:
-    return _instant_of(_instant_text(value, label=label))
+    return instant_of(_instant_text(value, label=label))
 
 
 def _earliest(first: str | None, second: str | None) -> str | None:
@@ -200,17 +202,17 @@ def _earliest(first: str | None, second: str | None) -> str | None:
         return second
     if second is None:
         return first
-    return min(first, second, key=_instant_of)
+    return min(first, second, key=instant_of)
 
 
 def _contains(item: Belief, moment: datetime) -> bool:
     """Half-open: the start is included, the end is not."""
-    if _instant_of(item.valid_from) > moment:
+    if instant_of(item.valid_from) > moment:
         return False
     end = item.effective_valid_to
     if end is None:
         return True
-    return _instant_of(end) > moment
+    return instant_of(end) > moment
 
 
 def _visible(beliefs: Sequence[Belief], known_at: object | None) -> list[Belief]:
@@ -226,7 +228,7 @@ def _active(beliefs: Sequence[Belief]) -> list[Belief]:
 
 
 def _observed_by(beliefs: Sequence[Belief], limit: datetime) -> list[Belief]:
-    return [item for item in beliefs if _instant_of(item.observed_at) <= limit]
+    return [item for item in beliefs if instant_of(item.observed_at) <= limit]
 
 
 def _grouped(beliefs: Sequence[Belief]) -> dict[bytes, list[Belief]]:
@@ -252,7 +254,7 @@ def _value_bytes(record: Mapping[str, object]) -> bytes:
 
 
 def _belief_order(item: Belief) -> tuple[datetime, str]:
-    return (_instant_of(item.observed_at), item.claim_id)
+    return (instant_of(item.observed_at), item.claim_id)
 
 
 def _resolved_group(group: list[Belief]) -> list[Belief]:
@@ -320,7 +322,7 @@ def _require_orderable(ordered: list[Belief]) -> None:
 
 def _require_distinct_observation(first: Belief, second: Belief) -> None:
     """Conflicting claims observed at one instant carry no order to read."""
-    if _instant_of(first.observed_at) != _instant_of(second.observed_at):
+    if instant_of(first.observed_at) != instant_of(second.observed_at):
         return
     if _value_bytes(first.record) == _value_bytes(second.record):
         return

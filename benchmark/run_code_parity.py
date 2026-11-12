@@ -168,7 +168,7 @@ def _grade_side(outcome: dict, must: list, must_not: list) -> str:
 
 # A graded line number that is a definition's own line: written as
 # `{line:<path>:<symbol>}` and resolved from the tree at grading time. The gold
-# used to carry 3030 for `def _page_diverse`, and an edit above it made every
+# used to carry 3030 for `def page_diverse`, and an edit above it made every
 # side grade wrong whatever it answered. Research:
 # docs/research/2026-09-13-what-the-stands-must-show-after-the-verdict-cache.md.
 _DEFINITION_TERM = re.compile(
@@ -442,7 +442,7 @@ def _child_result(payload: dict) -> dict:
     import mcp_server
 
     start = time.monotonic()
-    data, _ = mcp_server._tool_call_data(
+    data, _ = mcp_server.tool_call_data(
         payload["tool"], payload["arguments"], start + CALL_BUDGET_SECONDS
     )
     return {"seconds": round(time.monotonic() - start, 3), "data": data}

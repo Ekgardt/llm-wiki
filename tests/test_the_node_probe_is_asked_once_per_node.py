@@ -18,12 +18,12 @@ from pyright_profile import PyrightCandidates, discover_pyright
 from repository_scope import resolve_repository_scope
 
 from tests.code_kernel_helpers import create_pyright_fixture
-from tests.test_pyright_profile import _FakeNodeProcess, _install_fake_node
+from tests.pyright_profile_helpers import _FakeNodeProcess, _install_fake_node
 
 
 @pytest.fixture(autouse=True)
 def _empty_probe_cache() -> None:
-    pyright_profile._NODE_PROBE_CACHE.clear()
+    pyright_profile.NODE_PROBE_CACHE.clear()
 
 
 def _node_path(tmp_path: Path) -> Path:
@@ -111,10 +111,10 @@ def test_a_kept_probe_expires(
     processes, _trees = _fake_node(monkeypatch, tmp_path, b"v22.23.1\n")
 
     _discover(scope, state_root, server)
-    pyright_profile._NODE_PROBE_CACHE.update(
+    pyright_profile.NODE_PROBE_CACHE.update(
         {
             key: (time.monotonic() - 1.0, value)
-            for key, (_expiry, value) in pyright_profile._NODE_PROBE_CACHE.items()
+            for key, (_expiry, value) in pyright_profile.NODE_PROBE_CACHE.items()
         }
     )
     second = _discover(scope, state_root, server)

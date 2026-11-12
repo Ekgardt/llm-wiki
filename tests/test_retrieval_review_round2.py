@@ -7,7 +7,9 @@ import time
 from pathlib import Path
 
 import pytest
+from llm_wiki import retrieval_optional_stages, runtime_roots
 
+from tests.retrieval_stage_deadline import expire_after_backend
 from tests.slow_machine import SHORT_TIMEOUT
 
 SCRIPTS = Path(__file__).resolve().parents[1] / "scripts"
@@ -41,8 +43,8 @@ def _hit(cid: str, path: str, score: float, **extra):
 
 
 def test_semantic_false_forces_base_lexical_even_for_hybrid_profile(monkeypatch):
+    import generation_search
     import retrieval
-    import search_memory
 
     dense_calls = {"n": 0}
 
@@ -53,8 +55,7 @@ def test_semantic_false_forces_base_lexical_even_for_hybrid_profile(monkeypatch)
     # Direct retrieve_via_search_memory path: semantic=False must force BASE.
     analysis_profile = "HYBRID"
     monkeypatch.setattr(
-        retrieval,
-        "analyze_query",
+        "llm_wiki.retrieval_query.analyze_query",
         lambda q: retrieval.QueryAnalysis(
             query=q,
             normalized_query=q,
@@ -64,9 +65,9 @@ def test_semantic_false_forces_base_lexical_even_for_hybrid_profile(monkeypatch)
             recommended_profile=analysis_profile,
         ),
     )
-    monkeypatch.setattr(search_memory, "_active_generation_catalog", lambda: None)
+    monkeypatch.setattr(generation_search, "active_generation_catalog", lambda: None)
     monkeypatch.setattr(
-        search_memory,
+        generation_search,
         "markdown_hits",
         lambda *a, **k: [_hit("a", "a.md", 1.0)],
     )
@@ -85,8 +86,9 @@ def test_semantic_false_forces_base_lexical_even_for_hybrid_profile(monkeypatch)
 
 
 def test_vector_inclusive_seal_used_when_vectors_complete(monkeypatch):
+    import generation_fts_validation
+    import generation_search
     import retrieval
-    import search_memory
     from repository_scope import resolve_repository_scope
 
     sealed = []
@@ -95,24 +97,24 @@ def test_vector_inclusive_seal_used_when_vectors_complete(monkeypatch):
         sealed.append(tuple(artifact_names))
         return ("seal", tuple(artifact_names))
 
-    monkeypatch.setattr(search_memory, "_generation_consumption_seal", fake_seal)
+    monkeypatch.setattr(generation_search, "generation_consumption_seal", fake_seal)
     class Conn:
         def close(self):
             return None
 
-    monkeypatch.setattr(search_memory, "_generation_connection", lambda *a, **k: Conn())
+    monkeypatch.setattr(generation_search, "generation_connection", lambda *a, **k: Conn())
     monkeypatch.setattr(
-        search_memory,
-        "_generation_fts_search",
+        generation_search,
+        "generation_fts_search",
         lambda *a, **k: [_hit("c1", "a.md", 1.0, chunk_id="c1")],
     )
     monkeypatch.setattr(
-        search_memory,
-        "_generation_vectors_search",
+        generation_search,
+        "generation_vectors_search",
         lambda *a, **k: [_hit("c1", "a.md", 0.9, chunk_id="c1")],
     )
-    monkeypatch.setattr(search_memory, "_generation_artifact", lambda m, n: True)
-    monkeypatch.setattr(search_memory, "markdown_hits", lambda *a, **k: [])
+    monkeypatch.setattr(generation_search, "generation_artifact", lambda m, n: True)
+    monkeypatch.setattr(generation_search, "markdown_hits", lambda *a, **k: [])
 
     class Catalog:
         generations_path = Path(".")
@@ -121,10 +123,10 @@ def test_vector_inclusive_seal_used_when_vectors_complete(monkeypatch):
             pytest.fail("repository retrieval must not invoke generic get_active repair")
 
         def get_active_for_repository(self, repository_scope, **_kwargs):
-            assert repository_scope == resolve_repository_scope(search_memory.ROOT)
+            assert repository_scope == resolve_repository_scope(runtime_roots.vault_root())
             return {
                 "generation_id": "gen-v",
-                "repository_scope": resolve_repository_scope(search_memory.ROOT).as_dict(),
+                "repository_scope": resolve_repository_scope(runtime_roots.vault_root()).as_dict(),
                 "vector_state": "complete",
                 "embedding_model_id": "m",
                 "embedding_model_revision": "r",
@@ -136,8 +138,8 @@ def test_vector_inclusive_seal_used_when_vectors_complete(monkeypatch):
                 "source_manifest_sha256": "a" * 64,
                 "collector_version": "c",
                 "extractor_version": "e",
-                "tokenizer_version": search_memory.GENERATION_TOKENIZER_VERSION,
-                "tokenizer_config_sha256": search_memory.GENERATION_TOKENIZER_CONFIG_SHA256,
+                "tokenizer_version": generation_fts_validation.GENERATION_TOKENIZER_VERSION,
+                "tokenizer_config_sha256": generation_fts_validation.GENERATION_TOKENIZER_CONFIG_SHA256,
                 "schema_version": "corpus-generation/v1",
             }
 
@@ -164,51 +166,51 @@ def test_wrong_repository_generation_cannot_contribute_any_signal(
     tmp_path, monkeypatch, bind_generation
 ):
     import evidence_graph
+    import generation_fts_validation
+    import generation_search
     import graph_neighbors
     import retrieval
-    import search_memory
     from repository_scope import resolve_repository_scope
 
     repository_a = tmp_path / "first" / "same-name"
     repository_b = tmp_path / "second" / "same-name"
     repository_a.mkdir(parents=True)
     repository_b.mkdir(parents=True)
-    monkeypatch.setattr(search_memory, "ROOT", repository_b)
+    monkeypatch.setenv("LLM_WIKI_ROOT", str(repository_b))
     monkeypatch.setattr(
-        search_memory,
-        "_generation_consumption_seal",
+        generation_search,
+        "generation_consumption_seal",
         lambda *_args, **_kwargs: pytest.fail("wrong generation must not be sealed"),
     )
     monkeypatch.setattr(
-        search_memory,
-        "_generation_consumption_unchanged",
+        generation_search,
+        "generation_consumption_unchanged",
         lambda *_args, **_kwargs: True,
     )
 
     monkeypatch.setattr(
-        search_memory,
-        "_generation_connection",
+        generation_search,
+        "generation_connection",
         lambda *_args, **_kwargs: pytest.fail("wrong generation FTS must not open"),
     )
     monkeypatch.setattr(
-        search_memory,
-        "_generation_fts_search",
+        generation_search,
+        "generation_fts_search",
         lambda *_args, **_kwargs: pytest.fail("wrong generation lexical signal used"),
     )
     monkeypatch.setattr(
-        search_memory,
-        "_generation_vectors_search",
+        generation_search,
+        "generation_vectors_search",
         lambda *_args, **_kwargs: pytest.fail("wrong generation vector signal used"),
     )
     monkeypatch.setattr(
-        search_memory,
+        generation_search,
         "markdown_hits",
         lambda *_args, **_kwargs: [_hit("local", "local.md", 1.0)],
     )
     monkeypatch.setattr(graph_neighbors, "boost_graph_neighbors", lambda *_args, **_kwargs: [])
     monkeypatch.setattr(
-        retrieval,
-        "expand_evidence_graph",
+        "llm_wiki.retrieval_graph.expand_evidence_graph",
         lambda *_args, **_kwargs: pytest.fail("wrong generation graph signal used"),
     )
 
@@ -252,8 +254,8 @@ def test_wrong_repository_generation_cannot_contribute_any_signal(
                 "source_manifest_sha256": "a" * 64,
                 "collector_version": "c",
                 "extractor_version": "e",
-                "tokenizer_version": search_memory.GENERATION_TOKENIZER_VERSION,
-                "tokenizer_config_sha256": search_memory.GENERATION_TOKENIZER_CONFIG_SHA256,
+                "tokenizer_version": generation_fts_validation.GENERATION_TOKENIZER_VERSION,
+                "tokenizer_config_sha256": generation_fts_validation.GENERATION_TOKENIZER_CONFIG_SHA256,
                 "schema_version": "corpus-generation/v1",
             }
             if bind_generation:
@@ -283,15 +285,15 @@ def test_wrong_repository_generation_cannot_contribute_any_signal(
 def test_repository_retrieval_selects_scope_before_generic_active_repair(
     tmp_path, monkeypatch
 ):
+    import generation_search
     import retrieval
-    import search_memory
     from repository_scope import resolve_repository_scope
 
     repository = tmp_path / "repository"
     repository.mkdir()
     scope = resolve_repository_scope(repository)
-    monkeypatch.setattr(search_memory, "ROOT", repository)
-    monkeypatch.setattr(search_memory, "markdown_hits", lambda *_a, **_k: [])
+    monkeypatch.setenv("LLM_WIKI_ROOT", str(repository))
+    monkeypatch.setattr(generation_search, "markdown_hits", lambda *_a, **_k: [])
 
     class Catalog:
         def get_active(self, **_kwargs):
@@ -319,19 +321,21 @@ def test_public_search_propagates_generation_stage_timeout(
     tmp_path, monkeypatch, stage
 ):
     import evidence_graph
-    import retrieval
+    import generation_fts_validation
+    import generation_search
     import search_memory
     from repository_scope import resolve_repository_scope
 
     root = tmp_path / "repository"
     root.mkdir()
-    monkeypatch.setattr(search_memory, "ROOT", root)
+    monkeypatch.setenv("LLM_WIKI_ROOT", str(root))
     deadline = time.monotonic() + 30
 
     def cancelled():
         return False
 
     seen: list[tuple[str, float | None, object]] = []
+    connection_seals = []
 
     def stop(name, received_deadline=None, received_cancelled=None):
         seen.append((name, received_deadline, received_cancelled))
@@ -354,8 +358,8 @@ def test_public_search_propagates_generation_stage_timeout(
         "source_manifest_sha256": "a" * 64,
         "collector_version": "collector",
         "extractor_version": "extractor",
-        "tokenizer_version": search_memory.GENERATION_TOKENIZER_VERSION,
-        "tokenizer_config_sha256": search_memory.GENERATION_TOKENIZER_CONFIG_SHA256,
+        "tokenizer_version": generation_fts_validation.GENERATION_TOKENIZER_VERSION,
+        "tokenizer_config_sha256": generation_fts_validation.GENERATION_TOKENIZER_CONFIG_SHA256,
         "schema_version": "corpus-generation/v1",
     }
 
@@ -400,7 +404,8 @@ def test_public_search_propagates_generation_stage_timeout(
         stop("seal_recheck", deadline, cancelled)
         return True
 
-    def connection(_catalog, _manifest, *, deadline=None, cancelled=None):
+    def connection(_catalog, _manifest, *, deadline=None, cancelled=None, seal=None):
+        connection_seals.append(seal)
         stop("fts_open", deadline, cancelled)
         return Connection()
 
@@ -413,14 +418,14 @@ def test_public_search_propagates_generation_stage_timeout(
         return [_hit("local", "local.md", 0.9)]
 
     monkeypatch.setattr(evidence_graph, "EvidenceGraph", Graph)
-    monkeypatch.setattr(search_memory, "_generation_consumption_seal", seal)
-    monkeypatch.setattr(search_memory, "_generation_consumption_unchanged", unchanged)
-    monkeypatch.setattr(search_memory, "_generation_connection", connection)
-    monkeypatch.setattr(search_memory, "_generation_fts_search", fts)
-    monkeypatch.setattr(search_memory, "_generation_vectors_search", vectors)
-    monkeypatch.setattr(retrieval, "expand_evidence_graph", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(generation_search, "generation_consumption_seal", seal)
+    monkeypatch.setattr(generation_search, "generation_consumption_unchanged", unchanged)
+    monkeypatch.setattr(generation_search, "generation_connection", connection)
+    monkeypatch.setattr(generation_search, "generation_fts_search", fts)
+    monkeypatch.setattr(generation_search, "generation_vectors_search", vectors)
+    monkeypatch.setattr("llm_wiki.retrieval_graph.expand_evidence_graph", lambda *_args, **_kwargs: [])
     monkeypatch.setattr(
-        search_memory,
+        generation_search,
         "markdown_hits",
         lambda *_args, **_kwargs: pytest.fail("timeout must not become legacy fallback"),
     )
@@ -447,6 +452,7 @@ def test_public_search_propagates_generation_stage_timeout(
         else (stage, deadline, cancelled)
     )
     assert expected_stop in seen
+    assert connection_seals[:1] in ([], [("sealed",)])
 
 
 @pytest.mark.parametrize("stop", ["deadline", "cancelled"])
@@ -463,9 +469,10 @@ def test_public_search_rejects_expired_or_cancelled_request(stop):
 
 
 def test_public_search_threads_deadline_and_cancel_into_the_markdown_read(monkeypatch):
+    import generation_search
     import search_memory
 
-    monkeypatch.setattr(search_memory, "_active_generation_catalog", lambda: None)
+    monkeypatch.setattr(generation_search, "active_generation_catalog", lambda: None)
     deadline = time.monotonic() + 30
 
     def cancelled():
@@ -478,7 +485,7 @@ def test_public_search_threads_deadline_and_cancel_into_the_markdown_read(monkey
 
     test_deadline = deadline
     test_cancelled = cancelled
-    monkeypatch.setattr(search_memory, "markdown_hits", lexical)
+    monkeypatch.setattr(generation_search, "markdown_hits", lexical)
 
     with pytest.raises(TimeoutError, match="markdown read deadline"):
         search_memory.search(
@@ -493,14 +500,11 @@ def test_public_search_threads_deadline_and_cancel_into_the_markdown_read(monkey
         )
 
 
-def _mode_of(row: dict) -> tuple:
-    return (
-        row["requested_mode"],
-        row["effective_mode"],
-        row["signals_used"],
-        row["fallback_reason"],
-        row["partial"],
-    )
+def _assert_optional_stage_times_out(retrieval, hanging) -> None:
+    with pytest.raises(retrieval.OptionalStageTimeout):
+        retrieval.run_optional_bounded(
+            hanging, deadline=time.monotonic() + SHORT_TIMEOUT, cancelled=None
+        )
 
 
 def test_optional_boundary_caps_concurrent_stragglers(monkeypatch):
@@ -509,10 +513,9 @@ def test_optional_boundary_caps_concurrent_stragglers(monkeypatch):
     release = threading.Event()
     started = 0
     lock = threading.Lock()
-    monkeypatch.setattr(retrieval, "OPTIONAL_STAGE_MAX_SECONDS", 0.01)
+    monkeypatch.setattr("llm_wiki.retrieval_optional_stages.OPTIONAL_STAGE_MAX_SECONDS", 0.01)
     monkeypatch.setattr(
-        retrieval,
-        "_OPTIONAL_STAGE_SLOTS",
+        "llm_wiki.retrieval_optional_stages.OPTIONAL_STAGE_SLOTS",
         threading.BoundedSemaphore(retrieval.MAX_OPTIONAL_STRAGGLERS),
     )
 
@@ -524,10 +527,7 @@ def test_optional_boundary_caps_concurrent_stragglers(monkeypatch):
 
     try:
         for _ in range(retrieval.MAX_OPTIONAL_STRAGGLERS + 1):
-            with pytest.raises(retrieval.OptionalStageTimeout):
-                retrieval._run_optional_bounded(
-                    hanging, deadline=time.monotonic() + SHORT_TIMEOUT, cancelled=None
-                )
+            _assert_optional_stage_times_out(retrieval, hanging)
         assert started == retrieval.MAX_OPTIONAL_STRAGGLERS
     finally:
         release.set()
@@ -536,7 +536,7 @@ def test_optional_boundary_caps_concurrent_stragglers(monkeypatch):
 def test_optional_boundary_releases_capacity_when_thread_start_fails(monkeypatch):
     import retrieval
 
-    real_thread = retrieval.threading.Thread
+    real_thread = retrieval_optional_stages.threading.Thread
     starts = 0
 
     # A real thread, so the registry that tracks inference threads forgets it when it
@@ -549,20 +549,19 @@ def test_optional_boundary_releases_capacity_when_thread_start_fails(monkeypatch
                 raise RuntimeError("thread startup failed")
             super().start()
 
-    monkeypatch.setattr(retrieval.threading, "Thread", FailingThenRealThread)
+    monkeypatch.setattr(retrieval_optional_stages.threading, "Thread", FailingThenRealThread)
     monkeypatch.setattr(
-        retrieval,
-        "_OPTIONAL_STAGE_SLOTS",
+        "llm_wiki.retrieval_optional_stages.OPTIONAL_STAGE_SLOTS",
         threading.BoundedSemaphore(retrieval.MAX_OPTIONAL_STRAGGLERS),
     )
 
     for _ in range(retrieval.MAX_OPTIONAL_STRAGGLERS):
         with pytest.raises(RuntimeError, match="thread startup failed"):
-            retrieval._run_optional_bounded(
+            retrieval.run_optional_bounded(
                 lambda: "unused", deadline=time.monotonic() + SHORT_TIMEOUT, cancelled=None
             )
 
-    assert retrieval._run_optional_bounded(
+    assert retrieval.run_optional_bounded(
         lambda: "started", deadline=time.monotonic() + SHORT_TIMEOUT, cancelled=None
     ) == "started"
 
@@ -575,8 +574,8 @@ def test_optional_boundary_releases_the_acquired_semaphore_after_rebind(monkeypa
         rebound_slots = threading.BoundedSemaphore(1)
         release = threading.Event()
         finished = threading.Event()
-        monkeypatch.setattr(retrieval, "OPTIONAL_STAGE_MAX_SECONDS", 0.005)
-        monkeypatch.setattr(retrieval, "_OPTIONAL_STAGE_SLOTS", acquired_slots)
+        monkeypatch.setattr("llm_wiki.retrieval_optional_stages.OPTIONAL_STAGE_MAX_SECONDS", 0.005)
+        monkeypatch.setattr("llm_wiki.retrieval_optional_stages.OPTIONAL_STAGE_SLOTS", acquired_slots)
 
         def straggler():
             try:
@@ -585,10 +584,10 @@ def test_optional_boundary_releases_the_acquired_semaphore_after_rebind(monkeypa
                 finished.set()
 
         with pytest.raises(retrieval.OptionalStageTimeout):
-            retrieval._run_optional_bounded(
+            retrieval.run_optional_bounded(
                 straggler, deadline=time.monotonic() + SHORT_TIMEOUT, cancelled=None
             )
-        monkeypatch.setattr(retrieval, "_OPTIONAL_STAGE_SLOTS", rebound_slots)
+        monkeypatch.setattr("llm_wiki.retrieval_optional_stages.OPTIONAL_STAGE_SLOTS", rebound_slots)
         release.set()
         assert finished.wait(SHORT_TIMEOUT)
         assert acquired_slots.acquire(blocking=False)
@@ -608,14 +607,14 @@ def test_optional_boundary_start_failure_releases_acquired_semaphore_after_rebin
             pass
 
         def start(self):
-            monkeypatch.setattr(retrieval, "_OPTIONAL_STAGE_SLOTS", rebound_slots)
+            monkeypatch.setattr("llm_wiki.retrieval_optional_stages.OPTIONAL_STAGE_SLOTS", rebound_slots)
             raise RuntimeError("thread startup failed")
 
-    monkeypatch.setattr(retrieval, "_OPTIONAL_STAGE_SLOTS", acquired_slots)
-    monkeypatch.setattr(retrieval.threading, "Thread", RebindingFailedThread)
+    monkeypatch.setattr("llm_wiki.retrieval_optional_stages.OPTIONAL_STAGE_SLOTS", acquired_slots)
+    monkeypatch.setattr(retrieval_optional_stages.threading, "Thread", RebindingFailedThread)
 
     with pytest.raises(RuntimeError, match="thread startup failed"):
-        retrieval._run_optional_bounded(
+        retrieval.run_optional_bounded(
             lambda: None, deadline=time.monotonic() + SHORT_TIMEOUT, cancelled=None
         )
     assert acquired_slots.acquire(blocking=False)
@@ -623,11 +622,12 @@ def test_optional_boundary_start_failure_releases_acquired_semaphore_after_rebin
 
 
 def test_explicit_base_under_deadline_is_not_reported_as_fallback(monkeypatch):
+    import generation_search
     import search_memory
 
-    monkeypatch.setattr(search_memory, "_active_generation_catalog", lambda: None)
+    monkeypatch.setattr(generation_search, "active_generation_catalog", lambda: None)
     monkeypatch.setattr(
-        search_memory,
+        generation_search,
         "markdown_hits",
         lambda *_args, **_kwargs: [_hit("local", "local.md", 1.0)],
     )
@@ -665,7 +665,9 @@ def _ids(rows) -> set[str]:
 
 def test_hard_filter_status_applies_without_as_of():
     """Status filter applies when as_of is absent (superseded dropped)."""
-    from search_memory import apply_hard_filters
+    from generation_search import (
+        apply_hard_filters,
+    )
 
     status_filt = {"project": "demo", "since": "2024-01-01", "scope": "all"}
 
@@ -676,7 +678,9 @@ def test_hard_filter_status_applies_without_as_of():
 
 def test_hard_filter_candidate_id_parity_across_backends():
     """as_of uses the validity window; future and expired validity are dropped."""
-    from search_memory import apply_hard_filters
+    from generation_search import (
+        apply_hard_filters,
+    )
 
     rows = _parity_rows()
     asof_filt = {"project": "demo", "since": "2024-01-01", "as_of": "2025-07-01", "scope": "all"}
@@ -836,7 +840,7 @@ def test_reranker_receives_full_chunk_content(monkeypatch):
     # The stage is told its own budget, so an abandoned rerank stops scoring
     # instead of finishing on the cores the answer is being built with. No
     # deadline was given to this call, so there is none to pass on.
-    assert options == [{"text_field": "content", "deadline": None}]
+    assert options == [{"text_field": "content", "deadline": None, "cancelled": None}]
 
 
 def _paths_of(result) -> list[str]:
@@ -861,17 +865,6 @@ def _noting_leg(calls: list[str], name: str, cid: str, path: str):
     return leg
 
 
-def _slow_lexical_leg(calls: list[str]):
-    """Finishes, and leaves no budget behind it."""
-    inner = _noting_leg(calls, "lexical", "a", "a.md")
-
-    def leg(**kwargs):
-        time.sleep(0.05)
-        return inner(**kwargs)
-
-    return leg
-
-
 def test_retrieve_respects_deadline(monkeypatch):
     """The deadline still binds -- and the finished leg is handed back, labelled.
 
@@ -885,14 +878,17 @@ def test_retrieve_respects_deadline(monkeypatch):
     import retrieval
 
     calls: list[str] = []
+    deadline, lexical = expire_after_backend(
+        monkeypatch, _noting_leg(calls, "lexical", "a", "a.md"), seconds=0.001
+    )
     result = retrieval.retrieve(
         "x",
         requested_profile="HYBRID",
-        lexical_backend=_slow_lexical_leg(calls),
+        lexical_backend=lexical,
         dense_backend=_noting_leg(calls, "dense", "b", "b.md"),
         rerank_enabled=False,
         corpus_generation="g",
-        deadline_monotonic=time.monotonic() + 0.001,
+        deadline_monotonic=deadline,
     )
 
     assert calls == ["lexical"]
@@ -1025,7 +1021,7 @@ def test_public_search_propagates_resource_controls(monkeypatch):
             analysis=retrieval.analyze_query("needle"),
         )
 
-    monkeypatch.setattr(retrieval, "retrieve", fake_retrieve)
+    monkeypatch.setattr("llm_wiki.retrieval_execution.retrieve", fake_retrieve)
     search_memory.search(
         "needle",
         deadline_monotonic=deadline,
@@ -1053,9 +1049,9 @@ def test_cancellation_is_checked_after_fusion_before_rerank(monkeypatch):
 
     reranked = []
 
-    monkeypatch.setattr(retrieval, "fuse_rrf", fuse_then_cancel)
+    monkeypatch.setattr("llm_wiki.retrieval_fusion.fuse_rrf", fuse_then_cancel)
     monkeypatch.setattr(
-        retrieval, "_maybe_rerank", lambda *a, **k: reranked.append(True)
+        "llm_wiki.retrieval_execution.maybe_rerank", lambda *a, **k: reranked.append(True)
     )
     result = retrieval.retrieve(
         "needle",
@@ -1078,19 +1074,20 @@ def test_cancellation_is_checked_after_fusion_before_rerank(monkeypatch):
 def test_late_vector_seal_change_discards_generation_lexical(
     monkeypatch, vectors_returned
 ):
+    import generation_fts_validation
+    import generation_search
     import retrieval
-    import search_memory
     from repository_scope import resolve_repository_scope
 
     checks = iter((True, True, True, False))
     monkeypatch.setattr(
-        search_memory,
-        "_generation_consumption_unchanged",
+        generation_search,
+        "generation_consumption_unchanged",
         lambda *_args, **_kwargs: next(checks),
     )
     monkeypatch.setattr(
-        search_memory,
-        "_generation_consumption_seal",
+        generation_search,
+        "generation_consumption_seal",
         lambda *_args, **_kwargs: ("sealed",),
     )
 
@@ -1099,22 +1096,22 @@ def test_late_vector_seal_change_discards_generation_lexical(
             return None
 
     monkeypatch.setattr(
-        search_memory, "_generation_connection", lambda *_args, **_kwargs: Connection()
+        generation_search, "generation_connection", lambda *_args, **_kwargs: Connection()
     )
     monkeypatch.setattr(
-        search_memory,
-        "_generation_fts_search",
+        generation_search,
+        "generation_fts_search",
         lambda *_args, **_kwargs: [_hit("generation", "generation.md", 10.0)],
     )
     monkeypatch.setattr(
-        search_memory,
-        "_generation_vectors_search",
+        generation_search,
+        "generation_vectors_search",
         lambda *_args, **_kwargs: (
             [_hit("generation", "generation.md", 0.9)] if vectors_returned else None
         ),
     )
     monkeypatch.setattr(
-        search_memory,
+        generation_search,
         "markdown_hits",
         lambda *_args, **_kwargs: [_hit("legacy", "legacy.md", 1.0)],
     )
@@ -1125,7 +1122,7 @@ def test_late_vector_seal_change_discards_generation_lexical(
         def get_active_for_repository(self, _repository_scope, **_kwargs):
             return {
                 "generation_id": "gen-v",
-                "repository_scope": resolve_repository_scope(search_memory.ROOT).as_dict(),
+                "repository_scope": resolve_repository_scope(runtime_roots.vault_root()).as_dict(),
                 "vector_state": "complete",
                 "embedding_model_id": "m",
                 "embedding_model_revision": "r",
@@ -1137,8 +1134,8 @@ def test_late_vector_seal_change_discards_generation_lexical(
                 "source_manifest_sha256": "a" * 64,
                 "collector_version": "c",
                 "extractor_version": "e",
-                "tokenizer_version": search_memory.GENERATION_TOKENIZER_VERSION,
-                "tokenizer_config_sha256": search_memory.GENERATION_TOKENIZER_CONFIG_SHA256,
+                "tokenizer_version": generation_fts_validation.GENERATION_TOKENIZER_VERSION,
+                "tokenizer_config_sha256": generation_fts_validation.GENERATION_TOKENIZER_CONFIG_SHA256,
                 "schema_version": "corpus-generation/v1",
             }
 
@@ -1158,5 +1155,4 @@ def test_late_vector_seal_change_discards_generation_lexical(
     assert [row["candidate_id"] for row in rows] == ["legacy"]
     assert rows[0]["generation"] == "legacy"
     assert rows[0]["fallback_reason"] == "generation_seal_changed"
-
 

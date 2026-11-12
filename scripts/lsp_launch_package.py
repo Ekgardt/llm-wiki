@@ -1,6 +1,6 @@
 """Executing a verified language server that must run from inside a package root.
 
-The descriptor launch in `pyright_session._LaunchServerGuard` closes the
+The descriptor launch in `pyright_session_launch.LaunchServerGuard` closes the
 verify-then-execute race completely: it unlinks its verified copy and hands
 `node` a file descriptor, so no path is left for anything to substitute. That
 strategy cannot execute `typescript-language-server`. Measured on node v22.23.2:
@@ -94,7 +94,7 @@ def _manifest_bytes(launch: PackageLaunch) -> bytes:
     return json.dumps(plain, sort_keys=True, separators=(",", ":")).encode("utf-8")
 
 
-def _created_directories(root: Path, entry_relative: Path) -> tuple[Path, ...]:
+def created_directories(root: Path, entry_relative: Path) -> tuple[Path, ...]:
     """Make the tree writable-by-owner-only, returning it deepest first.
 
     A failure part way through leaves directories nobody holds a handle on:
@@ -131,7 +131,8 @@ def _write_sealed_file(path: Path, payload: bytes) -> None:
     flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0)
     descriptor = os.open(path, flags, SEALED_FILE_MODE)
     try:
-        os.write(descriptor, payload)
+        with os.fdopen(descriptor, "wb", closefd=False) as output:
+            output.write(payload)
     finally:
         os.close(descriptor)
 
@@ -243,7 +244,7 @@ def _empty_tree(owner_root: Path, launch: PackageLaunch) -> LaunchTree:
     """The directories, made owner-private, and the two paths that will fill them."""
     root = owner_root / f"{LAUNCH_PREFIX}{secrets.token_hex(16)}"
     entry_relative = launch.entry_relative
-    directories = _created_directories(root, entry_relative)
+    directories = created_directories(root, entry_relative)
     entry = root / entry_relative
     manifest = root / MANIFEST_NAME
     return LaunchTree(root, entry, (entry, manifest), directories)

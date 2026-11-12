@@ -1,0 +1,243 @@
+{
+  "encoding": "o200k_base",
+  "max_tokens": 100000,
+  "serialization": "exact-duplicates/v1",
+  "files": [
+    "AGENTS.md",
+    "CLAUDE.md",
+    "docs/AGENTS.md",
+    "docs/STRUCTURE.md",
+    "docs/modules/breadcrumb-decision-tests.md",
+    "docs/modules/breadcrumb-documents.md",
+    "docs/modules/compile-claims-producer-helpers.md",
+    "docs/modules/compile-controller-tests-compile-streaming-required-context-context.json",
+    "docs/modules/compile-controller-tests-compile-streaming-required-context.md",
+    "docs/modules/compile-paths.md",
+    "docs/modules/compile-pipeline-apply-tests.md",
+    "docs/modules/compile-pipeline-tests-compile-keeps-physically-overlapping-existing-context-helpers.md",
+    "docs/modules/context-bundle.md",
+    "docs/modules/context-records.md",
+    "docs/modules/context-tooling.md",
+    "docs/modules/model-choice.md",
+    "docs/modules/native-event-reader.md",
+    "docs/modules/product-structure.md",
+    "docs/modules/project-governance.md",
+    "docs/modules/script-sources.md",
+    "docs/modules/test-support.md",
+    "rules/development-laws.md",
+    "scripts/__init__.py",
+    "scripts/llm_wiki/__init__.py",
+    "scripts/llm_wiki/context_bundle.py",
+    "tests/__init__.py",
+    "tests/compile_claims_producer_helpers.py",
+    "tests/compile_keeps_physically_overlapping_existing_context_helpers.py",
+    "tests/compile_paths.py",
+    "tests/conftest.py",
+    "tests/module_context.py",
+    "tests/module_context_paths.py",
+    "tests/module_interface.py",
+    "tests/module_interface_render.py",
+    "tests/module_qualification.py",
+    "tests/module_record_context.py",
+    "tests/module_records.py",
+    "tests/modules/__init__.py",
+    "tests/modules/breadcrumb_documents/__init__.py",
+    "tests/modules/breadcrumb_documents/contract_helpers.py",
+    "tests/modules/native_event_reader/__init__.py",
+    "tests/modules/native_event_reader/contract_helpers.py",
+    "tests/native_compile_uses_whole_container_helpers.py",
+    "tests/native_user_frames_keep_their_physical_evidence_helpers.py",
+    "tests/script_sources.py",
+    "tests/shared_fixtures.py",
+    "tests/slow_machine.py",
+    "tests/test_compile_streaming_required_context.py"
+  ],
+  "ownership": {
+    "files": [
+      "docs/modules/compile-controller-tests-compile-streaming-required-context-context.json",
+      "docs/modules/compile-controller-tests-compile-streaming-required-context.md",
+      "tests/test_compile_streaming_required_context.py"
+    ]
+  },
+  "qualified_dependencies": [
+    {
+      "provider": "scripts/breadcrumb_decision.py",
+      "names": [
+        "journal_block"
+      ],
+      "contract_sha256": "d9c930484c634bdb57dbd893d182a3cb86d6d5b4893041035de163552c86eebc",
+      "integration_tests": [
+        "tests/test_compile_streaming_required_context.py"
+      ]
+    },
+    {
+      "provider": "scripts/breadcrumb_evidence.py",
+      "names": [
+        "read_head"
+      ],
+      "contract_sha256": "ed6e789206b293b2cd7ca3cc716daa242835e10bc7a60103b33b2431c133913f",
+      "integration_tests": [
+        "tests/test_compile_streaming_required_context.py"
+      ]
+    },
+    {
+      "provider": "scripts/breadcrumb_protocol.py",
+      "names": [
+        "encode_parts",
+        "make_anchor",
+        "make_manifest"
+      ],
+      "contract_sha256": "d9092eee738a1a4113c9bf87afe3ae4ad27a6f4bb640b6b8040da43b1d304729",
+      "integration_tests": [
+        "tests/test_compile_streaming_required_context.py"
+      ]
+    },
+    {
+      "provider": "scripts/compile_controller.py",
+      "names": [
+        "CompileInputArchive",
+        "compile_inputs_digest",
+        "write_archive_snapshot"
+      ],
+      "contract_sha256": "515b6c5ce6d687910f38eb6af2e549914e92f5325406b0e3453053fac5cc01ee",
+      "integration_tests": [
+        "tests/test_compile_streaming_required_context.py"
+      ]
+    },
+    {
+      "provider": "scripts/compile_pipeline.py",
+      "names": [
+        "MAX_DAILY_PART_BYTES",
+        "sha256_bytes"
+      ],
+      "contract_sha256": "e3c430fc07fbadb69bdc414c139d77ca9213d055f09a02a21f8dd68793cbfa6f",
+      "integration_tests": [
+        "tests/test_compile_streaming_required_context.py"
+      ]
+    },
+    {
+      "provider": "scripts/compile_receipts.py",
+      "names": [
+        "SourceSnapshot"
+      ],
+      "contract_sha256": "02926d8c4ae579f35a373ac76b77bf41a7016f084df2b6a04a4afaeda23c25c1",
+      "integration_tests": [
+        "tests/test_compile_streaming_required_context.py"
+      ]
+    },
+    {
+      "provider": "scripts/corpus_snapshot.py",
+      "names": [
+        "collect_corpus"
+      ],
+      "contract_sha256": "7ea12368f51c070a84b0754260f0a82db5ac44b0395b95eabcb01e5053c9f0bb",
+      "integration_tests": [
+        "tests/test_compile_streaming_required_context.py"
+      ]
+    },
+    {
+      "provider": "scripts/evidence_resolver.py",
+      "names": [
+        "EvidenceRef",
+        "EvidenceResolver"
+      ],
+      "contract_sha256": "6cb2e53ba2a0d538eacf761771f71078923a4a686314d06b516c0c13c998f49c",
+      "integration_tests": [
+        "tests/test_compile_streaming_required_context.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/breadcrumb_documents.py",
+      "names": [
+        "source_documents",
+        "source_path"
+      ],
+      "contract_sha256": "9c32d29ba0229ab4fd59256dd23d9ea9fb8fde486cddde3ce431f64e296ab907",
+      "integration_tests": [
+        "tests/test_compile_streaming_required_context.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/compile_pipeline_apply.py",
+      "names": [
+        "apply_compile_plan"
+      ],
+      "contract_sha256": "129ecd76764fbd203f197468ec01d03833729ef205c00c26dd60fb67025303bb",
+      "integration_tests": [
+        "tests/test_compile_streaming_required_context.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/compile_pipeline_batches.py",
+      "names": [
+        "RequiredCitationContext"
+      ],
+      "contract_sha256": "afb79ae212b444ddf58fd7362a394a17b22d288f69417982a777eec0d1f835a4",
+      "integration_tests": [
+        "tests/test_compile_streaming_required_context.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/compile_pipeline_operations.py",
+      "names": [
+        "bound_evidence_block"
+      ],
+      "contract_sha256": "eb85cc0d2f89aa9e96b67af7d0b4bd30943883b39aebf8ed1e590a954aa82dd4",
+      "integration_tests": [
+        "tests/test_compile_streaming_required_context.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/compile_pipeline_sources.py",
+      "names": [
+        "snapshot_compile_inputs"
+      ],
+      "contract_sha256": "bf02fc1c5e0236abe974c7bd9563649093ead7a0da80b24feef40a93b2a02969",
+      "integration_tests": [
+        "tests/test_compile_streaming_required_context.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/generation_catalog_store.py",
+      "names": [
+        "GenerationCatalog"
+      ],
+      "contract_sha256": "b18194ebe04bf988b4474379fcb5243516550d43b745a00eaed1453f7844c983",
+      "integration_tests": [
+        "tests/test_a_blocked_task_has_a_way_back.py",
+        "tests/test_a_build_in_flight_is_not_an_orphan.py",
+        "tests/test_a_capacity_refusal_does_not_corrupt_a_generation.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/model_choice.py",
+      "names": [
+        "using_root"
+      ],
+      "contract_sha256": "d45f2655cb61963e77617d1dfd7d617b134ad77cc770b59b335d0856e5d65019",
+      "integration_tests": [
+        "tests/test_compile_streaming_required_context.py"
+      ]
+    },
+    {
+      "provider": "scripts/reliable_memory.py",
+      "names": [
+        "validate_state_root"
+      ],
+      "contract_sha256": "8680515cd873056a7c8a36e0057d91f2f83f23c48841263697676ff91f7ff964",
+      "integration_tests": [
+        "tests/test_compile_streaming_required_context.py"
+      ]
+    },
+    {
+      "provider": "scripts/repository_scope.py",
+      "names": [
+        "sanitized_git_environment"
+      ],
+      "contract_sha256": "fd550ae20761afad50b37fa3a71044a162485b0e4d4b3e2af9b5b22e143c2bec",
+      "integration_tests": [
+        "tests/test_compile_streaming_required_context.py"
+      ]
+    }
+  ]
+}

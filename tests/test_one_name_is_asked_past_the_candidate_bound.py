@@ -4,7 +4,7 @@ docs/research/2026-09-26-one-name-is-asked-past-the-candidate-bound.md
 """
 from __future__ import annotations
 
-from tests.test_whole_graph_aggregates import graph  # noqa: F401
+from tests.whole_graph_aggregates_helpers import graph  # noqa: F401
 
 QUERY = {
     "kinds": ("function", "method"),

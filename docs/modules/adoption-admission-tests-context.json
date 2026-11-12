@@ -1,0 +1,255 @@
+{
+  "encoding": "o200k_base",
+  "max_tokens": 100000,
+  "serialization": "exact-duplicates/v1",
+  "files": [
+    "AGENTS.md",
+    "CLAUDE.md",
+    "docs/AGENTS.md",
+    "docs/STRUCTURE.md",
+    "docs/modules/adoption-admission-tests-context.json",
+    "docs/modules/adoption-admission-tests.md",
+    "docs/modules/adoption-admission.md",
+    "docs/modules/context-bundle.md",
+    "docs/modules/context-records.md",
+    "docs/modules/context-tooling.md",
+    "docs/modules/formats.md",
+    "docs/modules/model-choice.md",
+    "docs/modules/product-structure.md",
+    "docs/modules/project-checkpoint-tests-adopted-capture-vault.md",
+    "docs/modules/project-governance.md",
+    "docs/modules/test-support.md",
+    "rules/development-laws.md",
+    "scripts/__init__.py",
+    "scripts/llm_wiki/__init__.py",
+    "scripts/llm_wiki/adoption_admission.py",
+    "scripts/llm_wiki/context_bundle.py",
+    "scripts/llm_wiki/formats/__init__.py",
+    "tests/__init__.py",
+    "tests/adopted_capture_vault.py",
+    "tests/conftest.py",
+    "tests/module_context.py",
+    "tests/module_context_paths.py",
+    "tests/module_interface.py",
+    "tests/module_interface_render.py",
+    "tests/module_qualification.py",
+    "tests/module_record_context.py",
+    "tests/module_records.py",
+    "tests/shared_fixtures.py",
+    "tests/slow_machine.py",
+    "tests/test_adoption_validation_has_one_read_transaction.py"
+  ],
+  "ownership": {
+    "files": [
+      "docs/modules/adoption-admission-tests-context.json",
+      "docs/modules/adoption-admission-tests.md",
+      "tests/test_adoption_validation_has_one_read_transaction.py"
+    ]
+  },
+  "qualified_dependencies": [
+    {
+      "provider": "scripts/installed_memory_repair.py",
+      "names": [
+        "repair_installed_vault"
+      ],
+      "contract_sha256": "6ab4497d3ed56413bc24ea5ae9e993acf118980056b046072877a80df4f52a18",
+      "integration_tests": [
+        "tests/test_adoption_validation_has_one_read_transaction.py"
+      ]
+    },
+    {
+      "provider": "scripts/integration_adapter.py",
+      "names": [
+        "encoded_capture_record"
+      ],
+      "contract_sha256": "c1c73b27401a0eeada333af83348785cd87fa68f98653a85a69f8e83e1d64a31",
+      "integration_tests": [
+        "tests/test_a_capture_that_fails_says_so.py",
+        "tests/test_a_checkpoint_records_what_was_done.py",
+        "tests/test_a_claude_prompt_takes_the_ingest_path.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/coordinator_invariants.py",
+      "names": [
+        "require_v3_invariants"
+      ],
+      "contract_sha256": "faa90f63db4e736666ce2015fb8f4284986825caeb4170332744d3fb0d902179",
+      "integration_tests": [
+        "tests/test_adoption_validation_has_one_read_transaction.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/coordinator_schema.py",
+      "names": [
+        "COORDINATOR_V3_SCHEMA_SHA256",
+        "coordinator_v3_schema_complete"
+      ],
+      "contract_sha256": "e18cb78342cf3dbda9c434cfc0729ff2023b756986a6209c843caa3bca89a464",
+      "integration_tests": [
+        "tests/test_adoption_validation_has_one_read_transaction.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/formats/canonical.py",
+      "names": [
+        "canonical_json_bytes",
+        "sha256_bytes"
+      ],
+      "contract_sha256": "2e42a7aefcb66ac2515f6665a03feae34e6f7bad4807787a789ce031f9f3a9c1",
+      "integration_tests": [
+        "tests/test_adoption_validation_has_one_read_transaction.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/formats/schema.py",
+      "names": [
+        "validate_schema"
+      ],
+      "contract_sha256": "753e4abefcf29389d3fc0c051070bfaa66db14ecb88e1c98fc9b85588a6017cb",
+      "integration_tests": [
+        "tests/test_adoption_validation_has_one_read_transaction.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/generation_catalog_store.py",
+      "names": [
+        "GenerationCatalog"
+      ],
+      "contract_sha256": "b18194ebe04bf988b4474379fcb5243516550d43b745a00eaed1453f7844c983",
+      "integration_tests": [
+        "tests/test_a_build_in_flight_is_not_an_orphan.py",
+        "tests/test_a_code_generation_is_not_abandoned.py",
+        "tests/test_a_flow_walk_stops_when_its_caller_has.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/model_choice.py",
+      "names": [
+        "using_root"
+      ],
+      "contract_sha256": "d45f2655cb61963e77617d1dfd7d617b134ad77cc770b59b335d0856e5d65019",
+      "integration_tests": [
+        "tests/test_adoption_validation_has_one_read_transaction.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/queue_database_contract.py",
+      "names": [
+        "QUEUE_COMPILE_CONTRACT",
+        "QUEUE_COMPILE_SCHEMA_SHA256",
+        "QUEUE_V3_SCHEMA_SHA256"
+      ],
+      "contract_sha256": "5797d90f9036764219ebbd8ecb9ced4d000fe0a385b92ca8e113ff490e303ef0",
+      "integration_tests": [
+        "tests/test_adoption_validation_has_one_read_transaction.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/queue_schema_operations.py",
+      "names": [
+        "queue_v3_schema_complete"
+      ],
+      "contract_sha256": "db4e115ba61cb917ec7b7ece12ccb0930457a77d2ee885afb7f94c44f73e2eb2",
+      "integration_tests": [
+        "tests/test_adoption_validation_has_one_read_transaction.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/queue_v3_readers.py",
+      "names": [
+        "audit_compile_progress",
+        "open_queue_v3_readonly"
+      ],
+      "contract_sha256": "2b9e3618a2c1192056d4afaeeccfe9a721a5665fe076bf154c79a2752d859554",
+      "integration_tests": [
+        "tests/test_adoption_validation_has_one_read_transaction.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/reliability_defaults.py",
+      "names": [
+        "DEFAULTS"
+      ],
+      "contract_sha256": "f37296a83c15073e42a6cc8b86b88c2d19c548ac19a4ef6d0ca2f7af925c90c8",
+      "integration_tests": [
+        "tests/test_adoption_validation_has_one_read_transaction.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/sqlite_contracts.py",
+      "names": [
+        "OperationalDatabaseContract"
+      ],
+      "contract_sha256": "819cca1e291f921a6fb6e6e90a16fb4a05b0659e020227653689af60d484a1a8",
+      "integration_tests": [
+        "tests/test_adoption_validation_has_one_read_transaction.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/sqlite_deadlines.py",
+      "names": [
+        "operational_deadline_active"
+      ],
+      "contract_sha256": "b6a31ad07e6c587aeabfc49f66f512ca222ed88ce0bd8a29eafe6eaca6ed4838",
+      "integration_tests": [
+        "tests/test_adoption_validation_has_one_read_transaction.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/sqlite_io.py",
+      "names": [
+        "open_readonly_operational_db"
+      ],
+      "contract_sha256": "ee94d29558e055bbff68f8247575ed84ab6d84b559eebf24b508977d35bc91db",
+      "integration_tests": [
+        "tests/modules/coordinator_validation/test_database.py",
+        "tests/modules/sqlite_io/test_connections.py",
+        "tests/modules/sqlite_io/test_probe.py"
+      ]
+    },
+    {
+      "provider": "scripts/markdown_transaction.py",
+      "names": [
+        "is_transient_writer_contention"
+      ],
+      "contract_sha256": "4a691e9ec1c28eda499587fe96d2c836d49eb3f4f9933d56400004bce165758d",
+      "integration_tests": [
+        "tests/test_adoption_validation_has_one_read_transaction.py"
+      ]
+    },
+    {
+      "provider": "scripts/operational_ownership.py",
+      "names": [
+        "parse_timestamp"
+      ],
+      "contract_sha256": "7340c77affed782203f09da71e156eebb3cbdf0d91749b26ca7e0871ba40354d",
+      "integration_tests": [
+        "tests/test_adoption_validation_has_one_read_transaction.py"
+      ]
+    },
+    {
+      "provider": "scripts/reliable_memory.py",
+      "names": [
+        "capture_operational_database_identity",
+        "capture_runtime_file_identity",
+        "read_runtime_bytes",
+        "validate_state_root"
+      ],
+      "contract_sha256": "d0ea6673010adbffa5399e8c060e362565a3862a371570e48609eafe2f39d00b",
+      "integration_tests": [
+        "tests/test_adoption_validation_has_one_read_transaction.py"
+      ]
+    },
+    {
+      "provider": "scripts/repository_scope.py",
+      "names": [
+        "sanitized_git_environment"
+      ],
+      "contract_sha256": "fd550ae20761afad50b37fa3a71044a162485b0e4d4b3e2af9b5b22e143c2bec",
+      "integration_tests": [
+        "tests/test_adoption_validation_has_one_read_transaction.py"
+      ]
+    }
+  ]
+}

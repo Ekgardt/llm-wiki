@@ -17,17 +17,20 @@ See `docs/research/2026-09-07-how-many-second-chances-an-intent-gets.md`.
 
 import sqlite3
 import sys
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 
-import memory_queue  # noqa: E402
-from memory_queue import QueueOperationError  # noqa: E402
+import queue_core
+from llm_wiki import queue_reader_capture, queue_store
+from queue_core import (
+    QueueOperationError,
+)
 
-NOW = datetime(2026, 9, 7, 12, 0, tzinfo=timezone.utc)
+NOW = datetime(2026, 9, 7, 12, 0, tzinfo=UTC)
 
 
 def _database() -> sqlite3.Connection:
@@ -57,12 +60,12 @@ class _Queue:
     """The three methods under test, borrowed so the fake cannot drift."""
 
     _parent_capture_link = staticmethod(
-        memory_queue._QueueV3CandidateReader._parent_capture_link
+        queue_core.QueueV3CandidateReader._parent_capture_link
     )
     _insert_capture_link = staticmethod(
-        memory_queue._QueueV3CandidateReader._insert_capture_link
+        queue_core.QueueV3CandidateReader._insert_capture_link
     )
-    _carry_capture_link = memory_queue._QueueV3CandidateReader._carry_capture_link
+    _carry_capture_link = queue_core.QueueV3CandidateReader._carry_capture_link
 
 
 def test_the_child_gets_a_link_to_the_same_intent():
@@ -89,9 +92,9 @@ def test_the_child_link_is_signed_for_the_child_and_not_copied():
         "SELECT link_digest FROM capture_task_links WHERE task_id='child'"
     ).fetchone()
     assert child["link_digest"] != "digest-of-parent"
-    expected = memory_queue.sha256_bytes(
-        memory_queue.canonical_json_bytes(
-            memory_queue._capture_link_record("child", "intent-1", "d" * 64, 1)
+    expected = queue_core.sha256_bytes(
+        queue_core.canonical_json_bytes(
+            queue_reader_capture.capture_link_record("child", "intent-1", "d" * 64, 1)
         )
     )
     assert child["link_digest"] == expected
@@ -110,26 +113,26 @@ def test_a_first_redrive_is_allowed():
     database = _database()
     _linked(database, generation=0)
 
-    assert memory_queue._require_dead_task(database, "parent")["id"] == "parent"
+    assert queue_reader_capture.require_dead_task(database, "parent")["id"] == "parent"
 
 
 def test_a_second_redrive_is_refused():
     database = _database()
-    _linked(database, generation=memory_queue.MAX_REDRIVE_GENERATIONS)
+    _linked(database, generation=queue_store.MAX_REDRIVE_GENERATIONS)
     _Queue()._carry_capture_link(database, "parent", "child", NOW)
     database.execute("INSERT INTO tasks(id, state, lineage_generation, redrive_of) VALUES ('child', 'cancelled', 0, 'parent')")
 
     with pytest.raises(QueueOperationError, match="redrive_generations_exhausted"):
-        memory_queue._require_dead_task(database, "parent")
+        queue_reader_capture.require_dead_task(database, "parent")
 
 
 def test_a_child_that_never_carried_the_link_did_not_spend_the_chance():
     """The 2026-09-06 children: created before a redrive carried the link, never reachable."""
     database = _database()
-    _linked(database, generation=memory_queue.MAX_REDRIVE_GENERATIONS)
+    _linked(database, generation=queue_store.MAX_REDRIVE_GENERATIONS)
     database.execute("INSERT INTO tasks(id, state, lineage_generation, redrive_of) VALUES ('child', 'cancelled', 0, 'parent')")
 
-    assert memory_queue._require_dead_task(database, "parent")["id"] == "parent"
+    assert queue_reader_capture.require_dead_task(database, "parent")["id"] == "parent"
 
 
 def test_a_task_that_is_not_dead_is_still_refused_first():
@@ -137,8 +140,8 @@ def test_a_task_that_is_not_dead_is_still_refused_first():
     database.execute("INSERT INTO tasks(id, state, lineage_generation) VALUES ('parent', 'ready', 0)")
 
     with pytest.raises(QueueOperationError, match="redrive_requires_dead"):
-        memory_queue._require_dead_task(database, "parent")
+        queue_reader_capture.require_dead_task(database, "parent")
 
 
 def test_one_round_is_the_bound_the_research_chose():
-    assert memory_queue.MAX_REDRIVE_GENERATIONS == 1
+    assert queue_store.MAX_REDRIVE_GENERATIONS == 1

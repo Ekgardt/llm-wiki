@@ -1,0 +1,235 @@
+{
+  "encoding": "o200k_base",
+  "max_tokens": 100000,
+  "serialization": "exact-duplicates/v1",
+  "files": [
+    "AGENTS.md",
+    "CLAUDE.md",
+    "docs/AGENTS.md",
+    "docs/STRUCTURE.md",
+    "docs/modules/context-bundle.md",
+    "docs/modules/context-records.md",
+    "docs/modules/context-tooling.md",
+    "docs/modules/formats.md",
+    "docs/modules/model-choice.md",
+    "docs/modules/product-structure.md",
+    "docs/modules/project-governance.md",
+    "docs/modules/reliable-memory-tests-reliable-memory-context.json",
+    "docs/modules/reliable-memory-tests-reliable-memory.md",
+    "docs/modules/test-support.md",
+    "rules/development-laws.md",
+    "scripts/__init__.py",
+    "scripts/llm_wiki/__init__.py",
+    "scripts/llm_wiki/context_bundle.py",
+    "scripts/llm_wiki/formats/__init__.py",
+    "tests/__init__.py",
+    "tests/conftest.py",
+    "tests/module_context.py",
+    "tests/module_context_paths.py",
+    "tests/module_interface.py",
+    "tests/module_interface_render.py",
+    "tests/module_qualification.py",
+    "tests/module_record_context.py",
+    "tests/module_records.py",
+    "tests/shared_fixtures.py",
+    "tests/slow_machine.py",
+    "tests/test_reliable_memory.py"
+  ],
+  "ownership": {
+    "files": [
+      "docs/modules/reliable-memory-tests-reliable-memory-context.json",
+      "docs/modules/reliable-memory-tests-reliable-memory.md",
+      "tests/test_reliable_memory.py"
+    ]
+  },
+  "qualified_dependencies": [
+    {
+      "provider": "scripts/compile_cache.py",
+      "names": [
+        "SourceDescriptor",
+        "SourceOccurrenceBounds"
+      ],
+      "contract_sha256": "9c77bf1a84b6d30e32a7ed40ced285f21295eadb207b4af4d48c1152914388ca",
+      "integration_tests": [
+        "tests/test_reliable_memory.py"
+      ]
+    },
+    {
+      "provider": "scripts/compile_pipeline.py",
+      "names": [
+        "UnsupportedCompileReceiptVersion",
+        "parse_compile_receipt_version"
+      ],
+      "contract_sha256": "d93afde24ba066bb4b6d4d92f244aa2d479d48d7d10beece6e31a8f2e98b1449",
+      "integration_tests": [
+        "tests/test_reliable_memory.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/formats/canonical.py",
+      "names": [
+        "canonical_json_bytes",
+        "sha256_bytes"
+      ],
+      "contract_sha256": "2e42a7aefcb66ac2515f6665a03feae34e6f7bad4807787a789ce031f9f3a9c1",
+      "integration_tests": [
+        "tests/test_reliable_memory.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/formats/receipts.py",
+      "names": [
+        "UnsupportedCompileReceiptVersion",
+        "parse_compile_receipt_version"
+      ],
+      "contract_sha256": "d93afde24ba066bb4b6d4d92f244aa2d479d48d7d10beece6e31a8f2e98b1449",
+      "integration_tests": [
+        "tests/test_reliable_memory.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/formats/schema.py",
+      "names": [
+        "SchemaValidationError",
+        "validate_schema",
+        "validate_schema_object"
+      ],
+      "contract_sha256": "46d24c7a6473d3ea49408722a1dcd3ba46d71ea5a0b5f9caf95082dd7e8baba1",
+      "integration_tests": [
+        "tests/test_reliable_memory.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/formats/source.py",
+      "names": [
+        "SourceDescriptor",
+        "SourceOccurrenceBounds"
+      ],
+      "contract_sha256": "9c77bf1a84b6d30e32a7ed40ced285f21295eadb207b4af4d48c1152914388ca",
+      "integration_tests": [
+        "tests/test_reliable_memory.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/generation_catalog_store.py",
+      "names": [
+        "GenerationCatalog"
+      ],
+      "contract_sha256": "b18194ebe04bf988b4474379fcb5243516550d43b745a00eaed1453f7844c983",
+      "integration_tests": [
+        "tests/test_a_blocked_task_has_a_way_back.py",
+        "tests/test_a_build_in_flight_is_not_an_orphan.py",
+        "tests/test_a_capacity_refusal_does_not_corrupt_a_generation.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/model_choice.py",
+      "names": [
+        "using_root"
+      ],
+      "contract_sha256": "d45f2655cb61963e77617d1dfd7d617b134ad77cc770b59b335d0856e5d65019",
+      "integration_tests": [
+        "tests/test_reliable_memory.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/reliability_defaults.py",
+      "names": [
+        "DEFAULTS",
+        "ReliableMemoryDefaults"
+      ],
+      "contract_sha256": "555e22d4d31132fc49a7d91c815d19fc776d7b1892c0402911c384ea6f3d0a1d",
+      "integration_tests": [
+        "tests/test_reliable_memory.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/runtime_environment.py",
+      "names": [
+        "known_network_path",
+        "owner_permissions_supported",
+        "platform_system",
+        "query_darwin_mounts",
+        "read_posix_mount_data",
+        "windows_reparse_point"
+      ],
+      "contract_sha256": "a1113f4f7501af9200bf6be148487e1d1f513e158bc4af1e0c03f28dc3d593be",
+      "integration_tests": [
+        "tests/modules/coordinator_validation/test_database.py",
+        "tests/modules/queue_artifacts/test_artifacts.py",
+        "tests/modules/runtime_environment/test_environment.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/sqlite_io.py",
+      "names": [
+        "set_owner_only",
+        "sqlite_lock_probe",
+        "windows_reparse_point"
+      ],
+      "contract_sha256": "06e2d061f7aab4584b9587ca65f0dab40205ab01be36019e424afb904acf20c7",
+      "integration_tests": [
+        "tests/modules/coordinator_validation/test_database.py",
+        "tests/modules/sqlite_io/test_connections.py",
+        "tests/modules/sqlite_io/test_probe.py"
+      ]
+    },
+    {
+      "provider": "scripts/reliable_memory.py",
+      "names": [
+        "DEFAULTS",
+        "MetadataDurabilityUnavailable",
+        "ReliableMemoryDefaults",
+        "RuntimeFileIdentity",
+        "SchemaValidationError",
+        "UnsafeStateRoot",
+        "begin_immediate",
+        "canonical_json_bytes",
+        "capture_runtime_file_identity",
+        "durable_publish_file",
+        "fsync_directory",
+        "fsync_file",
+        "known_network_path",
+        "open_operational_db",
+        "os",
+        "publish_runtime_file",
+        "query_darwin_mounts",
+        "read_runtime_bytes",
+        "sha256_bytes",
+        "sqlite3",
+        "subprocess",
+        "validate_schema",
+        "validate_schema_object",
+        "validate_state_root"
+      ],
+      "contract_sha256": "6d3016ce9c08a4115b616d6021b687e0273ed41a4be316e158deb2ae8ec344fd",
+      "integration_tests": [
+        "tests/test_reliable_memory.py"
+      ]
+    },
+    {
+      "provider": "scripts/repository_scope.py",
+      "names": [
+        "sanitized_git_environment"
+      ],
+      "contract_sha256": "fd550ae20761afad50b37fa3a71044a162485b0e4d4b3e2af9b5b22e143c2bec",
+      "integration_tests": [
+        "tests/test_reliable_memory.py"
+      ]
+    },
+    {
+      "provider": "scripts/windows_workspace.py",
+      "names": [
+        "close_handle",
+        "flush_directory",
+        "flush_file_path",
+        "move_file_write_through",
+        "open_writable_directory_path"
+      ],
+      "contract_sha256": "34be498a59dc03be892dd943dfe7e621e5166f83458a92a6472d2c0d44d89473",
+      "integration_tests": [
+        "tests/test_reliable_memory.py"
+      ]
+    }
+  ]
+}

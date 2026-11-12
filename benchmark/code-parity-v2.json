@@ -26,7 +26,9 @@
     "2026-09-07, a fourth side: Serena (MIT), pinned to its git head, started with the dashboard, log window and browser off and called only through its read tools — the runner refuses any other, because Serena also ships replace_content, rename_symbol and safe_delete_symbol and a benchmark that called one of those would be editing the repository it measures. Serena is an LSP proxy with no callee tool, no call graph and no notion of a module community, so T03, T10 and T13 are answered through its nearest surface and whatever it says is graded as it stands. T10 is its only two-call task, one hop per call, which is the shape the question asks for.",
     "2026-09-11, v2. The thirteen v1 tasks are carried over unchanged, and three questions are added that v1 could not ask: two about argument bindings (the `data_flow` mode added for issue #24, B3) and one about which tests exercise a function. Gold for T14-T16 was established by hand from the working tree on 2026-09-11 at the cited lines.",
     "T14 and T15 grade llm-wiki on the exact `argument->parameter` pairs it prints, and every other side on the caller-visible names alone, because no two tools spell a binding the same way. The fact graded is the same and is named in the gold citations.",
-    "Cross-service questions are not in this file: this repository serves no HTTP route, so a cross-service answer here would be vacuous. They live in `benchmark/code-parity-cross-service-v1.json`, against the two-repository fixture `benchmark/build_cross_service_fixture.py` builds."
+    "Cross-service questions are not in this file: this repository serves no HTTP route, so a cross-service answer here would be vacuous. They live in `benchmark/code-parity-cross-service-v1.json`, against the two-repository fixture `benchmark/build_cross_service_fixture.py` builds.",
+    "2026-11-10, the split of scripts/retrieval.py into twelve llm_wiki.retrieval_* parts moved every cited definition. T01, T03, T04, T10, T11, T13, T14 and T15 now cite the part that holds each line; no question moved and the graded names are the same, only the line numbers and file names follow the code. T09 still asks what scripts/retrieval.py depends on, and its answer is now the twelve parts it re-exports.",
+    "2026-11-10: T14 names graph_seeds and run_graph_backend, the public names the retrieval parts now share; Serena's relative_path names the part that defines graph_seeds."
   ],
   "tasks": [
     {
@@ -35,13 +37,13 @@
       "question": "Which production functions call fuse_rrf?",
       "gold": {
         "citations": [
-          "scripts/retrieval.py (def fuse_rrf)",
-          "scripts/retrieval.py (def _fused_candidates), call at scripts/retrieval.py:3113 — the only call site in scripts/ (grep -rn 'fuse_rrf(' scripts/ on 2026-09-12)"
+          "scripts/llm_wiki/retrieval_fusion.py (def fuse_rrf)",
+          "scripts/llm_wiki/retrieval_execution.py (def fused_candidates), call at scripts/llm_wiki/retrieval_execution.py:65 — the only call site in scripts/ (grep -rn 'fuse_rrf(' scripts/ on 2026-11-10)"
         ],
         "must": [
           [
-            "_fused_candidates",
-            "3113"
+            "fused_candidates",
+            "65"
           ]
         ],
         "must_not": []
@@ -99,13 +101,13 @@
       "gold": {
         "citations": [
           "scripts/session_evidence.py (def write_session_evidence)",
-          "scripts/flush_memory.py (def _keep_session_record), call at scripts/flush_memory.py:1141",
-                    "scripts/backfill_sessions.py (def _write_one), call at scripts/backfill_sessions.py:224"
+          "scripts/flush_memory.py (def keep_session_record), call at scripts/flush_memory.py:873",
+          "scripts/backfill_sessions.py (def _write_one), call at scripts/backfill_sessions.py:224"
         ],
         "must": [
           [
-            "_keep_session_record",
-            "1141"
+            "keep_session_record",
+            "873"
           ],
           [
             "_write_one",
@@ -166,14 +168,14 @@
       "question": "Which project functions does fuse_rrf call?",
       "gold": {
         "citations": [
-          "scripts/retrieval.py (def fuse_rrf) calls, in its body: _fusion_weights, _accumulate_backend, curated_pages_first (imported from provenance), _weigh_by_trust, _fused_candidate",
-          "the whole body of fuse_rrf was retrieval.py lines 1568-1612 on 2026-09-12"
+          "scripts/llm_wiki/retrieval_fusion.py (def fuse_rrf) calls, in its body: _fusion_weights, _accumulate_backend, curated_pages_first (imported from provenance), weigh_by_trust (imported from llm_wiki.retrieval_graph), _fused_candidate",
+          "the whole body of fuse_rrf was retrieval.py lines 1568-1612 on 2026-09-12; the 2026-11-10 split moved it unchanged into llm_wiki/retrieval_fusion.py"
         ],
         "must": [
           "_fusion_weights",
           "_accumulate_backend",
           "curated_pages_first",
-          "_weigh_by_trust",
+          "weigh_by_trust",
           "_fused_candidate"
         ],
         "must_not": []
@@ -228,15 +230,15 @@
     {
       "id": "T04",
       "kind": "find-symbol-definition",
-      "question": "Where is _page_diverse defined?",
+      "question": "Where is page_diverse defined?",
       "gold": {
         "citations": [
-          "scripts/retrieval.py (def _page_diverse)",
+          "scripts/llm_wiki/retrieval_selection.py (def page_diverse)",
           "graded on file and line together; the near-name distractor the 2026-08-28 gold named, _page_diverse_order in scripts/search_memory.py, no longer exists (grep -rn '_page_diverse_order' scripts/ on 2026-09-12 returns nothing)"
         ],
         "must": [
-          "retrieval.py",
-          "{line:scripts/retrieval.py:_page_diverse}"
+          "retrieval_selection.py",
+          "{line:scripts/llm_wiki/retrieval_selection.py:page_diverse}"
         ],
         "must_not": []
       },
@@ -245,7 +247,7 @@
           "tool": "get_architecture",
           "arguments": {
             "mode": "symbol",
-            "symbol": "_page_diverse"
+            "symbol": "page_diverse"
           }
         }
       ],
@@ -254,7 +256,7 @@
           "tool": "get_architecture",
           "arguments": {
             "mode": "snippet",
-            "symbol": "_page_diverse"
+            "symbol": "page_diverse"
           }
         }
       ],
@@ -262,7 +264,7 @@
         {
           "tool": "search_graph",
           "arguments": {
-            "query": "_page_diverse",
+            "query": "page_diverse",
             "limit": 5
           }
         }
@@ -271,7 +273,7 @@
         {
           "tool": "search",
           "arguments": {
-            "query": "_page_diverse"
+            "query": "page_diverse"
           }
         }
       ],
@@ -279,7 +281,7 @@
         {
           "tool": "find_symbol",
           "arguments": {
-            "name_path_pattern": "_page_diverse"
+            "name_path_pattern": "page_diverse"
           }
         }
       ]
@@ -360,10 +362,10 @@
     {
       "id": "T06",
       "kind": "find-dead-code",
-      "question": "Is _flush_started (scripts/integration_adapter.py) dead code?",
+      "question": "Is _flush_started (scripts/llm_wiki/integration_session_start.py) dead code?",
       "gold": {
         "citations": [
-          "scripts/integration_adapter.py (def _flush_started)",
+          "scripts/llm_wiki/integration_session_start.py (def _flush_started)",
           "no production reference outside its def: grep -rn _flush_started scripts/ integrations/ on 2026-09-12 returns the definition alone; tests and older benchmark artifacts name it only as a string"
         ],
         "must": [
@@ -433,7 +435,7 @@
           "tool": "find_referencing_symbols",
           "arguments": {
             "name_path": "_flush_started",
-            "relative_path": "scripts/integration_adapter.py"
+            "relative_path": "scripts/llm_wiki/integration_session_start.py"
           }
         }
       ]
@@ -441,15 +443,15 @@
     {
       "id": "T07",
       "kind": "find-dead-code",
-      "question": "Is _manifest_seal (scripts/search_memory.py) dead code?",
+      "question": "Is _manifest_seal (scripts/generation_search.py) dead code?",
       "gold": {
         "citations": [
-          "scripts/search_memory.py (def _manifest_seal)",
-          "scripts/search_memory.py (def _generation_consumption_seal)"
+          "scripts/generation_search.py (def _manifest_seal)",
+          "scripts/generation_search.py (def generation_consumption_seal)"
         ],
         "must": [
           "_manifest_seal",
-          "_generation_consumption_seal"
+          "generation_consumption_seal"
         ],
         "must_not": [
           "fuse_rrf"
@@ -473,7 +475,7 @@
           },
           "must": [
             "_manifest_seal",
-            "_generation_consumption_seal"
+            "generation_consumption_seal"
           ],
           "must_not": [
             "fuse_rrf"
@@ -497,7 +499,7 @@
             "depth": 1
           },
           "must": [
-            "_generation_consumption_seal"
+            "generation_consumption_seal"
           ],
           "must_not": []
         }
@@ -515,7 +517,7 @@
           "tool": "find_referencing_symbols",
           "arguments": {
             "name_path": "_manifest_seal",
-            "relative_path": "scripts/search_memory.py"
+            "relative_path": "scripts/generation_search.py"
           }
         }
       ]
@@ -594,13 +596,22 @@
       "question": "Which project modules does scripts/retrieval.py depend on?",
       "gold": {
         "citations": [
-          "scripts/retrieval.py (import lane_score — a module-level project import)",
-          "scripts/retrieval.py (from provenance import ... — a module-level project import)",
-          "function-local imports the static module graph may legitimately miss: reranker (:2126), search_memory (:2504), graph_neighbors (:2611), retrieval_telemetry (:2786)"
+          "since the 2026-11-10 split scripts/retrieval.py is a facade whose only module-level project imports are the twelve parts llm_wiki.retrieval_backends, llm_wiki.retrieval_execution, llm_wiki.retrieval_fusion, llm_wiki.retrieval_generation_hits, llm_wiki.retrieval_graph, llm_wiki.retrieval_legacy, llm_wiki.retrieval_optional_stages, llm_wiki.retrieval_query, llm_wiki.retrieval_rerank, llm_wiki.retrieval_search_memory, llm_wiki.retrieval_selection, llm_wiki.retrieval_stages",
+          "the imports of lane_score and provenance that the 2026-09-12 gold graded moved with the code: lane_score into llm_wiki/retrieval_selection.py, provenance into llm_wiki/retrieval_fusion.py and llm_wiki/retrieval_graph.py"
         ],
         "must": [
-          "provenance",
-          "lane_score"
+          "retrieval_backends",
+          "retrieval_execution",
+          "retrieval_fusion",
+          "retrieval_generation_hits",
+          "retrieval_graph",
+          "retrieval_legacy",
+          "retrieval_optional_stages",
+          "retrieval_query",
+          "retrieval_rerank",
+          "retrieval_search_memory",
+          "retrieval_selection",
+          "retrieval_stages"
         ],
         "must_not": []
       },
@@ -655,21 +666,21 @@
       "question": "Which functions reach fuse_rrf within two caller hops (callers, and callers of callers)?",
       "gold": {
         "citations": [
-          "hop 1: _fused_candidates — scripts/retrieval.py:3107, calls fuse_rrf at :3113",
-          "hop 2: _partial_candidates — scripts/retrieval.py:3229, calls _fused_candidates at :3235, and _executed_plan — scripts/retrieval.py:3295, calls it at :3344; grep -rn '_fused_candidates(' scripts/ on 2026-09-12 shows these two call sites and no other"
+          "hop 1: fused_candidates — scripts/llm_wiki/retrieval_execution.py:59, calls fuse_rrf at :65",
+          "hop 2: _partial_candidates — scripts/llm_wiki/retrieval_execution.py:181, calls fused_candidates at :187, and _executed_plan — scripts/llm_wiki/retrieval_execution.py:252, calls it at :301; grep -rn 'fused_candidates(' scripts/ on 2026-11-10 shows these two call sites and no other"
         ],
         "must": [
           [
-            "_fused_candidates",
-            "3113"
+            "fused_candidates",
+            "65"
           ],
           [
             "_partial_candidates",
-            "3235"
+            "187"
           ],
           [
             "_executed_plan",
-            "3344"
+            "301"
           ]
         ],
         "must_not": []
@@ -686,7 +697,7 @@
           "tool": "get_architecture",
           "arguments": {
             "mode": "callers",
-            "symbol": "_fused_candidates"
+            "symbol": "fused_candidates"
           }
         }
       ],
@@ -737,7 +748,7 @@
         {
           "tool": "find_referencing_symbols",
           "arguments": {
-            "name_path": "_fused_candidates",
+            "name_path": "fused_candidates",
             "relative_path": "scripts/retrieval.py"
           }
         }
@@ -750,12 +761,12 @@
       "gold": {
         "citations": [
           "scripts/provenance.py (def source_type_weight)",
-          "scripts/retrieval.py (def _weigh_by_trust), call at scripts/retrieval.py:1324 — the only call site in scripts/ outside the import at line 17, by grep -rn source_type_weight scripts/ on 2026-09-12"
+          "scripts/llm_wiki/retrieval_graph.py (def weigh_by_trust), call at scripts/llm_wiki/retrieval_graph.py:650 — the only call site in scripts/ outside the import at line 27, by grep -rn source_type_weight scripts/ on 2026-11-10"
         ],
         "must": [
           [
-            "_weigh_by_trust",
-            "1324"
+            "weigh_by_trust",
+            "650"
           ]
         ],
         "must_not": []
@@ -862,7 +873,7 @@
       "question": "Which module community does fuse_rrf belong to?",
       "gold": {
         "citations": [
-          "scripts/retrieval.py (def fuse_rrf) — a correct community answer names the retrieval cluster"
+          "scripts/llm_wiki/retrieval_fusion.py (def fuse_rrf) — a correct community answer names the retrieval cluster"
         ],
         "must": [
           "retrieval"
@@ -918,11 +929,11 @@
     {
       "id": "T14",
       "kind": "data-flow",
-      "question": "In the call to _graph_seeds inside _run_graph_backend, which caller-visible names are bound to which parameters?",
+      "question": "In the call to graph_seeds inside run_graph_backend, which caller-visible names are bound to which parameters?",
       "gold": {
         "citations": [
-          "scripts/retrieval.py:1920, inside _run_graph_backend — `seeds = _graph_seeds(lexical_hits, dense_hits)`",
-          "scripts/retrieval.py:725 — `def _graph_seeds(lexical, dense)`: the two positional arguments bind lexical_hits->lexical and dense_hits->dense"
+          "scripts/llm_wiki/retrieval_backends.py:114, inside run_graph_backend — `seeds = graph_seeds(lexical_hits, dense_hits)`",
+          "scripts/llm_wiki/retrieval_graph.py:32 — `def graph_seeds(lexical, dense)`: the two positional arguments bind lexical_hits->lexical and dense_hits->dense"
         ],
         "must": [
           "lexical_hits->lexical",
@@ -935,7 +946,7 @@
           "tool": "get_architecture",
           "arguments": {
             "mode": "data_flow",
-            "symbol": "_run_graph_backend",
+            "symbol": "run_graph_backend",
             "depth": 1
           }
         }
@@ -945,7 +956,7 @@
           "tool": "get_architecture",
           "arguments": {
             "mode": "data_flow",
-            "symbol": "_run_graph_backend",
+            "symbol": "run_graph_backend",
             "depth": 1
           }
         }
@@ -954,7 +965,7 @@
         {
           "tool": "trace_path",
           "arguments": {
-            "function_name": "_run_graph_backend",
+            "function_name": "run_graph_backend",
             "mode": "data_flow",
             "depth": 1
           },
@@ -968,7 +979,7 @@
         {
           "tool": "find_usages",
           "arguments": {
-            "fqn": "_graph_seeds"
+            "fqn": "graph_seeds"
           },
           "must": [
             "lexical_hits",
@@ -980,8 +991,8 @@
         {
           "tool": "find_referencing_symbols",
           "arguments": {
-            "name_path": "_graph_seeds",
-            "relative_path": "scripts/retrieval.py"
+            "name_path": "graph_seeds",
+            "relative_path": "scripts/llm_wiki/retrieval_graph.py"
           },
           "must": [
             "lexical_hits",
@@ -993,11 +1004,11 @@
     {
       "id": "T15",
       "kind": "data-flow",
-      "question": "What does _executed_plan pass to _rerank_failure, parameter by parameter?",
+      "question": "What does _executed_plan pass to rerank_failure, parameter by parameter?",
       "gold": {
         "citations": [
-          "scripts/retrieval.py:3372, inside _executed_plan — `_rerank_failure(rerank_trace, optional_failure)`",
-          "scripts/retrieval.py:3137 — `def _rerank_failure(trace, current)`: rerank_trace->trace and optional_failure->current"
+          "scripts/llm_wiki/retrieval_execution.py:329, inside _executed_plan — `rerank_failure(rerank_trace, optional_failure)`",
+          "scripts/llm_wiki/retrieval_execution.py:89 — `def rerank_failure(trace, current)`: rerank_trace->trace and optional_failure->current"
         ],
         "must": [
           "rerank_trace->trace",
@@ -1043,7 +1054,7 @@
         {
           "tool": "find_usages",
           "arguments": {
-            "fqn": "_rerank_failure"
+            "fqn": "rerank_failure"
           },
           "must": [
             "rerank_trace",
@@ -1055,7 +1066,7 @@
         {
           "tool": "find_referencing_symbols",
           "arguments": {
-            "name_path": "_rerank_failure",
+            "name_path": "rerank_failure",
             "relative_path": "scripts/retrieval.py"
           },
           "must": [

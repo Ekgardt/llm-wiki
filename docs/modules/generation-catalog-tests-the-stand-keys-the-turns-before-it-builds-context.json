@@ -1,0 +1,112 @@
+{
+  "encoding": "o200k_base",
+  "max_tokens": 100000,
+  "serialization": "exact-duplicates/v1",
+  "files": [
+    "AGENTS.md",
+    "CLAUDE.md",
+    "benchmark/__init__.py",
+    "docs/AGENTS.md",
+    "docs/STRUCTURE.md",
+    "docs/modules/benchmark-run-benchmark.md",
+    "docs/modules/context-bundle.md",
+    "docs/modules/context-records.md",
+    "docs/modules/context-tooling.md",
+    "docs/modules/generation-catalog-tests-the-stand-keys-the-turns-before-it-builds-context.json",
+    "docs/modules/generation-catalog-tests-the-stand-keys-the-turns-before-it-builds.md",
+    "docs/modules/model-choice.md",
+    "docs/modules/product-structure.md",
+    "docs/modules/project-governance.md",
+    "docs/modules/test-support.md",
+    "rules/development-laws.md",
+    "scripts/__init__.py",
+    "scripts/llm_wiki/__init__.py",
+    "scripts/llm_wiki/context_bundle.py",
+    "tests/__init__.py",
+    "tests/conftest.py",
+    "tests/module_context.py",
+    "tests/module_context_paths.py",
+    "tests/module_interface.py",
+    "tests/module_interface_render.py",
+    "tests/module_qualification.py",
+    "tests/module_record_context.py",
+    "tests/module_records.py",
+    "tests/shared_fixtures.py",
+    "tests/slow_machine.py",
+    "tests/test_the_stand_keys_the_turns_before_it_builds.py"
+  ],
+  "ownership": {
+    "files": [
+      "docs/modules/generation-catalog-tests-the-stand-keys-the-turns-before-it-builds-context.json",
+      "docs/modules/generation-catalog-tests-the-stand-keys-the-turns-before-it-builds.md",
+      "tests/test_the_stand_keys_the_turns_before_it_builds.py"
+    ]
+  },
+  "qualified_dependencies": [
+    {
+      "provider": "benchmark/longmemeval_vault.py",
+      "names": [
+        "FACT_KEYS_ENV",
+        "build_generation"
+      ],
+      "contract_sha256": "2648ea274ea426627562d6af839154cb99e51d23bb0dd2ebe5b0f745f08f69c7",
+      "integration_tests": [
+        "tests/test_a_refusal_searches_again.py",
+        "tests/test_an_abstention_says_which_kind_it_is.py",
+        "tests/test_longmemeval_benchmark.py"
+      ]
+    },
+    {
+      "provider": "scripts/generation_fts_validation.py",
+      "names": [
+        "GENERATION_FTS_ARTIFACT"
+      ],
+      "contract_sha256": "4bacec051f26142ff7fdb9eba018ffcd82f6bdef07fa4597f4745636431bd7f3",
+      "integration_tests": [
+        "tests/test_the_stand_keys_the_turns_before_it_builds.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/generation_catalog_store.py",
+      "names": [
+        "GenerationCatalog"
+      ],
+      "contract_sha256": "b18194ebe04bf988b4474379fcb5243516550d43b745a00eaed1453f7844c983",
+      "integration_tests": [
+        "tests/test_a_build_in_flight_is_not_an_orphan.py",
+        "tests/test_a_code_generation_is_not_abandoned.py",
+        "tests/test_a_flow_walk_stops_when_its_caller_has.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/model_choice.py",
+      "names": [
+        "using_root"
+      ],
+      "contract_sha256": "d45f2655cb61963e77617d1dfd7d617b134ad77cc770b59b335d0856e5d65019",
+      "integration_tests": [
+        "tests/test_the_stand_keys_the_turns_before_it_builds.py"
+      ]
+    },
+    {
+      "provider": "scripts/reliable_memory.py",
+      "names": [
+        "validate_state_root"
+      ],
+      "contract_sha256": "8680515cd873056a7c8a36e0057d91f2f83f23c48841263697676ff91f7ff964",
+      "integration_tests": [
+        "tests/test_the_stand_keys_the_turns_before_it_builds.py"
+      ]
+    },
+    {
+      "provider": "scripts/repository_scope.py",
+      "names": [
+        "sanitized_git_environment"
+      ],
+      "contract_sha256": "fd550ae20761afad50b37fa3a71044a162485b0e4d4b3e2af9b5b22e143c2bec",
+      "integration_tests": [
+        "tests/test_the_stand_keys_the_turns_before_it_builds.py"
+      ]
+    }
+  ]
+}

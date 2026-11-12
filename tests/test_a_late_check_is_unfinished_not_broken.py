@@ -12,6 +12,8 @@ import time
 from pathlib import Path
 
 import doctor
+import generation_maintenance
+from llm_wiki import doctor_deletion
 
 
 def _claims_database(state_root: Path) -> None:
@@ -24,7 +26,7 @@ def test_a_read_the_deadline_stopped_is_unfinished_and_still_blocks_deletion(tmp
     _claims_database(tmp_path)
     late = time.monotonic() - 1
 
-    check = doctor._unfinished_when_late(doctor._claim_check(tmp_path, tmp_path, late), late)
+    check = doctor.unfinished_when_late(doctor_deletion.claim_check(tmp_path, tmp_path, late), late)
 
     assert (check["status"], check["details"]["budget_exhausted"]) == ("degraded", True)
     assert check["details"]["deletion_codes"] == ["claims_state_unreadable"]
@@ -34,9 +36,9 @@ def test_a_read_the_deadline_stopped_is_unfinished_and_still_blocks_deletion(tmp
 def test_a_read_error_inside_the_budget_stays_an_error(tmp_path: Path) -> None:
     _claims_database(tmp_path)
     late = time.monotonic() - 1
-    unreadable = doctor._claim_check(tmp_path, tmp_path, late)
+    unreadable = doctor_deletion.claim_check(tmp_path, tmp_path, late)
 
-    check = doctor._unfinished_when_late(unreadable, time.monotonic() + 60)
+    check = doctor.unfinished_when_late(unreadable, time.monotonic() + 60)
 
     assert check["status"] == "error"
 
@@ -48,8 +50,8 @@ def test_every_check_doctor_collects_passes_the_late_rule(tmp_path: Path, monkey
         seen.append(check["id"])
         return check
 
-    monkeypatch.setattr(doctor, "_unfinished_when_late", observed)
+    monkeypatch.setattr(doctor, "unfinished_when_late", observed)
 
-    checks = doctor._collect_checks(tmp_path, tmp_path, tmp_path, doctor._as_utc(None), time.monotonic() - 1)
+    checks = doctor.collect_checks(tmp_path, tmp_path, tmp_path, generation_maintenance.as_utc(None), time.monotonic() - 1)
 
     assert seen == [check["id"] for check in checks]

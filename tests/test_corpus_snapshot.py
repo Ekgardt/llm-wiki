@@ -3,10 +3,9 @@ from __future__ import annotations
 import contextlib
 import dataclasses
 import hashlib
-import json
 import os
 import stat
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -15,29 +14,8 @@ import pytest
 from code_languages import CODE_LANGUAGE_BY_SUFFIX, language_for_path
 from corpus_snapshot import CorpusChanged, collect_corpus, validate_live_snapshot
 
-EXPECTED_CODE_LANGUAGE_BY_SUFFIX = {
-    ".bash": "bash",
-    ".c": "c",
-    ".cc": "cpp",
-    ".cpp": "cpp",
-    ".cs": "c_sharp",
-    ".cxx": "cpp",
-    ".go": "go",
-    ".h": "c",
-    ".hh": "cpp",
-    ".hpp": "cpp",
-    ".hxx": "cpp",
-    ".java": "java",
-    ".js": "javascript",
-    ".jsx": "javascript",
-    ".php": "php",
-    ".py": "python",
-    ".rb": "ruby",
-    ".rs": "rust",
-    ".sh": "bash",
-    ".ts": "typescript",
-    ".tsx": "typescript",
-}
+from tests.corpus_snapshot_helpers import write
+from tests.modules.code_languages.expected_languages import EXPECTED_CODE_LANGUAGE_BY_SUFFIX
 
 
 @pytest.fixture
@@ -49,9 +27,41 @@ def vault(tmp_path: Path) -> Path:
     return root
 
 
-def write(path: Path, text: str) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(text, encoding="utf-8", newline="")
+def test_collection_reports_admission_counts_before_semantic_filtering(vault):
+    from llm_wiki import doctor_generation
+
+    note = "---\ntype: concept\n---\n# Current\n"
+    old = "---\ntype: concept\nstatus: superseded\n---\n# Old\n"
+    write(vault / "knowledge/notes/current.md", note)
+    write(vault / "knowledge/notes/old.md", old)
+    write(vault / "knowledge/notes/ignored.txt", "not a note")
+    write(vault / "knowledge/projects/demo/state.md", note)
+    write(vault / "knowledge/projects/demo/journal.md", "journal" * 100)
+    write(vault / "knowledge/daily/2026-10-17.md", "daily" * 100)
+    snapshot = collect_corpus(vault)
+    assert snapshot.discovered_sources == 3
+    assert snapshot.discovered_bytes == len((note * 2 + old).encode())
+    assert snapshot.inspected_entries == 6  # three notes entries, demo, two project files
+    assert len(snapshot.sources) == 2
+    usage = doctor_generation.generation_capacity_usage(snapshot, vault)
+    assert usage["knowledge_extraction_sources"]["used"] == 1
+    assert usage["project_extraction_sources_per_call"]["used"] == 1
+
+
+def test_admission_counts_verified_session_parts_but_not_ordinary_dumps(vault):
+    from tests.modules.breadcrumb_documents.contract_helpers import _source
+
+    _head, documents = _source(b"complete retained user event")
+    for relative, content in documents.items():
+        path = vault / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(content)
+    write(vault / "knowledge/raw/sessions/2026-09-29/ordinary.md", "ordinary" * 100)
+    snapshot = collect_corpus(vault)
+    assert snapshot.discovered_sources == len(documents)
+    assert snapshot.discovered_bytes == sum(map(len, documents.values()))
+    assert {source.record.relative_path for source in snapshot.sources} == set(documents)
+    assert snapshot.inspected_entries > snapshot.discovered_sources
 
 
 def page(body: str, **metadata: object) -> str:
@@ -180,7 +190,7 @@ def test_as_of_uses_validity_and_an_unreadable_frontmatter_costs_only_its_page(v
     assert "knowledge/notes/bad.md" in {source.record.relative_path for source in tolerated.sources}
 
     (vault / "knowledge/notes/bad.md").unlink()
-    past = collect_corpus(vault, as_of=datetime(2025, 6, 1, tzinfo=timezone.utc))
+    past = collect_corpus(vault, as_of=datetime(2025, 6, 1, tzinfo=UTC))
     future = collect_corpus(vault, as_of="2027-01-01T00:00:00Z")
     assert [source.record.relative_path for source in past.sources] == [
         "knowledge/notes/old.md"
@@ -241,30 +251,6 @@ def test_supported_code_suffixes_override_natural_language_inference(
 
     assert snapshot.sources[0].record.language == language
     assert snapshot.chunks[0].language == language
-
-
-def test_code_language_map_exactly_matches_independent_complete_contract():
-    assert dict(CODE_LANGUAGE_BY_SUFFIX) == EXPECTED_CODE_LANGUAGE_BY_SUFFIX
-
-
-def test_code_language_classifier_identity_binds_version_and_canonical_map():
-    from code_languages import (
-        CLASSIFIER_IDENTITY,
-        CLASSIFIER_MAP_SHA256,
-        CLASSIFIER_VERSION,
-    )
-
-    canonical = json.dumps(
-        EXPECTED_CODE_LANGUAGE_BY_SUFFIX,
-        ensure_ascii=True,
-        separators=(",", ":"),
-        sort_keys=True,
-    ).encode("ascii")
-    expected_digest = hashlib.sha256(canonical).hexdigest()
-
-    assert CLASSIFIER_VERSION == "code-language-classifier/v1"
-    assert CLASSIFIER_MAP_SHA256 == expected_digest
-    assert CLASSIFIER_IDENTITY == f"{CLASSIFIER_VERSION}+sha256:{expected_digest}"
 
 
 def test_corpus_and_code_graph_share_one_language_map():
@@ -332,7 +318,7 @@ def test_unknown_text_suffixes_retain_natural_language_inference(
 
 def test_internal_language_classifier_prefers_explicit_metadata():
     assert (
-        corpus_snapshot._classify_language(
+        corpus_snapshot.classify_language(
             explicit="custom", path=Path("example.py"), text="English text."
         )
         == "custom"
@@ -633,6 +619,8 @@ def test_collection_uses_writer_gate_and_rejects_external_edit_race(vault: Path,
     coordinator = Coordinator()
     real_read = corpus_snapshot.read_stable_bytes
     reads = 0
+    now = [0.0]
+    monkeypatch.setattr(corpus_snapshot.time, "monotonic", lambda: now[0])
 
     def racing_read(path: Path, limit: int, *, label: str):
         # An edit lands after every read, so no pass ever holds still: the
@@ -641,12 +629,14 @@ def test_collection_uses_writer_gate_and_rejects_external_edit_race(vault: Path,
         content = real_read(path, limit, label=label)
         reads += 1
         target.write_bytes(b"# Page\nAfter %d!\n" % reads)
+        now[0] += 1.0
         return content
 
     monkeypatch.setattr(corpus_snapshot, "read_stable_bytes", racing_read)
-    with pytest.raises(CorpusChanged, match="never held still"):
-        collect_corpus(vault, coordinator=coordinator)
+    with pytest.raises(CorpusChanged, match="deadline"):
+        collect_corpus(vault, coordinator=coordinator, deadline_seconds=5)
     assert coordinator.entered is True
+    assert reads > 0
 
 
 def test_writer_gate_receives_remaining_deadline_and_releases_on_error(
@@ -785,6 +775,8 @@ def test_directory_replacement_during_scandir_is_rejected(
     write(target / "page.md", "# Before\n")
     real_scandir = corpus_snapshot.os.scandir
     swaps = 0
+    now = [0.0]
+    monkeypatch.setattr(corpus_snapshot.time, "monotonic", lambda: now[0])
 
     def swapping_scandir(path: object):
         # The directory is replaced under every pass, so none holds still.
@@ -793,11 +785,12 @@ def test_directory_replacement_during_scandir_is_rejected(
             swaps += 1
             target.rename(vault / f"knowledge/notes/safe-original-{swaps}")
             write(target / "page.md", f"# After {swaps}\n")
+            now[0] += 1.0
         return real_scandir(path)
 
     monkeypatch.setattr(corpus_snapshot.os, "scandir", swapping_scandir)
-    with pytest.raises(CorpusChanged, match="ancestor.*changed|directory.*changed"):
-        collect_corpus(vault)
+    with pytest.raises(CorpusChanged, match="deadline"):
+        collect_corpus(vault, deadline_seconds=5)
     assert swaps >= 2
 
 
@@ -812,6 +805,8 @@ def test_source_parent_same_byte_replacement_after_read_is_rejected(
     target.write_bytes(content)
     real_read = corpus_snapshot.read_stable_bytes
     swaps = 0
+    now = [0.0]
+    monkeypatch.setattr(corpus_snapshot.time, "monotonic", lambda: now[0])
 
     def swapping_read(path: Path, limit: int, *, label: str):
         # The parent is replaced by a same-byte twin after every read of the
@@ -823,11 +818,12 @@ def test_source_parent_same_byte_replacement_after_read_is_rejected(
             parent.rename(vault / f"knowledge/notes/safe-original-{swaps}")
             parent.mkdir()
             (parent / "page.md").write_bytes(content)
+            now[0] += 1.0
         return result
 
     monkeypatch.setattr(corpus_snapshot, "read_stable_bytes", swapping_read)
-    with pytest.raises(CorpusChanged, match="ancestor.*changed"):
-        collect_corpus(vault)
+    with pytest.raises(CorpusChanged, match="deadline"):
+        collect_corpus(vault, deadline_seconds=5)
     assert swaps >= 2
 
 
@@ -1084,3 +1080,35 @@ def test_a_doc_ranks_below_a_compiled_page_and_below_code() -> None:
 
     assert provenance.type_weight("doc") < provenance.DEFAULT_TYPE_WEIGHT
     assert provenance.type_weight("doc") < provenance.type_weight("decision")
+
+
+@pytest.mark.parametrize("relative", ["knowledge/notes/unused.md", "knowledge/projects/demo/state.md"])
+def test_explicit_pruning_also_skips_a_direct_walk_root(vault, relative):
+    write(vault / relative, page("# Unused\nUnrelated to the selected daily.\n", type="concept"))
+    original = collect_corpus(vault)
+    assert [source.record.relative_path for source in original.sources] == [relative]
+    parent = "knowledge/notes" if relative.startswith("knowledge/notes/") else "knowledge/projects"
+    selected = collect_corpus(vault, pruned_directories=(parent,))
+    assert not selected.sources
+
+
+def test_daily_integrity_checks_remain_when_other_roots_are_pruned(vault, monkeypatch):
+    relative = "knowledge/daily/2026-10-03.md"
+    write(vault / relative, "# 2026-10-03\n\n## [10:00:00] session-end | s\n\n**user:** A fact.\n")
+    original = corpus_snapshot.candidate_bytes
+    now = [0.0]
+    monkeypatch.setattr(corpus_snapshot.time, "monotonic", lambda: now[0])
+
+    def racing_daily_read(candidate, max_bytes, label):
+        content = original(candidate, max_bytes, label)
+        target = vault / relative
+        target.write_bytes(target.read_bytes() + b"Changed during collection.\n")
+        now[0] += 1.0
+        return content
+
+    monkeypatch.setattr(corpus_snapshot, "candidate_bytes", racing_daily_read)
+    with pytest.raises(CorpusChanged, match="deadline"):
+        collect_corpus(
+            vault, daily_paths=(relative,), deadline_seconds=5,
+            pruned_directories=("knowledge/notes", "knowledge/projects", "knowledge/raw/sessions"),
+        )

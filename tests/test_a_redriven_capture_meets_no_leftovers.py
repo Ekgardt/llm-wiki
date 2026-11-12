@@ -5,21 +5,21 @@ Audit 2026-09-26 A-12, docs/research/2026-09-26-a-redriven-capture-meets-no-left
 from __future__ import annotations
 
 import sqlite3
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 import flush_memory
 import operational_ownership
 import pytest
 
-from tests.test_capture_terminal import (  # noqa: F401
+from tests.capture_terminal_helpers import (  # noqa: F401
     _crash_before_ledger,
     _FakeNoContentProvider,
     _NoContentProcessor,
     _own_session_vault,
     _ready_intent_binding,
 )
-from tests.test_queue_v3_capture_links import _coordinator, _queue
+from tests.queue_v3_capture_links_helpers import _coordinator, _queue
 
 
 def _died_between_decision_and_ledger(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
@@ -55,7 +55,7 @@ def test_the_purge_keeps_the_redrive_family_and_does_not_stop(tmp_path, monkeypa
     _age_everything(queue)
 
     receipt = queue.purge(
-        terminal_before=datetime.now(timezone.utc), export_path=tmp_path / "export", include_dead=True
+        terminal_before=datetime.now(UTC), export_path=tmp_path / "export", include_dead=True
     )
 
     assert set(receipt.retained) == {binding.task_id, child}

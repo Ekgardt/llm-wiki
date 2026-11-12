@@ -13,17 +13,15 @@ class TestFindCandidates:
     """Test finding pages that need reflection."""
 
     def test_no_candidates_in_empty_vault(self, tmp_path, monkeypatch):
-        import reflection
 
-        monkeypatch.setattr(reflection, "KNOWLEDGE", tmp_path / "notes")
+        monkeypatch.setenv("LLM_WIKI_ROOT", str(tmp_path))
         candidates = find_reflection_candidates()
         assert candidates == []
 
     def test_finds_page_with_multiple_updates(self, tmp_path, monkeypatch):
-        import reflection
 
-        notes = tmp_path / "notes"
-        notes.mkdir()
+        notes = tmp_path / "knowledge" / "notes"
+        notes.mkdir(parents=True)
         page = notes / "growing-page.md"
         page.write_text(
             "---\ntype: pattern\n---\n\n"
@@ -34,7 +32,7 @@ class TestFindCandidates:
             "## Update (2026-03-10)\nThird update.\n",
             encoding="utf-8",
         )
-        monkeypatch.setattr(reflection, "KNOWLEDGE", notes)
+        monkeypatch.setenv("LLM_WIKI_ROOT", str(tmp_path))
 
         candidates = find_reflection_candidates()
         assert len(candidates) == 1
@@ -42,10 +40,9 @@ class TestFindCandidates:
         assert candidates[0]["update_count"] == 3
 
     def test_ignores_pages_below_threshold(self, tmp_path, monkeypatch):
-        import reflection
 
-        notes = tmp_path / "notes"
-        notes.mkdir()
+        notes = tmp_path / "knowledge" / "notes"
+        notes.mkdir(parents=True)
         page = notes / "few-updates.md"
         page.write_text(
             "---\ntype: concept\n---\n\n"
@@ -54,16 +51,15 @@ class TestFindCandidates:
             "## Update (2026-01-15)\nOnly one.\n",
             encoding="utf-8",
         )
-        monkeypatch.setattr(reflection, "KNOWLEDGE", notes)
+        monkeypatch.setenv("LLM_WIKI_ROOT", str(tmp_path))
 
         candidates = find_reflection_candidates()
         assert len(candidates) == 0
 
     def test_skips_superseded_pages(self, tmp_path, monkeypatch):
-        import reflection
 
-        notes = tmp_path / "notes"
-        notes.mkdir()
+        notes = tmp_path / "knowledge" / "notes"
+        notes.mkdir(parents=True)
         page = notes / "old.md"
         page.write_text(
             "---\ntype: decision\nstatus: superseded\n---\n\n"
@@ -72,17 +68,16 @@ class TestFindCandidates:
             "## Update (2026-02-15)\nB\n",
             encoding="utf-8",
         )
-        monkeypatch.setattr(reflection, "KNOWLEDGE", notes)
+        monkeypatch.setenv("LLM_WIKI_ROOT", str(tmp_path))
 
         candidates = find_reflection_candidates()
         assert len(candidates) == 0
 
     def test_skips_already_reflected_pages(self, tmp_path, monkeypatch):
         """Pages with ## History section are already reflected."""
-        import reflection
 
-        notes = tmp_path / "notes"
-        notes.mkdir()
+        notes = tmp_path / "knowledge" / "notes"
+        notes.mkdir(parents=True)
         page = notes / "reflected.md"
         page.write_text(
             "---\ntype: pattern\n---\n\n"
@@ -93,7 +88,7 @@ class TestFindCandidates:
             "## Update (2026-02-15)\nB\n",
             encoding="utf-8",
         )
-        monkeypatch.setattr(reflection, "KNOWLEDGE", notes)
+        monkeypatch.setenv("LLM_WIKI_ROOT", str(tmp_path))
 
         candidates = find_reflection_candidates()
         assert len(candidates) == 0
@@ -148,8 +143,7 @@ def _vault_page(tmp_path, monkeypatch, text: str, reply: str):
     page = notes / "growing-page.md"
     page.write_text(text, encoding="utf-8")
     written: dict = {}
-    monkeypatch.setattr(reflection, "ROOT", tmp_path)
-    monkeypatch.setattr(reflection, "KNOWLEDGE", notes)
+    monkeypatch.setenv("LLM_WIKI_ROOT", str(tmp_path))
     monkeypatch.setattr("llm_client.call_llm", lambda *args, **kwargs: reply)
     monkeypatch.setattr(reflection, "mutate_knowledge", lambda _id, files, **_k: written.update(files))
     return reflection, page, written
@@ -193,7 +187,7 @@ class TestARewriteIsCheckedBeforeItIsWritten:
         reflected = (
             GOOD_REWRITE.replace("# Growing Page", "---\ntype: pattern\n---\n\n# Growing Page")
             + "\n## Update (2026-05-01)\nNew.\n\n## Update (2026-06-01)\nNewer.\n"
-            + "\n\n## History (pre-reflection 2026-03-01)\n<details>\n\n## Update (2026-01-15)\nOld.\n\n</details>\n"
+            + "\n\n## History (pre-reflection 2026-03-01)\n<details>\n<summary>Original page before reflection</summary>\n\n## Update (2026-01-15)\nOld.\n\n</details>\n"
         )
         reflection, _page, _written = _vault_page(tmp_path, monkeypatch, reflected, GOOD_REWRITE)
 

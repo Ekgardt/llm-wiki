@@ -15,7 +15,7 @@ import workspace_revision
 
 def test_a_failing_git_command_raises_the_degrading_error(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="exit code") as failure:
-        workspace_revision._git_output(
+        workspace_revision.git_output(
             tmp_path,
             ["status", "--porcelain=v2"],
             maximum_bytes=1024,

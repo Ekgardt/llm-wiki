@@ -1,0 +1,141 @@
+{
+  "encoding": "o200k_base",
+  "max_tokens": 100000,
+  "serialization": "exact-duplicates/v1",
+  "files": [
+    "AGENTS.md",
+    "CLAUDE.md",
+    "docs/AGENTS.md",
+    "docs/STRUCTURE.md",
+    "docs/modules/compile-controller-tests-compile-archive-daily-sharing-helpers.md",
+    "docs/modules/compile-controller-tests-compile-streamed-json-metadata-context.json",
+    "docs/modules/compile-controller-tests-compile-streamed-json-metadata.md",
+    "docs/modules/context-bundle.md",
+    "docs/modules/context-records.md",
+    "docs/modules/context-tooling.md",
+    "docs/modules/model-choice.md",
+    "docs/modules/product-structure.md",
+    "docs/modules/project-governance.md",
+    "docs/modules/test-support.md",
+    "rules/development-laws.md",
+    "scripts/__init__.py",
+    "scripts/llm_wiki/__init__.py",
+    "scripts/llm_wiki/context_bundle.py",
+    "tests/__init__.py",
+    "tests/compile_archive_daily_sharing_helpers.py",
+    "tests/conftest.py",
+    "tests/module_context.py",
+    "tests/module_context_paths.py",
+    "tests/module_interface.py",
+    "tests/module_interface_render.py",
+    "tests/module_qualification.py",
+    "tests/module_record_context.py",
+    "tests/module_records.py",
+    "tests/shared_fixtures.py",
+    "tests/slow_machine.py",
+    "tests/test_compile_streamed_json_metadata.py"
+  ],
+  "ownership": {
+    "files": [
+      "docs/modules/compile-controller-tests-compile-streamed-json-metadata-context.json",
+      "docs/modules/compile-controller-tests-compile-streamed-json-metadata.md",
+      "tests/test_compile_streamed_json_metadata.py"
+    ]
+  },
+  "qualified_dependencies": [
+    {
+      "provider": "scripts/compile_controller.py",
+      "names": [
+        "CompileInputArchive",
+        "SnapshotArchiveWriter",
+        "SnapshotJsonArray",
+        "archive_record_value",
+        "blob_digest",
+        "compile_inputs_digest",
+        "put_snapshot_json",
+        "snapshot_content_chunks",
+        "snapshot_json",
+        "write_archive_snapshot"
+      ],
+      "contract_sha256": "48d1f18455810f754fe4248bf6a88dc8dab27fdb9a5802d6ddaf8fece1d9cf24",
+      "integration_tests": [
+        "tests/test_compile_archive_json_views.py",
+        "tests/test_compile_artifact_retention.py",
+        "tests/test_compile_atomic_capture.py"
+      ]
+    },
+    {
+      "provider": "scripts/compile_receipts.py",
+      "names": [
+        "DailySnapshot",
+        "NativeCompileFrame"
+      ],
+      "contract_sha256": "ea3799e76fb870f9cd3063247d44cf58e55d580ce838baf5a2b14a62f7e28999",
+      "integration_tests": [
+        "tests/test_compile_streamed_json_metadata.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/compile_controller_archive.py",
+      "names": [
+        "snapshot_json"
+      ],
+      "contract_sha256": "49a7e85d70a0d7b9b4cc8a45f47d18666fca4f7e8cb13568e3750351e20ae644",
+      "integration_tests": [
+        "tests/test_compile_streamed_json_metadata.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/compile_pipeline_sources.py",
+      "names": [
+        "CompileInputs"
+      ],
+      "contract_sha256": "c1a75c8212e623985185c7a6f7f88831a486d3323a117f38ebae6fc6db249bcd",
+      "integration_tests": [
+        "tests/test_compile_streamed_json_metadata.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/generation_catalog_store.py",
+      "names": [
+        "GenerationCatalog"
+      ],
+      "contract_sha256": "b18194ebe04bf988b4474379fcb5243516550d43b745a00eaed1453f7844c983",
+      "integration_tests": [
+        "tests/test_a_build_in_flight_is_not_an_orphan.py",
+        "tests/test_a_code_generation_is_not_abandoned.py",
+        "tests/test_a_flow_walk_stops_when_its_caller_has.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/model_choice.py",
+      "names": [
+        "using_root"
+      ],
+      "contract_sha256": "d45f2655cb61963e77617d1dfd7d617b134ad77cc770b59b335d0856e5d65019",
+      "integration_tests": [
+        "tests/test_compile_streamed_json_metadata.py"
+      ]
+    },
+    {
+      "provider": "scripts/reliable_memory.py",
+      "names": [
+        "validate_state_root"
+      ],
+      "contract_sha256": "8680515cd873056a7c8a36e0057d91f2f83f23c48841263697676ff91f7ff964",
+      "integration_tests": [
+        "tests/test_compile_streamed_json_metadata.py"
+      ]
+    },
+    {
+      "provider": "scripts/repository_scope.py",
+      "names": [
+        "sanitized_git_environment"
+      ],
+      "contract_sha256": "fd550ae20761afad50b37fa3a71044a162485b0e4d4b3e2af9b5b22e143c2bec",
+      "integration_tests": [
+        "tests/test_compile_streamed_json_metadata.py"
+      ]
+    }
+  ]
+}

@@ -1,0 +1,26 @@
+{
+  "event": {
+    "work_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "task_id": "task-fixture",
+    "sequence": 2,
+    "source_digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "stage": "snapshot_ready",
+    "outcome": "ready",
+    "details": {
+      "artifact": {
+        "reference": "run/queue-results/cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc.result",
+        "sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+      },
+      "label": "проверка",
+      "items": [
+        1,
+        true,
+        null
+      ]
+    }
+  },
+  "canonical": "{\"details\":{\"artifact\":{\"reference\":\"run/queue-results/cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc.result\",\"sha256\":\"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd\"},\"items\":[1,true,null],\"label\":\"проверка\"},\"outcome\":\"ready\",\"sequence\":2,\"source_digest\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"stage\":\"snapshot_ready\",\"task_id\":\"task-fixture\",\"work_id\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"}",
+  "digest": "fc79d196dac198372d32c17dad7b92f0b9ce6b85140e08d2f40576264ed121b1",
+  "pickle_protocol_4": "gASVGgIAAAAAAACMEGNvbXBpbGVfcHJvZ3Jlc3OUjAxDb21waWxlRXZlbnSUk5QpgZR9lCiMB3dvcmtfaWSUjEBhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhlIwHdGFza19pZJSMDHRhc2stZml4dHVyZZSMCHNlcXVlbmNllEsCjA1zb3VyY2VfZGlnZXN0lIxAYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYpSMBXN0YWdllIwOc25hcHNob3RfcmVhZHmUjAdvdXRjb21llIwFcmVhZHmUjAdkZXRhaWxzlH2UKIwIYXJ0aWZhY3SUfZQojAlyZWZlcmVuY2WUjFlydW4vcXVldWUtcmVzdWx0cy9jY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjLnJlc3VsdJSMBnNoYTI1NpSMQGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGSUdYwFbGFiZWyUjBDQv9GA0L7QstC10YDQutCwlIwFaXRlbXOUXZQoSwGITmV1dWIu",
+  "class_module": "compile_progress"
+}

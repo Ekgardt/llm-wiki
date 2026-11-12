@@ -22,7 +22,10 @@ if str(SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_DIR))
 
 import memory_queue  # noqa: E402
+import queue_core  # noqa: E402
 from installed_memory_repair import repair_installed_vault  # noqa: E402
+
+from tests.script_sources import split_module_files  # noqa: E402
 
 _ADOPTION_TOMBSTONE_SCHEMA = "operational-db-tombstone/v1"
 
@@ -42,7 +45,7 @@ def _adopted_vault(tmp_path: Path) -> tuple[Path, Path]:
         confirm_all_agents_stopped=True,
     )
     assert report["overall_status"] == "ok"
-    tombstone = json.loads((state_root / "run/queue.sqlite3").read_text())
+    tombstone = json.loads((state_root / "run/queue.sqlite3").read_text(encoding='utf-8'))
     assert tombstone["schema_version"] == _ADOPTION_TOMBSTONE_SCHEMA
     return root, state_root
 
@@ -63,7 +66,7 @@ def _point_process_at(monkeypatch, root: Path, state_root: Path) -> None:
 def test_the_rule_hands_an_adopted_vault_the_adopted_queue(tmp_path: Path) -> None:
     root, state_root = _adopted_vault(tmp_path)
 
-    queue = memory_queue.active_or_legacy_memory_queue(root, state_root)
+    queue = queue_core.active_or_legacy_memory_queue(root, state_root)
 
     assert queue.db_path == state_root / "run/queue-v3.sqlite3"
     assert queue.run_dir == state_root / "run"
@@ -72,9 +75,9 @@ def test_the_rule_hands_an_adopted_vault_the_adopted_queue(tmp_path: Path) -> No
 def test_the_rule_hands_an_unadopted_vault_the_legacy_queue(tmp_path: Path) -> None:
     root, state_root = _unadopted_vault(tmp_path)
 
-    queue = memory_queue.active_or_legacy_memory_queue(root, state_root)
+    queue = queue_core.active_or_legacy_memory_queue(root, state_root)
 
-    assert isinstance(queue, memory_queue.MemoryQueue)
+    assert isinstance(queue, queue_core.MemoryQueue)
     assert queue.db_path == state_root / "run/queue.sqlite3"
 
 
@@ -84,11 +87,11 @@ def test_operator_status_reads_an_adopted_vault(
     """The measured defect: `status` answered `sqlite_error` on this vault."""
     root, state_root = _adopted_vault(tmp_path)
     _point_process_at(monkeypatch, root, state_root)
-    memory_queue.active_or_legacy_memory_queue(root, state_root).enqueue(
+    queue_core.active_or_legacy_memory_queue(root, state_root).enqueue(
         "query", 1, {"prompt": "status"}
     )
 
-    status = memory_queue._operator_status()
+    status = memory_queue.operator_status()
 
     assert status["counts"] == {"total": 1}
     assert status["states"]["ready"] == 1
@@ -100,15 +103,15 @@ def test_the_worker_entry_point_reads_an_adopted_vault(
     """Step one of the nightly pass: `work` refused with `sqlite_error`."""
     root, state_root = _adopted_vault(tmp_path)
     _point_process_at(monkeypatch, root, state_root)
-    memory_queue.active_or_legacy_memory_queue(root, state_root).enqueue(
+    queue_core.active_or_legacy_memory_queue(root, state_root).enqueue(
         "query", 1, {"prompt": "work"}
     )
 
-    summary = memory_queue.run_worker(
+    summary = queue_core.run_worker(
         lambda _task: True,
         max_tasks=1,
         idle_seconds=0,
-        processor_runner=memory_queue._run_processor_inline,
+        processor_runner=queue_core.run_processor_inline,
     )
 
     assert summary.processed == 1
@@ -118,7 +121,7 @@ def test_the_worker_entry_point_reads_an_adopted_vault(
 
 def test_the_adopted_queue_answers_get_and_list(tmp_path: Path) -> None:
     root, state_root = _adopted_vault(tmp_path)
-    queue = memory_queue.active_or_legacy_memory_queue(root, state_root)
+    queue = queue_core.active_or_legacy_memory_queue(root, state_root)
     task_id = queue.enqueue("query", 1, {"prompt": "listed"}, priority=7)
 
     listed = queue.list_tasks(states=("ready",))
@@ -130,7 +133,7 @@ def test_the_adopted_queue_answers_get_and_list(tmp_path: Path) -> None:
 
 def test_the_adopted_queue_counts_eligible_work(tmp_path: Path) -> None:
     root, state_root = _adopted_vault(tmp_path)
-    queue = memory_queue.active_or_legacy_memory_queue(root, state_root)
+    queue = queue_core.active_or_legacy_memory_queue(root, state_root)
     queue.enqueue("query", 1, {"prompt": "counted"})
 
     assert queue.count_eligible() == 1
@@ -139,7 +142,7 @@ def test_the_adopted_queue_counts_eligible_work(tmp_path: Path) -> None:
 
 def test_compile_source_failures_survive_adoption(tmp_path: Path) -> None:
     root, state_root = _adopted_vault(tmp_path)
-    queue = memory_queue.active_or_legacy_memory_queue(root, state_root)
+    queue = queue_core.active_or_legacy_memory_queue(root, state_root)
     logical_path = "knowledge/daily/2026-08-26.md"
     digest = "a" * 64
 
@@ -158,8 +161,8 @@ def test_a_direct_legacy_construction_names_the_tombstone(tmp_path: Path) -> Non
     """NEW-104: `file is not a database` named neither boundary nor path."""
     _root, state_root = _adopted_vault(tmp_path)
 
-    with pytest.raises(memory_queue.QueueOperationError) as raised:
-        memory_queue.MemoryQueue(state_root)
+    with pytest.raises(queue_core.QueueOperationError) as raised:
+        queue_core.MemoryQueue(state_root)
 
     assert raised.value.code == "queue_tombstoned_by_adoption"
     assert "run/queue.sqlite3" in raised.value.detail.replace("\\", "/")
@@ -171,9 +174,9 @@ def test_the_cli_refusal_prints_the_tombstoned_path(
 ) -> None:
     _root, state_root = _adopted_vault(tmp_path)
 
-    with pytest.raises(memory_queue.QueueOperationError) as raised:
-        memory_queue.MemoryQueue(state_root)
-    assert memory_queue._emit_cli_error(raised.value) == 2
+    with pytest.raises(queue_core.QueueOperationError) as raised:
+        queue_core.MemoryQueue(state_root)
+    assert memory_queue.emit_cli_error(raised.value) == 2
 
     printed = json.loads(capsys.readouterr().out)
     assert printed["codes"] == ["queue_tombstoned_by_adoption"]
@@ -192,7 +195,7 @@ def test_the_source_fence_family_works_on_the_adopted_queue(tmp_path: Path) -> N
     this test keeps the routing file's own claim honest.
     """
     root, state_root = _adopted_vault(tmp_path)
-    queue = memory_queue.active_or_legacy_memory_queue(root, state_root)
+    queue = queue_core.active_or_legacy_memory_queue(root, state_root)
 
     fence = queue.acquire_source_fence("2026-08-26", "b" * 64)
 
@@ -216,27 +219,25 @@ def _direct_constructions(path: Path) -> list[int]:
 
 
 def test_no_reader_opens_the_queue_outside_the_rule() -> None:
-    outside = {
-        name: _direct_constructions(SCRIPTS_DIR / name)
-        for name in ("doctor.py", "archive_daily.py", "compile_memory.py", "mcp_server.py")
-    }
+    readers = [
+        *split_module_files("doctor", "doctor"),
+        *split_module_files("compile_pipeline", "compile_pipeline"),
+        *(SCRIPTS_DIR / name for name in ("archive_daily.py", "compile_memory.py", "mcp_server.py")),
+    ]
+    outside = {path.name: _direct_constructions(path) for path in readers}
 
-    assert outside == {
-        "doctor.py": [],
-        "archive_daily.py": [],
-        "compile_memory.py": [],
-        "mcp_server.py": [],
-    }
+    assert outside == dict.fromkeys(outside, [])
+    assert len(outside) == len(readers) > 5
 
 
 def test_a_legacy_queue_on_a_real_database_still_opens(tmp_path: Path) -> None:
     """The refusal must read a tombstone, never an ordinary queue database."""
     root, state_root = _unadopted_vault(tmp_path)
-    memory_queue.active_or_legacy_memory_queue(root, state_root).enqueue(
+    queue_core.active_or_legacy_memory_queue(root, state_root).enqueue(
         "query", 1, {"prompt": "legacy"}
     )
 
-    reopened = memory_queue.MemoryQueue(state_root)
+    reopened = queue_core.MemoryQueue(state_root)
 
     assert reopened.count_eligible() == 1
     with sqlite3.connect(state_root / "run/queue.sqlite3") as database:

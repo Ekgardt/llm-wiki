@@ -14,7 +14,6 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 
 import capture_diagnostics  # noqa: E402
-import memory_state  # noqa: E402
 
 from tests.slow_machine import SHORT_TIMEOUT  # noqa: E402
 
@@ -23,13 +22,9 @@ OVERSIZE_LINES = 1500
 
 @pytest.fixture
 def trail(tmp_path, monkeypatch) -> Path:
-    run = tmp_path / "run"
-    monkeypatch.setattr(memory_state, "STATE_DIR", run)
-    monkeypatch.setattr(memory_state, "STATE_FILE", run / "state.json")
-    monkeypatch.setattr(memory_state, "LOCK_FILE", run / "state.json.lock")
+    monkeypatch.setenv("LLM_WIKI_STATE_ROOT", str(tmp_path))
     path = tmp_path / "logs" / "capture-failures.jsonl"
     path.parent.mkdir()
-    monkeypatch.setattr(capture_diagnostics, "FAILURE_LOG", path)
     return path
 
 
@@ -47,7 +42,7 @@ def _appending_writer(reason: str, finished: threading.Event) -> threading.Threa
     record = {"kind": "burst", "reason": reason, "at": "now", "outcome": "lost"}
 
     def _append() -> None:
-        capture_diagnostics._append_failure_line(record)
+        capture_diagnostics.append_failure_line(record)
         finished.set()
 
     worker = threading.Thread(target=_append)
@@ -63,7 +58,7 @@ def test_a_line_appended_during_a_trim_is_not_erased_by_it(trail, monkeypatch):
     own pause, and it expects it to elapse: the writer is waiting for the trail's lock.
     """
     _oversize(trail)
-    trimmed_tail = capture_diagnostics._trimmed_tail
+    trimmed_tail = capture_diagnostics.trimmed_tail
     writers: list[threading.Thread] = []
     finished = threading.Event()
 
@@ -73,8 +68,8 @@ def test_a_line_appended_during_a_trim_is_not_erased_by_it(trail, monkeypatch):
         assert not finished.wait(0.05)
         return kept
 
-    monkeypatch.setattr(capture_diagnostics, "_trimmed_tail", _append_after_reading)
-    capture_diagnostics._trim_failure_log()
+    monkeypatch.setattr(capture_diagnostics, "trimmed_tail", _append_after_reading)
+    capture_diagnostics.trim_failure_log()
     writers[-1].join(SHORT_TIMEOUT)
 
     assert "appended during the trim" in _reasons(trail)
@@ -85,7 +80,7 @@ def test_a_trim_leaves_the_trail_alone_while_another_writer_holds_its_lock(trail
     size = _oversize(trail)
 
     with capture_diagnostics.trail_lock() as held:
-        capture_diagnostics._trim_failure_log()
+        capture_diagnostics.trim_failure_log()
         after = (held, trail.stat().st_size)
 
     assert after == (True, size)

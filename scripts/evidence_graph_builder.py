@@ -34,11 +34,19 @@ from contextlib import closing
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from types import MappingProxyType
+from typing import Any, BinaryIO
 
 import corpus_snapshot
 import evidence_graph
-import generation_catalog
-from reliable_memory import canonical_json_bytes, fsync_directory, fsync_file, read_runtime_bytes
+from llm_wiki import (
+    evidence_graph_limits,
+    generation_catalog_store,
+    generation_limits,
+    generation_validation,
+    runtime_sync,
+)
+from llm_wiki.formats.canonical import canonical_json_bytes
+from reliable_memory import fsync_directory, read_runtime_bytes
 from repository_scope import RepositoryScope, same_repository_record
 
 GRAPH_SCHEMA_VERSION = evidence_graph.GRAPH_SCHEMA_VERSION
@@ -56,11 +64,11 @@ INCREMENTAL_MANIFEST_VERSION = "evidence-graph-incremental/v5"
 # ever be outgrown, so neither of these is that bound any more.
 #
 # Reading is bounded by the size the sealed `manifest.json` declares for this
-# artifact, which `generation_catalog._validate_generation` has already verified
-# by hashing it — see `_declared_manifest_bytes`. What is left here is the
+# artifact, which `generation_catalog.validate_generation` has already verified
+# by hashing it — see `declared_manifest_bytes`. What is left here is the
 # absurdity ceiling the catalog itself applies to any one artifact: a manifest
 # past it could not be registered as a generation artifact at all.
-MAX_INCREMENTAL_MANIFEST_BYTES = generation_catalog.MAX_ARTIFACT_BYTES
+MAX_INCREMENTAL_MANIFEST_BYTES = generation_limits.MAX_ARTIFACT_BYTES
 MAX_STORED_INCREMENTAL_MANIFEST_BYTES = MAX_INCREMENTAL_MANIFEST_BYTES
 #: `record_dependencies` is audit provenance that no reader in `scripts/`
 #: consumes and that is fully derivable from `sources` plus the membership
@@ -69,10 +77,10 @@ MAX_STORED_INCREMENTAL_MANIFEST_BYTES = MAX_INCREMENTAL_MANIFEST_BYTES
 #: it is a deterministic prefix and the manifest states the true total.
 MAX_INLINE_RECORD_DEPENDENCY_ROWS = 10_000
 _SHA256_RE = re.compile(r"[0-9a-f]{64}")
-_INVALIDATION_KEYS = frozenset(
+INVALIDATION_KEYS = frozenset(
     {"exports", "imports", "signatures", "aliases", "project_metadata"}
 )
-_RECORD_COLLECTIONS = (
+RECORD_COLLECTIONS = (
     "nodes",
     "occurrences",
     "assertions",
@@ -80,7 +88,7 @@ _RECORD_COLLECTIONS = (
     "observations",
     "dependencies",
 )
-_RECORD_KEYS = {
+RECORD_KEYS = {
     "nodes": "node_id",
     "occurrences": "occurrence_id",
     "assertions": "assertion_id",
@@ -217,7 +225,7 @@ def _require_build_types(
 ) -> None:
     _require_type(
         catalog,
-        generation_catalog.GenerationCatalog,
+        generation_catalog_store.GenerationCatalog,
         "catalog must be a GenerationCatalog",
     )
     _require_type(
@@ -366,7 +374,7 @@ def _materialized_graph_records(
         label: _materialize(
             records,
             label=label,
-            limit=evidence_graph.MAX_VALIDATION_ROWS,
+            limit=evidence_graph_limits.MAX_VALIDATION_ROWS,
             deadline=deadline,
             cancelled=cancelled,
         )
@@ -375,7 +383,7 @@ def _materialized_graph_records(
 
 
 def _created_generation_directory(
-    catalog: generation_catalog.GenerationCatalog, generation_id: str
+    catalog: generation_catalog_store.GenerationCatalog, generation_id: str
 ) -> Path:
     generation_path = catalog.generations_path / generation_id
     if generation_path.exists() or generation_path.is_symlink():
@@ -613,9 +621,9 @@ def _hash_bytes(
     cancelled: Callable[[], bool] | None,
 ) -> str:
     digest = hashlib.sha256()
-    for offset in range(0, len(content), generation_catalog.HASH_CHUNK_BYTES):
+    for offset in range(0, len(content), generation_limits.HASH_CHUNK_BYTES):
         _check_stop(deadline, cancelled)
-        digest.update(content[offset : offset + generation_catalog.HASH_CHUNK_BYTES])
+        digest.update(content[offset : offset + generation_limits.HASH_CHUNK_BYTES])
     _check_stop(deadline, cancelled)
     return digest.hexdigest()
 
@@ -663,17 +671,27 @@ def _hash_file(
     cancelled: Callable[[], bool] | None,
 ) -> tuple[int, str]:
     digest = hashlib.sha256()
-    total = 0
     with path.open("rb") as handle:
-        while True:
-            _check_stop(deadline, cancelled)
-            chunk = handle.read(generation_catalog.HASH_CHUNK_BYTES)
-            if not chunk:
-                break
-            total += len(chunk)
-            digest.update(chunk)
+        total = _hash_stream(handle, digest, deadline=deadline, cancelled=cancelled)
     _check_stop(deadline, cancelled)
     return total, digest.hexdigest()
+
+
+def _hash_stream(
+    handle: BinaryIO,
+    digest: Any,
+    *,
+    deadline: float | None,
+    cancelled: Callable[[], bool] | None,
+) -> int:
+    total = 0
+    while True:
+        _check_stop(deadline, cancelled)
+        chunk = handle.read(generation_limits.HASH_CHUNK_BYTES)
+        if not chunk:
+            return total
+        total += len(chunk)
+        digest.update(chunk)
 
 
 def _write_canonical_file(
@@ -685,12 +703,12 @@ def _write_canonical_file(
 ) -> None:
     encoded = canonical_json_bytes(payload)
     with path.open("xb") as handle:
-        for offset in range(0, len(encoded), generation_catalog.HASH_CHUNK_BYTES):
+        for offset in range(0, len(encoded), generation_limits.HASH_CHUNK_BYTES):
             _check_stop(deadline, cancelled)
-            handle.write(encoded[offset : offset + generation_catalog.HASH_CHUNK_BYTES])
+            handle.write(encoded[offset : offset + generation_limits.HASH_CHUNK_BYTES])
         handle.flush()
         _check_stop(deadline, cancelled)
-    fsync_file(path)
+    runtime_sync.fsync_file(path)
     _check_stop(deadline, cancelled)
 
 
@@ -720,7 +738,7 @@ def _snapshot_source_manifest(
 
 
 def build_full_generation(
-    catalog: generation_catalog.GenerationCatalog,
+    catalog: generation_catalog_store.GenerationCatalog,
     *,
     sources: Iterable[Mapping[str, object]],
     source_bytes: Mapping[str, bytes],
@@ -775,7 +793,7 @@ def build_full_generation(
         for source in _materialize(
             sources,
             label="sources",
-            limit=evidence_graph.MAX_VALIDATION_ROWS,
+            limit=evidence_graph_limits.MAX_VALIDATION_ROWS,
             deadline=deadline,
             cancelled=cancelled,
         )
@@ -825,6 +843,7 @@ def build_full_generation(
         database_path = generation_path / "evidence.sqlite3"
         _write_generation_database(
             database_path,
+            page_size=_generation_page_size(policy),
             graph_schema=graph_schema,
             sources_list=sources_list,
             source_bytes_snapshot=source_bytes_snapshot,
@@ -832,8 +851,11 @@ def build_full_generation(
             deadline=deadline,
             cancelled=cancelled,
         )
+        # SQLite now owns the complete persisted rows. Do not overlap these
+        # disposable Python containers with search/vector encoding and validation.
+        del records, nodes, occurrences, assertions, evidence, observations, dependencies
         _check_stop(deadline, cancelled)
-        fsync_file(database_path)
+        runtime_sync.fsync_file(database_path)
         fsync_directory(generation_path)
         search_artifact = _generation_search_artifact(
             snapshot,
@@ -842,8 +864,8 @@ def build_full_generation(
             cancelled=cancelled,
             state_root=catalog.state_root,
         )
-        vectors = _generation_vector_artifacts(
-            _vector_snapshot(snapshot, policy),
+        vectors = generation_vector_artifacts(
+            vector_snapshot(snapshot, policy),
             generation_path,
             deadline=deadline,
             cancelled=cancelled,
@@ -881,7 +903,7 @@ def build_full_generation(
         )
         _kill_if(kill_point, "after_validation")
         if not activate:
-            catalog._register_validated(  # noqa: SLF001
+            catalog.register_validated(
                 candidate, deadline=deadline, cancelled=cancelled
             )
             return BuildResult(
@@ -937,6 +959,7 @@ def _write_generation_database(
     records: Mapping[str, list[Mapping[str, object]]],
     deadline: float | None,
     cancelled: Callable[[], bool] | None,
+    page_size: int = 4096,
 ) -> None:
     evidence_graph.create_generation_database(
         database_path,
@@ -951,7 +974,18 @@ def _write_generation_database(
         dependencies=records["dependencies"],
         deadline=deadline,
         cancelled=cancelled,
+        page_size=page_size,
     )
+
+
+def _generation_page_size(policy: Mapping[str, object] | None) -> int:
+    # Complete 2026-10-08 memory/code pairs: 8 KiB removes small-source
+    # overflow waste in memory, but increases code storage. Keep code at 4 KiB.
+    # This changes physical pages only, never the v2 schema or source bytes.
+    # See docs/research/2026-10-08-compile-configuration-refresh-and-disk-amplification.md.
+    if _policy_code_roots(policy):
+        return 4096
+    return 8192
 
 
 def _generation_search_artifact(
@@ -964,9 +998,9 @@ def _generation_search_artifact(
 ):
     if snapshot is None:
         return None
-    import search_memory
+    import generation_search
 
-    return search_memory.build_generation_fts(
+    return generation_search.build_generation_fts(
         snapshot,
         generation_path,
         deadline=deadline,
@@ -1004,7 +1038,7 @@ def _nightly_ledger(state_root: Path | None) -> list[tuple[object, ...]] | None:
 
 
 def _vector_reuse_source(
-    catalog: generation_catalog.GenerationCatalog, parent_generation_id: str | None
+    catalog: generation_catalog_store.GenerationCatalog, parent_generation_id: str | None
 ) -> Path | None:
     """The parent generation, when there is one on disk to read vectors from."""
     if not parent_generation_id:
@@ -1015,7 +1049,7 @@ def _vector_reuse_source(
     return candidate
 
 
-def _generation_vector_artifacts(
+def generation_vector_artifacts(
     snapshot: corpus_snapshot.CorpusSnapshot | None,
     generation_path: Path,
     *,
@@ -1032,9 +1066,9 @@ def _generation_vector_artifacts(
     """
     if snapshot is None:
         return None
-    import search_memory
+    import generation_search
 
-    return search_memory.build_generation_vectors_if_available(
+    return generation_search.build_generation_vectors_if_available(
         snapshot,
         generation_path,
         deadline=deadline,
@@ -1051,16 +1085,16 @@ def _manifest_versions(snapshot: corpus_snapshot.CorpusSnapshot | None):
             DEFAULT_TOKENIZER_VERSION,
             DEFAULT_TOKENIZER_CONFIG_SHA256,
         )
-    import search_memory
+    import generation_fts_validation
 
     return (
         COMPLETE_CORPUS_GENERATION_SCHEMA_VERSION,
-        search_memory.GENERATION_TOKENIZER_VERSION,
-        search_memory.GENERATION_TOKENIZER_CONFIG_SHA256,
+        generation_fts_validation.GENERATION_TOKENIZER_VERSION,
+        generation_fts_validation.GENERATION_TOKENIZER_CONFIG_SHA256,
     )
 
 
-def _vector_snapshot(
+def vector_snapshot(
     snapshot: corpus_snapshot.CorpusSnapshot | None, policy: Mapping[str, object] | None
 ) -> corpus_snapshot.CorpusSnapshot | None:
     """The corpus to encode, or nothing when this generation's vectors are never read.
@@ -1156,7 +1190,7 @@ def _write_generation_manifests(
 
 
 def _activated_catalog_generation(
-    catalog: generation_catalog.GenerationCatalog,
+    catalog: generation_catalog_store.GenerationCatalog,
     candidate: object,
     *,
     generation_id: str,
@@ -1165,7 +1199,7 @@ def _activated_catalog_generation(
     deadline: float | None,
     cancelled: Callable[[], bool] | None,
 ) -> bool:
-    catalog._register_validated(  # noqa: SLF001
+    catalog.register_validated(
         candidate, deadline=deadline, cancelled=cancelled
     )
     _kill_if(kill_point, "before_activation")
@@ -1181,7 +1215,7 @@ def _activated_catalog_generation(
 
 
 def _activated_generation(
-    catalog: generation_catalog.GenerationCatalog,
+    catalog: generation_catalog_store.GenerationCatalog,
     candidate: object,
     state: dict[str, bool],
     *,
@@ -1206,11 +1240,11 @@ def _activated_generation(
             deadline=deadline,
             cancelled=cancelled,
         )
-    import search_memory
+    import generation_search
 
     _kill_if(kill_point, "before_activation")
     state["publication_attempted"] = True
-    return search_memory._publish_validated_generation(  # noqa: SLF001
+    return generation_search.publish_validated_generation(  # noqa: SLF001
         snapshot,
         Path(publication_root),
         catalog,
@@ -1225,7 +1259,7 @@ def _activated_generation(
 
 
 def _discard_failed_generation(
-    catalog: generation_catalog.GenerationCatalog,
+    catalog: generation_catalog_store.GenerationCatalog,
     generation_id: str,
     state: Mapping[str, bool],
     deadline: float | None,
@@ -1243,7 +1277,7 @@ def _discard_failed_generation(
 
 
 def _require_invalidation_fingerprints(fingerprints: object) -> None:
-    if not isinstance(fingerprints, Mapping) or set(fingerprints) != _INVALIDATION_KEYS:
+    if not isinstance(fingerprints, Mapping) or set(fingerprints) != INVALIDATION_KEYS:
         raise ValueError(
             "invalidation_fingerprints must contain exports, imports, signatures, aliases, "
             "and project_metadata"
@@ -1267,7 +1301,7 @@ def _is_record_tuple(records: object) -> bool:
 
 
 def _require_record_collections(value: SourceExtraction) -> None:
-    for collection in _RECORD_COLLECTIONS:
+    for collection in RECORD_COLLECTIONS:
         if not _is_record_tuple(getattr(value, collection)):
             raise TypeError(f"{collection} must be a tuple of record mappings")
 
@@ -1288,10 +1322,10 @@ def _require_extraction_shape(value: SourceExtraction) -> None:
         raise TypeError("workspace_sensitive must be a boolean")
 
 
-def _declared_manifest_bytes(generation_manifest: Mapping[str, object]) -> int:
+def declared_manifest_bytes(generation_manifest: Mapping[str, object]) -> int:
     """How many bytes to read: the number the sealed generation manifest names.
 
-    `generation_catalog._validate_generation` has already hashed every artifact
+    `generation_catalog.validate_generation` has already hashed every artifact
     against `manifest.json` and refused a wrong size or digest, so by the time
     this is asked the declared size is verified fact, not a hint. Reading
     exactly that is a bound the corpus cannot outgrow — which a constant is not,
@@ -1304,8 +1338,8 @@ def _declared_manifest_bytes(generation_manifest: Mapping[str, object]) -> int:
     raise ValueError("the sealed manifest does not declare its incremental manifest")
 
 
-def _load_incremental_manifest(
-    catalog: generation_catalog.GenerationCatalog,
+def load_incremental_manifest(
+    catalog: generation_catalog_store.GenerationCatalog,
     generation_id: str,
     *,
     deadline: float | None,
@@ -1315,7 +1349,7 @@ def _load_incremental_manifest(
     generation_path = catalog.generations_path / generation_id
     if not (generation_path / "incremental-manifest.json").exists():
         return None, None
-    generation_manifest, _seal = generation_catalog._validate_generation(  # noqa: SLF001 - reuse must validate the sealed parent
+    generation_manifest, _seal = generation_validation.validate_generation(  # noqa: SLF001 - reuse must validate the sealed parent
         generation_path,
         catalog.state_root,
         deadline=deadline,
@@ -1324,7 +1358,7 @@ def _load_incremental_manifest(
     raw = read_runtime_bytes(
         generation_path / "incremental-manifest.json",
         catalog.state_root,
-        max_bytes=_declared_manifest_bytes(generation_manifest),
+        max_bytes=declared_manifest_bytes(generation_manifest),
     )
     _check_stop(deadline, cancelled)
     try:
@@ -1333,7 +1367,7 @@ def _load_incremental_manifest(
         raise ValueError("incremental manifest must contain valid UTF-8 JSON") from exc
     if not isinstance(value, Mapping) or canonical_json_bytes(value) != raw:
         raise ValueError("incremental manifest must be a canonical JSON object")
-    return _validated_incremental_manifest(value), generation_manifest
+    return validated_incremental_manifest(value), generation_manifest
 
 
 
@@ -1413,14 +1447,14 @@ def _require_workspace_flag(entry: Mapping[str, object]) -> None:
 
 
 def _require_entry_fingerprints(fingerprints: object) -> None:
-    if not isinstance(fingerprints, Mapping) or set(fingerprints) != _INVALIDATION_KEYS:
+    if not isinstance(fingerprints, Mapping) or set(fingerprints) != INVALIDATION_KEYS:
         raise ValueError("incremental invalidation fingerprints are malformed")
     if any(not _is_digest(item) for item in fingerprints.values()):
         raise ValueError("incremental invalidation fingerprints are malformed")
 
 
 def _require_entry_records(records: object) -> None:
-    if not isinstance(records, Mapping) or set(records) != set(_RECORD_COLLECTIONS):
+    if not isinstance(records, Mapping) or set(records) != set(RECORD_COLLECTIONS):
         raise ValueError("incremental source record membership must be a closed object")
     for record_ids in records.values():
         _require_sorted_unique_list(
@@ -1488,7 +1522,7 @@ def _require_dependency_total(value: Mapping[str, object]) -> None:
         raise ValueError("incremental record dependency total is smaller than its sample")
 
 
-def _validated_incremental_manifest(value: Mapping[str, object]) -> Mapping[str, object]:
+def validated_incremental_manifest(value: Mapping[str, object]) -> Mapping[str, object]:
     version = value.get("version")
     _require_manifest_version(version)
     _require_manifest_keys(value)
@@ -1498,7 +1532,7 @@ def _validated_incremental_manifest(value: Mapping[str, object]) -> Mapping[str,
     return value
 
 
-def _workspace_sensitive_source_ids(
+def workspace_sensitive_source_ids(
     entries: Mapping[str, Mapping[str, object]],
 ) -> set[str]:
     """Derive the workspace-sensitive owners in one pass over source entries."""
@@ -1552,7 +1586,7 @@ def _row_record(collection: str, row: sqlite3.Row) -> dict[str, object]:
     return builder(row)
 
 
-def _parent_records(
+def parent_records(
     database_path: Path,
     source_entries: Mapping[str, Mapping[str, object]],
     reused_sources: set[str],
@@ -1562,7 +1596,7 @@ def _parent_records(
 ) -> dict[str, dict[str, Mapping[str, object]]]:
     wanted = _wanted_record_ids(source_entries, reused_sources)
     loaded: dict[str, dict[str, Mapping[str, object]]] = {
-        collection: {} for collection in _RECORD_COLLECTIONS
+        collection: {} for collection in RECORD_COLLECTIONS
     }
     uri = f"{database_path.resolve(strict=True).as_uri()}?mode=ro&immutable=1"
     with closing(sqlite3.connect(uri, uri=True, timeout=0)) as database:
@@ -1584,7 +1618,7 @@ def _wanted_record_ids(
             for source_id in reused_sources
             for record_id in source_entries[source_id]["records"][collection]
         }
-        for collection in _RECORD_COLLECTIONS
+        for collection in RECORD_COLLECTIONS
     }
 
 
@@ -1617,7 +1651,7 @@ def _load_collection_records(
     deadline: float | None,
     cancelled: Callable[[], bool] | None,
 ) -> None:
-    key = _RECORD_KEYS[collection]
+    key = RECORD_KEYS[collection]
     table = _collection_table(collection)
     for row in database.execute(f"SELECT * FROM {table} ORDER BY {key}"):
         _check_stop(deadline, cancelled)
@@ -1634,7 +1668,7 @@ def _read_parent_records(
     cancelled: Callable[[], bool] | None,
 ) -> None:
     try:
-        for collection in _RECORD_COLLECTIONS:
+        for collection in RECORD_COLLECTIONS:
             _load_collection_records(
                 database,
                 collection,
@@ -1657,7 +1691,7 @@ def _require_complete_parent_records(
     loaded: Mapping[str, dict[str, Mapping[str, object]]],
     wanted: Mapping[str, set[str]],
 ) -> None:
-    for collection in _RECORD_COLLECTIONS:
+    for collection in RECORD_COLLECTIONS:
         if set(loaded[collection]) != wanted[collection]:
             raise ValueError("incremental manifest references missing parent records")
 
@@ -1704,7 +1738,7 @@ def _same_content_moved(
     )
 
 
-def _record_ids_by_owner(
+def record_ids_by_owner(
     ownership: Mapping[tuple[str, str], set[str]],
     source_ids: Iterable[str],
     *,
@@ -1713,7 +1747,7 @@ def _record_ids_by_owner(
 ) -> dict[str, dict[str, list[str]]]:
     """Invert record ownership once, preserving sorted manifest record IDs."""
     grouped = {
-        source_id: {collection: [] for collection in _RECORD_COLLECTIONS}
+        source_id: {collection: [] for collection in RECORD_COLLECTIONS}
         for source_id in source_ids
     }
     for (collection, record_id), owners in ownership.items():
@@ -1741,7 +1775,7 @@ def _sort_record_ids(records: Mapping[str, list[str]]) -> None:
 
 
 def build_incremental_generation(
-    catalog: generation_catalog.GenerationCatalog,
+    catalog: generation_catalog_store.GenerationCatalog,
     *,
     sources: Iterable[Mapping[str, object]],
     source_bytes: Mapping[str, bytes],
@@ -1773,7 +1807,7 @@ def build_incremental_generation(
         for source in _materialize(
             sources,
             label="sources",
-            limit=evidence_graph.MAX_VALIDATION_ROWS,
+            limit=evidence_graph_limits.MAX_VALIDATION_ROWS,
             deadline=deadline,
             cancelled=cancelled,
         )
@@ -1794,7 +1828,7 @@ def build_incremental_generation(
         current, parent_entries, parent_manifest, reuse_config, config_matches,
         _policy_code_roots(policy),
     )
-    runner = _IncrementalExtractor(
+    runner = IncrementalExtractor(
         extractor,
         sources_list,
         source_snapshot,
@@ -1807,7 +1841,7 @@ def build_incremental_generation(
     _expanded_rebuild(runner, delta, config_matches=config_matches)
     current_ids = set(current)
     reused = current_ids - rebuild
-    merged, ownership = _merged_records(
+    merged, ownership = merged_records(
         _reused_parent_records(
             catalog,
             parent_generation_id,
@@ -1821,7 +1855,7 @@ def build_incremental_generation(
         rebuild,
         runner.extracted,
     )
-    records_by_owner = _record_ids_by_owner(
+    records_by_owner = record_ids_by_owner(
         ownership,
         sorted(current_ids),
         deadline=deadline,
@@ -1840,17 +1874,20 @@ def build_incremental_generation(
         dependency_rows,
         dependency_total,
     )
+    # These intermediates are no longer used; the persisted manifest retains
+    # the source ownership evidence needed by the next generation.
+    del runner, ownership, records_by_owner, entry_by_id, parent_entries, parent_manifest
     _check_stop(deadline, cancelled)
     built = build_full_generation(
         catalog,
         sources=sources_list,
         source_bytes=source_snapshot,
-        nodes=merged["nodes"].values(),
-        occurrences=merged["occurrences"].values(),
-        assertions=merged["assertions"].values(),
-        evidence=merged["evidence"].values(),
-        observations=merged["observations"].values(),
-        dependencies=merged["dependencies"].values(),
+        nodes=_owned_record_iterator(merged, "nodes"),
+        occurrences=_owned_record_iterator(merged, "occurrences"),
+        assertions=_owned_record_iterator(merged, "assertions"),
+        evidence=_owned_record_iterator(merged, "evidence"),
+        observations=_owned_record_iterator(merged, "observations"),
+        dependencies=_owned_record_iterator(merged, "dependencies"),
         generation_id=generation_id,
         parent_generation_id=parent_generation_id,
         policy=policy,
@@ -1882,6 +1919,11 @@ def build_incremental_generation(
     )
 
 
+def _owned_record_iterator(merged, collection):
+    """Transfer one locally owned family; exhaustion releases its dictionary."""
+    return iter(merged.pop(collection).values())
+
+
 def _validated_incremental_inputs(
     catalog: object,
     reuse_config: object,
@@ -1890,7 +1932,7 @@ def _validated_incremental_inputs(
 ) -> RepositoryScope | None:
     _require_type(
         catalog,
-        generation_catalog.GenerationCatalog,
+        generation_catalog_store.GenerationCatalog,
         "catalog must be a GenerationCatalog",
     )
     _require_type(
@@ -1923,7 +1965,7 @@ def _comparable_reuse_config(config: Mapping[str, object]) -> dict[str, object]:
     }
 
 
-def _reuse_config_matches(
+def reuse_config_matches(
     parent_manifest: Mapping[str, object],
     parent_generation_manifest: Mapping[str, object] | None,
     reuse_config: IncrementalReuseConfig,
@@ -1961,7 +2003,7 @@ def _parent_reuse_config_matches(
 
 
 def _incremental_parent_state(
-    catalog: generation_catalog.GenerationCatalog,
+    catalog: generation_catalog_store.GenerationCatalog,
     parent_generation_id: str | None,
     reuse_config: IncrementalReuseConfig,
     repository_scope_object: Mapping[str, object] | None,
@@ -1972,7 +2014,7 @@ def _incremental_parent_state(
     if parent_generation_id is None:
         return None, {}, False
     try:
-        parent_manifest, parent_generation_manifest = _load_incremental_manifest(
+        parent_manifest, parent_generation_manifest = load_incremental_manifest(
             catalog, parent_generation_id, deadline=deadline, cancelled=cancelled
         )
     except ValueError:
@@ -1984,7 +2026,7 @@ def _incremental_parent_state(
     parent_entries = {
         str(entry["source_id"]): entry for entry in parent_manifest.get("sources", [])
     }
-    config_matches = _reuse_config_matches(
+    config_matches = reuse_config_matches(
         parent_manifest, parent_generation_manifest, reuse_config, repository_scope_object
     )
     return parent_manifest, parent_entries, config_matches
@@ -2008,7 +2050,7 @@ def _workspace_surface_moved(
     return current_source.get("language") != parent_source.get("language")
 
 
-def _workspace_source_ids(
+def workspace_source_ids(
     sources: Mapping[str, Mapping[str, object]], code_roots: tuple[str, ...]
 ) -> set[str]:
     """Every source outside the memory walk; a code root named `knowledge` is code.
@@ -2038,8 +2080,8 @@ def _workspace_membership_changed(
     )
     if parent_workspace_manifest != reuse_config.workspace_manifest_sha256:
         return True
-    current_workspace_ids = _workspace_source_ids(current, code_roots)
-    previous_workspace_ids = _workspace_source_ids(parent_sources, code_roots)
+    current_workspace_ids = workspace_source_ids(current, code_roots)
+    previous_workspace_ids = workspace_source_ids(parent_sources, code_roots)
     if added & current_workspace_ids or deleted & previous_workspace_ids:
         return True
     workspace_ids = current_workspace_ids | previous_workspace_ids
@@ -2084,7 +2126,7 @@ def _incremental_delta(
     )
     rebuild = _initial_rebuild(config_matches, current_ids, added, changed)
     if membership_changed:
-        rebuild.update(_workspace_source_ids(current, code_roots))
+        rebuild.update(workspace_source_ids(current, code_roots))
     return {
         "added": added,
         "deleted": deleted,
@@ -2109,8 +2151,8 @@ def _universe_ids(
     parent entry, and a source moved across the boundary belongs to both until
     the move has been accounted for.
     """
-    current_workspace = _workspace_source_ids(current, code_roots)
-    parent_workspace = _workspace_source_ids(parent_entries, code_roots)
+    current_workspace = workspace_source_ids(current, code_roots)
+    parent_workspace = workspace_source_ids(parent_entries, code_roots)
     return (
         current_workspace | parent_workspace,
         (set(current) - current_workspace) | (set(parent_entries) - parent_workspace),
@@ -2125,7 +2167,7 @@ def _initial_rebuild(
     return set(added | changed)
 
 
-class _IncrementalExtractor:
+class IncrementalExtractor:
     """Runs the extractor once per source and remembers what it produced."""
 
     def __init__(
@@ -2175,7 +2217,7 @@ class _IncrementalExtractor:
             self.run(source_id)
 
 
-def _semantic_changes(
+def source_semantic_changes(
     extracted: Mapping[str, SourceExtraction],
     changed: set[str],
     parent_entries: Mapping[str, Mapping[str, object]],
@@ -2226,7 +2268,7 @@ def _workspace_invalidated(
 
     See `docs/research/2026-08-29-what-a-changed-source-may-invalidate.md`.
     """
-    sensitive = _workspace_sensitive_source_ids(parent_entries) & current_ids
+    sensitive = workspace_sensitive_source_ids(parent_entries) & current_ids
     return _sensitive_in_moved_universes(sensitive, universes, moved) - rebuild
 
 
@@ -2244,7 +2286,7 @@ def _newly_invalidated(
 
 
 def _expanded_rebuild(
-    runner: _IncrementalExtractor, delta: Mapping[str, object], *, config_matches: bool
+    runner: IncrementalExtractor, delta: Mapping[str, object], *, config_matches: bool
 ) -> None:
     """Follow invalidation through dependencies until nothing new falls out."""
     if not config_matches:
@@ -2252,7 +2294,7 @@ def _expanded_rebuild(
     parent_entries = delta["parent_entries"]
     current_ids = delta["current_ids"]
     rebuild = delta["rebuild"]
-    semantic_changes = _semantic_changes(
+    semantic_changes = source_semantic_changes(
         runner.extracted, delta["changed"], parent_entries
     )
     workspace_invalidated = _workspace_invalidated(
@@ -2275,7 +2317,7 @@ def _expanded_rebuild(
 
 
 def _reused_parent_records(
-    catalog: generation_catalog.GenerationCatalog,
+    catalog: generation_catalog_store.GenerationCatalog,
     parent_generation_id: str | None,
     parent_entries: Mapping[str, Mapping[str, object]],
     reused: set[str],
@@ -2284,8 +2326,8 @@ def _reused_parent_records(
     cancelled: Callable[[], bool] | None,
 ) -> dict[str, dict[str, Mapping[str, object]]]:
     if not reused or parent_generation_id is None:
-        return {collection: {} for collection in _RECORD_COLLECTIONS}
-    return _parent_records(
+        return {collection: {} for collection in RECORD_COLLECTIONS}
+    return parent_records(
         catalog.generations_path / parent_generation_id / "evidence.sqlite3",
         parent_entries,
         reused,
@@ -2311,7 +2353,7 @@ def _merge_collection_records(
     records: Iterable[Mapping[str, object]],
     source_id: str,
 ) -> None:
-    key = _RECORD_KEYS[collection]
+    key = RECORD_KEYS[collection]
     for record in records:
         record_id = str(record[key])
         candidate = dict(record)
@@ -2327,12 +2369,12 @@ def _claim_reused_records(
     records: Mapping[str, Iterable[str]],
     source_id: str,
 ) -> None:
-    for collection in _RECORD_COLLECTIONS:
+    for collection in RECORD_COLLECTIONS:
         for record_id in records[collection]:
             ownership.setdefault((collection, str(record_id)), set()).add(source_id)
 
 
-def _merged_records(
+def merged_records(
     parent_records: Mapping[str, dict[str, Mapping[str, object]]],
     parent_entries: Mapping[str, Mapping[str, object]],
     reused: set[str],
@@ -2341,14 +2383,14 @@ def _merged_records(
 ):
     merged: dict[str, dict[str, Mapping[str, object]]] = {
         collection: dict(parent_records[collection])
-        for collection in _RECORD_COLLECTIONS
+        for collection in RECORD_COLLECTIONS
     }
     ownership: dict[tuple[str, str], set[str]] = {}
     for source_id in reused:
         _claim_reused_records(ownership, parent_entries[source_id]["records"], source_id)
     for source_id in sorted(rebuild):
         result = extracted[source_id]
-        for collection in _RECORD_COLLECTIONS:
+        for collection in RECORD_COLLECTIONS:
             _merge_collection_records(
                 merged[collection],
                 ownership,

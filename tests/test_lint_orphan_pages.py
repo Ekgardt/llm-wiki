@@ -27,11 +27,10 @@ One-sentence summary: {title} exists.
 @pytest.fixture()
 def notes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     """A vault of its own; findings are reported relative to the vault root."""
-    import lint_memory
 
     directory = tmp_path / "knowledge" / "notes"
     directory.mkdir(parents=True)
-    monkeypatch.setattr(lint_memory, "ROOT", tmp_path)
+    monkeypatch.setenv("LLM_WIKI_ROOT", str(tmp_path))
     return directory
 
 

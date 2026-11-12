@@ -39,9 +39,9 @@ def test_a_planned_graph_run_says_what_it_asked_for() -> None:
 def test_a_graph_answer_without_its_dense_leg_reports_dense_missing() -> None:
     from dataclasses import asdict
 
-    trace = mcp_server._reported_trace(asdict(_graph_run_without_dense().trace))
+    trace = mcp_server.reported_trace(asdict(_graph_run_without_dense().trace))
 
-    components = mcp_server._recall_components({"retrieval_trace": trace})
+    components = mcp_server.recall_components({"retrieval_trace": trace})
 
     assert components["dense"]["freshness"] == "missing"
 
@@ -54,6 +54,6 @@ def test_no_trace_field_is_dropped_on_its_way_to_the_envelope() -> None:
 
     names = {field.name for field in fields(RetrievalTrace)}
     schema = json.loads(mcp_server.RETRIEVAL_TRACE_SCHEMA.read_text(encoding="utf-8"))
-    reported = mcp_server._reported_trace(asdict(_graph_run_without_dense().trace))
+    reported = mcp_server.reported_trace(asdict(_graph_run_without_dense().trace))
 
     assert (names - set(schema["properties"]), names - set(reported)) == (set(), set())

@@ -54,14 +54,10 @@ def _git(vault: Path, *arguments: str, when: float | None = None) -> None:
 @pytest.fixture
 def vault(tmp_path, monkeypatch):
     """A throwaway vault wired into the archiver; never the live one."""
-    import archive_stale
 
     root = tmp_path / "vault"
     notes = root / "knowledge" / "notes"
     notes.mkdir(parents=True)
-    monkeypatch.setattr(archive_stale, "ROOT", root)
-    monkeypatch.setattr(archive_stale, "KNOWLEDGE", notes)
-    monkeypatch.setattr(archive_stale, "ARCHIVE_ROOT", notes / "archive")
     monkeypatch.setenv("LLM_WIKI_ROOT", str(root))
     monkeypatch.setenv("LLM_WIKI_STATE_ROOT", str(tmp_path / "state"))
     return root
@@ -100,7 +96,7 @@ def _stale(root: Path) -> list[str]:
     import archive_stale
 
     cutoff = time.time() - DEFAULT_DAYS * DAY
-    return sorted(page.name for page in archive_stale._stale_pages(cutoff, DEFAULT_DAYS))
+    return sorted(page.name for page in archive_stale.stale_pages(cutoff, DEFAULT_DAYS))
 
 
 # --------------------------------------------------------------------------
@@ -181,9 +177,6 @@ def test_a_vault_nested_inside_a_repository_still_reads_its_history(tmp_path, mo
     repository = tmp_path / "repository"
     root = repository / "vault"
     (root / "knowledge" / "notes").mkdir(parents=True)
-    monkeypatch.setattr(archive_stale, "ROOT", root)
-    monkeypatch.setattr(archive_stale, "KNOWLEDGE", root / "knowledge" / "notes")
-    monkeypatch.setattr(archive_stale, "ARCHIVE_ROOT", root / "knowledge/notes/archive")
     monkeypatch.setenv("LLM_WIKI_ROOT", str(root))
     monkeypatch.setenv("LLM_WIKI_STATE_ROOT", str(tmp_path / "state"))
     _repository(repository)
@@ -242,22 +235,22 @@ def test_a_page_whose_body_writes_status_is_archived_as_retired(vault):
     page = vault / "knowledge/notes/body-mentions-status.md"
     page.write_text("A page with no frontmatter that writes status: here.\n", encoding="utf-8")
 
-    assert archive_stale._archive_page(page, apply=True).startswith("ARCHIVED:")
+    assert archive_stale.archive_page(page, apply=True).startswith("ARCHIVED:")
     archived = _archived_copy(vault, "body-mentions-status").read_text(encoding="utf-8")
     assert archived.startswith("---\nstatus: archived\n---\n")
     assert is_retired("archived") and "status: archived" in archived
 
 
 def test_such_an_archived_page_is_refused_by_the_legacy_index(vault):
-    """The measured leak: `_collect_pages` does not skip the archive directory."""
+    """The measured leak: `collect_pages` does not skip the archive directory."""
     import archive_stale
-    import search_memory
+    import generation_search
 
     page = vault / "knowledge/notes/body-mentions-status.md"
     page.write_text("A page with no frontmatter that writes status: here.\n", encoding="utf-8")
-    archive_stale._archive_page(page, apply=True)
+    archive_stale.archive_page(page, apply=True)
 
-    collected = search_memory._collect_pages(
+    collected = generation_search.collect_pages(
         knowledge_dir=vault / "knowledge/notes", root=vault
     )
 
@@ -270,7 +263,7 @@ def test_the_inserted_block_is_removed_again_on_restore(vault):
     page = vault / "knowledge/notes/body-mentions-status.md"
     original = "A page with no frontmatter that writes status: here.\n"
     page.write_text(original, encoding="utf-8")
-    archive_stale._archive_page(page, apply=True)
+    archive_stale.archive_page(page, apply=True)
 
     outcome = archive_stale.restore_page("body-mentions-status", apply=True)
 
@@ -290,7 +283,7 @@ def test_a_declared_status_survives_the_round_trip(vault):
     original = "---\ntype: debugging\nstatus: preliminary\n---\n\nA page.\n"
     page.write_text(original, encoding="utf-8")
 
-    archive_stale._archive_page(page, apply=True)
+    archive_stale.archive_page(page, apply=True)
     archived = _archived_copy(vault, "declared-status").read_text(encoding="utf-8")
     archive_stale.restore_page("declared-status", apply=True)
 
@@ -307,7 +300,7 @@ def test_a_page_without_a_status_still_round_trips_byte_for_byte(vault):
     original = "---\ntype: debugging\n---\n\nA page.\n"
     page.write_text(original, encoding="utf-8")
 
-    archive_stale._archive_page(page, apply=True)
+    archive_stale.archive_page(page, apply=True)
     archive_stale.restore_page("no-status", apply=True)
 
     assert page.read_text(encoding="utf-8") == original
@@ -321,7 +314,7 @@ def test_a_superseded_page_archived_by_hand_comes_back_superseded(vault):
     original = "---\ntype: debugging\nstatus: superseded\n---\n\nA page.\n"
     page.write_text(original, encoding="utf-8")
 
-    archive_stale._archive_page(page, apply=True)
+    archive_stale.archive_page(page, apply=True)
     archive_stale.restore_page("retired", apply=True)
 
     assert page.read_text(encoding="utf-8") == original
@@ -336,7 +329,7 @@ def test_a_page_already_calling_itself_archived_records_no_previous_status(vault
         "---\ntype: debugging\nstatus: archived\n---\n\nA page.\n", encoding="utf-8"
     )
 
-    archive_stale._archive_page(page, apply=True)
+    archive_stale.archive_page(page, apply=True)
     archived = _archived_copy(vault, "already-archived").read_text(encoding="utf-8")
     archive_stale.restore_page("already-archived", apply=True)
 

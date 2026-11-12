@@ -20,100 +20,27 @@ import json
 import sys
 from pathlib import Path
 
-import pytest
 from reliable_memory import canonical_json_bytes, sha256_bytes
 
+from tests.compile_claims_producer_helpers import (
+    DATE,
+    QUOTE,
+    SECOND_QUOTE,
+    _candidate,
+    _daily,
+    _draft,
+    _evidence,
+    _operation,
+    vault,  # noqa: F401
+)
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
-
-DATE = "2026-07-14"
-QUOTE = "The maintenance lease expires after 30 seconds."
-SECOND_QUOTE = "The nightly pass runs at 03:00 local time."
-
-
-@pytest.fixture
-def vault(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[Path, Path]:
-    root = tmp_path / "vault"
-    state_root = tmp_path / "state"
-    state_root.mkdir()
-    for relative in ("knowledge/daily/receipts", "knowledge/notes", "knowledge/projects"):
-        (root / relative).mkdir(parents=True)
-    (root / "knowledge/index.md").write_bytes(b"# Old index\n")
-    (root / "knowledge/log.md").write_bytes(b"# Session Memory Log\n")
-    (root / "AGENTS.md").write_bytes(b"agent contract\n")
-
-    import compile_memory
-
-    for name, value in (
-        ("ROOT", root),
-        ("STATE_ROOT", state_root),
-        ("MEMORY", root / "knowledge"),
-        ("DAILY_DIR", root / "knowledge/daily"),
-        ("KNOWLEDGE", root / "knowledge/notes"),
-        ("INDEX", root / "knowledge/index.md"),
-        ("LOG", root / "knowledge/log.md"),
-        ("AGENTS", root / "AGENTS.md"),
-    ):
-        monkeypatch.setattr(compile_memory, name, value)
-    return root, state_root
-
-
-def _daily(root: Path, name: str = f"{DATE}.md") -> Path:
-    path = root / "knowledge/daily" / name
-    path.write_text(
-        f"# Daily Session Memory — {DATE}\n\n"
-        "## [10:00:00] session-end | manual\n"
-        f"{QUOTE}\n"
-        f"{SECOND_QUOTE}\n",
-        encoding="utf-8",
-    )
-    return path
-
-
-def _evidence(quote: str = QUOTE, timestamp: str = "10:00:00") -> dict[str, str]:
-    return {
-        "daily_date": DATE,
-        "timestamp": timestamp,
-        "quoted_text": quote,
-        "claim": "The lease has a bounded expiry.",
-    }
-
-
-def _operation(claims: list[object] | None = None) -> dict[str, object]:
-    operation: dict[str, object] = {
-        "action": "create",
-        "category": "decisions",
-        "slug": "bounded-lease-expiry",
-        "title": "Bounded lease expiry",
-        "summary": "The maintenance lease expires rather than wedging.",
-        "body_section": "Decision",
-        "body_markdown": "A lease that cannot expire is a permanent wedge.",
-        "evidence": [_evidence()],
-        "related": [],
-    }
-    if claims is not None:
-        operation["claims"] = claims
-    return operation
-
-
-def _candidate(**overrides: object) -> dict[str, object]:
-    candidate: dict[str, object] = {
-        "evidence_index": 0,
-        "subject": "maintenance lease",
-        "relation": "ends-at",
-        "value": {"type": "number", "value": "30", "unit": "seconds"},
-    }
-    candidate.update(overrides)
-    return candidate
-
-
-def _draft(operations: list[dict[str, object]]) -> str:
-    return json.dumps({"operations": operations, "audit": {}})
 
 
 # --- 1. the prompt --------------------------------------------------------
 
 
-def test_the_draft_prompt_names_claims_and_what_the_model_must_supply(vault):
+def test_the_draft_prompt_names_claims_and_what_the_model_must_supply(vault):  # noqa: F811
     """A field the prompt never mentions is a field nobody asked for.
 
     `claims` existed only as one optional key inside 6 KB of schema JSON pasted
@@ -121,21 +48,26 @@ def test_the_draft_prompt_names_claims_and_what_the_model_must_supply(vault):
     "claim" appeared zero times in the whole draft prompt.
     """
     root, _state_root = vault
-    import compile_memory
+    from llm_wiki import (
+        compile_pipeline_prompts,
+        compile_pipeline_sources,
+    )
 
     daily = _daily(root)
-    inputs = compile_memory.snapshot_compile_inputs([daily])
-    preamble = compile_memory._draft_prompt(inputs).split("IMMUTABLE SOURCES")[0]
+    inputs = compile_pipeline_sources.snapshot_compile_inputs([daily])
+    preamble = compile_pipeline_prompts.draft_prompt(inputs).split("IMMUTABLE SOURCES")[0]
 
     assert "claims" in preamble
     assert "evidence_index" in preamble
 
 
-def test_the_draft_never_asks_the_model_for_a_fact_about_bytes(vault):
+def test_the_draft_never_asks_the_model_for_a_fact_about_bytes(vault):  # noqa: F811
     """Identity and provenance are computed here, so they are not requested."""
-    import compile_memory
+    from llm_wiki import (
+        compile_pipeline_base,
+    )
 
-    candidate = compile_memory.CLAIM_CANDIDATE_SCHEMA["properties"]
+    candidate = compile_pipeline_base.CLAIM_CANDIDATE_SCHEMA["properties"]
     assert set(candidate) == {
         "evidence_index",
         "subject",
@@ -169,16 +101,20 @@ def _derived_facts(record: dict, daily: Path) -> dict[str, object]:
     }
 
 
-def test_a_drafted_candidate_becomes_a_record_bound_to_the_source_bytes(vault):
+def test_a_drafted_candidate_becomes_a_record_bound_to_the_source_bytes(vault):  # noqa: F811
     root, _state_root = vault
-    import compile_memory
     from claims import validate_claim_record
+    from llm_wiki import (
+        compile_pipeline_operations,
+        compile_pipeline_prompts,
+        compile_pipeline_sources,
+    )
 
     daily = _daily(root)
-    inputs = compile_memory.snapshot_compile_inputs([daily])
-    operations = compile_memory._draft_operations(_draft([_operation([_candidate()])]))
+    inputs = compile_pipeline_sources.snapshot_compile_inputs([daily])
+    operations = compile_pipeline_prompts.draft_operations(_draft([_operation([_candidate()])]))
 
-    derived = compile_memory._with_derived_claims(operations, inputs)
+    derived = compile_pipeline_operations.with_derived_claims(operations, inputs)
 
     records = derived[0]["claims"]
     validate_claim_record(records[0])
@@ -196,23 +132,27 @@ def test_a_drafted_candidate_becomes_a_record_bound_to_the_source_bytes(vault):
     }
 
 
-def test_the_derived_record_survives_the_plan_validator(vault):
+def test_the_derived_record_survives_the_plan_validator(vault):  # noqa: F811
     root, _state_root = vault
-    import compile_memory
-
-    daily = _daily(root)
-    inputs = compile_memory.snapshot_compile_inputs([daily])
-    operations = compile_memory._with_derived_claims(
-        compile_memory._draft_operations(_draft([_operation([_candidate()])])), inputs
+    from llm_wiki import (
+        compile_pipeline_operations,
+        compile_pipeline_prompts,
+        compile_pipeline_sources,
     )
 
-    plan = compile_memory._normalize_plan(operations, inputs)
+    daily = _daily(root)
+    inputs = compile_pipeline_sources.snapshot_compile_inputs([daily])
+    operations = compile_pipeline_operations.with_derived_claims(
+        compile_pipeline_prompts.draft_operations(_draft([_operation([_candidate()])])), inputs
+    )
+
+    plan = compile_pipeline_prompts.normalize_plan(operations, inputs)
 
     content = json.loads(str(plan["operations"][0]["content"]))
     assert len(content["claims"]) == 1
 
 
-def test_the_reviewer_is_not_billed_for_records_it_cannot_change(vault):
+def test_the_reviewer_is_not_billed_for_records_it_cannot_change(vault):  # noqa: F811
     """A derived claim has nothing in it for a critic to improve.
 
     The reviewer decides whether an operation is specific, durable and exactly
@@ -222,15 +162,19 @@ def test_the_reviewer_is_not_billed_for_records_it_cannot_change(vault):
     change.
     """
     root, _state_root = vault
-    import compile_memory
-
-    daily = _daily(root)
-    inputs = compile_memory.snapshot_compile_inputs([daily])
-    operations = compile_memory._with_derived_claims(
-        compile_memory._draft_operations(_draft([_operation([_candidate()])])), inputs
+    from llm_wiki import (
+        compile_pipeline_operations,
+        compile_pipeline_prompts,
+        compile_pipeline_sources,
     )
 
-    prompt = compile_memory._critique_prompt(inputs, operations)
+    daily = _daily(root)
+    inputs = compile_pipeline_sources.snapshot_compile_inputs([daily])
+    operations = compile_pipeline_operations.with_derived_claims(
+        compile_pipeline_prompts.draft_operations(_draft([_operation([_candidate()])])), inputs
+    )
+
+    prompt = compile_pipeline_prompts.critique_prompt(inputs, operations)
 
     assert operations[0]["claims"], "the plan still carries the derived record"
     assert "fingerprint" not in prompt
@@ -263,71 +207,87 @@ _FABRICATED = {
 }
 
 
-def test_a_fabricated_claim_costs_the_claim_and_never_the_page(vault):
+def test_a_fabricated_claim_costs_the_claim_and_never_the_page(vault):  # noqa: F811
     """The exact shape the real `claude` provider returned, unasked.
 
-    Before the fix this reached `_normalize_plan` and killed the whole plan with
+    Before the fix this reached `normalize_plan` and killed the whole plan with
     `claim semantic fields are not canonical` — two good pages lost to one
     optional field the model was never asked for.
     """
     root, _state_root = vault
-    import compile_memory
+    from llm_wiki import (
+        compile_pipeline_operations,
+        compile_pipeline_prompts,
+        compile_pipeline_sources,
+    )
 
     daily = _daily(root)
-    inputs = compile_memory.snapshot_compile_inputs([daily])
+    inputs = compile_pipeline_sources.snapshot_compile_inputs([daily])
 
-    operations = compile_memory._draft_operations(_draft([_operation([dict(_FABRICATED)])]))
-    operations = compile_memory._with_derived_claims(operations, inputs)
-    plan = compile_memory._normalize_plan(operations, inputs)
+    operations = compile_pipeline_prompts.draft_operations(_draft([_operation([dict(_FABRICATED)])]))
+    operations = compile_pipeline_operations.with_derived_claims(operations, inputs)
+    plan = compile_pipeline_prompts.normalize_plan(operations, inputs)
 
     assert len(plan["operations"]) == 1
     assert "claims" not in json.loads(str(plan["operations"][0]["content"]))
 
 
-def test_claims_of_the_wrong_shape_entirely_still_cost_only_the_claims(vault):
+def test_claims_of_the_wrong_shape_entirely_still_cost_only_the_claims(vault):  # noqa: F811
     root, _state_root = vault
-    import compile_memory
+    from llm_wiki import (
+        compile_pipeline_operations,
+        compile_pipeline_prompts,
+        compile_pipeline_sources,
+    )
 
     daily = _daily(root)
-    inputs = compile_memory.snapshot_compile_inputs([daily])
+    inputs = compile_pipeline_sources.snapshot_compile_inputs([daily])
     operation = _operation()
     operation["claims"] = {"not": "an array"}
 
-    operations = compile_memory._draft_operations(_draft([operation]))
-    plan = compile_memory._normalize_plan(
-        compile_memory._with_derived_claims(operations, inputs), inputs
+    operations = compile_pipeline_prompts.draft_operations(_draft([operation]))
+    plan = compile_pipeline_prompts.normalize_plan(
+        compile_pipeline_operations.with_derived_claims(operations, inputs), inputs
     )
 
     assert "claims" not in json.loads(str(plan["operations"][0]["content"]))
 
 
-def test_a_candidate_pointing_past_the_evidence_costs_only_itself(vault):
+def test_a_candidate_pointing_past_the_evidence_costs_only_itself(vault):  # noqa: F811
     root, _state_root = vault
-    import compile_memory
+    from llm_wiki import (
+        compile_pipeline_operations,
+        compile_pipeline_prompts,
+        compile_pipeline_sources,
+    )
 
     daily = _daily(root)
-    inputs = compile_memory.snapshot_compile_inputs([daily])
-    operations = compile_memory._draft_operations(
+    inputs = compile_pipeline_sources.snapshot_compile_inputs([daily])
+    operations = compile_pipeline_prompts.draft_operations(
         _draft([_operation([_candidate(evidence_index=7), _candidate()])])
     )
 
-    derived = compile_memory._with_derived_claims(operations, inputs)
+    derived = compile_pipeline_operations.with_derived_claims(operations, inputs)
 
     assert len(derived[0]["claims"]) == 1
     assert derived[0]["claims"][0]["subject"] == "maintenance lease"
 
 
-def test_two_candidates_with_the_same_meaning_yield_one_record(vault):
+def test_two_candidates_with_the_same_meaning_yield_one_record(vault):  # noqa: F811
     root, _state_root = vault
-    import compile_memory
+    from llm_wiki import (
+        compile_pipeline_operations,
+        compile_pipeline_prompts,
+        compile_pipeline_sources,
+    )
 
     daily = _daily(root)
-    inputs = compile_memory.snapshot_compile_inputs([daily])
-    operations = compile_memory._draft_operations(
+    inputs = compile_pipeline_sources.snapshot_compile_inputs([daily])
+    operations = compile_pipeline_prompts.draft_operations(
         _draft([_operation([_candidate(), _candidate()])])
     )
 
-    derived = compile_memory._with_derived_claims(operations, inputs)
+    derived = compile_pipeline_operations.with_derived_claims(operations, inputs)
 
     assert len(derived[0]["claims"]) == 1
 
@@ -356,7 +316,7 @@ def _oversized_daily(root: Path) -> Path:
     return path
 
 
-def test_a_claim_binds_to_the_part_of_a_split_day_that_holds_its_quote(vault):
+def test_a_claim_binds_to_the_part_of_a_split_day_that_holds_its_quote(vault):  # noqa: F811
     """The same defect fixed for quoted evidence on 2026-08-24, still open here.
 
     `_daily_for_evidence` asked for the *sole* snapshot of a date, and a long day
@@ -365,18 +325,22 @@ def test_a_claim_binds_to_the_part_of_a_split_day_that_holds_its_quote(vault):
     ever have bound — the reference resolved against no snapshot at all.
     """
     root, _state_root = vault
-    import compile_memory
+    from llm_wiki import (
+        compile_pipeline_operations,
+        compile_pipeline_prompts,
+        compile_pipeline_sources,
+    )
 
     daily = _oversized_daily(root)
-    inputs = compile_memory.snapshot_compile_inputs([daily])
+    inputs = compile_pipeline_sources.snapshot_compile_inputs([daily])
     operation = _operation([_candidate(evidence_index=0)])
     operation["evidence"] = [_evidence(SECOND_QUOTE, "11:00:00")]
     operation["slug"] = "nightly-pass-hour"
 
-    derived = compile_memory._with_derived_claims(
-        compile_memory._draft_operations(_draft([operation])), inputs
+    derived = compile_pipeline_operations.with_derived_claims(
+        compile_pipeline_prompts.draft_operations(_draft([operation])), inputs
     )
-    compile_memory._normalize_plan(derived, inputs)
+    compile_pipeline_prompts.normalize_plan(derived, inputs)
 
     assert len(inputs.dailies) > 1
     assert [item["evidence"]["text"] for item in derived[0]["claims"]] == [SECOND_QUOTE]
@@ -385,20 +349,25 @@ def test_a_claim_binds_to_the_part_of_a_split_day_that_holds_its_quote(vault):
 # --- 5. end to end: the ledger the index reads back ------------------------
 
 
-def test_a_drafted_claim_reaches_the_page_ledger_and_the_claim_index(vault):
+def test_a_drafted_claim_reaches_the_page_ledger_and_the_claim_index(vault):  # noqa: F811
     root, state_root = vault
-    import compile_memory
     from claims import ClaimIndex
+    from llm_wiki import (
+        compile_pipeline_apply,
+        compile_pipeline_operations,
+        compile_pipeline_prompts,
+        compile_pipeline_sources,
+    )
     from markdown_transaction import MarkdownCoordinator
 
     daily = _daily(root)
-    inputs = compile_memory.snapshot_compile_inputs([daily])
-    operations = compile_memory._with_derived_claims(
-        compile_memory._draft_operations(_draft([_operation([_candidate()])])), inputs
+    inputs = compile_pipeline_sources.snapshot_compile_inputs([daily])
+    operations = compile_pipeline_operations.with_derived_claims(
+        compile_pipeline_prompts.draft_operations(_draft([_operation([_candidate()])])), inputs
     )
-    plan = compile_memory._normalize_plan(operations, inputs)
+    plan = compile_pipeline_prompts.normalize_plan(operations, inputs)
 
-    compile_memory.apply_compile_plan(
+    compile_pipeline_apply.apply_compile_plan(
         inputs,
         plan,
         action_key="c" * 64,

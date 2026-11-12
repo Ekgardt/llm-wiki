@@ -1,6 +1,6 @@
 """A task that has spent every attempt must not keep the state of pending work.
 
-`_failure_state` sent an ordinary failure back to `ready` whatever the attempt
+`failure_state` sent an ordinary failure back to `ready` whatever the attempt
 count was, so a task failing on its last allowed attempt kept the state of
 work still to do and the attempt count of work given up on. The worker will
 not claim it — the budget is spent. `redrive` will not take it — redrive
@@ -14,7 +14,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 
-import memory_queue  # noqa: E402
+import queue_core  # noqa: E402
 import repair_exhausted_queue_tasks as repair  # noqa: E402
 
 
@@ -27,21 +27,21 @@ def _row(attempts: int) -> sqlite3.Row:
 
 
 def _failure(**kwargs):
-    return memory_queue.QueueFailure(error_code="processor_failed", **kwargs)
+    return queue_core.QueueFailure(error_code="processor_failed", **kwargs)
 
 
 def test_the_last_allowed_attempt_ends_the_task():
     assert repair  # the repair ships with the fix that stops making this state
 
-    assert memory_queue._failure_state(_row(8), _failure(), 8) == ("dead", 8)
+    assert queue_core.failure_state(_row(8), _failure(), 8) == ("dead", 8)
 
 
 def test_an_attempt_still_left_goes_back_to_ready():
-    assert memory_queue._failure_state(_row(7), _failure(), 8) == ("ready", 7)
+    assert queue_core.failure_state(_row(7), _failure(), 8) == ("ready", 7)
 
 
 def test_a_blocked_capability_is_not_an_attempt_at_all():
-    state, attempts = memory_queue._failure_state(
+    state, attempts = queue_core.failure_state(
         _row(8), _failure(blocked_capability="provider"), 8
     )
 

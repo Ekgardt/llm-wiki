@@ -15,24 +15,22 @@ import threading
 import time
 from collections.abc import Iterator
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 import markdown_transaction
-import memory_queue
-from installed_memory_repair import validate_reliability_v3_runtime
+import queue_core
+from llm_wiki import runtime_roots
+from llm_wiki.formats.canonical import canonical_json_bytes, sha256_bytes
 from operational_ownership import (
     OperationalOwnershipError,
     OwnerLease,
     OwnershipRegistry,
 )
-from reliable_memory import (
-    _harden_runtime_owner_only,
-    canonical_json_bytes,
-    fsync_directory,
-    fsync_file,
-    sha256_bytes,
+from reliability_v3_validation import (
+    validate_reliability_v3_runtime,
 )
+from reliable_memory import fsync_directory, fsync_file, harden_runtime_owner_only
 
 # Entries one source walk may list before it refuses with `source_entry_limit`; the
 # list is held in memory. Basis unknown beyond that: value predates measurement; the
@@ -81,6 +79,7 @@ _ALLOWED_RUNTIME_FINDINGS = frozenset(
     {
         "queue_task_retained",
         "queue_attempt_history_retained",
+        "queue_compile_progress_retained",
         "queue_source_failure_retained",
         "queue_source_link_retained",
         "capture_intent_retained",
@@ -143,7 +142,8 @@ class _Entry:
         }
         if self.kind == "file":
             value.update(size=self.size, sha256=self.sha256)
-        elif self.kind == "symlink":
+            return value
+        if self.kind == "symlink":
             assert self.link_target is not None
             value["target_sha256"] = sha256_bytes(
                 self.link_target.encode("utf-8", errors="surrogatepass")
@@ -290,7 +290,7 @@ def _raise_command_status(status: str) -> None:
         raise BackupError("restic_timeout")
 
 
-def _run_bounded(
+def run_bounded(
     command: list[str],
     *,
     cwd: Path,
@@ -450,14 +450,14 @@ def _scan_tree(
     return tuple(entries)
 
 
-def _copy_regular_file(source: Path, destination: Path) -> None:
+def copy_regular_file(source: Path, destination: Path) -> None:
     shutil.copyfile(source, destination, follow_symlinks=False)
     shutil.copystat(source, destination, follow_symlinks=False)
 
 
 def _copy_file_entry(entry: _Entry, destination: Path, deadline: float) -> None:
-    _copy_regular_file(entry.source, destination)
-    _harden_runtime_owner_only(destination, 0o600)
+    copy_regular_file(entry.source, destination)
+    harden_runtime_owner_only(destination, 0o600)
     if not destination.is_file():
         raise BackupError("staging_copy_mismatch")
     if _hash_file(destination, deadline) != entry.sha256:
@@ -468,7 +468,7 @@ def _copy_entry(entry: _Entry, image: Path, deadline: float) -> None:
     destination = image / entry.path
     if entry.kind == "directory":
         destination.mkdir()
-        _harden_runtime_owner_only(destination, 0o700)
+        harden_runtime_owner_only(destination, 0o700)
         return
     if entry.kind == "file":
         _copy_file_entry(entry, destination, deadline)
@@ -477,7 +477,7 @@ def _copy_entry(entry: _Entry, image: Path, deadline: float) -> None:
     os.symlink(entry.link_target, destination, target_is_directory=False)
 
 
-def _copy_entries(entries: tuple[_Entry, ...], image: Path, deadline: float) -> None:
+def copy_entries(entries: tuple[_Entry, ...], image: Path, deadline: float) -> None:
     for entry in entries:
         _deadline(deadline)
         _copy_entry(entry, image, deadline)
@@ -492,12 +492,12 @@ def _snapshot_file(source: Path, destination: Path) -> None:
         return
     with os.fdopen(descriptor, "rb") as stream, destination.open("xb") as copy:
         shutil.copyfileobj(stream, copy)
-    _harden_runtime_owner_only(destination, 0o600)
+    harden_runtime_owner_only(destination, 0o600)
 
 
 def _snapshot_directory(source: Path, destination: Path, deadline: float) -> None:
     destination.mkdir()
-    _harden_runtime_owner_only(destination, 0o700)
+    harden_runtime_owner_only(destination, 0o700)
     for child in _directory_children(source):
         _deadline(deadline)
         _snapshot_path(Path(child.path), destination / child.name, deadline)
@@ -545,7 +545,7 @@ def _sqlite_online_backup(source: Path, destination: Path, deadline: float) -> N
         raise
     except (OSError, sqlite3.Error) as exc:
         raise BackupError("database_backup_failed") from exc
-    _harden_runtime_owner_only(destination, 0o600)
+    harden_runtime_owner_only(destination, 0o600)
     fsync_file(destination)
 
 
@@ -580,7 +580,7 @@ def _require_regular_database(path: Path) -> None:
         raise BackupError("database_validation_failed")
 
 
-def _validated_databases(
+def validated_databases(
     state_root: Path,
 ) -> tuple[dict[str, object], dict[str, object]]:
     run = state_root / "run"
@@ -592,7 +592,7 @@ def _validated_databases(
         coordinator = markdown_transaction.validate_coordinator_v3_database(
             coordinator_path, state_root=state_root
         )
-        queue = memory_queue.validate_queue_v3_database(
+        queue = queue_core.validate_queue_v3_database(
             queue_path, state_root=state_root
         )
     except BackupError:
@@ -616,7 +616,7 @@ def _database_manifest_entry(
 def _database_manifest(image: Path) -> list[dict[str, object]]:
     state_root = image / "state"
     run = state_root / "run"
-    coordinator, queue = _validated_databases(state_root)
+    coordinator, queue = validated_databases(state_root)
     return [
         _database_manifest_entry(run, _ACTIVE_DATABASES[0], coordinator),
         _database_manifest_entry(run, _ACTIVE_DATABASES[1], queue),
@@ -633,7 +633,7 @@ def _maintain_heartbeat(
     # A busy database is retried until the lease expires; a lost fence is final.
     # See `docs/research/2026-09-14-a-busy-database-is-not-a-lost-lease.md`.
     from lease_renewal import renew_until_stopped
-    from reliable_memory import DEFAULTS
+    from llm_wiki.reliability_defaults import DEFAULTS
 
     ended = renew_until_stopped(
         lambda: registry.heartbeat(lease),
@@ -670,7 +670,7 @@ def _stop_heartbeat(
 
 
 @contextlib.contextmanager
-def _heartbeat(registry: OwnershipRegistry, lease: OwnerLease) -> Iterator[None]:
+def heartbeat(registry: OwnershipRegistry, lease: OwnerLease) -> Iterator[None]:
     stop = threading.Event()
     failures: list[BaseException] = []
     # The owner is already held; its expiry is counted from here.
@@ -693,7 +693,7 @@ def _heartbeat(registry: OwnershipRegistry, lease: OwnerLease) -> Iterator[None]
         _stop_heartbeat(thread, stop, lease, body_failed)
 
 
-def _resolve_directory(path: Path, code: str) -> Path:
+def resolve_directory(path: Path, code: str) -> Path:
     try:
         resolved = Path(path).resolve(strict=True)
     except OSError as exc:
@@ -703,11 +703,11 @@ def _resolve_directory(path: Path, code: str) -> Path:
     return resolved
 
 
-def _resolve_staging(path: Path) -> Path:
+def resolve_staging(path: Path) -> Path:
     selected = Path(path)
     if selected.is_symlink():
         raise BackupError("backup_path_invalid")
-    return _resolve_directory(selected, "backup_path_invalid")
+    return resolve_directory(selected, "backup_path_invalid")
 
 
 def _require_separate_sources(vault: Path, state: Path) -> None:
@@ -718,7 +718,7 @@ def _require_separate_sources(vault: Path, state: Path) -> None:
         raise BackupError("source_roots_overlap")
 
 
-def _validate_root_locations(vault: Path, state: Path, staging: Path) -> None:
+def validate_root_locations(vault: Path, state: Path, staging: Path) -> None:
     _require_separate_sources(vault, state)
     for source in {vault, state}:
         if _paths_overlap(staging, source):
@@ -741,18 +741,18 @@ def _protect_empty_directory(path: Path, occupied_code: str, invalid_code: str) 
     if _directory_occupied(path, invalid_code):
         raise BackupError(occupied_code)
     try:
-        _harden_runtime_owner_only(path, 0o700)
+        harden_runtime_owner_only(path, 0o700)
     except (OSError, PermissionError) as exc:
         raise BackupError(invalid_code) from exc
 
 
-def _resolve_roots(
+def resolve_roots(
     root: Path, state_root: Path, staging_parent: Path
 ) -> tuple[Path, Path, Path]:
-    vault = _resolve_directory(root, "backup_path_invalid")
-    state = _resolve_directory(state_root, "backup_path_invalid")
-    staging = _resolve_staging(staging_parent)
-    _validate_root_locations(vault, state, staging)
+    vault = resolve_directory(root, "backup_path_invalid")
+    state = resolve_directory(state_root, "backup_path_invalid")
+    staging = resolve_staging(staging_parent)
+    validate_root_locations(vault, state, staging)
     _protect_empty_directory(staging, "staging_not_empty", "staging_not_protected")
     return vault, state, staging
 
@@ -760,7 +760,7 @@ def _resolve_roots(
 def _acquire_backup_owner(state_root: Path) -> tuple[OwnershipRegistry, OwnerLease]:
     coordinator = state_root / "run" / "markdown-transactions-v3.sqlite3"
     try:
-        registry = OwnershipRegistry._from_adopted_database(state_root, coordinator)
+        registry = OwnershipRegistry.from_adopted_database(state_root, coordinator)
         lease = registry.acquire(
             "runtime-deletion-check",
             scope="backup-snapshot",
@@ -828,7 +828,7 @@ def _git_paths(root: Path, arguments: tuple[str, ...], deadline: float) -> froze
     all mean the same thing here — nothing may be left out on git's word.
     """
     try:
-        result = _run_bounded(
+        result = run_bounded(
             ["git", "-C", str(root), *arguments],
             cwd=root,
             deadline=deadline,
@@ -910,7 +910,7 @@ def _create_image_structure(image: Path) -> None:
     directories = (image / "vault", image / "state", image / "state/run")
     for directory in directories:
         directory.mkdir()
-        _harden_runtime_owner_only(directory, 0o700)
+        harden_runtime_owner_only(directory, 0o700)
 
 
 def _copy_active_databases(
@@ -948,7 +948,7 @@ def _write_image_manifest(
     now: datetime,
     deadline: float,
 ) -> None:
-    created_at = now.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+    created_at = now.astimezone(UTC).isoformat().replace("+00:00", "Z")
     manifest = {
         "schema_version": "private-vault-backup/v1",
         "created_at": created_at,
@@ -967,11 +967,11 @@ def _write_image_manifest(
         stream.write(canonical_json_bytes(manifest))
         stream.flush()
         os.fsync(stream.fileno())
-    _harden_runtime_owner_only(manifest_path, 0o600)
+    harden_runtime_owner_only(manifest_path, 0o600)
     fsync_directory(image)
 
 
-def _build_image(
+def build_image(
     *,
     root: Path,
     state_root: Path,
@@ -990,8 +990,8 @@ def _build_image(
     )
     vault_entries, runtime_entries = _source_entries(root, state_root, deadline)
     _create_image_structure(image)
-    _copy_entries(vault_entries, image, deadline)
-    _copy_entries(runtime_entries, image, deadline)
+    copy_entries(vault_entries, image, deadline)
+    copy_entries(runtime_entries, image, deadline)
     _copy_hook_snapshot(state_root / "run", image / "state/run", deadline)
     _copy_active_databases(state_root, image, lease, deadline)
     _confirm_sources_unchanged(
@@ -1011,7 +1011,7 @@ def _build_image(
 
 
 @contextlib.contextmanager
-def _held_backup_owner(state_root: Path) -> Iterator[tuple[OwnershipRegistry, OwnerLease]]:
+def held_backup_owner(state_root: Path) -> Iterator[tuple[OwnershipRegistry, OwnerLease]]:
     registry, lease = _acquire_backup_owner(state_root)
     body_error: BaseException | None = None
     try:
@@ -1031,9 +1031,9 @@ def _prepare_backup_image(
     now: datetime,
     deadline: float,
 ) -> None:
-    with _held_backup_owner(state_root) as (registry, lease):
-        with _heartbeat(registry, lease):
-            _build_image(
+    with held_backup_owner(state_root) as (registry, lease):
+        with heartbeat(registry, lease):
+            build_image(
                 root=root,
                 state_root=state_root,
                 image=image,
@@ -1053,14 +1053,14 @@ def staged_backup_image(
     deadline: float = float("inf"),
 ) -> Iterator[Path]:
     """Yield one validated image and remove its plaintext bytes on exit."""
-    vault, state, parent = _resolve_roots(root, state_root, staging_parent)
+    vault, state, parent = resolve_roots(root, state_root, staging_parent)
     _deadline(deadline)
     try:
         _prepare_backup_image(
             root=vault,
             state_root=state,
             image=parent,
-            now=now or datetime.now(timezone.utc),
+            now=now or datetime.now(UTC),
             deadline=deadline,
         )
         yield parent
@@ -1079,7 +1079,7 @@ def _require_regular_file(path: Path, maximum: int, code: str) -> None:
         raise BackupError(code)
 
 
-def _read_manifest(root: Path) -> tuple[bytes, dict[str, object]]:
+def read_manifest(root: Path) -> tuple[bytes, dict[str, object]]:
     manifest_path = root / "manifest.json"
     _require_regular_file(manifest_path, 16 * 1024 * 1024, "manifest_invalid")
     try:
@@ -1115,7 +1115,7 @@ def _actual_manifest_entries(root: Path) -> list[dict[str, object]]:
 def validate_backup_image(image: Path) -> dict[str, int]:
     """Validate manifest membership, hashes, database schemas, and integrity."""
     root = Path(image).resolve(strict=True)
-    raw, manifest = _read_manifest(root)
+    raw, manifest = read_manifest(root)
     expected = _validate_manifest_envelope(raw, manifest)
     actual = _actual_manifest_entries(root)
     if actual != expected:
@@ -1267,7 +1267,7 @@ def _restic_inputs(
 
 
 def _require_restic_version(binary: Path, *, cwd: Path, deadline: float) -> None:
-    result = _run_bounded([str(binary), "version"], cwd=cwd, deadline=deadline)
+    result = run_bounded([str(binary), "version"], cwd=cwd, deadline=deadline)
     if result.returncode != 0 or re.match(
         rf"^restic {re.escape(_RESTIC_VERSION)}(?:\s|$)",
         result.stdout.decode("ascii", errors="ignore"),
@@ -1360,7 +1360,7 @@ def _backed_up_image(image: Path, base: list[str], deadline: float) -> dict[str,
 
 
 def _restic_backup(base: list[str], image: Path, deadline: float) -> str:
-    result = _run_bounded(
+    result = run_bounded(
         base
         + [
             "backup",
@@ -1381,7 +1381,7 @@ def _restic_backup(base: list[str], image: Path, deadline: float) -> str:
 
 
 def _restic_check(base: list[str], image: Path, deadline: float) -> None:
-    checked = _run_bounded(base + ["check"], cwd=image, deadline=deadline)
+    checked = run_bounded(base + ["check"], cwd=image, deadline=deadline)
     if checked.returncode != 0:
         raise BackupError("restic_check_failed")
 
@@ -1443,7 +1443,7 @@ def _require_complete_restore(summary: dict[str, object]) -> None:
         raise BackupError("restic_restore_incomplete")
 
 
-def _restore_summary(output: bytes) -> None:
+def restore_summary(output: bytes) -> None:
     summary = _single_summary(output, "restic_restore_output_invalid")
     _validate_restore_counters(summary)
     _require_complete_restore(summary)
@@ -1459,7 +1459,7 @@ def _validate_restore_receipt(snapshot_id: str, manifest_sha256: str) -> None:
 def _check_restic_repository(
     base: list[str], *, cwd: Path, deadline: float
 ) -> None:
-    checked = _run_bounded(base + ["check"], cwd=cwd, deadline=deadline)
+    checked = run_bounded(base + ["check"], cwd=cwd, deadline=deadline)
     if checked.returncode != 0:
         raise BackupError("restic_check_failed")
 
@@ -1471,7 +1471,7 @@ def _run_restore(
     snapshot_id: str,
     deadline: float,
 ) -> None:
-    result = _run_bounded(
+    result = run_bounded(
         base
         + [
             "restore",
@@ -1486,21 +1486,21 @@ def _run_restore(
     )
     if result.returncode != 0:
         raise BackupError("restic_restore_failed")
-    _restore_summary(result.stdout)
+    restore_summary(result.stdout)
 
 
 def _validate_restored_image(
     target: Path, expected_manifest_sha256: str, deadline: float
 ) -> tuple[dict[str, int], dict[str, object]]:
-    _harden_runtime_owner_only(target, 0o700)
-    manifest_bytes, manifest = _read_manifest(target)
+    harden_runtime_owner_only(target, 0o700)
+    manifest_bytes, manifest = read_manifest(target)
     if sha256_bytes(manifest_bytes) != expected_manifest_sha256:
         raise BackupError("restore_manifest_mismatch")
     validation = validate_backup_image(target)
     _require_runtime_valid(
         root=target / "vault",
         state_root=target / "state",
-        now=datetime.now(timezone.utc),
+        now=datetime.now(UTC),
         deadline=deadline,
         excluded_owner=None,
         code="restore_runtime_invalid",
@@ -1648,7 +1648,7 @@ def _refuse_conflicts(conflicts: list[tuple[Path, Path]], image: Path) -> None:
         raise _publish_conflict(conflicts[0][0], image)
 
 
-def _write_new(source: Path, destination: Path) -> None:
+def write_new(source: Path, destination: Path) -> None:
     """Create exclusively and make it durable: the file and the entry that names it."""
     destination.parent.mkdir(parents=True, exist_ok=True)
     with open(destination, "xb") as handle:
@@ -1661,7 +1661,7 @@ def _write_new(source: Path, destination: Path) -> None:
 def _write_or_refuse(source: Path, destination: Path, image: Path) -> None:
     """A file that appeared since the plan is the same refusal, not an overwrite."""
     try:
-        _write_new(source, destination)
+        write_new(source, destination)
     except FileExistsError:
         raise _publish_conflict(source, image) from None
 
@@ -1704,7 +1704,7 @@ def publish_restored_image(
     pairs = _publication_targets(staged, Path(vault_root).resolve(), Path(state_root).resolve())
     to_write, identical = _planned_publication(pairs, staged)
     _write_all_or_none(to_write, deadline, staged)
-    _harden_runtime_owner_only(Path(state_root).resolve() / "run", 0o700)
+    harden_runtime_owner_only(Path(state_root).resolve() / "run", 0o700)
     return {
         "schema_version": "private-vault-publish-receipt/v1",
         "manifest_sha256": expected_manifest_sha256,
@@ -1759,10 +1759,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 
 def _runtime_roots() -> tuple[Path, Path]:
-    configured = os.environ.get("LLM_WIKI_ROOT")
-    default = Path(__file__).resolve().parent.parent
-    root = Path(configured) if configured else default
-    state_root = Path(os.environ.get("LLM_WIKI_STATE_ROOT", root))
+    root = runtime_roots.vault_root()
+    state_root = runtime_roots.state_root_for(root)
     try:
         return root.resolve(strict=True), state_root.resolve(strict=True)
     except OSError as exc:
@@ -1807,7 +1805,7 @@ _SAFE_DETAIL = re.compile(
 )
 
 
-def _safe_error_details(details: tuple[str, ...]) -> list[str]:
+def safe_error_details(details: tuple[str, ...]) -> list[str]:
     return [detail for detail in details if _SAFE_DETAIL.fullmatch(detail)]
 
 
@@ -1823,7 +1821,7 @@ def main(argv: list[str] | None = None) -> int:
         receipt = _run_cli_command(args, root, state_root, deadline)
     except BackupError as exc:
         _print_json(
-            {"ok": False, "code": exc.code, "details": _safe_error_details(exc.details)}
+            {"ok": False, "code": exc.code, "details": safe_error_details(exc.details)}
         )
         return 2
     except TimeoutError:

@@ -113,7 +113,7 @@ def test_collectable_root_name_answers_for_hidden_archive_and_skipped_names():
 
 def test_the_prune_rule_has_one_definition(vault: Path):
     """The predicate and the walk must not be able to disagree."""
-    discovery = corpus_snapshot._Discovery(  # noqa: SLF001
+    discovery = corpus_snapshot.Discovery(  # noqa: SLF001
         vault,
         max_files=10,
         max_entries=10,
@@ -161,7 +161,7 @@ def test_the_vault_vocabulary_prunes_knowledge_and_not_somebody_elses_code(
     Losing it inside a foreign repository would be silent -- no refusal, no
     `excluded_roots` entry, no line in the receipt. That is NEW-67's shape.
     """
-    discovery = corpus_snapshot._Discovery(  # noqa: SLF001
+    discovery = corpus_snapshot.Discovery(  # noqa: SLF001
         vault,
         max_files=10,
         max_entries=10,

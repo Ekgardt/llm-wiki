@@ -13,6 +13,7 @@ Useful signal must survive:
 """
 from __future__ import annotations
 
+import faulthandler
 import json
 import os
 import re
@@ -24,6 +25,7 @@ from datetime import datetime
 from pathlib import Path
 
 import pytest
+from llm_wiki import integration_session_start
 
 SCRIPT = Path(__file__).resolve().parent.parent / "scripts" / "session_start_context.py"
 
@@ -103,11 +105,13 @@ def test_context_size_reasonable(injected_context: str):
 def test_latest_daily_ignores_readme(tmp_path, monkeypatch):
     import session_start_context
 
-    (tmp_path / "2026-07-12.md").write_text("daily", encoding="utf-8")
-    (tmp_path / "2026-07-13-notes.md").write_text("notes", encoding="utf-8")
-    (tmp_path / "9999-99-99.md").write_text("invalid", encoding="utf-8")
-    (tmp_path / "README.md").write_text("help", encoding="utf-8")
-    monkeypatch.setattr(session_start_context, "DAILY_DIR", tmp_path)
+    daily = tmp_path / "knowledge" / "daily"
+    daily.mkdir(parents=True)
+    (daily / "2026-07-12.md").write_text("daily", encoding="utf-8")
+    (daily / "2026-07-13-notes.md").write_text("notes", encoding="utf-8")
+    (daily / "9999-99-99.md").write_text("invalid", encoding="utf-8")
+    (daily / "README.md").write_text("help", encoding="utf-8")
+    monkeypatch.setenv("LLM_WIKI_ROOT", str(tmp_path))
 
     assert session_start_context.latest_daily().name == "2026-07-12.md"
 
@@ -116,21 +120,19 @@ def test_nightly_catchup_claim_is_atomic_and_once_per_date(tmp_path, monkeypatch
     import memory_state
     import session_start_context
 
-    monkeypatch.setattr(memory_state, "STATE_DIR", tmp_path / "run")
-    monkeypatch.setattr(memory_state, "STATE_FILE", tmp_path / "run" / "state.json")
-    monkeypatch.setattr(memory_state, "LOCK_FILE", tmp_path / "run" / "state.json.lock")
+    monkeypatch.setenv("LLM_WIKI_STATE_ROOT", str(tmp_path))
     monkeypatch.setattr(session_start_context, "update_state", memory_state.update_state)
     monkeypatch.setattr(session_start_context, "HOOK_STATE_LOCK_TIMEOUT", 120.0)
 
     with ThreadPoolExecutor(max_workers=16) as pool:
         claims = list(
             pool.map(
-                lambda _: session_start_context._claim_nightly_catchup("2026-07-12"),
+                lambda _: session_start_context.claim_nightly_catchup("2026-07-12"),
                 range(32),
             )
         )
 
-    state = json.loads(memory_state.STATE_FILE.read_text(encoding="utf-8"))
+    state = json.loads(memory_state.state_file().read_text(encoding="utf-8"))
     claim = state["nightly_catchup_claim"]
     memory_state.update_state(lambda value: value.update(last_nightly_date="2026-07-13"))
 
@@ -139,7 +141,7 @@ def test_nightly_catchup_claim_is_atomic_and_once_per_date(tmp_path, monkeypatch
         claim["date"],
         claim["status"],
         bool(claim["expires_at"]),
-        session_start_context._claim_nightly_catchup("2026-07-13"),
+        session_start_context.claim_nightly_catchup("2026-07-13"),
     ) == (1, "2026-07-12", "claimed", True, False)
 
 
@@ -147,9 +149,7 @@ def test_expired_nightly_claim_can_be_retried(tmp_path, monkeypatch):
     import memory_state
     import session_start_context
 
-    monkeypatch.setattr(memory_state, "STATE_DIR", tmp_path / "run")
-    monkeypatch.setattr(memory_state, "STATE_FILE", tmp_path / "run" / "state.json")
-    monkeypatch.setattr(memory_state, "LOCK_FILE", tmp_path / "run" / "state.json.lock")
+    monkeypatch.setenv("LLM_WIKI_STATE_ROOT", str(tmp_path))
     monkeypatch.setattr(session_start_context, "update_state", memory_state.update_state)
     monkeypatch.setattr(session_start_context, "HOOK_STATE_LOCK_TIMEOUT", 120.0)
     memory_state.save_state({
@@ -161,7 +161,7 @@ def test_expired_nightly_claim_can_be_retried(tmp_path, monkeypatch):
         }
     })
 
-    assert session_start_context._claim_nightly_catchup(
+    assert session_start_context.claim_nightly_catchup(
         "2026-07-12", now="2026-07-12T02:00:00"
     ) is True
 
@@ -173,8 +173,8 @@ def test_session_start_spawns_scheduled_nightly_nonblocking_only_for_catchup(
 
     spawned = []
     monkeypatch.delenv("MEMORY_LLM_PROVIDER", raising=False)
-    monkeypatch.setattr(session_start_context, "ROOT", tmp_path)
-    monkeypatch.setattr(session_start_context, "_claim_nightly_catchup", lambda today=None: True)
+    monkeypatch.setenv("LLM_WIKI_ROOT", str(tmp_path))
+    monkeypatch.setattr(session_start_context, "claim_nightly_catchup", lambda today=None: True)
     monkeypatch.setattr(
         session_start_context, "spawn_detached", lambda args: spawned.append(args) or 321
     )
@@ -197,13 +197,11 @@ def test_nightly_catchup_claim_returns_quickly_when_state_lock_is_held(
     lock_file = state_dir / "state.json.lock"
     state_dir.mkdir()
     lock_file.write_text(str(os.getpid()), encoding="utf-8")
-    monkeypatch.setattr(memory_state, "STATE_DIR", state_dir)
-    monkeypatch.setattr(memory_state, "STATE_FILE", state_dir / "state.json")
-    monkeypatch.setattr(memory_state, "LOCK_FILE", lock_file)
+    monkeypatch.setenv("LLM_WIKI_STATE_ROOT", str(tmp_path))
     monkeypatch.setattr(session_start_context, "update_state", memory_state.update_state)
 
     started = time.perf_counter()
-    claimed = session_start_context._claim_nightly_catchup("2026-07-13")
+    claimed = session_start_context.claim_nightly_catchup("2026-07-13")
 
     assert claimed is False
     assert time.perf_counter() - started < 0.75
@@ -219,11 +217,9 @@ def test_failed_nightly_spawn_releases_quickly_when_state_lock_is_held(
     lock_file = state_dir / "state.json.lock"
     state_dir.mkdir()
     lock_file.write_text(str(os.getpid()), encoding="utf-8")
-    monkeypatch.setattr(memory_state, "STATE_DIR", state_dir)
-    monkeypatch.setattr(memory_state, "STATE_FILE", state_dir / "state.json")
-    monkeypatch.setattr(memory_state, "LOCK_FILE", lock_file)
+    monkeypatch.setenv("LLM_WIKI_STATE_ROOT", str(tmp_path))
     monkeypatch.setattr(session_start_context, "update_state", memory_state.update_state)
-    monkeypatch.setattr(session_start_context, "_claim_nightly_catchup", lambda today: True)
+    monkeypatch.setattr(session_start_context, "claim_nightly_catchup", lambda today: True)
     monkeypatch.setattr(session_start_context, "spawn_detached", lambda args: None)
     monkeypatch.delenv("MEMORY_LLM_PROVIDER", raising=False)
 
@@ -256,9 +252,9 @@ def test_session_start_injects_bounded_health_only_when_degraded(monkeypatch):
     monkeypatch.setattr(session_start_context, "guardrails_block", lambda slug=None: "")
     monkeypatch.setattr(session_start_context, "metacognitive_block", lambda: "")
     monkeypatch.setattr(session_start_context, "advisory_block", lambda slug=None: "")
-    monkeypatch.setattr(session_start_context, "_impact_block", lambda: "")
+    monkeypatch.setattr(session_start_context, "impact_block", lambda: "")
 
-    assert session_start_context.health_block() == "## Health\n\nindex: stale\n\n"
+    assert session_start_context.health_block() == "## Health\n\nOperational scope; retained history not checked.\nindex: stale\n\n"
     context = session_start_context.build_context()
     assert "## Health" in context
     assert len(context.encode("utf-8")) <= (
@@ -274,7 +270,7 @@ def test_session_start_retains_3035_byte_advisory_under_shared_token_budget(monk
     monkeypatch.setattr(session_start_context, "guardrails_block", lambda slug=None: "")
     monkeypatch.setattr(session_start_context, "metacognitive_block", lambda: "")
     monkeypatch.setattr(session_start_context, "advisory_block", lambda slug=None: advisory)
-    monkeypatch.setattr(session_start_context, "_impact_block", lambda: "")
+    monkeypatch.setattr(session_start_context, "impact_block", lambda: "")
     monkeypatch.setattr(session_start_context, "health_block", lambda: "")
     # Force the index/daily/log to be tiny so the advisory alone is the
     # dominating section.
@@ -320,7 +316,7 @@ def test_direct_session_start_routes_semantic_items_through_compiler(monkeypatch
 
     monkeypatch.setattr(context_compiler, "compile_context_items", compile_spy)
 
-    result = session_start_context._pack_session_sections([
+    result = session_start_context.pack_session_sections([
         ("title", "# Project memory context"),
         ("guardrails", "safe"),
         ("health", "degraded"),
@@ -367,7 +363,7 @@ def test_direct_session_start_drops_optional_sections_whole_under_pressure(monke
         ContextBudget(None, len(expected.encode("utf-8")), 0, 0),
     )
 
-    result = session_start_context._pack_session_sections([
+    result = session_start_context.pack_session_sections([
         ("title", "title-must-drop-whole"),
         ("guardrails", "safety-whole"),
         ("health", "health-whole"),
@@ -391,7 +387,7 @@ def test_session_start_heading_and_body_drop_as_one_complete_item(monkeypatch):
     monkeypatch.setattr(session_start_context, "metacognitive_block", lambda: "")
     monkeypatch.setattr(session_start_context, "health_block", lambda: "")
     monkeypatch.setattr(session_start_context, "advisory_block", lambda slug=None: "")
-    monkeypatch.setattr(session_start_context, "_impact_block", lambda: "")
+    monkeypatch.setattr(session_start_context, "impact_block", lambda: "")
     monkeypatch.setattr(session_start_context, "trim_index", lambda text: "I" * 200)
     monkeypatch.setattr(
         session_start_context, "latest_daily", lambda: SimpleNamespace(name="x")
@@ -405,7 +401,7 @@ def test_session_start_heading_and_body_drop_as_one_complete_item(monkeypatch):
     )
 
     items = session_start_context.build_context_items()
-    rendered = session_start_context._pack_session_items(items)
+    rendered = session_start_context.pack_session_items(items)
 
     assert "session:index_header" not in {item.item_id for item in items}
     assert "session:daily_header" not in {item.item_id for item in items}
@@ -426,7 +422,7 @@ def test_generated_project_context_routes_items_through_compiler(monkeypatch):
 
     monkeypatch.setattr(build_context, "compile_context_items", compile_spy)
 
-    result = build_context._pack_project_context(
+    result = build_context.pack_project_context(
         [
             ("orientation", "## Project context: demo"),
             ("handoff", "### Where you left off\nresume here"),
@@ -475,11 +471,11 @@ def test_generated_project_context_drops_history_whole_under_pressure(monkeypatc
         "DEFAULT_CONTEXT_BUDGET",
         ContextBudget(None, len(handoff.encode("utf-8")), 0, 0),
     )
-    monkeypatch.setattr(build_context, "_read_state_handoff", lambda slug: "resume-whole")
-    monkeypatch.setattr(build_context, "_find_project_pages", lambda slug: [])
+    monkeypatch.setattr(build_context, "read_state_handoff", lambda slug: "resume-whole")
+    monkeypatch.setattr(build_context, "find_project_pages", lambda slug: [])
     monkeypatch.setattr(
         build_context,
-        "_find_recent_daily_activity",
+        "find_recent_daily_activity",
         lambda slug: ["recent-history-must-drop-whole"],
     )
     monkeypatch.setattr(
@@ -516,14 +512,14 @@ def test_recovered_handoff_routes_through_compiler_as_mandatory(monkeypatch):
     global_items = [
         item
         for item in (
-            session_start_context._section_item("guardrails", "safe"),
-            session_start_context._section_item("health", "degraded"),
-            session_start_context._section_item("advisory", "next action"),
-            session_start_context._section_item("daily", "old event"),
+            session_start_context.section_item("guardrails", "safe"),
+            session_start_context.section_item("health", "degraded"),
+            session_start_context.section_item("advisory", "next action"),
+            session_start_context.section_item("daily", "old event"),
         )
         if item is not None
     ]
-    result = integration_adapter._append_context(global_items, "recovered handoff")
+    result = integration_adapter.append_context(global_items, "recovered handoff")
 
     by_id = {item.item_id: item for item in captured["items"]}
     handoff = by_id["session-start:project-handoff"]
@@ -546,6 +542,7 @@ def test_recovered_handoff_routes_through_compiler_as_mandatory(monkeypatch):
 def test_integration_uses_unpacked_project_handoff_items(monkeypatch):
     import context_compiler
     import integration_adapter
+    import project_checkpoint
     from context_budget import ContextItem
     from project_journal import ProjectHandoffResult
 
@@ -563,9 +560,10 @@ def test_integration_uses_unpacked_project_handoff_items(monkeypatch):
         parent_id="project:demo",
         priority_class="handoff",
     )
-    monkeypatch.setattr(integration_adapter, "ProjectStore", lambda *args: object())
+    monkeypatch.setattr(integration_session_start, "ProjectStore", lambda *args: object())
+    monkeypatch.setattr(project_checkpoint, "ProjectStore", lambda *args: object())
     monkeypatch.setattr(
-        integration_adapter,
+        integration_session_start,
         "recover_project_handoff",
         lambda *args, **kwargs: ProjectHandoffResult(
             "prefiltered text must not be used", items=(handoff_item,)
@@ -579,8 +577,8 @@ def test_integration_uses_unpacked_project_handoff_items(monkeypatch):
 
     monkeypatch.setattr(context_compiler, "compile_context_items", compile_spy)
 
-    handoff_items = integration_adapter._recover_project_handoff("demo", Path("demo"))
-    rendered = integration_adapter._append_context([], handoff_items)
+    handoff_items = integration_adapter.recovered_project_handoff("demo", Path("demo"))
+    rendered = integration_adapter.append_context([], handoff_items)
 
     assert handoff_items == (handoff_item,)
     assert captured["items"] == (handoff_item,)
@@ -620,12 +618,12 @@ def test_integration_keeps_complete_recovered_handoff_under_pressure(monkeypatch
         "DEFAULT_CONTEXT_BUDGET",
         ContextBudget(None, len(expected.encode("utf-8")), 0, 0),
     )
-    optional_history = session_start_context._section_item(
+    optional_history = session_start_context.section_item(
         "daily", "optional global history must drop"
     )
     assert optional_history is not None
 
-    rendered = integration_adapter._append_context(
+    rendered = integration_adapter.append_context(
         [optional_history], handoff_items
     )
 
@@ -640,7 +638,7 @@ def test_integration_keeps_complete_recovered_handoff_under_pressure(monkeypatch
         "DEFAULT_CONTEXT_BUDGET",
         ContextBudget(None, len(expected.encode("utf-8")) - 1, 0, 0),
     )
-    failure = integration_adapter._append_context([], handoff_items)
+    failure = integration_adapter.append_context([], handoff_items)
     refused = (
         "mandatory_budget_exceeded" in failure,
         "Ship whole" in failure,
@@ -665,15 +663,15 @@ def test_integration_context_drops_optional_sections_whole_under_pressure(monkey
     items = [
         item
         for item in (
-            session_start_context._section_item("guardrails", "safety-whole"),
-            session_start_context._section_item("health", "health-whole"),
-            session_start_context._section_item("advisory", "advisory-must-drop-whole"),
-            session_start_context._section_item("daily", "history-must-drop-whole"),
+            session_start_context.section_item("guardrails", "safety-whole"),
+            session_start_context.section_item("health", "health-whole"),
+            session_start_context.section_item("advisory", "advisory-must-drop-whole"),
+            session_start_context.section_item("daily", "history-must-drop-whole"),
         )
         if item is not None
     ]
 
-    result = integration_adapter._append_context(items, "recovered-whole")
+    result = integration_adapter.append_context(items, "recovered-whole")
 
     assert (result, "advisory" in result, "history" in result) == (expected, False, False)
 
@@ -684,7 +682,7 @@ def test_session_start_impossible_mandatory_budget_is_visible_not_sliced(monkeyp
 
     monkeypatch.setattr(session_start_context, "DEFAULT_CONTEXT_BUDGET", ContextBudget(None, 10, 0, 0))
 
-    result = session_start_context._pack_session_sections(
+    result = session_start_context.pack_session_sections(
         [("guardrails", "mandatory-guardrail-content")]
     )
 
@@ -698,7 +696,7 @@ def test_project_state_impossible_cap_is_visible_not_character_sliced():
 
     import session_start_project_state
 
-    result = session_start_project_state._clip("project-state-" * 100, 20)
+    result = session_start_project_state.clip("project-state-" * 100, 20)
 
     assert json.loads(result) == {"error": "budget"}
     assert len(result.encode("utf-8")) <= 20
@@ -723,9 +721,9 @@ def test_project_state_impossible_cap_is_visible_not_character_sliced():
 def test_project_root_requires_bounded_native_absolute_path(platform, root, expected):
     import session_start_project_state
 
-    assert session_start_project_state._is_native_absolute_root(root, platform) is expected
+    assert session_start_project_state.is_native_absolute_root(root, platform) is expected
     oversized = "x" * (session_start_project_state.MAX_PROJECT_ROOT_CHARS + 1)
-    assert session_start_project_state._is_native_absolute_root(oversized, platform) is False
+    assert session_start_project_state.is_native_absolute_root(oversized, platform) is False
 
 
 def test_project_dir_rejects_relative_env_before_resolution(monkeypatch):
@@ -734,7 +732,7 @@ def test_project_dir_rejects_relative_env_before_resolution(monkeypatch):
     monkeypatch.setenv("CLAUDE_PROJECT_DIR", "relative/project")
 
     with pytest.raises(ValueError, match="native absolute"):
-        session_start_project_state._resolve_project_dir()
+        session_start_project_state.resolve_project_dir()
 
 
 def test_project_state_routes_mandatory_handoff_through_compiler(monkeypatch):
@@ -751,7 +749,7 @@ def test_project_state_routes_mandatory_handoff_through_compiler(monkeypatch):
 
     monkeypatch.setattr(context_compiler, "compile_context_items", compile_spy)
 
-    result = session_start_project_state._clip("project state", 2400)
+    result = session_start_project_state.clip("project state", 2400)
 
     item = captured["items"][0]
 
@@ -777,7 +775,7 @@ def test_project_handoff_alone_still_uses_shared_budget(monkeypatch):
         context_budget, "DEFAULT_CONTEXT_BUDGET", ContextBudget(None, 10, 0, 0)
     )
 
-    result = integration_adapter._append_context([], "handoff-content-too-large")
+    result = integration_adapter.append_context([], "handoff-content-too-large")
 
     assert "mandatory_budget_exceeded" in result
     assert "handoff-content-too-large" not in result
@@ -787,9 +785,9 @@ def test_integration_context_preserves_trailing_newline():
     import integration_adapter
     import session_start_context
 
-    item = session_start_context._section_item("guardrails", "global")
+    item = session_start_context.section_item("guardrails", "global")
     assert item is not None
-    result = integration_adapter._append_context(
+    result = integration_adapter.append_context(
         [item], "handoff\n", trailing_newline=True
     )
 
@@ -806,7 +804,9 @@ def test_session_start_health_fails_open(monkeypatch):
         lambda **kwargs: (_ for _ in ()).throw(RuntimeError("doctor unavailable")),
     )
 
-    assert session_start_context.health_block() == ""
+    block = session_start_context.health_block()
+    assert "Operational health could not be measured" in block
+    assert "doctor unavailable" in block
 
 
 def test_session_start_health_uses_strict_doctor_budget(monkeypatch):
@@ -833,7 +833,7 @@ def test_session_start_recovers_transactions_before_health_context(monkeypatch):
     events = []
     monkeypatch.setattr(
         session_start_context,
-        "_recover_transactions",
+        "recover_transactions",
         lambda: events.append("recover"),
     )
     monkeypatch.setattr(
@@ -867,14 +867,14 @@ def test_session_start_recovery_rejects_symlinked_database(tmp_path, monkeypatch
     except OSError as exc:
         pytest.skip(f"symlinks unavailable: {exc}")
     called = []
-    monkeypatch.setattr(session_start_context, "ROOT", root)
-    monkeypatch.setattr(session_start_context, "STATE_ROOT", state_root)
+    monkeypatch.setenv("LLM_WIKI_ROOT", str(root))
+    monkeypatch.setenv("LLM_WIKI_STATE_ROOT", str(state_root))
     monkeypatch.setattr(
         "markdown_transaction.MarkdownCoordinator.recover",
         lambda *args, **kwargs: called.append(kwargs),
     )
 
-    session_start_context._recover_transactions()
+    session_start_context.recover_transactions()
 
     assert called == []
 
@@ -890,8 +890,8 @@ def test_session_start_recovery_passes_hard_limit_and_deadline(tmp_path, monkeyp
     database = run / "markdown-transactions.sqlite3"
     database.write_bytes(b"safe")
     received = []
-    monkeypatch.setattr(session_start_context, "ROOT", root)
-    monkeypatch.setattr(session_start_context, "STATE_ROOT", state_root)
+    monkeypatch.setenv("LLM_WIKI_ROOT", str(root))
+    monkeypatch.setenv("LLM_WIKI_STATE_ROOT", str(state_root))
     monkeypatch.setattr(
         session_start_context,
         "validate_runtime_file",
@@ -908,7 +908,7 @@ def test_session_start_recovery_passes_hard_limit_and_deadline(tmp_path, monkeyp
     )
 
     started = time.monotonic()
-    session_start_context._recover_transactions()
+    session_start_context.recover_transactions()
 
     assert received[0]["max_transactions"] > 0
     assert started < received[0]["deadline"] <= started + 0.11
@@ -935,18 +935,22 @@ def test_session_start_health_latency_is_bounded_with_large_unsafe_queue(
         (queue / "unsafe.json").symlink_to(external)
     except (OSError, NotImplementedError):
         pass
-    monkeypatch.setattr(session_start_context, "ROOT", root)
-    monkeypatch.setattr(session_start_context, "STATE_ROOT", state_root)
+    monkeypatch.setenv("LLM_WIKI_ROOT", str(root))
+    monkeypatch.setenv("LLM_WIKI_STATE_ROOT", str(state_root))
 
-    started = time.perf_counter()
-    block = session_start_context.health_block()
-    elapsed = time.perf_counter() - started
+    faulthandler.dump_traceback_later(0.5)
+    try:
+        started = time.perf_counter()
+        block = session_start_context.health_block()
+        elapsed = time.perf_counter() - started
+    finally:
+        faulthandler.cancel_dump_traceback_later()
 
     assert (elapsed < 0.5, block.startswith("## Health"), "secret" in block) == (
         True,
         True,
         False,
-    )
+    ), f"health block elapsed {elapsed:.6f}s"
 
 
 def _fake_section(monkeypatch, module, *, log_entry: str) -> None:
@@ -954,7 +958,7 @@ def _fake_section(monkeypatch, module, *, log_entry: str) -> None:
     monkeypatch.setattr(module, "guardrails_block", lambda slug=None: "")
     monkeypatch.setattr(module, "metacognitive_block", lambda: "")
     monkeypatch.setattr(module, "advisory_block", lambda slug=None: "")
-    monkeypatch.setattr(module, "_impact_block", lambda: "")
+    monkeypatch.setattr(module, "impact_block", lambda: "")
     monkeypatch.setattr(module, "health_block", lambda: "")
     monkeypatch.setattr(module, "trim_index", lambda *_: "")
     monkeypatch.setattr(module, "latest_daily", lambda: None)
@@ -1044,10 +1048,10 @@ def test_a_truncated_run_reports_only_that_it_was_truncated(monkeypatch):
 
     block = session_start_context.health_block()
 
-    assert "Health was not measured" in block
-    assert "1 of 2 checks" in block
-    assert "queue" not in block
-    assert "unreadable" not in block
+    assert "Operational checks incomplete" in block
+    assert "1 of 2" in block
+    assert "queue" in block
+    assert "unreadable" in block
 
 
 def test_a_complete_run_reports_its_findings(monkeypatch):
@@ -1061,13 +1065,13 @@ def test_a_complete_run_reports_its_findings(monkeypatch):
     monkeypatch.setattr(doctor, "run_doctor", lambda **kwargs: report)
     monkeypatch.setattr(doctor, "degraded_summary", lambda passed: "index: stale")
 
-    assert session_start_context.health_block() == "## Health\n\nindex: stale\n\n"
+    assert session_start_context.health_block() == "## Health\n\nOperational scope; retained history not checked.\nindex: stale\n\n"
 
 
 def _knowledge_state(monkeypatch, state: dict) -> str:
     import session_start_context
 
-    monkeypatch.setattr(session_start_context, "_load_state_safe", lambda: state)
+    monkeypatch.setattr(session_start_context, "load_state_safe", lambda: state)
     return session_start_context.metacognitive_block()
 
 
@@ -1124,14 +1128,14 @@ def test_compile_backlog_reads_the_utc_stamp_compile_actually_writes():
     """
     import session_start_context
 
-    aware = session_start_context._compile_backlog_days(
+    aware = session_start_context.compile_backlog_days(
         {"last_compile_at": "2026-08-26T14:49:32.401938Z"}
     )
-    naive = session_start_context._compile_backlog_days(
+    naive = session_start_context.compile_backlog_days(
         {"last_compile_at": "2026-08-26T14:49:32.401938"}
     )
 
     assert isinstance(aware, int)
     assert aware >= 0
     assert aware == naive
-    assert session_start_context._compile_backlog_days({}) is None
+    assert session_start_context.compile_backlog_days({}) is None

@@ -1,0 +1,122 @@
+{
+  "encoding": "o200k_base",
+  "max_tokens": 100000,
+  "serialization": "exact-duplicates/v1",
+  "files": [
+    "AGENTS.md",
+    "CLAUDE.md",
+    "docs/AGENTS.md",
+    "docs/STRUCTURE.md",
+    "docs/modules/context-bundle.md",
+    "docs/modules/context-records.md",
+    "docs/modules/context-tooling.md",
+    "docs/modules/lsp-profiles-tests-typescript-navigation-context.json",
+    "docs/modules/lsp-profiles-tests-typescript-navigation.md",
+    "docs/modules/model-choice.md",
+    "docs/modules/product-structure.md",
+    "docs/modules/project-governance.md",
+    "docs/modules/test-support.md",
+    "rules/development-laws.md",
+    "scripts/__init__.py",
+    "scripts/llm_wiki/__init__.py",
+    "scripts/llm_wiki/context_bundle.py",
+    "tests/__init__.py",
+    "tests/conftest.py",
+    "tests/module_context.py",
+    "tests/module_context_paths.py",
+    "tests/module_interface.py",
+    "tests/module_interface_render.py",
+    "tests/module_qualification.py",
+    "tests/module_record_context.py",
+    "tests/module_records.py",
+    "tests/shared_fixtures.py",
+    "tests/slow_machine.py",
+    "tests/test_typescript_navigation.py"
+  ],
+  "ownership": {
+    "files": [
+      "docs/modules/lsp-profiles-tests-typescript-navigation-context.json",
+      "docs/modules/lsp-profiles-tests-typescript-navigation.md",
+      "tests/test_typescript_navigation.py"
+    ]
+  },
+  "qualified_dependencies": [
+    {
+      "provider": "scripts/llm_wiki/generation_catalog_store.py",
+      "names": [
+        "GenerationCatalog"
+      ],
+      "contract_sha256": "b18194ebe04bf988b4474379fcb5243516550d43b745a00eaed1453f7844c983",
+      "integration_tests": [
+        "tests/test_a_blocked_task_has_a_way_back.py",
+        "tests/test_a_build_in_flight_is_not_an_orphan.py",
+        "tests/test_a_capacity_refusal_does_not_corrupt_a_generation.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/model_choice.py",
+      "names": [
+        "using_root"
+      ],
+      "contract_sha256": "d45f2655cb61963e77617d1dfd7d617b134ad77cc770b59b335d0856e5d65019",
+      "integration_tests": [
+        "tests/test_typescript_navigation.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/pyright_session_ranges.py",
+      "names": [
+        "location_key",
+        "lsp_range"
+      ],
+      "contract_sha256": "8f84fa02658bbd49bf5db38703e8646a53d738f0e88f3fa9b0514fb5c2cc1339",
+      "integration_tests": [
+        "tests/test_typescript_navigation.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/pyright_session_values.py",
+      "names": [
+        "LspLocation"
+      ],
+      "contract_sha256": "69a10e98a3abd54c8601a74db76372b1dd7280362bab99b786e36ee0f32d0056",
+      "integration_tests": [
+        "tests/test_a_document_is_opened_in_its_own_language.py",
+        "tests/test_code_navigation.py",
+        "tests/test_code_navigation_benchmark.py"
+      ]
+    },
+    {
+      "provider": "scripts/lsp_profiles.py",
+      "names": [
+        "TSSERVER_RELATIVE",
+        "TSSERVER_VERSION",
+        "TYPESCRIPT_PROFILE"
+      ],
+      "contract_sha256": "36f5cd9c0fc59002b1c749c447ad04e46058cb4ac2e03e0badb86f4e3a6f36b2",
+      "integration_tests": [
+        "tests/test_typescript_navigation.py"
+      ]
+    },
+    {
+      "provider": "scripts/reliable_memory.py",
+      "names": [
+        "validate_state_root"
+      ],
+      "contract_sha256": "8680515cd873056a7c8a36e0057d91f2f83f23c48841263697676ff91f7ff964",
+      "integration_tests": [
+        "tests/test_typescript_navigation.py"
+      ]
+    },
+    {
+      "provider": "scripts/repository_scope.py",
+      "names": [
+        "sanitized_git_environment"
+      ],
+      "contract_sha256": "fd550ae20761afad50b37fa3a71044a162485b0e4d4b3e2af9b5b22e143c2bec",
+      "integration_tests": [
+        "tests/test_typescript_navigation.py"
+      ]
+    }
+  ]
+}

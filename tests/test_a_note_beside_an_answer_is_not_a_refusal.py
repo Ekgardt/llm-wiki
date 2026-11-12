@@ -36,24 +36,24 @@ def _answered(**overrides):
 
 
 def test_a_note_beside_a_grounded_answer_is_accepted():
-    query_memory._require_answered_shape(
+    query_memory.require_answered_shape(
         _answered(reason="The 2023-09-30 entry states the count directly.")
     )
 
 
 def test_a_reply_with_no_claims_is_still_refused():
     with pytest.raises(GroundedQAError, match="claims with citations"):
-        query_memory._require_answered_shape(_answered(claims=[]))
+        query_memory.require_answered_shape(_answered(claims=[]))
 
 
 def test_a_reply_with_no_citations_is_still_refused():
     with pytest.raises(GroundedQAError, match="claims with citations"):
-        query_memory._require_answered_shape(_answered(citations=[]))
+        query_memory.require_answered_shape(_answered(citations=[]))
 
 
 def test_an_abstention_still_needs_a_reason_and_no_claims():
     with pytest.raises(GroundedQAError, match="abstention statuses"):
-        query_memory._require_abstention_shape(
+        query_memory.require_abstention_shape(
             {
                 "status": "insufficient_evidence",
                 "claims": [],
@@ -62,7 +62,7 @@ def test_an_abstention_still_needs_a_reason_and_no_claims():
             }
         )
     with pytest.raises(GroundedQAError, match="abstention statuses"):
-        query_memory._require_abstention_shape(
+        query_memory.require_abstention_shape(
             {
                 "status": "insufficient_evidence",
                 "claims": [{"text": "x"}],
@@ -77,11 +77,11 @@ def test_the_note_does_not_reach_the_reader_as_a_reason(monkeypatch):
     validated = _answered(reason="a note the model wrote beside its claims")
     monkeypatch.setattr(
         query_memory,
-        "_kept_claims",
+        "kept_claims",
         lambda claims, cited, supplied: (list(claims), {"E1"}, [], []),
     )
 
-    answer = query_memory._answer_of_surviving_claims(
+    answer = query_memory.answer_of_surviving_claims(
         validated, {"E1": {"citation_id": "E1"}}, {}
     )
 
@@ -93,11 +93,11 @@ def test_the_note_does_not_reach_the_reader_as_a_reason(monkeypatch):
 def test_when_no_claim_survives_it_is_still_an_abstention(monkeypatch):
     monkeypatch.setattr(
         query_memory,
-        "_kept_claims",
+        "kept_claims",
         lambda claims, cited, supplied: ([], set(), ["gate"], list(claims)),
     )
 
-    answer = query_memory._answer_of_surviving_claims(_answered(), {}, {})
+    answer = query_memory.answer_of_surviving_claims(_answered(), {}, {})
 
     assert answer["status"] == "insufficient_evidence"
     assert answer["claims"] == []

@@ -17,8 +17,9 @@ if str(TESTS) not in sys.path:
     sys.path.insert(0, str(TESTS))
 
 import prune_generations  # noqa: E402
-from test_generation_catalog import _catalog, _publish  # noqa: E402
-from test_prune_generations import _chain  # noqa: E402
+
+from tests.generation_catalog_helpers import _catalog, _publish  # noqa: E402
+from tests.prune_generations_helpers import _chain  # noqa: E402
 
 
 def _aged(tree: Path, seconds: float) -> None:

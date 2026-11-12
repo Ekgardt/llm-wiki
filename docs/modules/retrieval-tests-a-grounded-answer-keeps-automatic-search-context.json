@@ -1,0 +1,375 @@
+{
+  "encoding": "o200k_base",
+  "max_tokens": 100000,
+  "serialization": "exact-duplicates/v1",
+  "files": [
+    "AGENTS.md",
+    "CLAUDE.md",
+    "docs/AGENTS.md",
+    "docs/STRUCTURE.md",
+    "docs/modules/context-bundle.md",
+    "docs/modules/context-records.md",
+    "docs/modules/context-tooling.md",
+    "docs/modules/formats.md",
+    "docs/modules/grounded-qa-helpers.md",
+    "docs/modules/model-choice.md",
+    "docs/modules/product-structure.md",
+    "docs/modules/project-governance.md",
+    "docs/modules/query-memory.md",
+    "docs/modules/retrieval-tests-a-grounded-answer-keeps-automatic-search-context.json",
+    "docs/modules/retrieval-tests-a-grounded-answer-keeps-automatic-search.md",
+    "docs/modules/test-support.md",
+    "rules/development-laws.md",
+    "scripts/__init__.py",
+    "scripts/llm_wiki/__init__.py",
+    "scripts/llm_wiki/context_bundle.py",
+    "scripts/llm_wiki/formats/__init__.py",
+    "scripts/query_memory.py",
+    "tests/__init__.py",
+    "tests/conftest.py",
+    "tests/grounded_qa_helpers.py",
+    "tests/module_context.py",
+    "tests/module_context_paths.py",
+    "tests/module_interface.py",
+    "tests/module_interface_render.py",
+    "tests/module_qualification.py",
+    "tests/module_record_context.py",
+    "tests/module_records.py",
+    "tests/shared_fixtures.py",
+    "tests/slow_machine.py",
+    "tests/test_a_grounded_answer_keeps_automatic_search.py"
+  ],
+  "ownership": {
+    "files": [
+      "docs/modules/retrieval-tests-a-grounded-answer-keeps-automatic-search-context.json",
+      "docs/modules/retrieval-tests-a-grounded-answer-keeps-automatic-search.md",
+      "tests/test_a_grounded_answer_keeps_automatic_search.py"
+    ]
+  },
+  "qualified_dependencies": [
+    {
+      "provider": "scripts/aggregation_pass.py",
+      "names": [
+        "CLUSTER_SYSTEM_PROMPT",
+        "FANOUT_SYSTEM_PROMPT",
+        "aggregating_claims",
+        "asks_to_aggregate",
+        "counted_inputs",
+        "counted_kind",
+        "counting_rule",
+        "duplicate_groups",
+        "entity_note",
+        "fan_out_queries",
+        "reaches_the_edge"
+      ],
+      "contract_sha256": "461ab9a0b9872a2b807ee5ca88c16a74d270bcb784c1a4bfd3440a59cc0ce6f0",
+      "integration_tests": [
+        "tests/test_a_grounded_answer_keeps_automatic_search.py"
+      ]
+    },
+    {
+      "provider": "scripts/bounded_io.py",
+      "names": [
+        "read_stable_bytes"
+      ],
+      "contract_sha256": "e570dc41e0fd70556ec6a4e887a3da194bcc13122684e515651b13dd19d7d5c1",
+      "integration_tests": [
+        "tests/test_a_grounded_answer_keeps_automatic_search.py"
+      ]
+    },
+    {
+      "provider": "scripts/calendar_pass.py",
+      "names": [
+        "calendar_note",
+        "difference_claims",
+        "unstated_gaps"
+      ],
+      "contract_sha256": "fd7c9e8e18dceeb91ea4ec5d3dfc46359e0a16d9a03e05a17fa87b9929c67d62",
+      "integration_tests": [
+        "tests/test_a_grounded_answer_keeps_automatic_search.py"
+      ]
+    },
+    {
+      "provider": "scripts/context_budget.py",
+      "names": [
+        "BudgetExceededError",
+        "ContextBudget"
+      ],
+      "contract_sha256": "e4cb263d5a6203fa48ad69397d2c90022ced8cf3c516b3283f997e37d81df7b3",
+      "integration_tests": [
+        "tests/test_a_grounded_answer_keeps_automatic_search.py"
+      ]
+    },
+    {
+      "provider": "scripts/context_compiler.py",
+      "names": [
+        "compile_context"
+      ],
+      "contract_sha256": "ffa44d3cb2fd7775d1c8fb5053dacf27f444d8d6e0963be7f9f6f5f35a0a8eb9",
+      "integration_tests": [
+        "tests/test_a_grounded_answer_keeps_automatic_search.py"
+      ]
+    },
+    {
+      "provider": "scripts/corpus_snapshot.py",
+      "names": [
+        "CorpusChanged",
+        "CorpusSnapshot",
+        "VAULT_CODE_ROOTS",
+        "collect_corpus",
+        "iter_snapshot_chunks",
+        "read_current_source",
+        "select_snapshot_chunks"
+      ],
+      "contract_sha256": "710f306f6ee396483ef301a1020cb0f7a4b622c92f45f6b5149c5aa39b613df4",
+      "integration_tests": [
+        "tests/test_a_grounded_answer_keeps_automatic_search.py"
+      ]
+    },
+    {
+      "provider": "scripts/embedding_model.py",
+      "names": [
+        "prefixed_texts"
+      ],
+      "contract_sha256": "e4b918fd421721d713e3656f023791db466185b526f08a26e2ee5d2441ec2488",
+      "integration_tests": [
+        "tests/test_a_grounded_answer_keeps_automatic_search.py"
+      ]
+    },
+    {
+      "provider": "scripts/evidence_pruning.py",
+      "names": [
+        "pruned_spans",
+        "prunes"
+      ],
+      "contract_sha256": "d174f3cb0532ef2f1135729f8a3459f7c73e31ffa1fbe788f418f5ab6937a751",
+      "integration_tests": [
+        "tests/test_a_grounded_answer_keeps_automatic_search.py"
+      ]
+    },
+    {
+      "provider": "scripts/evidence_resolver.py",
+      "names": [
+        "EvidenceResolutionError",
+        "verify_evidence_span"
+      ],
+      "contract_sha256": "e44cbd500e49ff0e300dd73b58b1b467ba134c317ba6e8c196a4f4109daa7111",
+      "integration_tests": [
+        "tests/test_a_grounded_answer_keeps_automatic_search.py"
+      ]
+    },
+    {
+      "provider": "scripts/evidence_sufficiency.py",
+      "names": [
+        "coverage_note",
+        "reads_again",
+        "sufficiency"
+      ],
+      "contract_sha256": "d6b9824c728f9c3dce4a7f950479e7c308835ac53a16bdfddb50fd13e786475f",
+      "integration_tests": [
+        "tests/test_a_grounded_answer_keeps_automatic_search.py"
+      ]
+    },
+    {
+      "provider": "scripts/generation_search.py",
+      "names": [
+        "embedder_cache"
+      ],
+      "contract_sha256": "18a4bc45cf4cfa4cc015a88d54f807c27d12d81979731d84afb37da737d573eb",
+      "integration_tests": [
+        "tests/test_a_grounded_answer_keeps_automatic_search.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_client.py",
+      "names": [
+        "call_ceiling",
+        "call_llm"
+      ],
+      "contract_sha256": "8a6f60ad4403b2e02f19ffae00f53436ad412a13fa2cda4f086b2f00b0556f20",
+      "integration_tests": [
+        "tests/test_a_grounded_answer_keeps_automatic_search.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/formats/schema.py",
+      "names": [
+        "SchemaValidationError",
+        "validate_schema"
+      ],
+      "contract_sha256": "76946ef37ad882ce80156c718162804f98af3e5e58f3f285709a48590218d910",
+      "integration_tests": [
+        "tests/test_a_grounded_answer_keeps_automatic_search.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/generation_catalog_store.py",
+      "names": [
+        "GenerationCatalog"
+      ],
+      "contract_sha256": "b18194ebe04bf988b4474379fcb5243516550d43b745a00eaed1453f7844c983",
+      "integration_tests": [
+        "tests/test_a_blocked_task_has_a_way_back.py",
+        "tests/test_a_build_in_flight_is_not_an_orphan.py",
+        "tests/test_a_capacity_refusal_does_not_corrupt_a_generation.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/model_choice.py",
+      "names": [
+        "using_root"
+      ],
+      "contract_sha256": "d45f2655cb61963e77617d1dfd7d617b134ad77cc770b59b335d0856e5d65019",
+      "integration_tests": [
+        "tests/test_a_grounded_answer_keeps_automatic_search.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/runtime_roots.py",
+      "names": [
+        "notes_dir",
+        "vault_root"
+      ],
+      "contract_sha256": "f47c3efae603e72a79c6c17cf005af8a6f4dc4f720fafd0a8a85a6399813ea9d",
+      "integration_tests": [
+        "tests/test_a_continuation_keeps_its_original_entry.py",
+        "tests/test_a_prompt_checkpoint_does_not_outwait_its_host.py",
+        "tests/test_a_session_marker_survives_a_busy_writer.py"
+      ]
+    },
+    {
+      "provider": "scripts/markdown_transaction.py",
+      "names": [
+        "append_knowledge",
+        "mutate_knowledge",
+        "stable_operation_id"
+      ],
+      "contract_sha256": "8074dba03e5b0a4eeada1dbaa5ba42b20c860c0da29ebfcd215c239000c877e7",
+      "integration_tests": [
+        "tests/test_a_grounded_answer_keeps_automatic_search.py"
+      ]
+    },
+    {
+      "provider": "scripts/rebuild_memory_index.py",
+      "names": [
+        "published_paths"
+      ],
+      "contract_sha256": "16cae2cf47b51c71cc443958232e62003e7c7ad96d5218761a11580adfb44948",
+      "integration_tests": [
+        "tests/test_a_grounded_answer_keeps_automatic_search.py"
+      ]
+    },
+    {
+      "provider": "scripts/refusal_pass.py",
+      "names": [
+        "DROPPED_CLAIMS_KEY",
+        "MISSING_SYSTEM_PROMPT",
+        "dropped_texts",
+        "missing_queries",
+        "needs_a_second_search"
+      ],
+      "contract_sha256": "4938a42bc745e45b318e41e33f46cf06e8663e3cfe844a5ebc9fa7d67a0905b5",
+      "integration_tests": [
+        "tests/test_a_grounded_answer_keeps_automatic_search.py"
+      ]
+    },
+    {
+      "provider": "scripts/reliable_memory.py",
+      "names": [
+        "validate_state_root"
+      ],
+      "contract_sha256": "8680515cd873056a7c8a36e0057d91f2f83f23c48841263697676ff91f7ff964",
+      "integration_tests": [
+        "tests/test_a_grounded_answer_keeps_automatic_search.py"
+      ]
+    },
+    {
+      "provider": "scripts/reply_json.py",
+      "names": [
+        "object_with",
+        "reply_document"
+      ],
+      "contract_sha256": "8f583612dc5c3481df19cd07f7450613b82b5e9e5fb9625bb05cbf500d261853",
+      "integration_tests": [
+        "tests/test_a_grounded_answer_keeps_automatic_search.py"
+      ]
+    },
+    {
+      "provider": "scripts/repository_scope.py",
+      "names": [
+        "sanitized_git_environment"
+      ],
+      "contract_sha256": "fd550ae20761afad50b37fa3a71044a162485b0e4d4b3e2af9b5b22e143c2bec",
+      "integration_tests": [
+        "tests/test_a_grounded_answer_keeps_automatic_search.py"
+      ]
+    },
+    {
+      "provider": "scripts/retrieval.py",
+      "names": [
+        "PROFILES",
+        "analyze_query",
+        "planned_request",
+        "retrieve_via_search_memory"
+      ],
+      "contract_sha256": "2c5b8120987e7245ace131b4dbe050160404b71829f43b912b61ef6acb4db89b",
+      "integration_tests": [
+        "tests/test_a_blocked_task_has_a_way_back.py",
+        "tests/test_a_committed_source_resolves_an_older_compile_plan.py",
+        "tests/test_a_count_that_reached_the_edge_looks_again.py"
+      ]
+    },
+    {
+      "provider": "scripts/retrieval_telemetry.py",
+      "names": [
+        "best_effort_make_event",
+        "best_effort_record_events"
+      ],
+      "contract_sha256": "d1ff2704abc1924049f90916189f4675b62e6538f8a55c94aceb2eb72ffa3c21",
+      "integration_tests": [
+        "tests/test_a_grounded_answer_keeps_automatic_search.py"
+      ]
+    },
+    {
+      "provider": "scripts/search_memory.py",
+      "names": [
+        "published_corpus"
+      ],
+      "contract_sha256": "94cb15eff2ee4cc3ecb8dbebb9019d7a507de093ff671d14c8704616c3c8d4eb",
+      "integration_tests": [
+        "tests/test_a_grounded_answer_keeps_automatic_search.py"
+      ]
+    },
+    {
+      "provider": "scripts/secret_redact.py",
+      "names": [
+        "redact_secrets"
+      ],
+      "contract_sha256": "8b925f76433b0c3f5ab03f4b8b41a462551d5616843facdd2918813d103ad6f5",
+      "integration_tests": [
+        "tests/test_a_grounded_answer_keeps_automatic_search.py"
+      ]
+    },
+    {
+      "provider": "scripts/temporal_anchor.py",
+      "names": [
+        "query_with_dates",
+        "window"
+      ],
+      "contract_sha256": "eac00e4f7dbb37cff4f78e68c62800f0ff883b9c790b399b808b80bc9c964050",
+      "integration_tests": [
+        "tests/test_a_grounded_answer_keeps_automatic_search.py"
+      ]
+    },
+    {
+      "provider": "scripts/vault_log.py",
+      "names": [
+        "vault_log_path"
+      ],
+      "contract_sha256": "7b821b683156be07052675b491ca6624f66a752aa0fb02f5458024890c33685b",
+      "integration_tests": [
+        "tests/test_a_grounded_answer_keeps_automatic_search.py"
+      ]
+    }
+  ]
+}

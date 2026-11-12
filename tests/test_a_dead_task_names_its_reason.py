@@ -11,14 +11,18 @@ import sys
 from pathlib import Path
 
 import pytest
+from llm_wiki import queue_worker
 
 SCRIPTS_DIR = Path(__file__).resolve().parent.parent / "scripts"
 if str(SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_DIR))
 
 import flush_memory  # noqa: E402
-import memory_queue  # noqa: E402
-from memory_queue import QueueOperationError, processor_error_code  # noqa: E402
+import queue_core  # noqa: E402
+from queue_core import (  # noqa: E402
+    QueueOperationError,
+    processor_error_code,  # noqa: E402
+)
 
 
 @pytest.mark.parametrize(
@@ -33,7 +37,7 @@ from memory_queue import QueueOperationError, processor_error_code  # noqa: E402
 )
 def test_the_code_names_the_failure_and_never_its_text(error: BaseException, code: str) -> None:
     assert processor_error_code(error) == code
-    assert len(processor_error_code(error).encode("utf-8")) <= memory_queue.PROCESSOR_ERROR_CODE_BYTES
+    assert len(processor_error_code(error).encode("utf-8")) <= queue_core.PROCESSOR_ERROR_CODE_BYTES
 
 
 def _raising(error: BaseException):
@@ -57,21 +61,41 @@ def _run(processor, task, remaining):
 def test_the_worker_hands_the_queue_that_code(
     error: BaseException, code: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr(memory_queue, "_compat_task", lambda lease: {"id": "task"})
-    outcome = memory_queue._run_processor(_raising(error), _run, None, 10.0)
+    monkeypatch.setattr(queue_worker, "compat_task", lambda lease: {"id": "task"})
+    outcome = queue_core.run_processor(_raising(error), _run, None, 10.0)
 
-    failure = memory_queue._unsuccessful_worker_failure(outcome)
+    failure = queue_core.unsuccessful_worker_failure(outcome)
 
     assert (outcome.outcome, outcome.error_code, failure.error_code) == (False, code, code)
 
 
 def test_a_processor_that_answers_false_keeps_the_bare_code() -> None:
-    outcome = memory_queue._ProcessorOutcome(False, False, False)
+    outcome = queue_core.ProcessorOutcome(False, False, False)
 
-    assert memory_queue._unsuccessful_worker_failure(outcome).error_code == "processor_failed"
+    assert queue_core.unsuccessful_worker_failure(outcome).error_code == "processor_failed"
 
 
 def test_the_capture_worker_names_the_same_code() -> None:
-    failure = flush_memory._capture_queue_failure(RuntimeError("intent_fence_lost"))
+    failure = flush_memory.capture_queue_failure(RuntimeError("intent_fence_lost"))
 
     assert (failure.error_code, failure.retry_after) == ("processor_failed:intent_fence_lost", None)
+
+
+@pytest.mark.parametrize('character', ['Я', '文', '😀'])
+@pytest.mark.parametrize(('permanent', 'expected_state'), [(False, 'ready'), (True, 'dead')])
+def test_unicode_reason_settles_the_real_v3_lease(tmp_path, character, permanent, expected_state):
+    from tests.memory_queue_helpers import _v3_queue
+
+    queue = _v3_queue(tmp_path)
+    task_id = queue.enqueue('query', 1, {'query': 'plain'})
+    lease = queue.claim('unicode-reason-worker')
+    assert lease is not None and lease.id == task_id
+    error = type(character * 80, (Exception,), {})('private text')
+    code = processor_error_code(error)
+    assert flush_memory.capture_queue_failure(error).error_code == code
+    queue.fail(lease, queue_core.QueueFailure(code, permanent=permanent))
+    task = queue.get(task_id)
+    assert task.state == expected_state
+    assert task.error_code == code
+    assert task.attempt_history[-1].error_code == code
+    assert len(code.encode('utf-8')) <= queue_core.PROCESSOR_ERROR_CODE_BYTES

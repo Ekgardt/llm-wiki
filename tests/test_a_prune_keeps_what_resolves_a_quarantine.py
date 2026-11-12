@@ -4,46 +4,22 @@ docs/research/2026-09-27-a-prune-keeps-what-resolves-a-quarantine.md
 """
 from __future__ import annotations
 
-import sqlite3
 import time
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
-import doctor
-import markdown_transaction
+from llm_wiki import markdown_undo
 from markdown_transaction import MarkdownCoordinator
 
-from tests.slow_machine import SHORT_TIMEOUT
+from tests.a_prune_keeps_what_resolves_a_quarantine_helpers import (
+    _append,
+    _quarantine,
+    _sql,
+    _unresolved,
+    _vault,
+)
 
-LATER = timedelta(days=markdown_transaction.HISTORY_RETENTION_DAYS + 1)
-
-
-def _append(coordinator: MarkdownCoordinator, operation_id: str, day: str):
-    return markdown_transaction._append_until_committed(
-        coordinator, operation_id, f"knowledge/daily/{day}.md", f"- {operation_id}\n".encode(),
-        deadline=time.monotonic() + SHORT_TIMEOUT, cancelled=None,
-    )
-
-
-def _sql(coordinator: MarkdownCoordinator, statement: str, arguments: tuple = ()) -> None:
-    with sqlite3.connect(coordinator.database_path) as database:
-        database.execute(statement, arguments)
-
-
-def _quarantine(coordinator: MarkdownCoordinator, record) -> None:
-    _sql(coordinator, "UPDATE \"transaction\" SET state = 'quarantined' WHERE id = ?", (record.id,))
-
-
-def _unresolved(coordinator: MarkdownCoordinator) -> int:
-    with sqlite3.connect(coordinator.database_path) as database:
-        columns = {row[1] for row in database.execute('PRAGMA table_info("transaction")')}
-        return doctor._unresolved_quarantine(database, columns)
-
-
-def _vault(tmp_path: Path) -> MarkdownCoordinator:
-    root = tmp_path / "vault"
-    (root / "knowledge/daily").mkdir(parents=True)
-    return MarkdownCoordinator(root, tmp_path / "state")
+LATER = timedelta(days=markdown_undo.HISTORY_RETENTION_DAYS + 1)
 
 
 def _each_kind_of_resolution(coordinator: MarkdownCoordinator) -> None:
@@ -64,10 +40,10 @@ def test_pruning_history_never_reopens_a_resolved_quarantine(tmp_path: Path) -> 
     coordinator = _vault(tmp_path)
     _each_kind_of_resolution(coordinator)
     _append(coordinator, "post-tool:unrelated", "2026-01-04")
-    coordinator.prune(now=datetime.now(timezone.utc) + timedelta(days=3))
+    coordinator.prune(now=datetime.now(UTC) + timedelta(days=3))
     before = _unresolved(coordinator)
 
-    pruned = coordinator.prune_history(now=datetime.now(timezone.utc) + LATER)
+    pruned = coordinator.prune_history(now=datetime.now(UTC) + LATER)
 
     assert (before, _unresolved(coordinator), pruned["transactions"]) == (0, 0, 1)
 
@@ -76,10 +52,10 @@ def test_a_prune_past_its_deadline_keeps_what_it_did_and_says_so(tmp_path: Path)
     coordinator = _vault(tmp_path)
     for day in ("2026-01-01", "2026-01-02", "2026-01-03"):
         _append(coordinator, f"post-tool:{day}", day)
-    coordinator.prune(now=datetime.now(timezone.utc) + timedelta(days=3))
+    coordinator.prune(now=datetime.now(UTC) + timedelta(days=3))
 
-    expired = coordinator.prune_history(now=datetime.now(timezone.utc) + LATER, deadline=time.monotonic() - 1)
-    sliced = coordinator.prune_history(now=datetime.now(timezone.utc) + LATER, deadline=time.monotonic() + 60,
+    expired = coordinator.prune_history(now=datetime.now(UTC) + LATER, deadline=time.monotonic() - 1)
+    sliced = coordinator.prune_history(now=datetime.now(UTC) + LATER, deadline=time.monotonic() + 60,
                                        slice_seconds=0.0)
 
     assert (expired["transactions"], expired["unfinished"], sliced["transactions"], sliced["unfinished"]) == (

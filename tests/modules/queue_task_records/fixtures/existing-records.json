@@ -1,0 +1,661 @@
+{
+  "captured_from": "d71e4424",
+  "source_sha256": "8eee77011023e8a09bf48219e652f8aa30f4c5163e6a305822cf62b58dd147a8",
+  "cases": [
+    {
+      "label": "ready",
+      "row": {
+        "id": "e26abc91da274be486eb57374cb2d9f2",
+        "kind": "query",
+        "handler_version": 3,
+        "input_hash": "537b1e6f6be85903f1a640a205c5dca50046730e2203f7fba0d2b04ab51dac1f",
+        "dedupe_key": "record-fixture",
+        "state": "ready",
+        "priority": 0,
+        "created_at": "2026-11-03T06:47:15.973315+00:00",
+        "updated_at": "2026-11-03T06:47:15.973315+00:00",
+        "available_at": "2026-11-03T06:47:15.973315+00:00",
+        "attempts": 0,
+        "last_attempt_at": null,
+        "lease_owner": null,
+        "lease_token": null,
+        "lease_expires_at": null,
+        "lease_heartbeat_at": null,
+        "attempt_started_at": null,
+        "error_code": null,
+        "blocked_capability": null,
+        "result_reference": null,
+        "result_sha256": null,
+        "result_operation_id": null,
+        "redrive_of": null,
+        "lineage_generation": 0
+      },
+      "history": [],
+      "source_links": [
+        {
+          "logical_path": "knowledge/daily/2026-11-03.md",
+          "source_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        }
+      ],
+      "link": null,
+      "seal": null,
+      "payload": {
+        "prompt": "Пример 文"
+      },
+      "expected_task": {
+        "id": "e26abc91da274be486eb57374cb2d9f2",
+        "kind": "query",
+        "handler_version": 3,
+        "payload": {
+          "prompt": "Пример 文"
+        },
+        "input_hash": "537b1e6f6be85903f1a640a205c5dca50046730e2203f7fba0d2b04ab51dac1f",
+        "dedupe_key": "record-fixture",
+        "state": "ready",
+        "priority": 0,
+        "created_at": "2026-11-03T06:47:15.973315+00:00",
+        "updated_at": "2026-11-03T06:47:15.973315+00:00",
+        "available_at": "2026-11-03T06:47:15.973315+00:00",
+        "attempts": 0,
+        "last_attempt_at": null,
+        "lease_owner": null,
+        "lease_token": null,
+        "lease_expires_at": null,
+        "lease_heartbeat_at": null,
+        "error_code": null,
+        "blocked_capability": null,
+        "result_reference": null,
+        "result_sha256": null,
+        "redrive_of": null,
+        "attempt_history": []
+      },
+      "expected_v3": {
+        "schema_version": "queue-task/v3",
+        "task_id": "e26abc91da274be486eb57374cb2d9f2",
+        "kind": "query",
+        "handler_version": 3,
+        "payload": {
+          "prompt": "Пример 文"
+        },
+        "input_hash": "537b1e6f6be85903f1a640a205c5dca50046730e2203f7fba0d2b04ab51dac1f",
+        "dedupe_key": "record-fixture",
+        "state": "ready",
+        "priority": 0,
+        "created_at": "2026-11-03T06:47:15.973315+00:00",
+        "updated_at": "2026-11-03T06:47:15.973315+00:00",
+        "available_at": "2026-11-03T06:47:15.973315+00:00",
+        "attempts": 0,
+        "last_attempt_at": null,
+        "lease": null,
+        "error_code": null,
+        "blocked_capability": null,
+        "result": null,
+        "redrive_of": null,
+        "lineage_generation": 0,
+        "attempt_history": [],
+        "source_links": [
+          {
+            "logical_path": "knowledge/daily/2026-11-03.md",
+            "source_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+          }
+        ],
+        "capture_binding": null
+      },
+      "expected_legacy": {
+        "attempt_history": [],
+        "attempts": 0,
+        "available_at": "2026-11-03T06:47:15.973315+00:00",
+        "blocked_capability": null,
+        "created_at": "2026-11-03T06:47:15.973315+00:00",
+        "dedupe_key": "record-fixture",
+        "error_code": null,
+        "handler_version": 3,
+        "id": "e26abc91da274be486eb57374cb2d9f2",
+        "input_hash": "537b1e6f6be85903f1a640a205c5dca50046730e2203f7fba0d2b04ab51dac1f",
+        "kind": "query",
+        "last_attempt_at": null,
+        "payload": {
+          "prompt": "Пример 文"
+        },
+        "priority": 0,
+        "redrive_of": null,
+        "result_reference": null,
+        "result_sha256": null,
+        "state": "ready",
+        "updated_at": "2026-11-03T06:47:15.973315+00:00"
+      }
+    },
+    {
+      "label": "leased",
+      "row": {
+        "id": "e26abc91da274be486eb57374cb2d9f2",
+        "kind": "query",
+        "handler_version": 3,
+        "input_hash": "537b1e6f6be85903f1a640a205c5dca50046730e2203f7fba0d2b04ab51dac1f",
+        "dedupe_key": "record-fixture",
+        "state": "leased",
+        "priority": 0,
+        "created_at": "2026-11-03T06:47:15.973315+00:00",
+        "updated_at": "2026-11-03T06:47:15.979804+00:00",
+        "available_at": "2026-11-03T06:47:15.973315+00:00",
+        "attempts": 1,
+        "last_attempt_at": null,
+        "lease_owner": "fixture-worker",
+        "lease_token": "1111111111111111111111111111111111111111111111111111111111111111",
+        "lease_expires_at": "2026-11-03T06:49:15.979804+00:00",
+        "lease_heartbeat_at": "2026-11-03T06:47:15.979804+00:00",
+        "attempt_started_at": "2026-11-03T06:47:15.979804+00:00",
+        "error_code": null,
+        "blocked_capability": null,
+        "result_reference": null,
+        "result_sha256": null,
+        "result_operation_id": null,
+        "redrive_of": null,
+        "lineage_generation": 0
+      },
+      "history": [],
+      "source_links": [
+        {
+          "logical_path": "knowledge/daily/2026-11-03.md",
+          "source_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        }
+      ],
+      "link": null,
+      "seal": null,
+      "payload": {
+        "prompt": "Пример 文"
+      },
+      "expected_task": {
+        "id": "e26abc91da274be486eb57374cb2d9f2",
+        "kind": "query",
+        "handler_version": 3,
+        "payload": {
+          "prompt": "Пример 文"
+        },
+        "input_hash": "537b1e6f6be85903f1a640a205c5dca50046730e2203f7fba0d2b04ab51dac1f",
+        "dedupe_key": "record-fixture",
+        "state": "leased",
+        "priority": 0,
+        "created_at": "2026-11-03T06:47:15.973315+00:00",
+        "updated_at": "2026-11-03T06:47:15.979804+00:00",
+        "available_at": "2026-11-03T06:47:15.973315+00:00",
+        "attempts": 1,
+        "last_attempt_at": null,
+        "lease_owner": "fixture-worker",
+        "lease_token": "1111111111111111111111111111111111111111111111111111111111111111",
+        "lease_expires_at": "2026-11-03T06:49:15.979804+00:00",
+        "lease_heartbeat_at": "2026-11-03T06:47:15.979804+00:00",
+        "error_code": null,
+        "blocked_capability": null,
+        "result_reference": null,
+        "result_sha256": null,
+        "redrive_of": null,
+        "attempt_history": []
+      },
+      "expected_v3": {
+        "schema_version": "queue-task/v3",
+        "task_id": "e26abc91da274be486eb57374cb2d9f2",
+        "kind": "query",
+        "handler_version": 3,
+        "payload": {
+          "prompt": "Пример 文"
+        },
+        "input_hash": "537b1e6f6be85903f1a640a205c5dca50046730e2203f7fba0d2b04ab51dac1f",
+        "dedupe_key": "record-fixture",
+        "state": "leased",
+        "priority": 0,
+        "created_at": "2026-11-03T06:47:15.973315+00:00",
+        "updated_at": "2026-11-03T06:47:15.979804+00:00",
+        "available_at": "2026-11-03T06:47:15.973315+00:00",
+        "attempts": 1,
+        "last_attempt_at": null,
+        "lease": {
+          "owner": "fixture-worker",
+          "token": "1111111111111111111111111111111111111111111111111111111111111111",
+          "expires_at": "2026-11-03T06:49:15.979804+00:00",
+          "heartbeat_at": "2026-11-03T06:47:15.979804+00:00"
+        },
+        "error_code": null,
+        "blocked_capability": null,
+        "result": null,
+        "redrive_of": null,
+        "lineage_generation": 0,
+        "attempt_history": [],
+        "source_links": [
+          {
+            "logical_path": "knowledge/daily/2026-11-03.md",
+            "source_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+          }
+        ],
+        "capture_binding": null
+      },
+      "expected_legacy": {
+        "attempt_history": [],
+        "attempts": 1,
+        "available_at": "2026-11-03T06:47:15.973315+00:00",
+        "blocked_capability": null,
+        "created_at": "2026-11-03T06:47:15.973315+00:00",
+        "dedupe_key": "record-fixture",
+        "error_code": null,
+        "handler_version": 3,
+        "id": "e26abc91da274be486eb57374cb2d9f2",
+        "input_hash": "537b1e6f6be85903f1a640a205c5dca50046730e2203f7fba0d2b04ab51dac1f",
+        "kind": "query",
+        "last_attempt_at": null,
+        "payload": {
+          "prompt": "Пример 文"
+        },
+        "priority": 0,
+        "redrive_of": null,
+        "result_reference": null,
+        "result_sha256": null,
+        "state": "leased",
+        "updated_at": "2026-11-03T06:47:15.979804+00:00"
+      }
+    },
+    {
+      "label": "published",
+      "row": {
+        "id": "e26abc91da274be486eb57374cb2d9f2",
+        "kind": "query",
+        "handler_version": 3,
+        "input_hash": "537b1e6f6be85903f1a640a205c5dca50046730e2203f7fba0d2b04ab51dac1f",
+        "dedupe_key": "record-fixture",
+        "state": "leased",
+        "priority": 0,
+        "created_at": "2026-11-03T06:47:15.973315+00:00",
+        "updated_at": "2026-11-03T06:47:15.984725+00:00",
+        "available_at": "2026-11-03T06:47:15.973315+00:00",
+        "attempts": 1,
+        "last_attempt_at": null,
+        "lease_owner": "fixture-worker",
+        "lease_token": "1111111111111111111111111111111111111111111111111111111111111111",
+        "lease_expires_at": "2026-11-03T06:49:15.979804+00:00",
+        "lease_heartbeat_at": "2026-11-03T06:47:15.979804+00:00",
+        "attempt_started_at": "2026-11-03T06:47:15.979804+00:00",
+        "error_code": null,
+        "blocked_capability": null,
+        "result_reference": "run/queue-results/5fa38eb5101e93bbc2b7ec2c4ab166cd02a169591a7c487868edd6a7b8638114.result",
+        "result_sha256": "b7ee2726de6ca82314c48a0190296560be0f3954487beb645468cdb16c09e23a",
+        "result_operation_id": "fixture-operation",
+        "redrive_of": null,
+        "lineage_generation": 0
+      },
+      "history": [],
+      "source_links": [
+        {
+          "logical_path": "knowledge/daily/2026-11-03.md",
+          "source_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        }
+      ],
+      "link": null,
+      "seal": null,
+      "payload": {
+        "prompt": "Пример 文"
+      },
+      "expected_task": {
+        "id": "e26abc91da274be486eb57374cb2d9f2",
+        "kind": "query",
+        "handler_version": 3,
+        "payload": {
+          "prompt": "Пример 文"
+        },
+        "input_hash": "537b1e6f6be85903f1a640a205c5dca50046730e2203f7fba0d2b04ab51dac1f",
+        "dedupe_key": "record-fixture",
+        "state": "leased",
+        "priority": 0,
+        "created_at": "2026-11-03T06:47:15.973315+00:00",
+        "updated_at": "2026-11-03T06:47:15.984725+00:00",
+        "available_at": "2026-11-03T06:47:15.973315+00:00",
+        "attempts": 1,
+        "last_attempt_at": null,
+        "lease_owner": "fixture-worker",
+        "lease_token": "1111111111111111111111111111111111111111111111111111111111111111",
+        "lease_expires_at": "2026-11-03T06:49:15.979804+00:00",
+        "lease_heartbeat_at": "2026-11-03T06:47:15.979804+00:00",
+        "error_code": null,
+        "blocked_capability": null,
+        "result_reference": "run/queue-results/5fa38eb5101e93bbc2b7ec2c4ab166cd02a169591a7c487868edd6a7b8638114.result",
+        "result_sha256": "b7ee2726de6ca82314c48a0190296560be0f3954487beb645468cdb16c09e23a",
+        "redrive_of": null,
+        "attempt_history": []
+      },
+      "expected_v3": {
+        "schema_version": "queue-task/v3",
+        "task_id": "e26abc91da274be486eb57374cb2d9f2",
+        "kind": "query",
+        "handler_version": 3,
+        "payload": {
+          "prompt": "Пример 文"
+        },
+        "input_hash": "537b1e6f6be85903f1a640a205c5dca50046730e2203f7fba0d2b04ab51dac1f",
+        "dedupe_key": "record-fixture",
+        "state": "leased",
+        "priority": 0,
+        "created_at": "2026-11-03T06:47:15.973315+00:00",
+        "updated_at": "2026-11-03T06:47:15.984725+00:00",
+        "available_at": "2026-11-03T06:47:15.973315+00:00",
+        "attempts": 1,
+        "last_attempt_at": null,
+        "lease": {
+          "owner": "fixture-worker",
+          "token": "1111111111111111111111111111111111111111111111111111111111111111",
+          "expires_at": "2026-11-03T06:49:15.979804+00:00",
+          "heartbeat_at": "2026-11-03T06:47:15.979804+00:00"
+        },
+        "error_code": null,
+        "blocked_capability": null,
+        "result": {
+          "reference": "run/queue-results/5fa38eb5101e93bbc2b7ec2c4ab166cd02a169591a7c487868edd6a7b8638114.result",
+          "sha256": "b7ee2726de6ca82314c48a0190296560be0f3954487beb645468cdb16c09e23a",
+          "operation_id": "fixture-operation"
+        },
+        "redrive_of": null,
+        "lineage_generation": 0,
+        "attempt_history": [],
+        "source_links": [
+          {
+            "logical_path": "knowledge/daily/2026-11-03.md",
+            "source_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+          }
+        ],
+        "capture_binding": null
+      },
+      "expected_legacy": {
+        "attempt_history": [],
+        "attempts": 1,
+        "available_at": "2026-11-03T06:47:15.973315+00:00",
+        "blocked_capability": null,
+        "created_at": "2026-11-03T06:47:15.973315+00:00",
+        "dedupe_key": "record-fixture",
+        "error_code": null,
+        "handler_version": 3,
+        "id": "e26abc91da274be486eb57374cb2d9f2",
+        "input_hash": "537b1e6f6be85903f1a640a205c5dca50046730e2203f7fba0d2b04ab51dac1f",
+        "kind": "query",
+        "last_attempt_at": null,
+        "payload": {
+          "prompt": "Пример 文"
+        },
+        "priority": 0,
+        "redrive_of": null,
+        "result_reference": "run/queue-results/5fa38eb5101e93bbc2b7ec2c4ab166cd02a169591a7c487868edd6a7b8638114.result",
+        "result_sha256": "b7ee2726de6ca82314c48a0190296560be0f3954487beb645468cdb16c09e23a",
+        "state": "leased",
+        "updated_at": "2026-11-03T06:47:15.984725+00:00"
+      }
+    },
+    {
+      "label": "succeeded",
+      "row": {
+        "id": "e26abc91da274be486eb57374cb2d9f2",
+        "kind": "query",
+        "handler_version": 3,
+        "input_hash": "537b1e6f6be85903f1a640a205c5dca50046730e2203f7fba0d2b04ab51dac1f",
+        "dedupe_key": "record-fixture",
+        "state": "succeeded",
+        "priority": 0,
+        "created_at": "2026-11-03T06:47:15.973315+00:00",
+        "updated_at": "2026-11-03T06:47:15.989047+00:00",
+        "available_at": "2026-11-03T06:47:15.973315+00:00",
+        "attempts": 1,
+        "last_attempt_at": null,
+        "lease_owner": null,
+        "lease_token": null,
+        "lease_expires_at": null,
+        "lease_heartbeat_at": null,
+        "attempt_started_at": null,
+        "error_code": null,
+        "blocked_capability": null,
+        "result_reference": "run/queue-results/5fa38eb5101e93bbc2b7ec2c4ab166cd02a169591a7c487868edd6a7b8638114.result",
+        "result_sha256": "b7ee2726de6ca82314c48a0190296560be0f3954487beb645468cdb16c09e23a",
+        "result_operation_id": "fixture-operation",
+        "redrive_of": null,
+        "lineage_generation": 0
+      },
+      "history": [
+        {
+          "attempt": 1,
+          "started_at": "2026-11-03T06:47:15.979804+00:00",
+          "finished_at": "2026-11-03T06:47:15.989047+00:00",
+          "outcome": "succeeded",
+          "error_code": null
+        }
+      ],
+      "source_links": [
+        {
+          "logical_path": "knowledge/daily/2026-11-03.md",
+          "source_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        }
+      ],
+      "link": null,
+      "seal": null,
+      "payload": {
+        "prompt": "Пример 文"
+      },
+      "expected_task": {
+        "id": "e26abc91da274be486eb57374cb2d9f2",
+        "kind": "query",
+        "handler_version": 3,
+        "payload": {
+          "prompt": "Пример 文"
+        },
+        "input_hash": "537b1e6f6be85903f1a640a205c5dca50046730e2203f7fba0d2b04ab51dac1f",
+        "dedupe_key": "record-fixture",
+        "state": "succeeded",
+        "priority": 0,
+        "created_at": "2026-11-03T06:47:15.973315+00:00",
+        "updated_at": "2026-11-03T06:47:15.989047+00:00",
+        "available_at": "2026-11-03T06:47:15.973315+00:00",
+        "attempts": 1,
+        "last_attempt_at": null,
+        "lease_owner": null,
+        "lease_token": null,
+        "lease_expires_at": null,
+        "lease_heartbeat_at": null,
+        "error_code": null,
+        "blocked_capability": null,
+        "result_reference": "run/queue-results/5fa38eb5101e93bbc2b7ec2c4ab166cd02a169591a7c487868edd6a7b8638114.result",
+        "result_sha256": "b7ee2726de6ca82314c48a0190296560be0f3954487beb645468cdb16c09e23a",
+        "redrive_of": null,
+        "attempt_history": [
+          {
+            "attempt": 1,
+            "started_at": "2026-11-03T06:47:15.979804+00:00",
+            "finished_at": "2026-11-03T06:47:15.989047+00:00",
+            "outcome": "succeeded",
+            "error_code": null
+          }
+        ]
+      },
+      "expected_v3": {
+        "schema_version": "queue-task/v3",
+        "task_id": "e26abc91da274be486eb57374cb2d9f2",
+        "kind": "query",
+        "handler_version": 3,
+        "payload": {
+          "prompt": "Пример 文"
+        },
+        "input_hash": "537b1e6f6be85903f1a640a205c5dca50046730e2203f7fba0d2b04ab51dac1f",
+        "dedupe_key": "record-fixture",
+        "state": "succeeded",
+        "priority": 0,
+        "created_at": "2026-11-03T06:47:15.973315+00:00",
+        "updated_at": "2026-11-03T06:47:15.989047+00:00",
+        "available_at": "2026-11-03T06:47:15.973315+00:00",
+        "attempts": 1,
+        "last_attempt_at": null,
+        "lease": null,
+        "error_code": null,
+        "blocked_capability": null,
+        "result": {
+          "reference": "run/queue-results/5fa38eb5101e93bbc2b7ec2c4ab166cd02a169591a7c487868edd6a7b8638114.result",
+          "sha256": "b7ee2726de6ca82314c48a0190296560be0f3954487beb645468cdb16c09e23a",
+          "operation_id": "fixture-operation"
+        },
+        "redrive_of": null,
+        "lineage_generation": 0,
+        "attempt_history": [
+          {
+            "attempt": 1,
+            "started_at": "2026-11-03T06:47:15.979804+00:00",
+            "finished_at": "2026-11-03T06:47:15.989047+00:00",
+            "outcome": "succeeded",
+            "error_code": null
+          }
+        ],
+        "source_links": [
+          {
+            "logical_path": "knowledge/daily/2026-11-03.md",
+            "source_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+          }
+        ],
+        "capture_binding": null
+      },
+      "expected_legacy": {
+        "attempt_history": [
+          {
+            "attempt": 1,
+            "error_code": null,
+            "finished_at": "2026-11-03T06:47:15.989047+00:00",
+            "outcome": "succeeded",
+            "started_at": "2026-11-03T06:47:15.979804+00:00"
+          }
+        ],
+        "attempts": 1,
+        "available_at": "2026-11-03T06:47:15.973315+00:00",
+        "blocked_capability": null,
+        "created_at": "2026-11-03T06:47:15.973315+00:00",
+        "dedupe_key": "record-fixture",
+        "error_code": null,
+        "handler_version": 3,
+        "id": "e26abc91da274be486eb57374cb2d9f2",
+        "input_hash": "537b1e6f6be85903f1a640a205c5dca50046730e2203f7fba0d2b04ab51dac1f",
+        "kind": "query",
+        "last_attempt_at": null,
+        "payload": {
+          "prompt": "Пример 文"
+        },
+        "priority": 0,
+        "redrive_of": null,
+        "result_reference": "run/queue-results/5fa38eb5101e93bbc2b7ec2c4ab166cd02a169591a7c487868edd6a7b8638114.result",
+        "result_sha256": "b7ee2726de6ca82314c48a0190296560be0f3954487beb645468cdb16c09e23a",
+        "state": "succeeded",
+        "updated_at": "2026-11-03T06:47:15.989047+00:00"
+      }
+    },
+    {
+      "label": "cancelled",
+      "row": {
+        "id": "70e9e230d442463e893f750f9ffe658c",
+        "kind": "query",
+        "handler_version": 1,
+        "input_hash": "5e63a0226ddc6ea0e2cb22d5baaf29e889adf4cedec5f3948c4ffb606dc20d3c",
+        "dedupe_key": null,
+        "state": "cancelled",
+        "priority": 0,
+        "created_at": "2026-11-03T06:47:15.995682+00:00",
+        "updated_at": "2026-11-03T06:47:15.997676+00:00",
+        "available_at": "2026-11-03T06:47:15.995682+00:00",
+        "attempts": 0,
+        "last_attempt_at": null,
+        "lease_owner": null,
+        "lease_token": null,
+        "lease_expires_at": null,
+        "lease_heartbeat_at": null,
+        "attempt_started_at": null,
+        "error_code": "cancelled",
+        "blocked_capability": null,
+        "result_reference": null,
+        "result_sha256": null,
+        "result_operation_id": null,
+        "redrive_of": null,
+        "lineage_generation": 0
+      },
+      "history": [],
+      "source_links": [],
+      "link": null,
+      "seal": null,
+      "payload": {
+        "prompt": "cancelled"
+      },
+      "expected_task": {
+        "id": "70e9e230d442463e893f750f9ffe658c",
+        "kind": "query",
+        "handler_version": 1,
+        "payload": {
+          "prompt": "cancelled"
+        },
+        "input_hash": "5e63a0226ddc6ea0e2cb22d5baaf29e889adf4cedec5f3948c4ffb606dc20d3c",
+        "dedupe_key": null,
+        "state": "cancelled",
+        "priority": 0,
+        "created_at": "2026-11-03T06:47:15.995682+00:00",
+        "updated_at": "2026-11-03T06:47:15.997676+00:00",
+        "available_at": "2026-11-03T06:47:15.995682+00:00",
+        "attempts": 0,
+        "last_attempt_at": null,
+        "lease_owner": null,
+        "lease_token": null,
+        "lease_expires_at": null,
+        "lease_heartbeat_at": null,
+        "error_code": "cancelled",
+        "blocked_capability": null,
+        "result_reference": null,
+        "result_sha256": null,
+        "redrive_of": null,
+        "attempt_history": []
+      },
+      "expected_v3": {
+        "schema_version": "queue-task/v3",
+        "task_id": "70e9e230d442463e893f750f9ffe658c",
+        "kind": "query",
+        "handler_version": 1,
+        "payload": {
+          "prompt": "cancelled"
+        },
+        "input_hash": "5e63a0226ddc6ea0e2cb22d5baaf29e889adf4cedec5f3948c4ffb606dc20d3c",
+        "dedupe_key": null,
+        "state": "cancelled",
+        "priority": 0,
+        "created_at": "2026-11-03T06:47:15.995682+00:00",
+        "updated_at": "2026-11-03T06:47:15.997676+00:00",
+        "available_at": "2026-11-03T06:47:15.995682+00:00",
+        "attempts": 0,
+        "last_attempt_at": null,
+        "lease": null,
+        "error_code": "cancelled",
+        "blocked_capability": null,
+        "result": null,
+        "redrive_of": null,
+        "lineage_generation": 0,
+        "attempt_history": [],
+        "source_links": [],
+        "capture_binding": null
+      },
+      "expected_legacy": {
+        "attempt_history": [],
+        "attempts": 0,
+        "available_at": "2026-11-03T06:47:15.995682+00:00",
+        "blocked_capability": null,
+        "created_at": "2026-11-03T06:47:15.995682+00:00",
+        "dedupe_key": null,
+        "error_code": "cancelled",
+        "handler_version": 1,
+        "id": "70e9e230d442463e893f750f9ffe658c",
+        "input_hash": "5e63a0226ddc6ea0e2cb22d5baaf29e889adf4cedec5f3948c4ffb606dc20d3c",
+        "kind": "query",
+        "last_attempt_at": null,
+        "payload": {
+          "prompt": "cancelled"
+        },
+        "priority": 0,
+        "redrive_of": null,
+        "result_reference": null,
+        "result_sha256": null,
+        "state": "cancelled",
+        "updated_at": "2026-11-03T06:47:15.997676+00:00"
+      }
+    }
+  ]
+}

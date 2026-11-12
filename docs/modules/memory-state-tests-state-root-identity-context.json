@@ -1,0 +1,196 @@
+{
+  "encoding": "o200k_base",
+  "max_tokens": 100000,
+  "serialization": "exact-duplicates/v1",
+  "files": [
+    "AGENTS.md",
+    "CLAUDE.md",
+    "docs/AGENTS.md",
+    "docs/STRUCTURE.md",
+    "docs/modules/context-bundle.md",
+    "docs/modules/context-records.md",
+    "docs/modules/context-tooling.md",
+    "docs/modules/formats.md",
+    "docs/modules/memory-state-tests-state-root-identity-context.json",
+    "docs/modules/memory-state-tests-state-root-identity.md",
+    "docs/modules/memory-state.md",
+    "docs/modules/model-choice.md",
+    "docs/modules/product-structure.md",
+    "docs/modules/project-governance.md",
+    "docs/modules/test-support.md",
+    "rules/development-laws.md",
+    "scripts/__init__.py",
+    "scripts/llm_wiki/__init__.py",
+    "scripts/llm_wiki/context_bundle.py",
+    "scripts/llm_wiki/formats/__init__.py",
+    "scripts/memory_state.py",
+    "tests/__init__.py",
+    "tests/conftest.py",
+    "tests/module_context.py",
+    "tests/module_context_paths.py",
+    "tests/module_interface.py",
+    "tests/module_interface_render.py",
+    "tests/module_qualification.py",
+    "tests/module_record_context.py",
+    "tests/module_records.py",
+    "tests/shared_fixtures.py",
+    "tests/slow_machine.py",
+    "tests/test_state_root_identity.py"
+  ],
+  "ownership": {
+    "files": [
+      "docs/modules/memory-state-tests-state-root-identity-context.json",
+      "docs/modules/memory-state-tests-state-root-identity.md",
+      "tests/test_state_root_identity.py"
+    ]
+  },
+  "qualified_dependencies": [
+    {
+      "provider": "scripts/llm_wiki/daily_log_selection.py",
+      "names": [
+        "DAILY_LOG_NAME",
+        "closed_daily_logs",
+        "daily_logs"
+      ],
+      "contract_sha256": "9312e062e043605a13e12d81bc2182a65496fbba97c43c050665368b3a3a50e0",
+      "integration_tests": [
+        "tests/test_state_root_identity.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/formats/canonical.py",
+      "names": [
+        "sha256_bytes"
+      ],
+      "contract_sha256": "7d34a853c5a6f1be8b00805b2e865ac2a5ca5a6fe3ca141de97ebda61d2a85cf",
+      "integration_tests": [
+        "tests/test_state_root_identity.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/generation_catalog_store.py",
+      "names": [
+        "GenerationCatalog"
+      ],
+      "contract_sha256": "b18194ebe04bf988b4474379fcb5243516550d43b745a00eaed1453f7844c983",
+      "integration_tests": [
+        "tests/test_a_blocked_task_has_a_way_back.py",
+        "tests/test_a_build_in_flight_is_not_an_orphan.py",
+        "tests/test_a_capacity_refusal_does_not_corrupt_a_generation.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/model_choice.py",
+      "names": [
+        "using_root"
+      ],
+      "contract_sha256": "d45f2655cb61963e77617d1dfd7d617b134ad77cc770b59b335d0856e5d65019",
+      "integration_tests": [
+        "tests/test_state_root_identity.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/reliability_defaults.py",
+      "names": [
+        "MAX_CAPTURE_INTENT_BYTES"
+      ],
+      "contract_sha256": "28a8dc8034cfb4107c91dc81134dc922d4ff140125e47e22b1745919f042b083",
+      "integration_tests": [
+        "tests/test_state_root_identity.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/runtime_publication.py",
+      "names": [
+        "durable_publish_file",
+        "write_all"
+      ],
+      "contract_sha256": "3ace406f2ca856fd15e86873d8991d400f1cb7cdbe076b62f29ec9b92a3d9607",
+      "integration_tests": [
+        "tests/test_state_root_identity.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/runtime_roots.py",
+      "names": [
+        "reports_dir",
+        "run_dir",
+        "state_root",
+        "vault_root"
+      ],
+      "contract_sha256": "ea95ea74372847f0b0257317f24d823b8209f414563288a36b40ca9355cbf7a3",
+      "integration_tests": [
+        "tests/test_a_continuation_keeps_its_original_entry.py",
+        "tests/test_a_prompt_checkpoint_does_not_outwait_its_host.py",
+        "tests/test_a_session_marker_survives_a_busy_writer.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/runtime_sync.py",
+      "names": [
+        "fsync_directory"
+      ],
+      "contract_sha256": "daa2cadea43dcbf30b11f383dbd1f8c023fc36510736dca7f09a60731c806b78",
+      "integration_tests": [
+        "tests/test_state_root_identity.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/state_json_values.py",
+      "names": [
+        "decoded_state",
+        "serialized_state",
+        "state_bytes",
+        "trim_state_to_budget"
+      ],
+      "contract_sha256": "126afb9435e3abd9b8973ced948991421abade147b58ebf4d54263a924bd971b",
+      "integration_tests": [
+        "tests/test_state_root_identity.py"
+      ]
+    },
+    {
+      "provider": "scripts/markdown_transaction.py",
+      "names": [
+        "default_coordinator"
+      ],
+      "contract_sha256": "0a80cfd3830006672b75128ad7982e8d2a0ea290ee6c424a4e61a9fe2121087c",
+      "integration_tests": [
+        "tests/test_state_root_identity.py"
+      ]
+    },
+    {
+      "provider": "scripts/process_liveness.py",
+      "names": [
+        "owner_alive",
+        "pid_alive",
+        "process_start_identity"
+      ],
+      "contract_sha256": "a2c8f5c8c08187e5bfaac1623884abf867b5cdad8bf86bdce0201bd403b825f7",
+      "integration_tests": [
+        "tests/test_state_root_identity.py"
+      ]
+    },
+    {
+      "provider": "scripts/reliable_memory.py",
+      "names": [
+        "validate_state_root"
+      ],
+      "contract_sha256": "8680515cd873056a7c8a36e0057d91f2f83f23c48841263697676ff91f7ff964",
+      "integration_tests": [
+        "tests/test_state_root_identity.py"
+      ]
+    },
+    {
+      "provider": "scripts/repository_scope.py",
+      "names": [
+        "sanitized_git_environment"
+      ],
+      "contract_sha256": "fd550ae20761afad50b37fa3a71044a162485b0e4d4b3e2af9b5b22e143c2bec",
+      "integration_tests": [
+        "tests/test_a_code_generation_is_not_abandoned.py",
+        "tests/test_a_directory_link_inside_the_checkout_does_not_refuse_the_revision.py",
+        "tests/test_a_document_is_opened_in_its_own_language.py"
+      ]
+    }
+  ]
+}

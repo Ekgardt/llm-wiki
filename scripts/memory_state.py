@@ -22,9 +22,7 @@ written by a faster one.
 from __future__ import annotations
 
 import hashlib
-import json
 import os
-import re
 import secrets
 import subprocess
 import sys
@@ -36,73 +34,50 @@ from pathlib import Path
 from typing import Any
 
 import process_liveness
-from reliable_memory import durable_publish_file, fsync_directory, sha256_bytes
-
-# Every hook imports this module, and the probe below runs at import. A hook's
-# whole budget is seconds; `rev-parse` answers in milliseconds.
-ROOT_PROBE_TIMEOUT_SECONDS = 2.0
-
-
-def _resolve_vault_root(start: Path) -> Path:
-    """Resolve the canonical vault root even from inside a git worktree.
-
-    A naive `start.parent.parent` points to the worktree's own root, not
-    the main vault. Git exposes the main repo via
-    `git rev-parse --git-common-dir`, whose parent is the canonical vault.
-    Falls back to the simple behavior if git is unavailable.
-    """
-    try:
-        out = subprocess.check_output(
-            ["git", "rev-parse", "--git-common-dir"],
-            cwd=str(start),
-            text=True,
-            stderr=subprocess.DEVNULL,
-            timeout=ROOT_PROBE_TIMEOUT_SECONDS,
-        ).strip()
-        git_common_dir = Path(out) if Path(out).is_absolute() else (start / out).resolve()
-        git_common_dir = git_common_dir.resolve()
-        if git_common_dir.name == ".git":
-            return git_common_dir.parent
-    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError):
-        pass
-    return start
+from llm_wiki.daily_log_selection import (
+    DAILY_LOG_NAME as DAILY_LOG_NAME,
+)
+from llm_wiki.daily_log_selection import (
+    closed_daily_logs as closed_daily_logs,
+)
+from llm_wiki.daily_log_selection import (
+    daily_logs as daily_logs,
+)
+from llm_wiki.formats.canonical import sha256_bytes
+from llm_wiki.reliability_defaults import MAX_CAPTURE_INTENT_BYTES as MAX_CAPTURE_INTENT_BYTES
+from llm_wiki.runtime_publication import durable_publish_file, write_all
+from llm_wiki.runtime_roots import reports_dir, run_dir, vault_root
+from llm_wiki.runtime_sync import fsync_directory
+from llm_wiki.state_json_values import (
+    decoded_state,
+)
+from llm_wiki.state_json_values import (
+    serialized_state as _serialize_state_values,
+)
+from llm_wiki.state_json_values import (
+    state_bytes as state_bytes,
+)
+from llm_wiki.state_json_values import (
+    trim_state_to_budget as _trim_state_values,
+)
 
 
-# Canonical vault root: prefer LLM_WIKI_ROOT when set (installed instance),
-# else resolve from this file's location (worktree-aware).
-def _vault_root() -> Path:
-    env = os.environ.get("LLM_WIKI_ROOT")
-    if env:
-        return Path(env).resolve()
-    return _resolve_vault_root(Path(__file__).resolve().parent.parent)
+def state_file() -> Path:
+    return run_dir() / "state.json"
 
 
-ROOT = _vault_root()
+def lock_file() -> Path:
+    return run_dir() / "state.json.lock"
 
-# Runtime state lives INSIDE the vault as gitignored dirs (cache/, logs/,
-# run/) — keeps everything in one checkout, git ignores the churn.
-# Overridable via LLM_WIKI_STATE_ROOT for explicit portability (tests use a
-# temp dir; multi-disk setups can point elsewhere).
-STATE_ROOT = Path(
-    os.environ.get("LLM_WIKI_STATE_ROOT", str(ROOT))
-).resolve()
-STATE_DIR = STATE_ROOT / "run"
-REPORTS_DIR = STATE_ROOT / "logs"
-CODE_TOOLS_DIR = STATE_ROOT / "cache/code-tools"
-LSP_RUN_DIR = STATE_ROOT / "run/lsp"
-STATE_FILE = STATE_DIR / "state.json"
-LOCK_FILE = STATE_DIR / "state.json.lock"
-# One capture intent on disk; the hook that writes it and the worker that
-# reads it bound the same file (`docs/research/2026-09-23-one-limit-one-place.md`).
-MAX_CAPTURE_INTENT_BYTES = 1024 * 1024
+
 # How long a hook waits for `state.json`: the host is waiting on the hook.
 HOOK_STATE_LOCK_TIMEOUT = 0.1
 
 # If a lock file is older than this, assume the holder died and steal it.
-_STALE_LOCK_SECONDS = 30.0
+STALE_LOCK_SECONDS = 30.0
 
 
-def _is_pid_alive(pid: int) -> bool:
+def is_pid_alive(pid: int) -> bool:
     """Cross-platform 'is this PID still running?' — one probe, doubt is alive.
 
     Used to decide whether a stale lock file belongs to a process that is
@@ -114,26 +89,14 @@ def _is_pid_alive(pid: int) -> bool:
     return process_liveness.pid_alive(pid)
 
 
-def _decoded_state(raw: bytes) -> dict[str, Any] | None:
-    """The state these bytes hold, or None: not UTF-8, not JSON, or not an object.
-
-    One definition of "readable" for the reader and the writer. See
-    `docs/research/2026-09-17-a-torn-state-file-is-recovered-whatever-its-bytes.md`.
-    """
-    try:
-        value = json.loads(raw.decode("utf-8"))
-    except (UnicodeDecodeError, json.JSONDecodeError):
-        return None
-    return value if isinstance(value, dict) else None
-
-
 def _keep_corrupt_copy(raw: bytes) -> None:
     """Preserve the corrupt bytes for forensics; do not silently clobber."""
     try:
-        bak = STATE_FILE.with_suffix(".json.corrupt")
+        bak = state_file().with_suffix(".json.corrupt")
         bak.write_bytes(raw)
-        err_log = REPORTS_DIR / "hook-errors.log"
-        REPORTS_DIR.mkdir(parents=True, exist_ok=True)
+        reports = reports_dir()
+        err_log = reports / "hook-errors.log"
+        reports.mkdir(parents=True, exist_ok=True)
         with err_log.open("a", encoding="utf-8") as f:
             stamp = datetime.now().astimezone().isoformat(timespec="seconds")
             f.write(f"[{stamp}] state.json corrupt; backed up to {bak.name}\n")
@@ -142,11 +105,12 @@ def _keep_corrupt_copy(raw: bytes) -> None:
 
 
 def load_state() -> dict[str, Any]:
-    STATE_DIR.mkdir(parents=True, exist_ok=True)
-    if not STATE_FILE.exists():
+    path = state_file()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if not path.exists():
         return {}
-    raw = STATE_FILE.read_bytes()
-    state = _decoded_state(raw)
+    raw = path.read_bytes()
+    state = decoded_state(raw)
     if state is None:
         _keep_corrupt_copy(raw)
         return {}
@@ -160,61 +124,28 @@ def load_state() -> dict[str, Any]:
 # growth shows up as eviction rather than as a blind spot.
 MAX_STATE_TARGET_BYTES = 192 * 1024
 
-# The maps that grow with use: dedupe memory and per-project reducers. Each is
-# already capped by entry count, but an entry is not a fixed size, so the count
-# caps alone never bounded the file.
-_TRIMMABLE_STATE_KEYS = (
-    "tool_capture_dedupe",
-    "prompt_capture_dedupe",
-    "project_checkpoint_reducers",
-)
-
-
-def _state_bytes(state: dict[str, Any]) -> int:
-    return len(json.dumps(state, indent=2, ensure_ascii=False).encode("utf-8"))
-
-
-def _evict_oldest(state: dict[str, Any], key: str) -> bool:
-    """Drop the oldest entry of one growth map; True when something went."""
-    entries = state.get(key)
-    if not isinstance(entries, dict) or not entries:
-        return False
-    entries.pop(next(iter(entries)))
-    return True
-
 
 def trim_state_to_budget(state: dict[str, Any]) -> int:
-    """Evict oldest dedupe and reducer entries until the file fits its bound.
-
-    Returns how many entries were dropped. Losing a dedupe entry can cost one
-    duplicate capture later; losing the health of two checks costs every finding
-    they would have made, which is the worse of the two.
-    """
-    dropped = 0
-    while _state_bytes(state) > MAX_STATE_TARGET_BYTES:
-        if not any(_evict_oldest(state, key) for key in _TRIMMABLE_STATE_KEYS):
-            return dropped
-        dropped += 1
-    return dropped
+    """Apply the existing disposable-cache policy using the current byte budget."""
+    return _trim_state_values(state, MAX_STATE_TARGET_BYTES)
 
 
 def _serialized_state(state: dict[str, Any]) -> str:
-    trim_state_to_budget(state)
-    return json.dumps(state, indent=2, ensure_ascii=False)
+    return _serialize_state_values(state, MAX_STATE_TARGET_BYTES)
 
 
-def _write_state_text(text: str) -> None:
-    STATE_DIR.mkdir(parents=True, exist_ok=True)
-    atomic_write(STATE_FILE, text)
+def _write_state_text(path: Path, text: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    atomic_write(path, text)
 
 
 def save_state(state: dict[str, Any]) -> None:
-    _write_state_text(_serialized_state(state))
+    _write_state_text(state_file(), _serialized_state(state))
 
 
-def _state_unchanged(text: str) -> bool:
+def _state_unchanged(path: Path, text: str) -> bool:
     try:
-        return STATE_FILE.read_bytes() == text.encode("utf-8")
+        return path.read_bytes() == text.encode("utf-8")
     except OSError:
         return False
 
@@ -230,18 +161,18 @@ def _sharing_violation(exc: PermissionError) -> bool:
 _LOCK_OPEN_FLAGS = os.O_CREAT | os.O_EXCL | os.O_RDWR | getattr(os, "O_BINARY", 0)
 
 
-def _lock_already_held() -> bool:
-    return sys.platform == "win32" and LOCK_FILE.exists()
+def _lock_already_held(lock: Path) -> bool:
+    return sys.platform == "win32" and lock.exists()
 
 
-def _contention(exc: PermissionError, observed_contention: bool) -> bool:
+def _contention(exc: PermissionError, observed_contention: bool, lock: Path) -> bool:
     """A held lock is contention; an ACL denial is a real error."""
-    if _sharing_violation(exc) or _lock_already_held():
+    if _sharing_violation(exc) or _lock_already_held(lock):
         return True
     return observed_contention
 
 
-def _claim_lock(payload: bytes) -> int | None:
+def claim_lock(lock: Path, payload: bytes) -> int | None:
     """The lock descriptor when it was ours to take, None while contended.
 
     The descriptor is binary: a Windows text-mode descriptor would write the
@@ -250,10 +181,14 @@ def _claim_lock(payload: bytes) -> int | None:
     docs/research/2026-09-18-a-payload-is-written-as-the-bytes-it-is.md
     """
     try:
-        fd = os.open(str(LOCK_FILE), _LOCK_OPEN_FLAGS)
+        fd = os.open(str(lock), _LOCK_OPEN_FLAGS)
     except FileExistsError:
         return None
-    os.write(fd, payload)
+    try:
+        write_all(fd, payload)
+    except BaseException:
+        os.close(fd)
+        raise
     return fd
 
 
@@ -265,7 +200,7 @@ def _own_process_identity() -> str:
         return ""
 
 
-def _lock_payload() -> bytes:
+def lock_payload() -> bytes:
     """Who holds the lock: the PID, and the identity that outlives PID reuse.
 
     A PID alone cannot say whether its owner died and its number was handed to
@@ -275,25 +210,26 @@ def _lock_payload() -> bytes:
     return f"{os.getpid()}\n{_own_process_identity()}\n".encode()
 
 
-def _lock_age() -> float:
+def lock_age(lock: Path) -> float:
     try:
-        return time.time() - LOCK_FILE.stat().st_mtime
+        return time.time() - lock.stat().st_mtime
     except OSError:
         return 0.0
 
 
-def _lock_bytes() -> bytes | None:
+def _lock_bytes(lock: Path) -> bytes | None:
     try:
-        return LOCK_FILE.read_bytes()
+        return lock.read_bytes()
     except OSError:
         return None
 
 
-def _lock_owner(payload: bytes | None) -> tuple[int, str] | None:
+def lock_owner(payload: bytes | None) -> tuple[int, str] | None:
     """(PID, start identity) the lock records; None when it records neither.
 
-    The identity line is absent in a lock written before this release, and the
-    answer for such a file is the PID probe, exactly as it was.
+    The identity line is absent in a lock written before identities existed. On
+    Linux such a record cannot prove its owner dead (`process_liveness.owner_alive`),
+    so it is waited out rather than retired on a guess.
     """
     if not payload:
         return None
@@ -312,13 +248,13 @@ def _owner_from_lines(lines: list[str]) -> tuple[int, str] | None:
 
 def _owner_alive(payload: bytes | None) -> bool:
     """True when the recorded owner is a live process; corrupt reads say no."""
-    owner = _lock_owner(payload)
+    owner = lock_owner(payload)
     if owner is None:
         return False
     return process_liveness.owner_alive(*owner)
 
 
-def _named_owner_is_dead(payload: bytes | None) -> bool:
+def named_owner_is_dead(payload: bytes | None) -> bool:
     """A finished lock file that names a provably dead owner — no age needed.
 
     A writer that died holding the lock used to stop every other writer for the
@@ -327,7 +263,7 @@ def _named_owner_is_dead(payload: bytes | None) -> bool:
     """
     if not payload or not payload.endswith(b"\n"):
         return False
-    owner = _lock_owner(payload)
+    owner = lock_owner(payload)
     if owner is None or not owner[1]:
         return False
     return not process_liveness.owner_alive(*owner)
@@ -362,7 +298,7 @@ def _await_guard(descriptor: int, guard: Path) -> None:
 
 
 @contextmanager
-def _steal_guard(path: Path) -> Iterator[None]:
+def steal_guard(path: Path) -> Iterator[None]:
     """One stealer at a time for this lock: check and removal under one OS lock.
 
     See `docs/research/2026-09-14-one-stealer-at-a-time.md`.
@@ -392,7 +328,7 @@ def retire_stale_lock(path: Path, judged: bytes) -> bool:
     docs/research/2026-09-10-a-stale-lock-is-moved-aside-and-checked-before-it-is-removed.md,
     docs/research/2026-09-14-one-stealer-at-a-time.md
     """
-    with _steal_guard(path):
+    with steal_guard(path):
         if _current_bytes(path) != judged:
             return False
         path.unlink(missing_ok=True)
@@ -407,54 +343,58 @@ class StateCorrupt(OSError):
     """`run/state.json` and its previous version are both unreadable; nothing was written."""
 
 
-def _wait_for_slow_owner(deadline: float, poll: float) -> None:
+def _wait_for_slow_owner(lock: Path, deadline: float, poll: float) -> None:
     """Sleep for the live owner, but never past the caller's deadline."""
     remaining = deadline - time.time()
     if remaining <= 0:
-        raise StateLockTimeout(f"Could not acquire state lock: {LOCK_FILE}")
+        raise StateLockTimeout(f"Could not acquire state lock: {lock}")
     time.sleep(min(poll * 10, remaining))
 
 
-def _await_lock_turn(deadline: float, poll: float) -> None:
+def await_lock_turn(lock: Path, deadline: float, poll: float) -> None:
     """One turn of waiting: retire a dead lock, wait out a live one."""
-    payload = _lock_bytes()
-    if _named_owner_is_dead(payload):
-        retire_stale_lock(LOCK_FILE, payload)
+    payload = _lock_bytes(lock)
+    if named_owner_is_dead(payload):
+        retire_stale_lock(lock, payload)
         return
-    _judge_by_age(payload, deadline, poll)
+    _judge_by_age(lock, payload, deadline, poll)
 
 
-def _judge_by_age(payload: bytes | None, deadline: float, poll: float) -> None:
+def _judge_by_age(lock: Path, payload: bytes | None, deadline: float, poll: float) -> None:
     """The rule for a lock that does not name its owner: wait, then judge by age."""
-    if _lock_age() > _STALE_LOCK_SECONDS:
-        _retire_or_wait(payload, deadline, poll)
+    if lock_age(lock) > STALE_LOCK_SECONDS:
+        _retire_or_wait(lock, payload, deadline, poll)
         return
     if time.time() > deadline:
-        raise StateLockTimeout(f"Could not acquire state lock: {LOCK_FILE}")
+        raise StateLockTimeout(f"Could not acquire state lock: {lock}")
     time.sleep(poll)
 
 
-def _retire_or_wait(payload: bytes | None, deadline: float, poll: float) -> None:
+def _retire_or_wait(lock: Path, payload: bytes | None, deadline: float, poll: float) -> None:
     if _owner_alive(payload):
-        _wait_for_slow_owner(deadline, poll)
+        _wait_for_slow_owner(lock, deadline, poll)
         return
     if payload is not None:
-        retire_stale_lock(LOCK_FILE, payload)
+        retire_stale_lock(lock, payload)
 
 
-def _acquire_state_lock(payload: bytes, deadline: float, poll: float) -> int:
+def _claim_unless_contended(lock: Path, payload: bytes, observed_contention: bool) -> int | None:
+    try:
+        return claim_lock(lock, payload)
+    except PermissionError as exc:
+        if not _contention(exc, observed_contention, lock):
+            raise
+        return None
+
+
+def _acquire_state_lock(lock: Path, payload: bytes, deadline: float, poll: float) -> int:
     observed_contention = False
     while True:
-        try:
-            fd = _claim_lock(payload)
-        except PermissionError as exc:
-            if not _contention(exc, observed_contention):
-                raise
-            fd = None
+        fd = _claim_unless_contended(lock, payload, observed_contention)
         if fd is not None:
             return fd
         observed_contention = True
-        _await_lock_turn(deadline, poll)
+        await_lock_turn(lock, deadline, poll)
 
 
 # Windows will not delete a file somebody else has open. Microsoft: "The
@@ -479,10 +419,10 @@ def _reader_blocked_unlink(exc: OSError) -> bool:
     return getattr(exc, "winerror", None) in _WINDOWS_SHARING_ERRORS
 
 
-def _try_unlink_lock_file() -> bool | None:
+def try_unlink_lock_file(lock: Path) -> bool | None:
     """True when the lock is gone, False on a real error, None to try again."""
     try:
-        os.unlink(LOCK_FILE)
+        os.unlink(lock)
     except FileNotFoundError:
         return True
     except OSError as exc:
@@ -490,11 +430,11 @@ def _try_unlink_lock_file() -> bool | None:
     return True
 
 
-def _unlink_lock_file() -> bool:
+def _unlink_lock_file(lock: Path) -> bool:
     """Remove our lock, waiting out the readers Windows lets block a delete."""
     deadline = time.monotonic() + LOCK_RELEASE_SECONDS
     while True:
-        outcome = _try_unlink_lock_file()
+        outcome = try_unlink_lock_file(lock)
         if outcome is not None:
             return outcome
         if time.monotonic() >= deadline:
@@ -502,7 +442,7 @@ def _unlink_lock_file() -> bool:
         time.sleep(0.005)
 
 
-def _release_state_lock(fd: int, payload: bytes) -> None:
+def _release_state_lock(lock: Path, fd: int, payload: bytes) -> None:
     """Close the descriptor and unlink only while the lock is still ours.
 
     A stale-lock thief may have deleted our lock and another process may hold a
@@ -512,25 +452,26 @@ def _release_state_lock(fd: int, payload: bytes) -> None:
         os.close(fd)
     except OSError:
         pass
-    if _lock_bytes() == payload:
-        _unlink_lock_file()
+    if _lock_bytes(lock) == payload:
+        _unlink_lock_file(lock)
 
 
 @contextmanager
-def _state_lock(timeout: float = 10.0, poll: float = 0.05) -> Iterator[None]:
+def state_lock(timeout: float = 10.0, poll: float = 0.05) -> Iterator[None]:
     """Cross-platform advisory lock via O_CREAT|O_EXCL on a sidecar file.
 
     Works on Windows and POSIX without extra deps. If the lock file is stale
-    (older than `_STALE_LOCK_SECONDS`) and its owner is gone, we steal it; if
+    (older than `STALE_LOCK_SECONDS`) and its owner is gone, we steal it; if
     the owner is alive but slow, we wait instead of killing its write.
     """
-    STATE_DIR.mkdir(parents=True, exist_ok=True)
-    payload = _lock_payload()
-    fd = _acquire_state_lock(payload, time.time() + timeout, poll)
+    lock = lock_file()
+    lock.parent.mkdir(parents=True, exist_ok=True)
+    payload = lock_payload()
+    fd = _acquire_state_lock(lock, payload, time.time() + timeout, poll)
     try:
         yield
     finally:
-        _release_state_lock(fd, payload)
+        _release_state_lock(lock, fd, payload)
 
 
 def update_state(
@@ -544,26 +485,27 @@ def update_state(
     `lock_timeout` bounds lock acquisition while preserving the default
     timeout for scheduled and other non-hook writers.
     """
-    with _state_lock(timeout=lock_timeout):
-        state, readable = _state_for_update()
+    path = state_file()
+    with state_lock(timeout=lock_timeout):
+        state, readable = _state_for_update(path)
         mutator(state)
         text = _serialized_state(state)
         # An unchanged state is neither linked nor written: linking first and then
         # finding the write a duplicate left `.previous` the same inode as the
         # file itself, so in-place damage would take both (audit 2026-09-27 C-20,
         # docs/research/2026-09-27-a-previous-state-is-a-different-file.md).
-        if _state_unchanged(text):
+        if _state_unchanged(path, text):
             return state
-        _keep_previous(readable)
-        _write_state_text(text)
+        keep_previous(path, readable)
+        _write_state_text(path, text)
         return state
 
 
 # A writer never turns an unreadable state into an empty one: it recovers the
 # previous version or writes nothing. See
 # `docs/research/2026-09-14-a-corrupt-state-is-not-replaced-by-an-empty-one.md`.
-def _previous_state_file() -> Path:
-    return STATE_FILE.with_name(f"{STATE_FILE.name}.previous")
+def previous_state_file(path: Path) -> Path:
+    return path.with_name(f"{path.name}.previous")
 
 
 def _parsed_state(path: Path) -> dict[str, Any] | None:
@@ -571,70 +513,42 @@ def _parsed_state(path: Path) -> dict[str, Any] | None:
         raw = path.read_bytes()
     except OSError:
         return None
-    return _decoded_state(raw)
+    return decoded_state(raw)
 
 
-def _state_for_update() -> tuple[dict[str, Any], bool]:
+def _state_for_update(path: Path) -> tuple[dict[str, Any], bool]:
     """(the state to mutate, whether the current file was readable)."""
-    if not STATE_FILE.exists():
+    if not path.exists():
         return {}, False
-    current = _parsed_state(STATE_FILE)
+    current = _parsed_state(path)
     if current is not None:
         return current, True
-    return _recovered_previous(), False
+    return _recovered_previous(path), False
 
 
-def _recovered_previous() -> dict[str, Any]:
+def _recovered_previous(path: Path) -> dict[str, Any]:
     """The previous version of an unreadable state file, or `StateCorrupt`."""
     load_state()  # keeps the forensic copy and logs the corruption
-    previous = _parsed_state(_previous_state_file())
+    previous = _parsed_state(previous_state_file(path))
     if previous is None:
-        raise StateCorrupt(f"state file unreadable and no readable previous version: {STATE_FILE}")
+        raise StateCorrupt(f"state file unreadable and no readable previous version: {path}")
     return previous
 
 
-def _keep_previous(readable: bool) -> None:
+def keep_previous(path: Path, readable: bool) -> None:
     """Hard-link the readable file about to be replaced to its `.previous` name."""
     if not readable:
         return
-    staged = STATE_FILE.with_name(f".{STATE_FILE.name}.previous.{secrets.token_hex(8)}.tmp")
+    staged = path.with_name(f".{path.name}.previous.{secrets.token_hex(8)}.tmp")
     try:
-        os.link(STATE_FILE, staged)
-        os.replace(staged, _previous_state_file())
+        os.link(path, staged)
+        os.replace(staged, previous_state_file(path))
     except OSError:
         pass
     finally:
         # When `.previous` already is this inode, POSIX rename "does nothing, and
         # returns a success status" (rename(2)) and the staged link stays behind.
         staged.unlink(missing_ok=True)
-
-
-# `knowledge/daily/` also holds a tracked `README.md`. It is not a daily log:
-# it has no date and is never compiled. Every reader of that directory asks
-# here, so the rule has one home and no reader can forget it.
-# Research: docs/research/2026-09-17-a-daily-log-is-named-by-its-date-everywhere.md
-DAILY_LOG_NAME = re.compile(r"\d{4}-\d{2}-\d{2}\.md")
-
-
-def daily_logs(daily_dir: Path) -> list[Path]:
-    """The `YYYY-MM-DD.md` files of a daily directory, oldest first; none if it is absent."""
-    if not daily_dir.is_dir():
-        return []
-    return sorted(
-        path for path in daily_dir.glob("*.md") if DAILY_LOG_NAME.fullmatch(path.name) is not None
-    )
-
-
-def closed_daily_logs(daily_dir: Path) -> list[Path]:
-    """Every daily log but the newest: the newest is the one still being appended to.
-
-    Compiling it at every session start sent the whole open day again after each
-    append, padded to the compile window each time (2026-09-11: 36 KB of day text in
-    six batches for a 10.6 KB day). Like a log's active segment, it is compiled when
-    it closes; the nightly and a manual run still take every day. See
-    `docs/research/2026-09-27-an-estimate-is-measured-and-an-open-day-waits.md`.
-    """
-    return daily_logs(daily_dir)[:-1]
 
 
 def file_hash(path: Path) -> str:
@@ -748,7 +662,7 @@ def spawn_detached(
     kwargs: dict[str, Any] = {
         "stdin": subprocess.DEVNULL,
         "close_fds": True,
-        "cwd": str(ROOT),
+        "cwd": str(vault_root()),
         "stdout": out_value,
         "stderr": err_value,
         "env": _detached_environment(),

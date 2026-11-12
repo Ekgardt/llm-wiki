@@ -29,13 +29,13 @@ def test_a_partial_drop_names_its_gates():
         ],
     }
 
-    assert query_memory._refused_gates(answer) == [
+    assert query_memory.refused_gates(answer) == [
         "cited span states different figures than the claim it is offered for"
     ]
 
 
 def test_a_total_refusal_still_names_its_gates():
-    assert query_memory._refused_gates({"status": "insufficient_evidence", "reason": WHOLE}) == [
+    assert query_memory.refused_gates({"status": "insufficient_evidence", "reason": WHOLE}) == [
         "cited span states different figures"
     ]
 
@@ -50,20 +50,20 @@ def test_both_kinds_are_reported_together_without_repeats():
         ],
     }
 
-    assert query_memory._refused_gates(answer) == [
+    assert query_memory.refused_gates(answer) == [
         "cited evidence shares no content with the claim it supports",
         "cited span states different figures",
     ]
 
 
 def test_an_answer_that_lost_nothing_names_no_gate():
-    assert query_memory._refused_gates({"status": "answered", "reason": None}) == []
+    assert query_memory.refused_gates({"status": "answered", "reason": None}) == []
 
 
 def test_a_surviving_answer_carries_the_gates_that_dropped_a_claim(monkeypatch):
     monkeypatch.setattr(
         query_memory,
-        "_kept_claims",
+        "kept_claims",
         lambda claims, cited, supplied: ([claims[0]], {"E1"}, ["a gate that refused"], [claims[1]]),
     )
     validated = {
@@ -73,12 +73,12 @@ def test_a_surviving_answer_carries_the_gates_that_dropped_a_claim(monkeypatch):
         "citations": [{"citation_id": "E1"}],
     }
 
-    answer = query_memory._answer_of_surviving_claims(
+    answer = query_memory.answer_of_surviving_claims(
         validated, {"E1": {"citation_id": "E1"}}, {}
     )
 
     assert answer[query_memory.DROPPED_GATES_KEY] == ["a gate that refused"]
-    assert query_memory._refused_gates(answer) == ["a gate that refused"]
+    assert query_memory.refused_gates(answer) == ["a gate that refused"]
 
 
 def test_the_key_is_a_channel_and_not_a_field_of_an_answer():

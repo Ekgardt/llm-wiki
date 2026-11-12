@@ -5,26 +5,28 @@ import json
 from pathlib import Path
 
 import pytest
+from llm_wiki import runtime_roots
+
+from tests.compile_paths import compile_pipeline_binds
+from tests.script_sources import script_files
 
 
 def test_compile_rejects_path_escape_category(tmp_path, monkeypatch):
-    import compile_memory
+    from llm_wiki import compile_pipeline_base
 
     knowledge = tmp_path / "knowledge" / "notes"
     knowledge.mkdir(parents=True)
-    monkeypatch.setattr(compile_memory, "KNOWLEDGE", knowledge)
-    monkeypatch.setattr(compile_memory, "ROOT", tmp_path)
+    monkeypatch.setenv("LLM_WIKI_ROOT", str(tmp_path))
 
-    categories = compile_memory.RAW_PLAN_SCHEMA["properties"]["operations"][
+    categories = compile_pipeline_base.RAW_PLAN_SCHEMA["properties"]["operations"][
         "items"
     ]["properties"]["category"]["enum"]
     assert "../../docs" not in categories
-    assert not hasattr(compile_memory, "_execute_plan")
+    assert not compile_pipeline_binds("_execute_plan")
     assert not (tmp_path / "docs" / "evil.md").exists()
 
 
 def test_compile_dry_run_does_not_mutate_existing(tmp_path, monkeypatch):
-    import compile_memory
 
     knowledge = tmp_path / "knowledge" / "notes"
     knowledge.mkdir(parents=True)
@@ -32,37 +34,27 @@ def test_compile_dry_run_does_not_mutate_existing(tmp_path, monkeypatch):
     old.write_text("# Old\n\nbody\n", encoding="utf-8")
     before = old.read_text(encoding="utf-8")
 
-    monkeypatch.setattr(compile_memory, "KNOWLEDGE", tmp_path / "knowledge" / "notes")
-    monkeypatch.setattr(compile_memory, "ROOT", tmp_path)
+    monkeypatch.setenv("LLM_WIKI_ROOT", str(tmp_path))
 
-    assert not hasattr(compile_memory, "_execute_plan")
+    assert not compile_pipeline_binds("_execute_plan")
     assert old.read_text(encoding="utf-8") == before
 
 
 def test_query_file_back_uses_notes_dir():
-    import query_memory
 
-    assert query_memory.QA_DIR.as_posix().endswith("knowledge/notes")
-
-
-def test_redact_secrets_strips_bearer():
-    from secret_redact import redact_secrets
-
-    out = redact_secrets("Authorization: Bearer sk-abcdefghijklmnopqrstuvwxyz012345")
-    assert "sk-abcdefghijklmnopqrstuvwxyz012345" not in out
-    assert "REDACTED" in out
+    assert runtime_roots.notes_dir().as_posix().endswith("knowledge/notes")
 
 
 def test_memory_queue_work_query_without_output_path(tmp_path, monkeypatch):
-    import memory_queue
+    import queue_core
 
     monkeypatch.setenv("LLM_WIKI_STATE_ROOT", str(tmp_path))
     # Reset queue dir via env
-    tid = memory_queue.enqueue(
+    tid = queue_core.enqueue(
         "query",
         {"prompt": "hello", "system_prompt": "sys", "max_tokens": 10, "enqueued_by": "test"},
     )
-    pending = memory_queue._queue().list_tasks(states=("ready",))
+    pending = queue_core.default_queue().list_tasks(states=("ready",))
     assert any(task.id == tid for task in pending)
 
     def fake_call_llm(prompt, system_prompt="", max_tokens=1000):
@@ -87,11 +79,11 @@ def test_memory_queue_work_query_without_output_path(tmp_path, monkeypatch):
         Path(out).write_text(result, encoding="utf-8")
         return True
 
-    summary = memory_queue.run_worker(
+    summary = queue_core.run_worker(
         processor,
         max_tasks=5,
         idle_seconds=0,
-        processor_runner=memory_queue._run_processor_inline,
+        processor_runner=queue_core.run_processor_inline,
     )
     assert summary.succeeded >= 1, f"expected at least 1 ok, got {summary}"
 
@@ -99,22 +91,24 @@ def test_memory_queue_work_query_without_output_path(tmp_path, monkeypatch):
 def test_select_dailies_rejects_outside_daily(tmp_path, monkeypatch):
     import argparse
 
-    import compile_memory
+    from llm_wiki import compile_pipeline_selection
+    from markdown_transaction import MarkdownCoordinator
 
-    monkeypatch.setattr(compile_memory, "DAILY_DIR", tmp_path / "knowledge" / "daily")
+    monkeypatch.setenv("LLM_WIKI_ROOT", str(tmp_path))
     (tmp_path / "knowledge" / "daily").mkdir(parents=True)
     outside = tmp_path / "README.md"
     outside.write_text("x", encoding="utf-8")
     args = argparse.Namespace(file=str(outside), all=False)
-    with pytest.raises(SystemExit):
-        compile_memory.select_dailies(args, {}, coordinator=object())
+    coordinator = MarkdownCoordinator(tmp_path, tmp_path / "runtime")
+    with pytest.raises(SystemExit, match="--file must be under"):
+        compile_pipeline_selection.select_dailies(args, {}, coordinator=coordinator)
+    assert outside.read_text(encoding="utf-8") == "x"
 
 
 def test_e2e_compile_with_fake_provider(tmp_path, monkeypatch):
     """Full compile path under MEMORY_LLM_PROVIDER=fake writes no pages when ops empty,
     marks daily compiled, and emits COMPILE_DONE."""
-    import compile_memory
-    import memory_state
+    import compile_pipeline
 
     vault = tmp_path / "vault"
     daily = vault / "knowledge" / "daily"
@@ -124,7 +118,7 @@ def test_e2e_compile_with_fake_provider(tmp_path, monkeypatch):
     (vault / "docs").mkdir()
     (vault / "docs" / "AGENTS.md").write_text("# agents\n", encoding="utf-8")
     (vault / "knowledge" / "index.md").write_text("# idx\n", encoding="utf-8")
-    (vault / "knowledge" / "log.md").write_text("# log\n", encoding="utf-8")
+    (vault / "knowledge" / "log.local.md").write_text("# log\n", encoding="utf-8")
     day = daily / "2026-07-01.md"
     day.write_text(
         "# Daily — 2026-07-01\n\n## [10:00:00] session-end | test\n- Tier: `major`\n\n**Decisions made**\n- Ship fake compile e2e.\n",
@@ -153,28 +147,18 @@ def test_e2e_compile_with_fake_provider(tmp_path, monkeypatch):
             }
         )
         + "\nCOMPILE_AUDIT: verified 0 evidence citations; 0 dedup checks performed; "
-        "0 stubs skipped; 0 contradictions handled; 0 pages rejected as below-threshold",
+        "0 stubs skipped; 0 contradictions handled; 0 pages rejected as below-threshold\n"
+        + json.dumps({"source_review": {"complete": True, "reason": "Explicit fake fixture: no durable content."}}),
     )
 
     # Re-bind module paths that were cached at import time.
-    monkeypatch.setattr(compile_memory, "ROOT", vault)
-    monkeypatch.setattr(compile_memory, "MEMORY", vault / "knowledge")
-    monkeypatch.setattr(compile_memory, "DAILY_DIR", daily)
-    monkeypatch.setattr(compile_memory, "KNOWLEDGE", notes)
-    monkeypatch.setattr(compile_memory, "AGENTS", vault / "docs" / "AGENTS.md")
-    monkeypatch.setattr(compile_memory, "INDEX", vault / "knowledge" / "index.md")
-    monkeypatch.setattr(compile_memory, "LOG", vault / "knowledge" / "log.md")
-    monkeypatch.setattr(memory_state, "ROOT", vault)
-    monkeypatch.setattr(memory_state, "STATE_ROOT", state_root)
-    monkeypatch.setattr(memory_state, "STATE_DIR", state_root / "run")
-    monkeypatch.setattr(memory_state, "STATE_FILE", state_root / "run" / "state.json")
-    monkeypatch.setattr(memory_state, "REPORTS_DIR", state_root / "logs")
-    monkeypatch.setattr(compile_memory, "STATE_ROOT", state_root)
+    monkeypatch.setenv("LLM_WIKI_ROOT", str(vault))
+    monkeypatch.setenv("LLM_WIKI_STATE_ROOT", str(state_root))
 
     import argparse
 
     args = argparse.Namespace(all=False, file=str(day), dry_run=False, trigger="manual")
-    rc = compile_memory._run(args)
+    rc = compile_pipeline.run(args)
     assert rc == 0
     state = json.loads((state_root / "run" / "state.json").read_text(encoding="utf-8"))
     assert "2026-07-01.md" in state.get("compiled_daily_hashes", {})
@@ -288,10 +272,9 @@ def test_no_forbidden_legacy_paths_in_scripts():
     inside scripts/. Catching them here is cheaper than waiting for a runtime
     bug report from an operator whose env var layout differs from the author's.
     """
-    scripts_dir = Path(__file__).resolve().parent.parent / "scripts"
     offenders = [
         offender
-        for py in sorted(scripts_dir.glob("*.py"))
+        for py in script_files()
         for offender in _legacy_token_offenders(py)
     ]
     assert not offenders, "forbidden legacy path tokens in scripts/:\n  " + "\n  ".join(offenders)

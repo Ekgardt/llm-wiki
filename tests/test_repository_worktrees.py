@@ -11,13 +11,14 @@ SCRIPTS = Path(__file__).resolve().parents[1] / "scripts"
 if str(SCRIPTS) not in sys.path:
     sys.path.insert(0, str(SCRIPTS))
 
-from tests import test_repository_index as _index_tests  # noqa: E402
-from tests import test_repository_refresh as _refresh_tests  # noqa: E402
-from tests.test_repository_index import ALPHA, _git, _repository  # noqa: E402
+from tests import repository_index_helpers as _index_tests_helpers  # noqa: E402
+from tests import repository_refresh_helpers as _refresh_tests_helpers  # noqa: E402
+from tests.repository_index_helpers import ALPHA, _git, _repository  # noqa: E402
+from tests.repository_worktrees_helpers import _worktree  # noqa: E402
 
-vault = _index_tests.vault
-adopted_vault = _refresh_tests.adopted_vault
-_isolated_reader_cache = _refresh_tests._isolated_reader_cache
+vault = _index_tests_helpers.vault
+adopted_vault = _refresh_tests_helpers.adopted_vault
+_isolated_reader_cache = _refresh_tests_helpers._isolated_reader_cache
 
 LISTING = (
     "worktree /repo\0HEAD " + "a" * 40 + "\0branch refs/heads/main\0\0"
@@ -43,7 +44,9 @@ def test_the_porcelain_listing_is_read_record_by_record():
 
 
 def test_the_branch_key_decides_before_the_repository_key(tmp_path):
-    from repository_worktrees import indexing_marked_off
+    from repository_indexing import (
+        indexing_marked_off,
+    )
 
     repository = _repository(tmp_path / "repo", {"pkg/alpha.py": ALPHA})
     _git(repository, "checkout", "-q", "-b", "topic")
@@ -62,39 +65,34 @@ def test_the_branch_key_decides_before_the_repository_key(tmp_path):
 
 
 def test_a_marked_checkout_is_refused_by_name_before_anything_is_built(vault, tmp_path):
-    import repository_index
+    import repository_indexing
 
     _root, state = vault
     repository = _repository(tmp_path / "repo", {"pkg/alpha.py": ALPHA})
     _git(repository, "config", "llmwiki.index", "false")
 
-    with pytest.raises(repository_index.RepositoryIndexRefused) as refused:
-        repository_index.index_repository(repository, state_root=state)
+    with pytest.raises(repository_indexing.RepositoryIndexRefused) as refused:
+        repository_indexing.index_repository(repository, state_root=state)
     assert (refused.value.reason, refused.value.details["config_key"]) == (
         "repository_marked_not_indexed",
         "llmwiki.index",
     )
-    assert repository_index.list_repositories(state_root=state)["repositories"] == []
-
-
-def _worktree(repository: Path, name: str, branch: str) -> Path:
-    path = repository.parent / name
-    _git(repository, "worktree", "add", "-q", "-b", branch, str(path))
-    return path
+    assert repository_indexing.list_repositories(state_root=state)["repositories"] == []
 
 
 def test_a_new_worktree_of_a_registered_repository_is_indexed_by_the_timer(adopted_vault, tmp_path):
     import repository_index
+    import repository_indexing
     from repository_worktrees import unindexed_worktree_root
 
     _root, state = adopted_vault
     repository = _repository(tmp_path / "repo", {"pkg/alpha.py": ALPHA})
-    repository_index.index_repository(repository, state_root=state)
+    repository_indexing.index_repository(repository, state_root=state)
     topic = _worktree(repository, "repo-topic", "topic")
     before = unindexed_worktree_root(topic, state_root=state)
 
     answer = repository_index.refresh_all_repositories(state_root=state, budget_seconds=300)
-    rows = repository_index.list_repositories(state_root=state)["repositories"]
+    rows = repository_indexing.list_repositories(state_root=state)["repositories"]
 
     assert (before, [row["status"] for row in answer["followed"]]) == (topic.resolve(), ["followed"])
     assert sorted(Path(row["checkout_root"]).name for row in rows) == ["repo", "repo-topic"]
@@ -103,13 +101,14 @@ def test_a_new_worktree_of_a_registered_repository_is_indexed_by_the_timer(adopt
 
 def test_a_marked_or_unregistered_worktree_is_not_followed(adopted_vault, tmp_path):
     import repository_index
+    import repository_indexing
     from repository_worktrees import follow_worktree, unindexed_worktree_root
 
     _root, state = adopted_vault
     repository = _repository(tmp_path / "repo", {"pkg/alpha.py": ALPHA})
-    with pytest.raises(repository_index.RepositoryIndexRefused) as unregistered:
+    with pytest.raises(repository_indexing.RepositoryIndexRefused) as unregistered:
         follow_worktree(repository, state_root=state)
-    repository_index.index_repository(repository, state_root=state)
+    repository_indexing.index_repository(repository, state_root=state)
     topic = _worktree(repository, "repo-topic", "one-off")
     _git(topic, "config", "branch.one-off.llmwikiIndex", "false")
 
@@ -125,11 +124,12 @@ def test_a_marked_or_unregistered_worktree_is_not_followed(adopted_vault, tmp_pa
 def test_opted_out_worktrees_do_not_take_every_follow_slot(adopted_vault, tmp_path):
     """Audit C-43: docs/research/2026-09-25-an-opted-out-worktree-takes-no-follow-slot.md."""
     import repository_index
+    import repository_indexing
     from repository_worktrees import MAX_FOLLOWED_PER_PASS
 
     _root, state = adopted_vault
     repository = _repository(tmp_path / "repo", {"pkg/alpha.py": ALPHA})
-    repository_index.index_repository(repository, state_root=state)
+    repository_indexing.index_repository(repository, state_root=state)
     for index in range(MAX_FOLLOWED_PER_PASS):
         marked = _worktree(repository, f"repo-off-{index}", f"off-{index}")
         _git(marked, "config", f"branch.off-{index}.llmwikiIndex", "false")
@@ -145,21 +145,21 @@ def test_opted_out_worktrees_do_not_take_every_follow_slot(adopted_vault, tmp_pa
 def test_the_first_answer_without_a_generation_starts_the_follow_once(vault, tmp_path, monkeypatch):
     import mcp_server
     import memory_state
-    import repository_index
+    import repository_indexing
 
     _root, state = vault
     repository = _repository(tmp_path / "repo", {"pkg/alpha.py": ALPHA})
-    repository_index.index_repository(repository, state_root=state)
+    repository_indexing.index_repository(repository, state_root=state)
     topic = _worktree(repository, "repo-topic", "topic")
     spawned = []
     monkeypatch.setattr(memory_state, "spawn_detached", lambda argv, **_kw: spawned.append(argv) or 4242)
-    monkeypatch.setattr(mcp_server, "_FOLLOW_REQUESTED", set())
+    monkeypatch.setattr("llm_wiki.mcp_server_architecture.FOLLOW_REQUESTED", set())
 
-    first = mcp_server._worktree_follow_fields(topic)
-    second = mcp_server._worktree_follow_fields(topic)
+    first = mcp_server.worktree_follow_fields(topic)
+    second = mcp_server.worktree_follow_fields(topic)
     assert (first["freshness"]["refresh"], second["freshness"]["refresh"]) == (
         "worktree_follow_started",
         "worktree_follow_already_requested",
     )
     assert [argv[-2:] for argv in spawned] == [["follow", str(topic.resolve())]]
-    assert mcp_server._worktree_follow_fields(repository) == {}
+    assert mcp_server.worktree_follow_fields(repository) == {}

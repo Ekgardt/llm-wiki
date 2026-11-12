@@ -14,7 +14,6 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 
 import capture_diagnostics  # noqa: E402
-import memory_state  # noqa: E402
 
 WRITERS = 12
 FAILURES_EACH = 10
@@ -22,13 +21,9 @@ FAILURES_EACH = 10
 
 @pytest.fixture
 def trail(tmp_path, monkeypatch) -> Path:
-    run = tmp_path / "run"
-    monkeypatch.setattr(memory_state, "STATE_DIR", run)
-    monkeypatch.setattr(memory_state, "STATE_FILE", run / "state.json")
-    monkeypatch.setattr(memory_state, "LOCK_FILE", run / "state.json.lock")
+    monkeypatch.setenv("LLM_WIKI_STATE_ROOT", str(tmp_path))
     path = tmp_path / "logs" / "capture-failures.jsonl"
     path.parent.mkdir()
-    monkeypatch.setattr(capture_diagnostics, "FAILURE_LOG", path)
     return path
 
 

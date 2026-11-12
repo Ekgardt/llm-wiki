@@ -7,8 +7,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import doctor
 import integration_adapter
+from llm_wiki import doctor_integrations
 
 
 def _claude_settings(home: Path, command: str) -> Path:
@@ -19,8 +19,8 @@ def _claude_settings(home: Path, command: str) -> Path:
 
 
 def _claude(home: Path) -> dict:
-    configs = doctor._integration_host_configs(home)
-    return doctor._generic_host_result(*configs["claude"])
+    configs = doctor_integrations.integration_host_configs(home)
+    return doctor_integrations.generic_host_result(*configs["claude"])
 
 
 def test_hooks_that_name_a_retired_delegate_ask_for_the_installer(tmp_path: Path) -> None:
@@ -38,4 +38,4 @@ def test_current_hooks_are_ok(tmp_path: Path) -> None:
 
 
 def test_doctor_knows_every_retired_name_the_adapter_still_tolerates() -> None:
-    assert set(doctor.RETIRED_HOOK_DELEGATES) == set(integration_adapter.CAPTURE_DELEGATES.values())
+    assert set(doctor_integrations.RETIRED_HOOK_DELEGATES) == set(integration_adapter.CAPTURE_DELEGATES.values())

@@ -15,7 +15,7 @@ from __future__ import annotations
 import os
 import sqlite3
 import sys
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -24,9 +24,11 @@ SCRIPTS_DIR = Path(__file__).resolve().parent.parent / "scripts"
 if str(SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_DIR))
 
-import doctor  # noqa: E402
+import generation_maintenance  # noqa: E402
 from installed_memory_repair import repair_installed_vault  # noqa: E402
 from operational_ownership import OwnershipRegistry  # noqa: E402
+
+from tests.repository_index_helpers import _git  # noqa: E402
 
 _V3_DATABASE = "run/markdown-transactions-v3.sqlite3"
 
@@ -35,6 +37,7 @@ def _adopted_vault(tmp_path: Path) -> tuple[Path, Path]:
     root = tmp_path / "vault"
     state_root = tmp_path / "state"
     (root / "scripts").mkdir(parents=True)
+    _git(root, "init", "-q")
     (root / "scripts/integration_adapter.py").write_bytes(
         (SCRIPTS_DIR / "integration_adapter.py").read_bytes()
     )
@@ -55,7 +58,7 @@ def _adopted_vault(tmp_path: Path) -> tuple[Path, Path]:
 
 
 def _v3_registry(state_root: Path) -> OwnershipRegistry:
-    return OwnershipRegistry._from_adopted_database(  # noqa: SLF001
+    return OwnershipRegistry.from_adopted_database(  # noqa: SLF001
         state_root, state_root / _V3_DATABASE
     )
 
@@ -71,7 +74,7 @@ def test_generation_maintenance_runs_on_an_adopted_vault(tmp_path: Path) -> None
     """The refresh must not raise; it runs or defers with a named outcome."""
     root, state_root = _adopted_vault(tmp_path)
 
-    outcome = doctor.run_generation_maintenance(
+    outcome = generation_maintenance.run_generation_maintenance(
         root, state_root, time_budget_seconds=60, max_sources=200
     )
 
@@ -82,7 +85,7 @@ def test_generation_maintenance_runs_on_an_adopted_vault(tmp_path: Path) -> None
 def test_the_adopted_fence_is_released_after_the_pass(tmp_path: Path) -> None:
     root, state_root = _adopted_vault(tmp_path)
 
-    doctor.run_generation_maintenance(
+    generation_maintenance.run_generation_maintenance(
         root, state_root, time_budget_seconds=60, max_sources=200
     )
 
@@ -93,10 +96,10 @@ def test_a_live_v3_owner_defers_the_refresh_as_busy(tmp_path: Path) -> None:
     root, state_root = _adopted_vault(tmp_path)
     registry = _v3_registry(state_root)
     owner = registry.acquire(
-        doctor._V3_MAINTENANCE_ROLE, scope=doctor._V3_MAINTENANCE_SCOPE
+        generation_maintenance.V3_MAINTENANCE_ROLE, scope=generation_maintenance.V3_MAINTENANCE_SCOPE
     )
     try:
-        outcome = doctor.run_generation_maintenance(
+        outcome = generation_maintenance.run_generation_maintenance(
             root, state_root, time_budget_seconds=20, max_sources=5
         )
     finally:
@@ -108,27 +111,27 @@ def test_a_live_v3_owner_defers_the_refresh_as_busy(tmp_path: Path) -> None:
 
 def test_the_v3_lease_survives_heartbeat_require_and_release(tmp_path: Path) -> None:
     root, state_root = _adopted_vault(tmp_path)
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
 
-    acquired = doctor._acquire_maintenance_owner(root, state_root, now)
+    acquired = generation_maintenance.acquire_maintenance_owner(root, state_root, now)
     assert acquired is not None
     coordinator, lease = acquired
 
-    doctor._heartbeat_maintenance_owner(coordinator, lease)
-    doctor._require_maintenance_owner(coordinator, lease)
-    doctor._release_maintenance_owner(coordinator, lease)
+    generation_maintenance.heartbeat_maintenance_owner(coordinator, lease)
+    generation_maintenance.require_maintenance_owner(coordinator, lease)
+    generation_maintenance.release_maintenance_owner(coordinator, lease)
     assert _v3_owner_rows(state_root) == []
 
 
 def test_a_lost_v3_fence_raises_the_named_fence_loss(tmp_path: Path) -> None:
     """Downstream `_fence_lost_outcome` keys on this exact message."""
     root, state_root = _adopted_vault(tmp_path)
-    now = datetime.now(timezone.utc)
-    coordinator, lease = doctor._acquire_maintenance_owner(root, state_root, now)
-    doctor._release_maintenance_owner(coordinator, lease)
+    now = datetime.now(UTC)
+    coordinator, lease = generation_maintenance.acquire_maintenance_owner(root, state_root, now)
+    generation_maintenance.release_maintenance_owner(coordinator, lease)
 
-    with pytest.raises(doctor.MaintenanceFenceLost) as caught:
-        doctor._heartbeat_maintenance_owner(coordinator, lease)
+    with pytest.raises(generation_maintenance.MaintenanceFenceLost) as caught:
+        generation_maintenance.heartbeat_maintenance_owner(coordinator, lease)
 
     assert str(caught.value) == "maintenance_owner_fence_lost"
     assert caught.value.where == "heartbeat"
@@ -147,9 +150,9 @@ def test_a_legacy_root_still_writes_the_owner_name_row(tmp_path: Path) -> None:
     """The pre-adoption path keeps its schema, lease shape, and lifecycle."""
     root = tmp_path / "vault"
     (root / "knowledge" / "notes").mkdir(parents=True)
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
 
-    acquired = doctor._acquire_maintenance_owner(root, root, now)
+    acquired = generation_maintenance.acquire_maintenance_owner(root, root, now)
     assert acquired is not None
     coordinator, lease = acquired
     assert set(lease) == {"token", "epoch"}
@@ -157,7 +160,7 @@ def test_a_legacy_root_still_writes_the_owner_name_row(tmp_path: Path) -> None:
     row = _legacy_owner_row(root)
     assert row == ("doctor", lease["token"], os.getpid())
 
-    doctor._heartbeat_maintenance_owner(coordinator, lease)
-    doctor._require_maintenance_owner(coordinator, lease)
-    doctor._release_maintenance_owner(coordinator, lease)
+    generation_maintenance.heartbeat_maintenance_owner(coordinator, lease)
+    generation_maintenance.require_maintenance_owner(coordinator, lease)
+    generation_maintenance.release_maintenance_owner(coordinator, lease)
     assert _legacy_owner_row(root) == ("doctor", "", 0)

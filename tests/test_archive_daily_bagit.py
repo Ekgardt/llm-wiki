@@ -10,20 +10,27 @@ import stat
 import threading
 import time
 from contextlib import closing, contextmanager
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+import reliable_memory
+from llm_wiki import windows_acl
 from markdown_transaction import MarkdownChange, MarkdownCoordinator  # noqa: E402
 from reliable_memory import sha256_bytes  # noqa: E402
 
+from tests.archive_daily_bagit_helpers import (
+    _archiver,
+    archive_vault,  # noqa: F401
+)
+from tests.script_sources import script_files
 from tests.slow_machine import LONG_TIMEOUT
 
 
 class _LockedClock:
     def __init__(self) -> None:
-        self.value = datetime(2026, 7, 14, 12, tzinfo=timezone.utc)
+        self.value = datetime(2026, 7, 14, 12, tzinfo=UTC)
         self.lock = threading.Lock()
 
     def __call__(self) -> datetime:
@@ -35,67 +42,7 @@ class _LockedClock:
             self.value += timedelta(seconds=seconds)
 
 
-@pytest.fixture
-def archive_vault(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[Path, Path, Path]:
-    root = tmp_path / "vault"
-    state_root = tmp_path / "state"
-    state_root.mkdir()
-    for relative in ("knowledge/daily/receipts", "knowledge/notes"):
-        (root / relative).mkdir(parents=True)
-    (root / "knowledge/index.md").write_bytes(b"# Knowledge Index\n")
-    (root / "knowledge/log.md").write_bytes(b"# Session Memory Log\n")
-    (root / "AGENTS.md").write_bytes(b"contract\n")
-    daily = root / "knowledge/daily/2026-01-01.md"
-    daily.write_bytes(b"# day\n## [evt-1] event\ncompiled evidence\n")
-
-    import compile_memory
-
-    monkeypatch.setattr(compile_memory, "ROOT", root)
-    monkeypatch.setattr(compile_memory, "STATE_ROOT", state_root)
-    monkeypatch.setattr(compile_memory, "MEMORY", root / "knowledge")
-    monkeypatch.setattr(compile_memory, "DAILY_DIR", root / "knowledge/daily")
-    monkeypatch.setattr(compile_memory, "KNOWLEDGE", root / "knowledge/notes")
-    monkeypatch.setattr(compile_memory, "INDEX", root / "knowledge/index.md")
-    monkeypatch.setattr(compile_memory, "LOG", root / "knowledge/log.md")
-    monkeypatch.setattr(compile_memory, "AGENTS", root / "AGENTS.md")
-    inputs = compile_memory.snapshot_compile_inputs([daily])
-    batch = compile_memory.pack_compile_batches(inputs, model=None)[0]
-    compile_memory.apply_compile_plan(
-        inputs,
-        {"schema_version": "compile-plan/v2", "operations": []},
-        action_key="b" * 64,
-        trigger="manual",
-        coordinator=MarkdownCoordinator(root, state_root),
-        completed_at="2026-07-01T00:00:00Z",
-        batch=batch,
-        provider_budget={
-            "provider": "fake",
-            "model": "fake-v1",
-            "max_output_tokens": 4000,
-        },
-    )
-    with closing(
-        sqlite3.connect(state_root / "run/markdown-transactions.sqlite3")
-    ) as connection, connection:
-        connection.execute(
-            'UPDATE "transaction" SET updated_at="2026-05-01T00:00:00Z" '
-            'WHERE operation_id LIKE "compile:%"'
-        )
-    return root, state_root, daily
-
-
-def _archiver(root: Path, state_root: Path, **kwargs):
-    from archive_daily import DailyArchiver
-
-    return DailyArchiver(
-        root,
-        state_root,
-        clock=lambda: datetime(2026, 7, 14, 12, tzinfo=timezone.utc),
-        **kwargs,
-    )
-
-
-def test_eligibility_requires_age_and_exact_authoritative_v3_receipt(archive_vault) -> None:
+def test_eligibility_requires_age_and_exact_authoritative_v3_receipt(archive_vault) -> None:  # noqa: F811
     root, state_root, daily = archive_vault
     archiver = _archiver(root, state_root)
     assert archiver.eligible(daily, hot_days=90).eligible
@@ -108,15 +55,15 @@ def test_eligibility_requires_age_and_exact_authoritative_v3_receipt(archive_vau
 
 
 def test_v2_receipt_is_readable_history_but_never_authorizes_archive(
-    archive_vault,
+    archive_vault,  # noqa: F811
 ) -> None:
     root, state_root, daily = archive_vault
-    import compile_memory
+    from llm_wiki import compile_pipeline_apply, compile_pipeline_batches, compile_pipeline_sources
 
-    v3 = next((root / "knowledge/daily/receipts").glob("v3-*.md"))
+    v3 = next((root / "knowledge/daily/receipts").glob("v4-*.md"))
     v3.unlink()
-    inputs = compile_memory.snapshot_compile_inputs([daily])
-    compile_memory.apply_compile_plan(
+    inputs = compile_pipeline_sources.snapshot_compile_inputs([daily])
+    compile_pipeline_apply.apply_compile_plan(
         inputs,
         {"schema_version": "compile-plan/v2", "operations": []},
         action_key="9" * 64,
@@ -126,7 +73,7 @@ def test_v2_receipt_is_readable_history_but_never_authorizes_archive(
     )
 
     digest = sha256_bytes(daily.read_bytes())
-    assert compile_memory.read_compile_receipt_v2(
+    assert compile_pipeline_batches.read_compile_receipt_v2(
         digest, MarkdownCoordinator(root, state_root)
     ) is not None
     eligibility = _archiver(root, state_root).eligible(daily, hot_days=90)
@@ -134,9 +81,9 @@ def test_v2_receipt_is_readable_history_but_never_authorizes_archive(
     assert "compile_receipt_v3_missing" in eligibility.reasons
 
 
-def test_eligibility_rejects_nonterminal_compile_operation(archive_vault) -> None:
+def test_eligibility_rejects_nonterminal_compile_operation(archive_vault) -> None:  # noqa: F811
     root, state_root, daily = archive_vault
-    receipt = next((root / "knowledge/daily/receipts").glob("v3-*.md"))
+    receipt = next((root / "knowledge/daily/receipts").glob("v4-*.md"))
     record = json.loads(
         receipt.read_text(encoding="utf-8").split("```json\n", 1)[1].split("\n```", 1)[0]
     )
@@ -150,16 +97,18 @@ def test_eligibility_rejects_nonterminal_compile_operation(archive_vault) -> Non
     result = _archiver(root, state_root).eligible(daily, hot_days=90)
 
     assert not result.eligible
-    assert "nonterminal_compile_operation" in result.reasons
+    # The context reader refuses a receipt whose writer is no longer committed.
+    assert "compile_receipt_context_invalid" in result.reasons
 
 
-def test_archive_queries_release_transaction_database(archive_vault) -> None:
+def test_archive_queries_release_transaction_database(archive_vault) -> None:  # noqa: F811
     root, state_root, daily = archive_vault
     archiver = _archiver(root, state_root)
     digest = sha256_bytes(daily.read_bytes())
 
     assert archiver._receipt_operation_state(
-        f"knowledge/daily/{daily.name}", digest
+        f"knowledge/daily/{daily.name}", digest,
+        path=next((root / "knowledge/daily/receipts").glob("v4-*.md")),
     ) == "committed"
     archiver._transaction_references(daily.name, transaction_retention_days=30)
 
@@ -183,7 +132,9 @@ def _block_with_decision(root: Path, state_root: Path, daily: Path, digest: str)
 
 
 def _block_with_queue_task(root: Path, state_root: Path, daily: Path, digest: str) -> None:
-    from memory_queue import MemoryQueue
+    from queue_core import (
+        MemoryQueue,
+    )
 
     MemoryQueue(state_root).enqueue("compile", 1, {"daily_id": daily.stem, "hash": digest})
 
@@ -214,7 +165,7 @@ _BLOCKERS = {
     ],
 )
 def test_eligibility_rejects_every_live_or_pinned_reference(
-    archive_vault, blocker: str, reason: str
+    archive_vault, blocker: str, reason: str  # noqa: F811
 ) -> None:
     root, state_root, daily = archive_vault
     digest = sha256_bytes(daily.read_bytes())
@@ -226,7 +177,7 @@ def test_eligibility_rejects_every_live_or_pinned_reference(
     assert reason in result.reasons
 
 
-def test_eligibility_is_bounded_by_active_writer(archive_vault) -> None:
+def test_eligibility_is_bounded_by_active_writer(archive_vault) -> None:  # noqa: F811
     root, state_root, daily = archive_vault
     coordinator = MarkdownCoordinator(root, state_root)
     with coordinator.writer_gate():
@@ -234,7 +185,7 @@ def test_eligibility_is_bounded_by_active_writer(archive_vault) -> None:
             _archiver(root, state_root).eligible(daily, hot_days=90)
 
 
-def test_recent_compile_receipt_transaction_pins_source_for_undo(archive_vault) -> None:
+def test_recent_compile_receipt_transaction_pins_source_for_undo(archive_vault) -> None:  # noqa: F811
     root, state_root, daily = archive_vault
     with closing(
         sqlite3.connect(state_root / "run/markdown-transactions.sqlite3")
@@ -252,8 +203,10 @@ def test_recent_compile_receipt_transaction_pins_source_for_undo(archive_vault) 
     assert "transaction_retention" in result.reasons
 
 
-def test_dead_queue_reference_pins_source(archive_vault) -> None:
-    from memory_queue import MemoryQueue
+def test_dead_queue_reference_pins_source(archive_vault) -> None:  # noqa: F811
+    from queue_core import (
+        MemoryQueue,
+    )
 
     root, state_root, daily = archive_vault
     digest = sha256_bytes(daily.read_bytes())
@@ -268,8 +221,10 @@ def test_dead_queue_reference_pins_source(archive_vault) -> None:
     assert "queue_reference" in result.reasons
 
 
-def test_durable_source_failure_pins_archive_under_source_fence(archive_vault) -> None:
-    from memory_queue import MemoryQueue
+def test_durable_source_failure_pins_archive_under_source_fence(archive_vault) -> None:  # noqa: F811
+    from queue_core import (
+        MemoryQueue,
+    )
 
     root, state_root, daily = archive_vault
     digest = sha256_bytes(daily.read_bytes())
@@ -291,7 +246,7 @@ def test_durable_source_failure_pins_archive_under_source_fence(archive_vault) -
 
 
 def test_archive_publishes_complete_valid_bag_then_transactionally_removes_source(
-    archive_vault,
+    archive_vault,  # noqa: F811
 ) -> None:
     from evidence_resolver import EvidenceRef, EvidenceResolver, validate_bag
 
@@ -343,7 +298,7 @@ def test_archive_publishes_complete_valid_bag_then_transactionally_removes_sourc
 
 
 def test_archived_evidence_resolves_after_eligible_run_state_is_deleted(
-    archive_vault,
+    archive_vault,  # noqa: F811
 ) -> None:
     from evidence_resolver import EvidenceRef, EvidenceResolver
 
@@ -385,7 +340,7 @@ def test_archived_evidence_resolves_after_eligible_run_state_is_deleted(
 
 
 def test_forged_embedded_receipt_fails_after_outer_hashes_are_rebuilt(
-    archive_vault,
+    archive_vault,  # noqa: F811
 ) -> None:
     from archive_daily import DailyArchiver
     from evidence_resolver import EvidenceResolutionError, validate_bag
@@ -400,7 +355,7 @@ def test_forged_embedded_receipt_fails_after_outer_hashes_are_rebuilt(
     embedded = forged / "compile-receipt.md"
     embedded.write_bytes(
         embedded.read_bytes().replace(
-            b'"schema_version":"compile-receipt/v3"',
+            b'"schema_version":"compile-receipt/v4"',
             b'"schema_version":"compile-receipt/xx"',
         )
     )
@@ -422,7 +377,7 @@ def test_forged_embedded_receipt_fails_after_outer_hashes_are_rebuilt(
             f"{sha256_bytes((forged / name).read_bytes())}  {name}\n" for name in tags
         ).encode()
     )
-    DailyArchiver._seal(forged)
+    DailyArchiver.seal(forged)
     shutil.rmtree(state_root / "run")
 
     with pytest.raises(EvidenceResolutionError, match="compile receipt"):
@@ -430,7 +385,7 @@ def test_forged_embedded_receipt_fails_after_outer_hashes_are_rebuilt(
 
 
 def test_forged_offline_coordinator_record_fails_its_attested_digest(
-    archive_vault,
+    archive_vault,  # noqa: F811
 ) -> None:
     from archive_daily import DailyArchiver
     from evidence_resolver import EvidenceResolutionError, validate_bag
@@ -460,7 +415,7 @@ def test_forged_offline_coordinator_record_fails_its_attested_digest(
             f"{sha256_bytes((forged / name).read_bytes())}  {name}\n" for name in tags
         ).encode()
     )
-    DailyArchiver._seal(forged)
+    DailyArchiver.seal(forged)
     shutil.rmtree(state_root / "run")
 
     with pytest.raises(EvidenceResolutionError, match="authority"):
@@ -468,7 +423,7 @@ def test_forged_offline_coordinator_record_fails_its_attested_digest(
 
 
 def test_bag_validation_rechecks_receipt_hash_and_transaction_authority(
-    archive_vault,
+    archive_vault,  # noqa: F811
 ) -> None:
     from evidence_resolver import EvidenceResolutionError, validate_bag
 
@@ -499,13 +454,13 @@ def test_bag_validation_rechecks_receipt_hash_and_transaction_authority(
     )
     from archive_daily import DailyArchiver
 
-    DailyArchiver._seal(copy)
+    DailyArchiver.seal(copy)
 
     with pytest.raises(EvidenceResolutionError, match="coordinator"):
         validate_bag(copy, coordinator=coordinator, vault=root)
 
 
-def test_bag_info_requires_exact_fields_order_and_no_duplicates(archive_vault) -> None:
+def test_bag_info_requires_exact_fields_order_and_no_duplicates(archive_vault) -> None:  # noqa: F811
     from archive_daily import DailyArchiver
     from evidence_resolver import EvidenceResolutionError, validate_bag
 
@@ -530,7 +485,7 @@ def test_bag_info_requires_exact_fields_order_and_no_duplicates(archive_vault) -
             f"{sha256_bytes((copy / name).read_bytes())}  {name}\n" for name in tags
         ).encode()
     )
-    DailyArchiver._seal(copy)
+    DailyArchiver.seal(copy)
 
     with pytest.raises(EvidenceResolutionError, match="bag info"):
         validate_bag(
@@ -541,17 +496,18 @@ def test_bag_info_requires_exact_fields_order_and_no_duplicates(archive_vault) -
 
 
 def test_bag_validation_rejects_any_writable_member(
-    archive_vault, monkeypatch
+    archive_vault, monkeypatch  # noqa: F811
 ) -> None:
     import evidence_resolver
+    from llm_wiki import archive_read_only
 
     root, state_root, daily = archive_vault
     receipt = _archiver(root, state_root).archive(daily.stem)
     payload = receipt.bag_path / f"data/{daily.name}"
-    original = evidence_resolver._archive_path_is_read_only
+    original = archive_read_only.archive_path_is_read_only
     monkeypatch.setattr(
-        evidence_resolver,
-        "_archive_path_is_read_only",
+        archive_read_only,
+        "archive_path_is_read_only",
         lambda path: False if path == payload else original(path),
     )
 
@@ -563,7 +519,7 @@ def test_bag_validation_rejects_any_writable_member(
         )
 
 
-def test_archive_index_is_canonical_deterministic_and_derived(archive_vault) -> None:
+def test_archive_index_is_canonical_deterministic_and_derived(archive_vault) -> None:  # noqa: F811
     root, state_root, daily = archive_vault
     archiver = _archiver(root, state_root)
     receipt = archiver.archive(daily.stem)
@@ -583,23 +539,20 @@ def test_archive_index_is_canonical_deterministic_and_derived(archive_vault) -> 
 
 
 def test_archiver_bounds_month_iteration_before_filtering(
-    archive_vault, monkeypatch
+    archive_vault, monkeypatch  # noqa: F811
 ) -> None:
-    import archive_daily
 
     root, state_root, _daily = archive_vault
     month = root / "knowledge/daily/archive/2026-01"
     month.mkdir(parents=True)
     (month / "unrelated-one").mkdir()
     (month / "unrelated-two").mkdir()
-    monkeypatch.setattr(archive_daily, "MAX_ARCHIVE_ENTRIES", 1)
-
     with pytest.raises(ValueError, match="entry scan limit"):
-        _archiver(root, state_root)._archive_paths(hidden=False)
+        _archiver(root, state_root, max_month_entries=1)._archive_paths(hidden=False)
 
 
 def test_archive_refuses_linked_archive_boundary_before_writing_outside(
-    archive_vault,
+    archive_vault,  # noqa: F811
 ) -> None:
     root, state_root, daily = archive_vault
     outside = root.parent / "outside-archive"
@@ -616,7 +569,7 @@ def test_archive_refuses_linked_archive_boundary_before_writing_outside(
 
 
 def test_archive_rejects_mocked_windows_reparse_boundary(
-    archive_vault, monkeypatch
+    archive_vault, monkeypatch  # noqa: F811
 ) -> None:
     root, state_root, daily = archive_vault
     archive_root = root / "knowledge/daily/archive"
@@ -639,7 +592,7 @@ def test_archive_rejects_mocked_windows_reparse_boundary(
 
 @pytest.mark.parametrize("killpoint", ["after_build", "before_publish_rename"])
 def test_kill_before_atomic_publish_never_exposes_final_bag(
-    archive_vault, killpoint: str
+    archive_vault, killpoint: str  # noqa: F811
 ) -> None:
     root, state_root, daily = archive_vault
 
@@ -654,7 +607,7 @@ def test_kill_before_atomic_publish_never_exposes_final_bag(
 
 
 def test_hidden_build_has_canonical_intent_and_recovery_resumes_it(
-    archive_vault,
+    archive_vault,  # noqa: F811
 ) -> None:
     from reliable_memory import canonical_json_bytes
 
@@ -662,7 +615,7 @@ def test_hidden_build_has_canonical_intent_and_recovery_resumes_it(
     archiver = _archiver(root, state_root)
     eligibility = archiver.eligible(daily, hot_days=90)
     final, hidden = archiver._build_bag(
-        daily.stem, daily.read_bytes(), eligibility, hot_days=90
+        daily.stem, daily, eligibility, hot_days=90
     )
     intent_path = hidden / "build-intent.json"
     intent = json.loads(intent_path.read_bytes())
@@ -684,14 +637,14 @@ def test_hidden_build_has_canonical_intent_and_recovery_resumes_it(
 
 
 def test_build_failure_always_cleans_owned_hidden_directory(
-    archive_vault, monkeypatch
+    archive_vault, monkeypatch  # noqa: F811
 ) -> None:
     import archive_daily
 
     root, state_root, daily = archive_vault
     monkeypatch.setattr(
         archive_daily.DailyArchiver,
-        "_seal",
+        "seal",
         staticmethod(lambda path: (_ for _ in ()).throw(PermissionError("seal failed"))),
     )
 
@@ -704,7 +657,7 @@ def test_build_failure_always_cleans_owned_hidden_directory(
 
 
 def test_malicious_hidden_build_link_is_quarantined_without_touching_target(
-    archive_vault,
+    archive_vault,  # noqa: F811
 ) -> None:
     from archive_daily import ArchiveConflict
     from reliable_memory import canonical_json_bytes
@@ -741,7 +694,7 @@ def test_malicious_hidden_build_link_is_quarantined_without_touching_target(
 
 
 def test_mocked_reparse_hidden_member_is_quarantined_without_acl_follow(
-    archive_vault, monkeypatch
+    archive_vault, monkeypatch  # noqa: F811
 ) -> None:
     from archive_daily import ArchiveConflict
     from reliable_memory import canonical_json_bytes
@@ -780,7 +733,7 @@ def test_mocked_reparse_hidden_member_is_quarantined_without_acl_follow(
 
 
 def test_cross_volume_quarantine_uses_verified_copy_then_removes_active_bag(
-    archive_vault, monkeypatch
+    archive_vault, monkeypatch  # noqa: F811
 ) -> None:
     root, state_root, daily = archive_vault
 
@@ -813,9 +766,11 @@ def test_cross_volume_quarantine_uses_verified_copy_then_removes_active_bag(
 
 
 def test_windows_sharing_failure_keeps_source_and_releases_queue_fence(
-    archive_vault, monkeypatch
+    archive_vault, monkeypatch  # noqa: F811
 ) -> None:
-    from memory_queue import MemoryQueue
+    from queue_core import (
+        MemoryQueue,
+    )
 
     root, state_root, daily = archive_vault
     original_replace = Path.replace
@@ -832,7 +787,7 @@ def test_windows_sharing_failure_keeps_source_and_releases_queue_fence(
     assert MemoryQueue(state_root).enqueue("compile", 1, {"daily_id": daily.stem})
 
 
-def test_recovery_finishes_identical_duplicate_after_publish_crash(archive_vault) -> None:
+def test_recovery_finishes_identical_duplicate_after_publish_crash(archive_vault) -> None:  # noqa: F811
     root, state_root, daily = archive_vault
 
     def crash(point: str) -> None:
@@ -852,7 +807,7 @@ def test_recovery_finishes_identical_duplicate_after_publish_crash(archive_vault
 
 
 def test_recovery_passes_deadline_and_cancellation_to_source_removal(
-    archive_vault, monkeypatch
+    archive_vault, monkeypatch  # noqa: F811
 ) -> None:
     root, state_root, daily = archive_vault
 
@@ -895,21 +850,20 @@ def test_recovery_passes_deadline_and_cancellation_to_source_removal(
 
 
 def test_archive_index_publish_stops_when_cancelled_after_write_before_replace(
-    archive_vault, monkeypatch
+    archive_vault, monkeypatch  # noqa: F811
 ) -> None:
-    import archive_daily
 
     root, state_root, _daily = archive_vault
     archiver = _archiver(root, state_root)
     expired = False
-    real_fsync = archive_daily.fsync_file
+    real_fsync = reliable_memory.fsync_file
 
     def expire_after_write(path: Path) -> None:
         nonlocal expired
         real_fsync(path)
         expired = True
 
-    monkeypatch.setattr(archive_daily, "fsync_file", expire_after_write)
+    monkeypatch.setattr(reliable_memory, "fsync_file", expire_after_write)
 
     with pytest.raises(TimeoutError, match="deadline"):
         archiver.rebuild_index(
@@ -921,7 +875,7 @@ def test_archive_index_publish_stops_when_cancelled_after_write_before_replace(
 
 
 def test_archive_starts_with_recovery_and_reuses_exact_published_bag(
-    archive_vault,
+    archive_vault,  # noqa: F811
 ) -> None:
     root, state_root, daily = archive_vault
 
@@ -943,9 +897,11 @@ def test_archive_starts_with_recovery_and_reuses_exact_published_bag(
 
 
 def test_failure_created_after_publish_prevents_recovery_source_delete(
-    archive_vault,
+    archive_vault,  # noqa: F811
 ) -> None:
-    from memory_queue import MemoryQueue
+    from queue_core import (
+        MemoryQueue,
+    )
 
     root, state_root, daily = archive_vault
     digest = sha256_bytes(daily.read_bytes())
@@ -974,9 +930,11 @@ def test_failure_created_after_publish_prevents_recovery_source_delete(
 
 
 def test_archive_heartbeats_source_fence_past_original_lease(
-    archive_vault,
+    archive_vault,  # noqa: F811
 ) -> None:
-    from memory_queue import MemoryQueue
+    from queue_core import (
+        MemoryQueue,
+    )
 
     root, state_root, daily = archive_vault
     clock = _LockedClock()
@@ -1014,9 +972,12 @@ def test_archive_heartbeats_source_fence_past_original_lease(
 
 
 def test_archive_stops_before_publish_when_source_heartbeat_loses_takeover(
-    archive_vault, monkeypatch
+    archive_vault, monkeypatch  # noqa: F811
 ) -> None:
-    from memory_queue import MemoryQueue, QueueOperationError
+    from queue_core import (
+        MemoryQueue,
+        QueueOperationError,
+    )
 
     root, state_root, daily = archive_vault
     clock = _LockedClock()
@@ -1071,9 +1032,10 @@ def test_archive_stops_before_publish_when_source_heartbeat_loses_takeover(
 
 
 def test_failure_winning_finalization_race_preserves_flat_source(
-    archive_vault, monkeypatch
+    archive_vault, monkeypatch  # noqa: F811
 ) -> None:
-    from memory_queue import MemoryQueue
+    from llm_wiki import queue_store
+    from queue_core import MemoryQueue
 
     root, state_root, daily = archive_vault
     digest = sha256_bytes(daily.read_bytes())
@@ -1083,16 +1045,14 @@ def test_failure_winning_finalization_race_preserves_flat_source(
     continue_failure = threading.Event()
     archive_done = threading.Event()
     errors: list[BaseException] = []
-    original_record = MemoryQueue._record_source_failure_row
+    original_record = queue_store.record_source_failure_row
 
     def pause_record(*args) -> None:
         failure_holds_lock.set()
         assert continue_failure.wait(LONG_TIMEOUT)
         original_record(*args)
 
-    monkeypatch.setattr(
-        MemoryQueue, "_record_source_failure_row", staticmethod(pause_record)
-    )
+    monkeypatch.setattr(queue_store, "record_source_failure_row", pause_record)
 
     def killpoint(point: str) -> None:
         if point == "after_revalidate":
@@ -1137,9 +1097,10 @@ def test_failure_winning_finalization_race_preserves_flat_source(
 
 
 def test_archive_winning_finalization_race_deletes_before_failure_records(
-    archive_vault, monkeypatch
+    archive_vault, monkeypatch  # noqa: F811
 ) -> None:
-    from memory_queue import MemoryQueue
+    from llm_wiki import queue_store
+    from queue_core import MemoryQueue
 
     root, state_root, daily = archive_vault
     digest = sha256_bytes(daily.read_bytes())
@@ -1151,7 +1112,7 @@ def test_archive_winning_finalization_race_deletes_before_failure_records(
     failure_done = threading.Event()
     errors: list[BaseException] = []
     original_apply = archiver.coordinator.apply
-    original_connect = MemoryQueue._connect
+    original_connection = queue_store.source_failure_connection
 
     def pause_delete(transaction_id: str):
         record = archiver.coordinator._record(transaction_id)
@@ -1162,13 +1123,19 @@ def test_archive_winning_finalization_race_deletes_before_failure_records(
 
     monkeypatch.setattr(archiver.coordinator, "apply", pause_delete)
 
-    def observe_failure_connection(queue: MemoryQueue):
-        connection = original_connect(queue)
-        if threading.current_thread().name == "archive-failure-writer":
-            failure_connected.set()
-        return connection
+    @contextmanager
+    def observe_failure_connection(queue, deadline):
+        with original_connection(queue, deadline) as database:
+            if threading.current_thread().name == "archive-failure-writer":
+                # This scenario requires the second writer to succeed after the
+                # first commits. Its lock wait uses the same established hang
+                # bound as joins; the production busy limit is separately
+                # tested as a genuine refusal.
+                database.execute(f"PRAGMA busy_timeout={int(LONG_TIMEOUT * 1_000):d}")
+                failure_connected.set()
+            yield database
 
-    monkeypatch.setattr(MemoryQueue, "_connect", observe_failure_connection)
+    monkeypatch.setattr(queue_store, "source_failure_connection", observe_failure_connection)
 
     def archive() -> None:
         try:
@@ -1178,13 +1145,16 @@ def test_archive_winning_finalization_race_deletes_before_failure_records(
 
     def record_failure() -> None:
         failure_started.set()
-        MemoryQueue(state_root).record_source_failure(
-            f"knowledge/daily/{daily.name}",
-            digest,
-            error_code="archive_won_race",
-            producer="compile",
-        )
-        failure_done.set()
+        try:
+            MemoryQueue(state_root).record_source_failure(
+                f"knowledge/daily/{daily.name}",
+                digest,
+                error_code="archive_won_race",
+                producer="compile",
+            )
+            failure_done.set()
+        except BaseException as exc:
+            errors.append(exc)
 
     archive_thread = threading.Thread(target=archive)
     archive_thread.start()
@@ -1203,6 +1173,7 @@ def test_archive_winning_finalization_race_deletes_before_failure_records(
     assert not archive_thread.is_alive() and not failure_thread.is_alive()
     assert not failure_completed_while_delete_paused
     assert errors == []
+    assert failure_done.is_set()
     assert not daily.exists()
     assert MemoryQueue(state_root).source_failure(
         f"knowledge/daily/{daily.name}", digest
@@ -1210,7 +1181,7 @@ def test_archive_winning_finalization_race_deletes_before_failure_records(
 
 
 def test_mismatched_existing_bag_raises_stable_conflict_and_preserves_both_payloads(
-    archive_vault,
+    archive_vault,  # noqa: F811
 ) -> None:
     from archive_daily import ArchiveConflict
 
@@ -1235,7 +1206,7 @@ def test_mismatched_existing_bag_raises_stable_conflict_and_preserves_both_paylo
     assert (quarantined[0] / f"data/{daily.name}").read_bytes() == original
 
 
-def test_recovery_reduces_exact_duplicate_bags_to_one_active_copy(archive_vault) -> None:
+def test_recovery_reduces_exact_duplicate_bags_to_one_active_copy(archive_vault) -> None:  # noqa: F811
     root, state_root, daily = archive_vault
 
     def crash(point: str) -> None:
@@ -1251,7 +1222,7 @@ def test_recovery_reduces_exact_duplicate_bags_to_one_active_copy(archive_vault)
     shutil.copytree(bag, duplicate)
     from archive_daily import DailyArchiver
 
-    DailyArchiver._seal(duplicate)
+    DailyArchiver.seal(duplicate)
 
     _archiver(root, state_root).archive(daily.stem)
 
@@ -1262,7 +1233,7 @@ def test_recovery_reduces_exact_duplicate_bags_to_one_active_copy(archive_vault)
 
 @pytest.mark.parametrize("killpoint", ["after_revalidate", "after_source_delete"])
 def test_recovery_handles_every_post_publish_boundary(
-    archive_vault, killpoint: str
+    archive_vault, killpoint: str  # noqa: F811
 ) -> None:
     root, state_root, daily = archive_vault
 
@@ -1285,7 +1256,7 @@ def test_recovery_handles_every_post_publish_boundary(
     assert (root / "knowledge/daily/archive/archive-index.json").is_file()
 
 
-def test_recovery_quarantines_mismatched_duplicate_and_deletes_neither(archive_vault) -> None:
+def test_recovery_quarantines_mismatched_duplicate_and_deletes_neither(archive_vault) -> None:  # noqa: F811
     root, state_root, daily = archive_vault
 
     def crash(point: str) -> None:
@@ -1312,9 +1283,12 @@ def test_recovery_quarantines_mismatched_duplicate_and_deletes_neither(archive_v
 
 @pytest.mark.parametrize("failure_point", ["after_publish_rename", "after_source_delete"])
 def test_archive_holds_queue_source_fence_until_failure_cleanup(
-    archive_vault, failure_point: str
+    archive_vault, failure_point: str  # noqa: F811
 ) -> None:
-    from memory_queue import MemoryQueue, QueueOperationError
+    from queue_core import (
+        MemoryQueue,
+        QueueOperationError,
+    )
 
     root, state_root, daily = archive_vault
     queue = MemoryQueue(state_root)
@@ -1331,7 +1305,7 @@ def test_archive_holds_queue_source_fence_until_failure_cleanup(
     assert queue.enqueue("compile", 1, {"daily_id": daily.stem})
 
 
-def test_eligible_runs_inside_writer_gate(archive_vault, monkeypatch) -> None:
+def test_eligible_runs_inside_writer_gate(archive_vault, monkeypatch) -> None:  # noqa: F811
     root, state_root, daily = archive_vault
     archiver = _archiver(root, state_root)
     entered = 0
@@ -1349,18 +1323,18 @@ def test_eligible_runs_inside_writer_gate(archive_vault, monkeypatch) -> None:
     assert entered == 1
 
 
-def test_sealing_and_parent_fsync_fail_closed(archive_vault, monkeypatch) -> None:
+def test_sealing_and_parent_fsync_fail_closed(archive_vault, monkeypatch) -> None:  # noqa: F811
     import archive_daily
 
     root, state_root, daily = archive_vault
     synced: list[Path] = []
-    original_sync = archive_daily.fsync_directory
+    original_sync = reliable_memory.fsync_directory
 
     def record_sync(path: Path) -> None:
         synced.append(Path(path))
         original_sync(path)
 
-    monkeypatch.setattr(archive_daily, "fsync_directory", record_sync)
+    monkeypatch.setattr(reliable_memory, "fsync_directory", record_sync)
     result = _archiver(root, state_root).archive(daily.stem)
     assert root / "knowledge/daily" in synced
     assert root / "knowledge/daily/archive" in synced
@@ -1383,7 +1357,7 @@ def test_sealing_and_parent_fsync_fail_closed(archive_vault, monkeypatch) -> Non
         staticmethod(fail_seal),
     )
     with pytest.raises(PermissionError, match="seal"):
-        archive_daily.DailyArchiver._seal(build)
+        archive_daily.DailyArchiver.seal(build)
 
 
 def test_windows_read_only_acl_is_verified_and_fail_closed(tmp_path, monkeypatch) -> None:
@@ -1392,7 +1366,7 @@ def test_windows_read_only_acl_is_verified_and_fail_closed(tmp_path, monkeypatch
     path = tmp_path / "bag"
     path.mkdir()
     monkeypatch.setattr(archive_daily.os, "name", "nt")
-    monkeypatch.setattr(archive_daily, "_windows_acl_identity", lambda: "DOMAIN\\owner")
+    monkeypatch.setattr(windows_acl, "windows_acl_identity", lambda: "DOMAIN\\owner")
     calls = []
 
     def acl(command):
@@ -1403,13 +1377,13 @@ def test_windows_read_only_acl_is_verified_and_fail_closed(tmp_path, monkeypatch
             stderr=b"",
         )
 
-    monkeypatch.setattr(archive_daily, "_run_acl_command", acl)
+    monkeypatch.setattr(windows_acl, "run_acl_command", acl)
     archive_daily.DailyArchiver._set_archive_read_only(path)
     assert any("DOMAIN\\owner:(OI)(CI)(RX)" in part for part in calls[0])
 
     monkeypatch.setattr(
-        archive_daily,
-        "_run_acl_command",
+        windows_acl,
+        "run_acl_command",
         lambda command: SimpleNamespace(returncode=1, stdout=b"", stderr=b"denied"),
     )
     with pytest.raises(PermissionError, match="ACL"):
@@ -1432,7 +1406,7 @@ def test_windows_seal_removes_the_broad_principals(tmp_path, monkeypatch) -> Non
     path = tmp_path / "bag"
     path.mkdir()
     monkeypatch.setattr(archive_daily.os, "name", "nt")
-    monkeypatch.setattr(archive_daily, "_windows_acl_identity", lambda: "DOMAIN\\owner")
+    monkeypatch.setattr(windows_acl, "windows_acl_identity", lambda: "DOMAIN\\owner")
     calls = []
 
     def acl(command):
@@ -1443,7 +1417,7 @@ def test_windows_seal_removes_the_broad_principals(tmp_path, monkeypatch) -> Non
             stderr=b"",
         )
 
-    monkeypatch.setattr(archive_daily, "_run_acl_command", acl)
+    monkeypatch.setattr(windows_acl, "run_acl_command", acl)
     archive_daily.DailyArchiver._set_archive_read_only(path)
 
     removals = _acl_removal_commands(calls)
@@ -1460,14 +1434,14 @@ def test_windows_seal_fails_when_another_principal_survives(tmp_path, monkeypatc
     path = tmp_path / "bag"
     path.mkdir()
     monkeypatch.setattr(archive_daily.os, "name", "nt")
-    monkeypatch.setattr(archive_daily, "_windows_acl_identity", lambda: "DOMAIN\\owner")
+    monkeypatch.setattr(windows_acl, "windows_acl_identity", lambda: "DOMAIN\\owner")
     survivor = (
         b"bag DOMAIN\\owner:(OI)(CI)(RX)\r\n"
         b"    NT AUTHORITY\\SYSTEM:(F)\r\n"
     )
     monkeypatch.setattr(
-        archive_daily,
-        "_run_acl_command",
+        windows_acl,
+        "run_acl_command",
         lambda command: SimpleNamespace(returncode=0, stdout=survivor, stderr=b""),
     )
     with pytest.raises(PermissionError, match="principal other than"):
@@ -1492,9 +1466,8 @@ def test_only_archiver_uses_daily_archive_directory_rename_exception() -> None:
     the check, so the marker tracks the helper rather than the raw call it
     replaced.
     """
-    scripts = Path(__file__).resolve().parents[1] / "scripts"
     offenders = set()
-    for path in scripts.glob("*.py"):
+    for path in script_files():
         text = path.read_text(encoding="utf-8")
         if "def _publish_build(" in text:
             offenders.add(path.name)

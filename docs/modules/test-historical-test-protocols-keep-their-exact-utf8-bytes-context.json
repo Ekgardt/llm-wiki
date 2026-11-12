@@ -1,0 +1,402 @@
+{
+  "encoding": "o200k_base",
+  "max_tokens": 100000,
+  "serialization": "exact-duplicates/v1",
+  "files": [
+    "AGENTS.md",
+    "CLAUDE.md",
+    "docs/AGENTS.md",
+    "docs/STRUCTURE.md",
+    "docs/modules/archive-daily-tests-receipt-versions-preserve-historical-archive-authority-helpers.md",
+    "docs/modules/compile-memory.md",
+    "docs/modules/compile-paths.md",
+    "docs/modules/compile-pipeline-tests-compile-hardening.md",
+    "docs/modules/context-bundle.md",
+    "docs/modules/context-records.md",
+    "docs/modules/context-tooling.md",
+    "docs/modules/formats.md",
+    "docs/modules/historical-test-protocols-keep-their-exact-utf8-bytes-helpers.md",
+    "docs/modules/model-choice.md",
+    "docs/modules/product-structure.md",
+    "docs/modules/project-governance.md",
+    "docs/modules/script-sources.md",
+    "docs/modules/test-historical-test-protocols-keep-their-exact-utf8-bytes-context.json",
+    "docs/modules/test-historical-test-protocols-keep-their-exact-utf8-bytes.md",
+    "docs/modules/test-support.md",
+    "rules/development-laws.md",
+    "scripts/__init__.py",
+    "scripts/compile_memory.py",
+    "scripts/llm_wiki/__init__.py",
+    "scripts/llm_wiki/context_bundle.py",
+    "scripts/llm_wiki/formats/__init__.py",
+    "scripts/llm_wiki/formats/receipts.py",
+    "tests/__init__.py",
+    "tests/compile_paths.py",
+    "tests/conftest.py",
+    "tests/historical_test_protocols_keep_their_exact_utf8_bytes_helpers.py",
+    "tests/module_context.py",
+    "tests/module_context_paths.py",
+    "tests/module_interface.py",
+    "tests/module_interface_render.py",
+    "tests/module_qualification.py",
+    "tests/module_record_context.py",
+    "tests/module_records.py",
+    "tests/receipt_versions_preserve_historical_archive_authority_helpers.py",
+    "tests/script_sources.py",
+    "tests/shared_fixtures.py",
+    "tests/slow_machine.py",
+    "tests/test_compile_hardening.py",
+    "tests/test_historical_test_protocols_keep_their_exact_utf8_bytes.py"
+  ],
+  "ownership": {
+    "files": [
+      "docs/modules/test-historical-test-protocols-keep-their-exact-utf8-bytes-context.json",
+      "docs/modules/test-historical-test-protocols-keep-their-exact-utf8-bytes.md",
+      "tests/test_historical_test_protocols_keep_their_exact_utf8_bytes.py"
+    ]
+  },
+  "qualified_dependencies": [
+    {
+      "provider": "scripts/archive_daily.py",
+      "names": [
+        "DailyArchiver"
+      ],
+      "contract_sha256": "3124f02d815b082f823b6d42e73b83e6f1db251a39f6e1ce109c25792be7ebbd",
+      "integration_tests": [
+        "tests/test_a_windows_name_is_read_wherever_an_acl_is_checked.py",
+        "tests/test_adopted_source_fence_and_owner.py",
+        "tests/test_archive_daily_bagit.py"
+      ]
+    },
+    {
+      "provider": "scripts/compile_cache.py",
+      "names": [
+        "CompileCache"
+      ],
+      "contract_sha256": "2f950a945aecf6065663cf128b0cdc4db8f0e8cf0f8d1f1057cc0d1e52d56c95",
+      "integration_tests": [
+        "tests/test_historical_test_protocols_keep_their_exact_utf8_bytes.py"
+      ]
+    },
+    {
+      "provider": "scripts/compile_leased_run.py",
+      "names": [
+        "leased_compile_processor"
+      ],
+      "contract_sha256": "863aec0b7901984e1b393865374d1be4a4c05c6bd98ff719e9832d94f4d180bb",
+      "integration_tests": [
+        "tests/test_historical_test_protocols_keep_their_exact_utf8_bytes.py"
+      ]
+    },
+    {
+      "provider": "scripts/compile_lock.py",
+      "names": [
+        "lock_owner_token"
+      ],
+      "contract_sha256": "c417ca9f578d004aa7296946fe7766d087c82858a09e543c77dbbaedcab08ca0",
+      "integration_tests": [
+        "tests/test_historical_test_protocols_keep_their_exact_utf8_bytes.py"
+      ]
+    },
+    {
+      "provider": "scripts/compile_pipeline.py",
+      "names": [
+        "compile_context_source_identity",
+        "compile_source_identity",
+        "merge_compile_diagnostics",
+        "require_compile_active",
+        "retire_stale_source_failures",
+        "run"
+      ],
+      "contract_sha256": "d61b47f168f98335b485c5c349acb7a82d4fcecd6ebec1a4016d5179c92ff677",
+      "integration_tests": [
+        "tests/test_historical_test_protocols_keep_their_exact_utf8_bytes.py"
+      ]
+    },
+    {
+      "provider": "scripts/generation_maintenance.py",
+      "names": [
+        "run_generation_maintenance"
+      ],
+      "contract_sha256": "f993c23c1e2b938d88bee02a716a716c4bb2c99dfcb153bbb47aacab7a37f71b",
+      "integration_tests": [
+        "tests/test_historical_test_protocols_keep_their_exact_utf8_bytes.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_client.py",
+      "names": [
+        "LLMResult",
+        "ProviderDescriptor"
+      ],
+      "contract_sha256": "49028d940367f29613fe604096ec06729162f8d7ef981562c8d9511058d73893",
+      "integration_tests": [
+        "tests/test_historical_test_protocols_keep_their_exact_utf8_bytes.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/compile_pipeline_apply.py",
+      "names": [
+        "apply_compile_plan"
+      ],
+      "contract_sha256": "129ecd76764fbd203f197468ec01d03833729ef205c00c26dd60fb67025303bb",
+      "integration_tests": [
+        "tests/test_historical_test_protocols_keep_their_exact_utf8_bytes.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/compile_pipeline_base.py",
+      "names": [
+        "ALLOWED_CATEGORIES",
+        "RAW_PLAN_SCHEMA"
+      ],
+      "contract_sha256": "898a31916f4d5b1cc0c6d5a78ee2a8257126a625ad15307c07f6e882bbae4e49",
+      "integration_tests": [
+        "tests/test_historical_test_protocols_keep_their_exact_utf8_bytes.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/compile_pipeline_batches.py",
+      "names": [
+        "pack_compile_batches",
+        "resolve_compile_plan"
+      ],
+      "contract_sha256": "3e2fe0a42d10b929b7d70851d56bc53acc2d771d53686f1ca6d51ce9797b1ded",
+      "integration_tests": [
+        "tests/test_historical_test_protocols_keep_their_exact_utf8_bytes.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/compile_pipeline_prompts.py",
+      "names": [
+        "assert_external_work_allowed",
+        "validate_compile_plan"
+      ],
+      "contract_sha256": "679b125fb822495f88075768f2379d57e614ac74e6702502c859a6d14ecae5f6",
+      "integration_tests": [
+        "tests/test_historical_test_protocols_keep_their_exact_utf8_bytes.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/compile_pipeline_receipts.py",
+      "names": [
+        "context_receipt_path",
+        "v4_source_descriptor"
+      ],
+      "contract_sha256": "eb9f84b7800644d6ab90e9a16f390f061d2aa5293b1b71c4ef8db9161df878e6",
+      "integration_tests": [
+        "tests/test_historical_test_protocols_keep_their_exact_utf8_bytes.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/compile_pipeline_selection.py",
+      "names": [
+        "compile_task_payload",
+        "compile_under_lock",
+        "discard_unusable_receipts",
+        "mark_finished",
+        "parse_args",
+        "report_deprecated_flags",
+        "select_dailies"
+      ],
+      "contract_sha256": "1113971e7d480cd9f8e0eb7748e2ea1d08533f00ce29d925a0ff8ce19381208f",
+      "integration_tests": [
+        "tests/test_historical_test_protocols_keep_their_exact_utf8_bytes.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/compile_pipeline_sources.py",
+      "names": [
+        "snapshot_compile_inputs"
+      ],
+      "contract_sha256": "bf02fc1c5e0236abe974c7bd9563649093ead7a0da80b24feef40a93b2a02969",
+      "integration_tests": [
+        "tests/test_historical_test_protocols_keep_their_exact_utf8_bytes.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/compile_receipt_authority.py",
+      "names": [
+        "read_compile_receipt_version"
+      ],
+      "contract_sha256": "fefb0c1793f868e2cf9b6d894731a17d4d2564c66b083678e3588cc0872274de",
+      "integration_tests": [
+        "tests/test_historical_test_protocols_keep_their_exact_utf8_bytes.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/formats/canonical.py",
+      "names": [
+        "canonical_json_bytes",
+        "sha256_bytes"
+      ],
+      "contract_sha256": "2e42a7aefcb66ac2515f6665a03feae34e6f7bad4807787a789ce031f9f3a9c1",
+      "integration_tests": [
+        "tests/test_historical_test_protocols_keep_their_exact_utf8_bytes.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/formats/schema.py",
+      "names": [
+        "validate_schema"
+      ],
+      "contract_sha256": "753e4abefcf29389d3fc0c051070bfaa66db14ecb88e1c98fc9b85588a6017cb",
+      "integration_tests": [
+        "tests/test_historical_test_protocols_keep_their_exact_utf8_bytes.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/formats/source.py",
+      "names": [
+        "SourceDescriptor"
+      ],
+      "contract_sha256": "9c77bf1a84b6d30e32a7ed40ced285f21295eadb207b4af4d48c1152914388ca",
+      "integration_tests": [
+        "tests/test_historical_test_protocols_keep_their_exact_utf8_bytes.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/generation_catalog_store.py",
+      "names": [
+        "GenerationCatalog"
+      ],
+      "contract_sha256": "b18194ebe04bf988b4474379fcb5243516550d43b745a00eaed1453f7844c983",
+      "integration_tests": [
+        "tests/test_a_blocked_task_has_a_way_back.py",
+        "tests/test_a_build_in_flight_is_not_an_orphan.py",
+        "tests/test_a_capacity_refusal_does_not_corrupt_a_generation.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/model_choice.py",
+      "names": [
+        "using_root"
+      ],
+      "contract_sha256": "d45f2655cb61963e77617d1dfd7d617b134ad77cc770b59b335d0856e5d65019",
+      "integration_tests": [
+        "tests/test_historical_test_protocols_keep_their_exact_utf8_bytes.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/queue_contracts.py",
+      "names": [
+        "LeaseProcessor"
+      ],
+      "contract_sha256": "65beb9b24756c7432bcfbdb61f10fd40deaba6d9b24f671089b198571d775864",
+      "integration_tests": [
+        "tests/test_historical_test_protocols_keep_their_exact_utf8_bytes.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/reliability_defaults.py",
+      "names": [
+        "DEFAULTS"
+      ],
+      "contract_sha256": "f37296a83c15073e42a6cc8b86b88c2d19c548ac19a4ef6d0ca2f7af925c90c8",
+      "integration_tests": [
+        "tests/test_historical_test_protocols_keep_their_exact_utf8_bytes.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/runtime_roots.py",
+      "names": [
+        "state_root",
+        "vault_root"
+      ],
+      "contract_sha256": "904b31835161d11b79ab937c4651d91dd6966bdaa1f33e93b9ea768f519d2d3b",
+      "integration_tests": [
+        "tests/test_a_continuation_keeps_its_original_entry.py",
+        "tests/test_a_prompt_checkpoint_does_not_outwait_its_host.py",
+        "tests/test_a_session_marker_survives_a_busy_writer.py"
+      ]
+    },
+    {
+      "provider": "scripts/markdown_transaction.py",
+      "names": [
+        "MarkdownCoordinator",
+        "TransactionFailure"
+      ],
+      "contract_sha256": "097381a14436aaf457028fe27744908c794d9320348ff0e7349ad03f9d1497fc",
+      "integration_tests": [
+        "tests/test_historical_test_protocols_keep_their_exact_utf8_bytes.py"
+      ]
+    },
+    {
+      "provider": "scripts/operational_ownership.py",
+      "names": [
+        "OwnerLease",
+        "heartbeat_owner"
+      ],
+      "contract_sha256": "c4582c6d1bbabcef579a4c3046b13d8d5245cb46712fbce11b1e2594acf2617f",
+      "integration_tests": [
+        "tests/test_historical_test_protocols_keep_their_exact_utf8_bytes.py"
+      ]
+    },
+    {
+      "provider": "scripts/queue_core.py",
+      "names": [
+        "MemoryQueue",
+        "active_memory_queue",
+        "run_processor_child",
+        "uses_compile_journal",
+        "work_claimed"
+      ],
+      "contract_sha256": "5a298754505b51b58bb3f96b61f62363977e57ea91058ee9b4822e25f3fedd05",
+      "integration_tests": [
+        "tests/test_historical_test_protocols_keep_their_exact_utf8_bytes.py"
+      ]
+    },
+    {
+      "provider": "scripts/rebuild_memory_index.py",
+      "names": [
+        "build_index_bytes"
+      ],
+      "contract_sha256": "815f4d8001a3073cb82efc0f348a4bf9eb3a300a7b8d208dea0326f84246019f",
+      "integration_tests": [
+        "tests/test_historical_test_protocols_keep_their_exact_utf8_bytes.py"
+      ]
+    },
+    {
+      "provider": "scripts/reliable_memory.py",
+      "names": [
+        "canonical_json_bytes",
+        "sha256_bytes",
+        "validate_state_root"
+      ],
+      "contract_sha256": "4243e32fa6ecab88fca1a2d2b3214c0a36944fc23129138102dfaebf6d99457f",
+      "integration_tests": [
+        "tests/test_historical_test_protocols_keep_their_exact_utf8_bytes.py"
+      ]
+    },
+    {
+      "provider": "scripts/repository_scope.py",
+      "names": [
+        "sanitized_git_environment"
+      ],
+      "contract_sha256": "fd550ae20761afad50b37fa3a71044a162485b0e4d4b3e2af9b5b22e143c2bec",
+      "integration_tests": [
+        "tests/test_historical_test_protocols_keep_their_exact_utf8_bytes.py"
+      ]
+    },
+    {
+      "provider": "scripts/secret_redact.py",
+      "names": [
+        "describe_error"
+      ],
+      "contract_sha256": "fb304f29eb5f060ccb0503f24561dd6ee4cfb07e2c36b130c00ad9e1c9000eaf",
+      "integration_tests": [
+        "tests/test_historical_test_protocols_keep_their_exact_utf8_bytes.py"
+      ]
+    },
+    {
+      "provider": "scripts/settings.py",
+      "names": [
+        "setting_value"
+      ],
+      "contract_sha256": "ec6d2a43d91dba48c174aad5e9505790a05fd66f1bf1e5292264857f320a9881",
+      "integration_tests": [
+        "tests/test_historical_test_protocols_keep_their_exact_utf8_bytes.py"
+      ]
+    }
+  ]
+}

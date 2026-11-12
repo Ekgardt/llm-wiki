@@ -7,9 +7,7 @@ whole contract here. Research:
 """
 from __future__ import annotations
 
-import os
 import sys
-import time
 from pathlib import Path
 
 SCRIPTS_DIR = Path(__file__).resolve().parent.parent / "scripts"
@@ -18,93 +16,7 @@ if str(SCRIPTS_DIR) not in sys.path:
 
 import verified_artifacts  # noqa: E402
 
-
-def _artifact(tmp_path: Path, content: bytes = b"payload") -> Path:
-    path = tmp_path / "evidence.sqlite3"
-    path.write_bytes(content)
-    return path
-
-
-def _aged(path: Path, seconds: float) -> os.stat_result:
-    """Put the file's mtime in the past, as an artifact published earlier is."""
-    when = time.time() - seconds
-    os.utime(path, (when, when))
-    return path.stat()
-
-
-def _remembering_cache(tmp_path: Path, path: Path, digest: str):
-    cache = verified_artifacts.VerifiedArtifacts(tmp_path)
-    cache.remember("generation-1", "evidence.sqlite3", _aged(path, 60), digest)
-    cache.save()
-    return verified_artifacts.VerifiedArtifacts(tmp_path)
-
-
-def test_the_same_bytes_are_remembered_and_not_hashed_again(tmp_path):
-    path = _artifact(tmp_path)
-
-    reopened = _remembering_cache(tmp_path, path, "abc")
-
-    assert reopened.remembered("generation-1", "evidence.sqlite3", path.stat()) == "abc"
-
-
-def test_a_file_that_changed_is_not_remembered(tmp_path):
-    path = _artifact(tmp_path)
-    reopened = _remembering_cache(tmp_path, path, "abc")
-
-    path.write_bytes(b"payload and more")
-
-    assert reopened.remembered("generation-1", "evidence.sqlite3", path.stat()) is None
-
-
-def test_an_artifact_as_new_as_the_cache_is_racily_clean(tmp_path):
-    """Git's rule: a file changed inside the same tick would otherwise pass."""
-    path = _artifact(tmp_path)
-    reopened = _remembering_cache(tmp_path, path, "abc")
-    now = time.time()
-    os.utime(path, (now, now))
-
-    assert reopened.remembered("generation-1", "evidence.sqlite3", path.stat()) is None
-
-
-def test_another_generation_with_the_same_path_is_not_remembered(tmp_path):
-    path = _artifact(tmp_path)
-    reopened = _remembering_cache(tmp_path, path, "abc")
-
-    assert reopened.remembered("generation-2", "evidence.sqlite3", path.stat()) is None
-
-
-def test_a_corrupt_cache_is_an_empty_cache(tmp_path):
-    path = _artifact(tmp_path)
-    _remembering_cache(tmp_path, path, "abc")
-    verified_artifacts.cache_path(tmp_path).write_bytes(b"{ not json")
-
-    cache = verified_artifacts.VerifiedArtifacts(tmp_path)
-
-    assert cache.remembered("generation-1", "evidence.sqlite3", path.stat()) is None
-
-
-def test_nothing_is_written_when_nothing_new_was_verified(tmp_path):
-    path = _artifact(tmp_path)
-    _remembering_cache(tmp_path, path, "abc")
-    cache_file = verified_artifacts.cache_path(tmp_path)
-    before = cache_file.stat().st_mtime_ns
-
-    verified_artifacts.VerifiedArtifacts(tmp_path).save()
-
-    assert cache_file.stat().st_mtime_ns == before
-
-
-def test_the_cache_keeps_a_bounded_number_of_entries(tmp_path):
-    path = _artifact(tmp_path)
-    metadata = _aged(path, 60)
-    cache = verified_artifacts.VerifiedArtifacts(tmp_path)
-    for index in range(verified_artifacts.MAX_ENTRIES + 8):
-        cache.remember(f"generation-{index}", "evidence.sqlite3", metadata, "abc")
-    cache.save()
-
-    reopened = verified_artifacts.VerifiedArtifacts(tmp_path)
-
-    assert len(reopened.entries) == verified_artifacts.MAX_ENTRIES
+from tests.modules.verified_artifacts.cache_metadata import _aged  # noqa: E402
 
 
 def test_the_format_receipt_key_comes_from_the_remembered_digest(tmp_path):
@@ -119,7 +31,7 @@ def test_the_format_receipt_key_comes_from_the_remembered_digest(tmp_path):
     cache.remember("generation-7", "evidence.sqlite3", _aged(database, 60), "known")
     cache.save()
 
-    remembered = evidence_graph._remembered_artifact_digest(  # noqa: SLF001
+    remembered = evidence_graph.remembered_artifact_digest(  # noqa: SLF001
         verified_artifacts.VerifiedArtifacts(tmp_path), database
     )
 
@@ -138,7 +50,7 @@ def test_a_moved_artifact_has_no_remembered_digest(tmp_path):
     cache.save()
     database.write_bytes(b"payload changed")
 
-    remembered = evidence_graph._remembered_artifact_digest(  # noqa: SLF001
+    remembered = evidence_graph.remembered_artifact_digest(  # noqa: SLF001
         verified_artifacts.VerifiedArtifacts(tmp_path), database
     )
 
@@ -152,10 +64,10 @@ class _RefusesToBeWalked:
 
 def test_rows_already_walked_are_not_walked_again():
     """The walk is paid once per distinct artifact digest, not once per read."""
-    import search_memory
+    import generation_fts_validation
 
     assert (
-        search_memory._stored_chunks_match(  # noqa: SLF001
+        generation_fts_validation.stored_chunks_match(  # noqa: SLF001
             _RefusesToBeWalked(),
             None,
             count=3,
@@ -169,18 +81,18 @@ def test_rows_already_walked_are_not_walked_again():
 
 def test_a_digest_not_yet_walked_asks_for_the_walk(tmp_path):
     """A first read of these bytes walks them; the next process does not."""
-    import search_memory
+    import generation_fts_validation
 
     manifest = {"artifacts": [{"path": "search.sqlite3", "sha256": "d" * 64}]}
 
-    _cache, digest, first = search_memory._fts_rows_need_walking(  # noqa: SLF001
+    _cache, digest, first = generation_fts_validation.fts_rows_need_walking(  # noqa: SLF001
         tmp_path, manifest, False
     )
-    cache, _digest, _walk = search_memory._fts_rows_need_walking(  # noqa: SLF001
+    cache, _digest, _walk = generation_fts_validation.fts_rows_need_walking(  # noqa: SLF001
         tmp_path, manifest, False
     )
-    search_memory._remember_walked_rows(cache, digest, True)  # noqa: SLF001
-    _again, _digest, second = search_memory._fts_rows_need_walking(  # noqa: SLF001
+    generation_fts_validation.remember_walked_rows(cache, digest, True)  # noqa: SLF001
+    _again, _digest, second = generation_fts_validation.fts_rows_need_walking(  # noqa: SLF001
         tmp_path, manifest, False
     )
 
@@ -188,15 +100,15 @@ def test_a_digest_not_yet_walked_asks_for_the_walk(tmp_path):
 
 
 def test_a_deep_check_walks_the_rows_even_when_remembered(tmp_path):
-    import search_memory
+    import generation_fts_validation
 
     manifest = {"artifacts": [{"path": "search.sqlite3", "sha256": "e" * 64}]}
-    cache, digest, _first = search_memory._fts_rows_need_walking(  # noqa: SLF001
+    cache, digest, _first = generation_fts_validation.fts_rows_need_walking(  # noqa: SLF001
         tmp_path, manifest, False
     )
-    search_memory._remember_walked_rows(cache, digest, True)  # noqa: SLF001
+    generation_fts_validation.remember_walked_rows(cache, digest, True)  # noqa: SLF001
 
-    _cache, _digest, walk = search_memory._fts_rows_need_walking(  # noqa: SLF001
+    _cache, _digest, walk = generation_fts_validation.fts_rows_need_walking(  # noqa: SLF001
         tmp_path, manifest, True
     )
 
@@ -204,9 +116,9 @@ def test_a_deep_check_walks_the_rows_even_when_remembered(tmp_path):
 
 
 def test_a_manifest_without_a_digest_asks_for_the_walk(tmp_path):
-    import search_memory
+    import generation_fts_validation
 
-    _cache, digest, walk = search_memory._fts_rows_need_walking(  # noqa: SLF001
+    _cache, digest, walk = generation_fts_validation.fts_rows_need_walking(  # noqa: SLF001
         tmp_path, {"artifacts": []}, False
     )
 

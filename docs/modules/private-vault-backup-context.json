@@ -1,0 +1,250 @@
+{
+  "encoding": "o200k_base",
+  "max_tokens": 100000,
+  "serialization": "exact-duplicates/v1",
+  "files": [
+    "AGENTS.md",
+    "CLAUDE.md",
+    "docs/AGENTS.md",
+    "docs/STRUCTURE.md",
+    "docs/modules/context-bundle.md",
+    "docs/modules/context-records.md",
+    "docs/modules/context-tooling.md",
+    "docs/modules/formats.md",
+    "docs/modules/model-choice.md",
+    "docs/modules/private-vault-backup-context.json",
+    "docs/modules/private-vault-backup.md",
+    "docs/modules/product-structure.md",
+    "docs/modules/project-governance.md",
+    "docs/modules/queue-core-tests-reliability-v3-adoption-helpers.md",
+    "docs/modules/test-support.md",
+    "rules/development-laws.md",
+    "scripts/__init__.py",
+    "scripts/llm_wiki/__init__.py",
+    "scripts/llm_wiki/context_bundle.py",
+    "scripts/llm_wiki/formats/__init__.py",
+    "scripts/private_vault_backup.py",
+    "tests/__init__.py",
+    "tests/conftest.py",
+    "tests/module_context.py",
+    "tests/module_context_paths.py",
+    "tests/module_interface.py",
+    "tests/module_interface_render.py",
+    "tests/module_qualification.py",
+    "tests/module_record_context.py",
+    "tests/module_records.py",
+    "tests/private_vault_backup_helpers.py",
+    "tests/reliability_v3_adoption_helpers.py",
+    "tests/shared_fixtures.py",
+    "tests/slow_machine.py",
+    "tests/test_a_backup_image_carries_what_git_does_not.py",
+    "tests/test_a_backup_snapshots_what_hooks_write.py",
+    "tests/test_a_publication_counts_what_it_leaves_out.py",
+    "tests/test_a_publication_is_all_or_nothing.py",
+    "tests/test_a_real_restic_summary_is_accepted.py",
+    "tests/test_a_refused_publication_names_its_file.py",
+    "tests/test_private_vault_backup.py"
+  ],
+  "ownership": {
+    "files": [
+      "docs/modules/private-vault-backup-context.json",
+      "docs/modules/private-vault-backup.md",
+      "scripts/private_vault_backup.py",
+      "tests/private_vault_backup_helpers.py",
+      "tests/test_a_backup_image_carries_what_git_does_not.py",
+      "tests/test_a_backup_snapshots_what_hooks_write.py",
+      "tests/test_a_publication_counts_what_it_leaves_out.py",
+      "tests/test_a_publication_is_all_or_nothing.py",
+      "tests/test_a_real_restic_summary_is_accepted.py",
+      "tests/test_a_refused_publication_names_its_file.py",
+      "tests/test_private_vault_backup.py"
+    ]
+  },
+  "qualified_dependencies": [
+    {
+      "provider": "scripts/lease_renewal.py",
+      "names": [
+        "renew_until_stopped"
+      ],
+      "contract_sha256": "b2ab0739508c291354a6b92c1a414225732496cb481a22a3ff3b824be15c52bd",
+      "integration_tests": [
+        "tests/test_a_backup_image_carries_what_git_does_not.py",
+        "tests/test_a_backup_snapshots_what_hooks_write.py",
+        "tests/test_a_publication_counts_what_it_leaves_out.py",
+        "tests/test_a_publication_is_all_or_nothing.py",
+        "tests/test_a_real_restic_summary_is_accepted.py",
+        "tests/test_a_refused_publication_names_its_file.py",
+        "tests/test_private_vault_backup.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/formats/canonical.py",
+      "names": [
+        "canonical_json_bytes",
+        "sha256_bytes"
+      ],
+      "contract_sha256": "2e42a7aefcb66ac2515f6665a03feae34e6f7bad4807787a789ce031f9f3a9c1",
+      "integration_tests": [
+        "tests/test_a_backup_image_carries_what_git_does_not.py",
+        "tests/test_a_backup_snapshots_what_hooks_write.py",
+        "tests/test_a_publication_counts_what_it_leaves_out.py",
+        "tests/test_a_publication_is_all_or_nothing.py",
+        "tests/test_a_real_restic_summary_is_accepted.py",
+        "tests/test_a_refused_publication_names_its_file.py",
+        "tests/test_private_vault_backup.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/generation_catalog_store.py",
+      "names": [
+        "GenerationCatalog"
+      ],
+      "contract_sha256": "b18194ebe04bf988b4474379fcb5243516550d43b745a00eaed1453f7844c983",
+      "integration_tests": [
+        "tests/test_a_blocked_task_has_a_way_back.py",
+        "tests/test_a_build_in_flight_is_not_an_orphan.py",
+        "tests/test_a_capacity_refusal_does_not_corrupt_a_generation.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/model_choice.py",
+      "names": [
+        "using_root"
+      ],
+      "contract_sha256": "d45f2655cb61963e77617d1dfd7d617b134ad77cc770b59b335d0856e5d65019",
+      "integration_tests": [
+        "tests/test_a_backup_image_carries_what_git_does_not.py",
+        "tests/test_a_backup_snapshots_what_hooks_write.py",
+        "tests/test_a_publication_counts_what_it_leaves_out.py",
+        "tests/test_a_publication_is_all_or_nothing.py",
+        "tests/test_a_real_restic_summary_is_accepted.py",
+        "tests/test_a_refused_publication_names_its_file.py",
+        "tests/test_private_vault_backup.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/reliability_defaults.py",
+      "names": [
+        "DEFAULTS"
+      ],
+      "contract_sha256": "f37296a83c15073e42a6cc8b86b88c2d19c548ac19a4ef6d0ca2f7af925c90c8",
+      "integration_tests": [
+        "tests/test_a_backup_image_carries_what_git_does_not.py",
+        "tests/test_a_backup_snapshots_what_hooks_write.py",
+        "tests/test_a_publication_counts_what_it_leaves_out.py",
+        "tests/test_a_publication_is_all_or_nothing.py",
+        "tests/test_a_real_restic_summary_is_accepted.py",
+        "tests/test_a_refused_publication_names_its_file.py",
+        "tests/test_private_vault_backup.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/runtime_roots.py",
+      "names": [
+        "state_root_for",
+        "vault_root"
+      ],
+      "contract_sha256": "fd3b89380c4745d13e861ba28292a0649b1ea43bfe8106d0179487d0fdc1f100",
+      "integration_tests": [
+        "tests/test_a_continuation_keeps_its_original_entry.py",
+        "tests/test_a_prompt_checkpoint_does_not_outwait_its_host.py",
+        "tests/test_a_session_marker_survives_a_busy_writer.py"
+      ]
+    },
+    {
+      "provider": "scripts/markdown_transaction.py",
+      "names": [
+        "COORDINATOR_V3_SCHEMA_SHA256",
+        "initialize_coordinator_v3_candidate",
+        "validate_coordinator_v3_database"
+      ],
+      "contract_sha256": "f4e825ac8b89fd59cceb6d5388c2f3bb0d798db03f4bf99b27a77138cd4deb6f",
+      "integration_tests": [
+        "tests/test_a_backup_image_carries_what_git_does_not.py",
+        "tests/test_a_backup_snapshots_what_hooks_write.py",
+        "tests/test_a_publication_counts_what_it_leaves_out.py",
+        "tests/test_a_publication_is_all_or_nothing.py",
+        "tests/test_a_real_restic_summary_is_accepted.py",
+        "tests/test_a_refused_publication_names_its_file.py",
+        "tests/test_private_vault_backup.py"
+      ]
+    },
+    {
+      "provider": "scripts/operational_ownership.py",
+      "names": [
+        "OperationalOwnershipError",
+        "OwnerLease",
+        "OwnershipRegistry"
+      ],
+      "contract_sha256": "7db3826ad787d7d1af8131b8d56cbdc119fc7d37c33624f769e7aa30e9679884",
+      "integration_tests": [
+        "tests/test_a_breadcrumb_has_one_publication_owner.py",
+        "tests/test_a_capture_keeps_its_claim_while_it_asks.py",
+        "tests/test_a_dead_capture_gets_its_second_chance_after_a_fix.py"
+      ]
+    },
+    {
+      "provider": "scripts/queue_core.py",
+      "names": [
+        "QUEUE_V3_SCHEMA_SHA256",
+        "harden_owner_only",
+        "initialize_queue_v3_candidate",
+        "validate_queue_v3_database"
+      ],
+      "contract_sha256": "66c9235a0ce0f6ddda3e804b17690f77bdad6d41070a570ab6dfd8efaaf8717a",
+      "integration_tests": [
+        "tests/test_a_backup_image_carries_what_git_does_not.py",
+        "tests/test_a_backup_snapshots_what_hooks_write.py",
+        "tests/test_a_publication_counts_what_it_leaves_out.py",
+        "tests/test_a_publication_is_all_or_nothing.py",
+        "tests/test_a_real_restic_summary_is_accepted.py",
+        "tests/test_a_refused_publication_names_its_file.py",
+        "tests/test_private_vault_backup.py"
+      ]
+    },
+    {
+      "provider": "scripts/reliability_v3_validation.py",
+      "names": [
+        "validate_reliability_v3_runtime"
+      ],
+      "contract_sha256": "2af1763eeb7caa792a410626fbeb8cd8b620bfc934148d1b048e255e579a16bc",
+      "integration_tests": [
+        "tests/test_a_backup_image_carries_what_git_does_not.py",
+        "tests/test_a_backup_snapshots_what_hooks_write.py",
+        "tests/test_a_publication_counts_what_it_leaves_out.py",
+        "tests/test_a_publication_is_all_or_nothing.py",
+        "tests/test_a_real_restic_summary_is_accepted.py",
+        "tests/test_a_refused_publication_names_its_file.py",
+        "tests/test_private_vault_backup.py"
+      ]
+    },
+    {
+      "provider": "scripts/reliable_memory.py",
+      "names": [
+        "canonical_json_bytes",
+        "capture_runtime_file_identity",
+        "fsync_directory",
+        "fsync_file",
+        "harden_runtime_owner_only",
+        "sha256_bytes",
+        "validate_state_root"
+      ],
+      "contract_sha256": "c043ef07a9f1c95d0e750ca15cb89e1f9a7e8f259296fea2eba6712a75b53b54",
+      "integration_tests": [
+        "tests/test_a_backup_image_carries_what_git_does_not.py"
+      ]
+    },
+    {
+      "provider": "scripts/repository_scope.py",
+      "names": [
+        "sanitized_git_environment"
+      ],
+      "contract_sha256": "fd550ae20761afad50b37fa3a71044a162485b0e4d4b3e2af9b5b22e143c2bec",
+      "integration_tests": [
+        "tests/test_a_code_generation_is_not_abandoned.py",
+        "tests/test_a_directory_link_inside_the_checkout_does_not_refuse_the_revision.py",
+        "tests/test_a_document_is_opened_in_its_own_language.py"
+      ]
+    }
+  ]
+}

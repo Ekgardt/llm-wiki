@@ -10,8 +10,8 @@ from __future__ import annotations
 import time
 
 import capture_diagnostics
-import doctor
 import pytest
+from llm_wiki import doctor_capture, doctor_generation
 
 
 @pytest.fixture
@@ -22,8 +22,7 @@ def recorded(tmp_path, monkeypatch):
         apply(state)
 
     monkeypatch.setattr(capture_diagnostics, "update_state", mutate)
-    monkeypatch.setattr(capture_diagnostics, "FAILURE_LOG", tmp_path / "capture-failures.jsonl")
-    monkeypatch.setattr(capture_diagnostics, "REPORTS_DIR", tmp_path)
+    monkeypatch.setenv("LLM_WIKI_STATE_ROOT", str(tmp_path))
     return state
 
 
@@ -38,8 +37,23 @@ def test_tool_and_telemetry_failures_are_not_captures(recorded) -> None:
 
 def test_doctor_names_recent_tool_failures_under_tools(recorded, tmp_path, monkeypatch) -> None:
     capture_diagnostics.record_capture_failure("mcp_tool", "ValueError: bad reference")
-    monkeypatch.setattr(doctor, "_read_state", lambda _root, _deadline: (recorded, False))
+    monkeypatch.setattr(doctor_generation, "read_state", lambda _root, _deadline: (recorded, False))
 
-    check = doctor._tool_failure_check(tmp_path, time.monotonic() + 5)
+    check = doctor_capture.tool_failure_check(tmp_path, time.monotonic() + 5)
 
     assert (check["status"], check["details"]["kinds"]) == ("degraded", {"mcp_tool": 1})
+
+
+def test_historical_compile_refusal_remains_visible_without_claiming_capture_loss(recorded):
+    import copy
+
+    capture_diagnostics.record_capture_failure('compile_oversized_daily', 'retained source exceeds budget')
+    original = copy.deepcopy(recorded)
+    assert capture_diagnostics.capture_failure_totals(recorded) == {}
+    assert capture_diagnostics.operational_failure_totals(recorded) == {'compile_oversized_daily': 1}
+    assert recorded == original
+
+
+def test_unreadable_operational_diagnostics_are_not_reported_healthy(tmp_path, monkeypatch):
+    monkeypatch.setattr(doctor_generation, 'read_state', lambda *args: ({}, True))
+    assert doctor_capture.tool_failure_check(tmp_path, time.monotonic() + 5)['status'] == 'degraded'

@@ -40,7 +40,7 @@ def _transcript(tmp_path: Path) -> Path:
 
 
 def test_the_first_and_last_turns_survive_a_head_and_tail_of_service_records(tmp_path) -> None:
-    text = integration_adapter._capture_transcript_text(_transcript(tmp_path), LIMIT)
+    text = integration_adapter.capture_transcript_text(_transcript(tmp_path), LIMIT)
     rendered = render_transcript(text)
 
     assert ("FIRST QUESTION" in rendered, "LAST ANSWER" in rendered, len(text) <= LIMIT + 512) == (

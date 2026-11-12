@@ -1,68 +1,33 @@
 """Uniform, JSON-compatible response contract for local MCP operations."""
 from __future__ import annotations
 
-import json
-import math
 import subprocess
 import time
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-SCHEMA_VERSION = "1.0"
-COMPONENT_FRESHNESS = {"fresh", "stale", "missing", "unknown"}
-
-
-def envelope_schema() -> dict[str, Any]:
-    """Return the JSON Schema shared by structured MCP tool outputs."""
-    nullable_string = {"type": ["string", "null"]}
-    bounded_number = {"type": "number", "minimum": 0, "maximum": 1}
-    return {
-        "type": "object",
-        "properties": {
-            "schema_version": {"type": "string"},
-            "generated_at": {"type": "string", "format": "date-time"},
-            "index_timestamp": nullable_string,
-            "source_commit": nullable_string,
-            "freshness": {"type": "string", "enum": ["fresh", "stale", "unknown"]},
-            "coverage": bounded_number,
-            "confidence": bounded_number,
-            "fallback": {"type": "boolean"},
-            "partial": {"type": "boolean"},
-            "warnings": {"type": "array", "items": {"type": "string"}},
-            "components": {
-                "type": "object",
-                "additionalProperties": {
-                    "type": "object",
-                    "properties": {
-                        "generation": nullable_string,
-                        "freshness": {
-                            "type": "string",
-                            "enum": ["fresh", "stale", "missing", "unknown"],
-                        },
-                    },
-                    "required": ["generation", "freshness"],
-                    "additionalProperties": False,
-                },
-            },
-            "data": {},
-        },
-        "required": [
-            "schema_version",
-            "generated_at",
-            "index_timestamp",
-            "source_commit",
-            "freshness",
-            "coverage",
-            "confidence",
-            "fallback",
-            "partial",
-            "warnings",
-            "components",
-            "data",
-        ],
-        "additionalProperties": False,
-    }
+from llm_wiki import runtime_roots
+from llm_wiki.mcp_response_values import (
+    COMPONENT_FRESHNESS as COMPONENT_FRESHNESS,
+)
+from llm_wiki.mcp_response_values import (
+    SCHEMA_VERSION as SCHEMA_VERSION,
+)
+from llm_wiki.mcp_response_values import (
+    as_utc,
+    bounded,
+    json_safe,
+)
+from llm_wiki.mcp_response_values import (
+    components as _components,
+)
+from llm_wiki.mcp_response_values import (
+    envelope_schema as envelope_schema,
+)
+from llm_wiki.mcp_response_values import (
+    freshness as _freshness,
+)
 
 
 def build_envelope(
@@ -88,9 +53,9 @@ def build_envelope(
     vault's, is the answer's `source_commit`, and a root that is not absolute
     names no commit (audit 2026-09-26 C-9).
     """
-    coverage = _bounded("coverage", coverage)
-    confidence = _bounded("confidence", confidence)
-    generated_at = _as_utc(now or datetime.now(timezone.utc))
+    coverage = bounded("coverage", coverage)
+    confidence = bounded("confidence", confidence)
+    generated_at = as_utc(now or datetime.now(UTC))
     vault_root, runtime_root = _roots(root, state_root)
     response_warnings = [str(item) for item in warnings or []]
 
@@ -112,7 +77,7 @@ def build_envelope(
         "partial": bool(partial),
         "warnings": response_warnings,
         "components": component_details,
-        "data": _json_safe(data),
+        "data": json_safe(data),
     }
 
 
@@ -129,92 +94,38 @@ def _state_root_or(state_root: Path | None, fallback: Path) -> Path:
 
 def _default_roots(state_root: Path | None) -> tuple[Path, Path]:
     try:
-        from memory_state import ROOT, STATE_ROOT
 
-        return ROOT, _state_root_or(state_root, STATE_ROOT)
+        return runtime_roots.vault_root(), _state_root_or(state_root, runtime_roots.state_root())
     except (ImportError, OSError):
         fallback_root = Path(__file__).resolve().parent.parent
         return fallback_root, _state_root_or(state_root, fallback_root)
 
 
-def _bounded(name: str, value: float) -> float:
-    if isinstance(value, bool) or not isinstance(value, (int, float)) or not 0 <= value <= 1:
-        raise ValueError(f"{name} must be a number between 0 and 1")
-    return float(value)
-
-
-def _as_utc(value: datetime) -> datetime:
-    if value.tzinfo is None:
-        return value.replace(tzinfo=timezone.utc)
-    return value.astimezone(timezone.utc)
-
-
-def _components(value: dict[str, dict[str, Any]] | None) -> dict[str, dict[str, Any]]:
-    if value is None:
-        return {}
-    if not isinstance(value, dict):
-        raise TypeError("components must be an object")
-    return {name: _component_detail(name, detail) for name, detail in value.items()}
-
-
-def _component_detail(name: object, detail: object) -> dict[str, Any]:
-    _require_component_name(name)
-    if not isinstance(detail, dict) or set(detail) != {"generation", "freshness"}:
-        raise ValueError("component details must contain generation and freshness")
-    return _generation_and_freshness(detail["generation"], detail["freshness"])
-
-
-def _require_component_name(name: object) -> None:
-    if not isinstance(name, str) or not name or len(name) > 64:
-        raise ValueError("component names must be bounded non-empty strings")
-
-
-def _generation_and_freshness(generation: object, freshness: object) -> dict[str, Any]:
-    if generation is not None and not _bounded_generation(generation):
-        raise ValueError("component generation must be null or a bounded string")
-    if freshness not in COMPONENT_FRESHNESS:
-        raise ValueError("component freshness is invalid")
-    return {"generation": generation, "freshness": freshness}
-
-
-def _bounded_generation(generation: object) -> bool:
-    return isinstance(generation, str) and bool(generation) and len(generation) <= 128
-
-
-def _freshness(components: dict[str, dict[str, Any]]) -> str:
-    states = {detail["freshness"] for detail in components.values()}
-    if "stale" in states:
-        return "stale"
-    if states and states == {"fresh"}:
-        return "fresh"
-    return "unknown"
-
-
 # The checkout's commit, read again after this long: cached for the life of the
 # server, it named the commit from before the nightly fast-forward (audit B-34).
 SOURCE_COMMIT_TTL_SECONDS = 5.0
-_SOURCE_COMMITS: dict[str, tuple[float, str | None]] = {}
+SOURCE_COMMITS: dict[str, tuple[float, str | None]] = {}
 
 
 def _answer_commit(source_root: str | None, vault_root: Path) -> str | None:
     if source_root is None:
-        return _source_commit(str(vault_root))
+        return source_commit(str(vault_root))
     if not Path(source_root).is_absolute():
         return None
-    return _source_commit(source_root)
+    return source_commit(source_root)
 
 
-def _source_commit(root: str) -> str | None:
-    cached = _SOURCE_COMMITS.get(root)
+def source_commit(root: str) -> str | None:
+    cached = SOURCE_COMMITS.get(root)
     now = time.monotonic()
     if cached is not None and cached[0] > now:
         return cached[1]
-    commit = _read_source_commit(root)
-    _SOURCE_COMMITS[root] = (now + SOURCE_COMMIT_TTL_SECONDS, commit)
+    commit = read_source_commit(root)
+    SOURCE_COMMITS[root] = (now + SOURCE_COMMIT_TTL_SECONDS, commit)
     return commit
 
 
-def _read_source_commit(root: str) -> str | None:
+def read_source_commit(root: str) -> str | None:
     try:
         result = subprocess.run(
             # Any repository may be asked about, so its config names no command.
@@ -231,33 +142,3 @@ def _read_source_commit(root: str) -> str | None:
     if result.returncode != 0 or not commit:
         return None
     return commit
-
-
-def _json_safe(value: Any) -> Any:
-    if isinstance(value, float):
-        return value if math.isfinite(value) else None
-    if value is None or isinstance(value, (bool, int, str)):
-        return value
-    return _json_safe_structure(value)
-
-
-def _json_safe_structure(value: Any) -> Any:
-    if isinstance(value, Path):
-        return str(value)
-    if isinstance(value, dict):
-        return {str(key): _json_safe(item) for key, item in value.items()}
-    return _json_safe_sequence(value)
-
-
-def _json_safe_sequence(value: Any) -> Any:
-    if isinstance(value, (list, tuple, set)):
-        return [_json_safe(item) for item in value]
-    return _json_or_text(value)
-
-
-def _json_or_text(value: Any) -> Any:
-    try:
-        json.dumps(value)
-    except (TypeError, ValueError):
-        return str(value)
-    return value
