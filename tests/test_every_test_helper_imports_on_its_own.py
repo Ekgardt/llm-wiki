@@ -31,8 +31,8 @@ def _is_collected_package_or_data(path: Path) -> bool:
     return path.name.startswith("test_") or path.name in {"conftest.py", "__init__.py"}
 
 
-def _import_failure(module: str) -> str | None:
-    done = subprocess.run([sys.executable, "-I", "-c", IMPORT_ALONE, module, *map(str, PYTEST_IMPORT_ROOTS)],
+def _import_failure(module: str, roots: tuple[Path, ...] = PYTEST_IMPORT_ROOTS) -> str | None:
+    done = subprocess.run([sys.executable, "-I", "-c", IMPORT_ALONE, module, *map(str, roots)],
                           cwd=ROOT, capture_output=True, text=True, timeout=120, check=False,
                           stdin=subprocess.DEVNULL)
     if done.returncode == 0:
@@ -48,9 +48,13 @@ def test_the_guard_sees_the_shared_modules() -> None:
 def test_a_helper_without_its_path_setup_is_named(tmp_path: Path) -> None:
     helper = tmp_path / "orphan_helper.py"
     helper.write_text("import flush_corpus_labels\n", encoding="utf-8")
-    done = subprocess.run([sys.executable, "-I", "-c", IMPORT_ALONE, "orphan_helper", str(tmp_path)],
-                          capture_output=True, text=True, timeout=120, check=False, stdin=subprocess.DEVNULL)
-    assert (done.returncode != 0, "No module named 'flush_corpus_labels'" in done.stderr) == (True, True)
+    failure = _import_failure("orphan_helper", (tmp_path,))
+    assert failure == "orphan_helper: ModuleNotFoundError: No module named 'flush_corpus_labels'"
+
+
+def test_a_helper_that_imports_is_not_named(tmp_path: Path) -> None:
+    (tmp_path / "sound_helper.py").write_text("import json\n", encoding="utf-8")
+    assert _import_failure("sound_helper", (tmp_path,)) is None
 
 
 def test_every_shared_test_module_imports_in_a_fresh_interpreter() -> None:
