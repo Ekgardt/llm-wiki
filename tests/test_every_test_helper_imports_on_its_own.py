@@ -7,6 +7,7 @@ file happened to load first, and a shard or a single-file run fails at collectio
 from __future__ import annotations
 
 import ast
+import importlib.util
 import os
 import subprocess
 import sys
@@ -25,24 +26,29 @@ def _tracked_test_sources() -> list[Path]:
     return [Path(path) for path in tracked if not Path(path).is_relative_to(INDEXER_INPUT_DATA)]
 
 
-def _names_one_import_brings(node: ast.AST) -> set[str]:
+def _names_one_import_brings(node: ast.AST, package: str) -> set[str]:
     if isinstance(node, ast.Import):
         return {alias.name for alias in node.names}
     if isinstance(node, ast.ImportFrom):
-        return _names_from_import(node)
+        return _names_from_import(node, package)
     return set()
 
 
-def _names_from_import(node: ast.ImportFrom) -> set[str]:
-    """`from pkg import name` may bring the module `pkg.name`; relative imports name no path."""
-    if node.module is None:
-        return set()
-    return {node.module, *(f"{node.module}.{alias.name}" for alias in node.names)}
+def _names_from_import(node: ast.ImportFrom, package: str) -> set[str]:
+    """`from pkg import name` may bring the module `pkg.name`; a relative `pkg` is resolved in its package."""
+    base = importlib.util.resolve_name("." * node.level + (node.module or ""), package)
+    return {base, *(f"{base}.{alias.name}" for alias in node.names)}
+
+
+def _names_imported_by(source: Path, text: str) -> set[str]:
+    """A bare name may also reach a helper through the tests directory on the import path."""
+    package = ".".join(source.parent.parts)
+    names = set().union(*(_names_one_import_brings(node, package) for node in ast.walk(ast.parse(text))))
+    return names | {f"tests.{name}" for name in names}
 
 
 def _imported_names(source: Path) -> set[str]:
-    tree = ast.parse((ROOT / source).read_text(encoding="utf-8"))
-    return set().union(*map(_names_one_import_brings, ast.walk(tree)))
+    return _names_imported_by(source, (ROOT / source).read_text(encoding="utf-8"))
 
 
 def _shared_test_modules() -> list[str]:
@@ -70,6 +76,15 @@ def test_the_guard_sees_the_shared_modules() -> None:
     modules = _shared_test_modules()
     assert {"tests.code_navigation_benchmark_helpers", "tests.modules.flush_corpus_labels.contract_helpers"} <= set(modules)
     assert not [module for module in modules if module.endswith(".parquet_qualification")]
+    assert "tests.fake_process_tree" in modules
+
+
+def test_relative_and_bare_imports_name_the_helper_they_reach() -> None:
+    source = Path("tests/modules/split_suite/test_split.py")
+    text = "from .helper import f\nfrom . import sibling\nfrom ..up import g\nfrom bare_helper import h\n"
+    names = _names_imported_by(source, text)
+    assert {"tests.modules.split_suite.helper", "tests.modules.split_suite.sibling",
+            "tests.modules.up", "tests.bare_helper"} <= names
 
 
 def test_a_helper_without_its_path_setup_is_named(tmp_path: Path) -> None:
