@@ -590,9 +590,8 @@ def test_cancel_all_releases_pending_callers_and_sends_one_cancel_each() -> None
         ]
         assert _await_all_sent(protocol, 2)
         protocol.cancel_all("manager shutdown")
-        for future in futures:
-            with pytest.raises(RequestCancelled):
-                future.result(timeout=1)
+        errors = [future.exception(timeout=1) for future in futures]
+    assert all(isinstance(error, RequestCancelled) for error in errors)
 
     _await_frames(writer, 4)
     assert _cancel_frames(writer) == 2
