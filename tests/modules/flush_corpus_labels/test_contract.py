@@ -1,10 +1,7 @@
 """Original corpus-label assertions, now independent of provider orchestration."""
-import sys
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parents[3]
-sys.path.insert(0, str(ROOT / 'benchmark'))
-from tests.modules.flush_corpus_labels.contract_helpers import _builder  # noqa: E402
+from tests.modules.flush_corpus_labels.contract_helpers import _builder
 
 SESSION = "user: WAL or rollback?\n\nassistant: Rollback journal with synchronous FULL, because WAL breaks on network disks."
 

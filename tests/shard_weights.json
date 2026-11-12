@@ -1223,6 +1223,7 @@
   "test_every_stored_instant_has_one_width.py": 4.04,
   "test_every_structural_answer_carries_its_freshness.py": 0.01,
   "test_every_test_file_has_a_weight.py": 0.12,
+  "test_every_test_helper_imports_on_its_own.py": 0.85,
   "test_every_turn_keeps_its_rank.py": 0.0,
   "test_evidence_graph.py": 1.04,
   "test_evidence_graph_builder.py": 12.3,

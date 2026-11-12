@@ -1,7 +1,14 @@
 """Helpers shared by test_code_navigation_benchmark.py and the test files importing them."""
 from __future__ import annotations
 
-from navigation_benchmark_metrics import precision_recall_f1
+import sys
+from pathlib import Path
+
+BENCHMARK_ROOT = Path(__file__).resolve().parent.parent / "benchmark"
+if str(BENCHMARK_ROOT) not in sys.path:
+    sys.path.insert(0, str(BENCHMARK_ROOT))
+
+from navigation_benchmark_metrics import precision_recall_f1  # noqa: E402
 
 PACKAGE_SHA256 = "bd5c488fc20fa237a944279bf32cae2f986cf10d5d5d9e8705819859daeb2f4a"
 
