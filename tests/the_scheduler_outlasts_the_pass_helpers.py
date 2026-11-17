@@ -10,7 +10,7 @@ ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "scripts" / "install-scheduled-tasks.ps1"
 
 
-_TABLE = re.compile(r"^function Get-LLMWikiLimitHours \{ return @\{ nightly = (\d+); weekly = (\d+) \} \}$", re.MULTILINE)
+_TABLE = re.compile(r"^function Get-LLMWikiTimeLimit \{ return @\{ nightly = (\d+); weekly = (\d+) \} \}$", re.MULTILINE)
 
 
 def script_limit_hours() -> dict[str, int]:

@@ -42,7 +42,7 @@ function Find-CodexOnPath {
 }
 
 function Find-RealCodex {
-    if ($IsWindows -or $PSVersionTable.Platform -eq $null) { return Find-CodexOnWindows }
+    if ($IsWindows -or $null -eq $PSVersionTable.Platform) { return Find-CodexOnWindows }
     return Find-CodexOnPath
 }
 
@@ -87,10 +87,10 @@ function Initialize-CodexMemoryContext {
 
 function Invoke-CodexMemoryMaintenance {
     & uv run --locked --no-sync --directory $env:LLM_WIKI_ROOT python scripts/memory_queue.py work 2>&1 |
-        ForEach-Object { Write-Host "[codex-memory] $_" -ForegroundColor DarkGray }
+        ForEach-Object { Write-Information "[codex-memory] $_" -InformationAction Continue }
     if ($LASTEXITCODE -ne 0) { Write-Warning "[codex-memory] queue work failed ($LASTEXITCODE)" }
     & uv run --locked --no-sync --directory $env:LLM_WIKI_ROOT python scripts/maybe_compile.py 2>&1 |
-        ForEach-Object { Write-Host "[codex-memory] $_" -ForegroundColor DarkGray }
+        ForEach-Object { Write-Information "[codex-memory] $_" -InformationAction Continue }
     if ($LASTEXITCODE -ne 0) { Write-Warning "[codex-memory] compile trigger failed ($LASTEXITCODE)" }
 }
 
@@ -137,47 +137,47 @@ function codex {
 function Get-CodexMemoryState {
     $statePath = Join-Path $env:LLM_WIKI_STATE_ROOT "run\state.json"
     if (-not (Test-Path -LiteralPath $statePath)) {
-        Write-Host "  (state.json not found - no captures yet)"
+        Write-Information "  (state.json not found - no captures yet)" -InformationAction Continue
         return $null
     }
     try { return Get-Content -LiteralPath $statePath -Raw | ConvertFrom-Json }
     catch {
-        Write-Host "  (state.json corrupt or unreadable: $($_.Exception.Message))" -ForegroundColor Yellow
+        Write-Information "  (state.json corrupt or unreadable: $($_.Exception.Message))" -InformationAction Continue
         return $null
     }
 }
 
-function Write-CodexMemoryHeartbeats {
+function Write-CodexMemoryHeartbeat {
     param($State)
-    Write-Host "=== Codex heartbeats (recent activity) ===" -ForegroundColor Cyan
-    if (-not $State.codex_heartbeats) { Write-Host "  (no heartbeats yet)"; return }
+    Write-Information "=== Codex heartbeats (recent activity) ===" -InformationAction Continue
+    if (-not $State.codex_heartbeats) { Write-Information "  (no heartbeats yet)" -InformationAction Continue; return }
     $State.codex_heartbeats.PSObject.Properties | ForEach-Object {
         $h = $_.Value
-        Write-Host "  $($_.Name): $($h.reason) at $($h.at)"
+        Write-Information "  $($_.Name): $($h.reason) at $($h.at)" -InformationAction Continue
     }
 }
 
 function Write-CodexMemoryCompileStatus {
     param($State)
-    Write-Host "`n=== Tier distribution ===" -ForegroundColor Cyan
+    Write-Information "`n=== Tier distribution ===" -InformationAction Continue
     if ($State.flush_tier_counts) {
         $State.flush_tier_counts.PSObject.Properties | ForEach-Object {
-            Write-Host "  $($_.Name): $($_.Value)"
+            Write-Information "  $($_.Name): $($_.Value)" -InformationAction Continue
         }
     }
-    Write-Host "`n=== Last compile ===" -ForegroundColor Cyan
-    Write-Host "  at: $($State.last_compile_at)"
-    Write-Host "  status: $($State.last_compile_status)"
+    Write-Information "`n=== Last compile ===" -InformationAction Continue
+    Write-Information "  at: $($State.last_compile_at)" -InformationAction Continue
+    Write-Information "  status: $($State.last_compile_status)" -InformationAction Continue
     if ($State.last_compile_audit) {
-        Write-Host "  verified citations: $($State.last_compile_audit.verified)"
+        Write-Information "  verified citations: $($State.last_compile_audit.verified)" -InformationAction Continue
     }
 }
 
 function Write-CodexMemoryQueueStatus {
-    Write-Host "`n=== Memory queue (deferred tasks) ===" -ForegroundColor Cyan
+    Write-Information "`n=== Memory queue (deferred tasks) ===" -InformationAction Continue
     $queueStatus = & uv run --locked --no-sync --directory $env:LLM_WIKI_ROOT python scripts/memory_queue.py status | Out-String
     if ($LASTEXITCODE -ne 0) { Write-Warning "[codex-memory] queue status unavailable ($LASTEXITCODE)"; return }
-    Write-Host $queueStatus
+    Write-Information $queueStatus -InformationAction Continue
 }
 
 function codex-memory-status {
@@ -185,11 +185,11 @@ function codex-memory-status {
     try {
         $state = Get-CodexMemoryState
         if ($null -eq $state) { return }
-        Write-CodexMemoryHeartbeats -State $state
+        Write-CodexMemoryHeartbeat -State $state
         Write-CodexMemoryCompileStatus -State $state
-        Write-Host "`n=== Daily log count ===" -ForegroundColor Cyan
+        Write-Information "`n=== Daily log count ===" -InformationAction Continue
         $dailies = Get-ChildItem -LiteralPath (Join-Path $env:LLM_WIKI_ROOT 'knowledge\daily') -Filter *.md -ErrorAction SilentlyContinue
-        Write-Host "  total daily logs: $($dailies.Count)"
+        Write-Information "  total daily logs: $($dailies.Count)" -InformationAction Continue
         Write-CodexMemoryQueueStatus
     } finally { Pop-Location }
 }
@@ -221,5 +221,5 @@ function codex-memory-compile {
     }
 }
 
-Write-Host "[codex-memory-wrapper] Loaded. 'codex' is now wrapped with auto-capture." -ForegroundColor DarkGray
-Write-Host "[codex-memory-wrapper] Commands: codex (auto), codex-memory-status, codex-memory-compile" -ForegroundColor DarkGray
+Write-Information "[codex-memory-wrapper] Loaded. 'codex' is now wrapped with auto-capture." -InformationAction Continue
+Write-Information "[codex-memory-wrapper] Commands: codex (auto), codex-memory-status, codex-memory-compile" -InformationAction Continue

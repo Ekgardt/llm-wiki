@@ -33,6 +33,12 @@ param(
 
 $ErrorActionPreference = "Stop"
 $tasks = @("LLMWiki-Nightly", "LLMWiki-Weekly")
+$script:Request = [pscustomobject]@{
+    VaultRoot = $VaultRoot; StateRoot = $StateRoot; UvPath = $UvPath; SpecVersion = $SpecVersion
+    NightlyLimitHours = $NightlyLimitHours; WeeklyLimitHours = $WeeklyLimitHours
+    Uninstall = [bool]$Uninstall; Status = [bool]$Status; StateJson = [bool]$StateJson
+    RunNightlyNow = [bool]$RunNightlyNow; RunWeeklyNow = [bool]$RunWeeklyNow
+}
 
 # How long each task may run: install_control.SCHEDULER_LIMIT_HOURS, the one table
 # every scheduler uses, and the only place these hours are written in this script.
@@ -40,14 +46,14 @@ $tasks = @("LLMWiki-Nightly", "LLMWiki-Weekly")
 # scheduled_weekly.worst_case_seconds); tests hold both facts.
 # A function, not only a script variable: the status check calls it, so a caller
 # that loads the check alone still reads the same table.
-function Get-LLMWikiLimitHours { return @{ nightly = 5; weekly = 6 } }
-function Get-LLMWikiConfiguredLimitHours {
-    $limits = Get-LLMWikiLimitHours
-    if ($NightlyLimitHours -gt 0) { $limits.nightly = $NightlyLimitHours }
-    if ($WeeklyLimitHours -gt 0) { $limits.weekly = $WeeklyLimitHours }
+function Get-LLMWikiTimeLimit { return @{ nightly = 5; weekly = 6 } }
+function Get-LLMWikiConfiguredTimeLimit {
+    $limits = Get-LLMWikiTimeLimit
+    if ($script:Request.NightlyLimitHours -gt 0) { $limits.nightly = $script:Request.NightlyLimitHours }
+    if ($script:Request.WeeklyLimitHours -gt 0) { $limits.weekly = $script:Request.WeeklyLimitHours }
     return $limits
 }
-$LimitHours = Get-LLMWikiConfiguredLimitHours
+$LimitHours = Get-LLMWikiConfiguredTimeLimit
 
 # Captured at top level, where $MyInvocation describes this script rather than a function.
 # CommandOrigin cannot tell dot-sourcing apart: a script with mandatory parameters run by
@@ -127,15 +133,20 @@ function Test-LLMWikiTaskIdentity {
     return $stateValid -and $principalValid
 }
 
+function Get-LLMWikiContractLabel([bool]$Valid) {
+    if ($Valid) { return "matches the LLM-Wiki contract" }
+    return "does not match the LLM-Wiki contract"
+}
+
 function Write-LLMWikiTaskStatus {
     param($Task, $Info, [string]$Name, [bool]$Valid)
-    $color = if ($Valid) { "Green" } else { "Yellow" }
-    Write-Host "  ${Name}:" -ForegroundColor $color
-    Write-Host "    State:        $($Task.State)"
-    Write-Host "    Logon type:   $($Task.Principal.LogonType)"
-    Write-Host "    Last run:     $($Info.LastRunTime)"
-    Write-Host "    Last result:  $($Info.LastTaskResult)"
-    Write-Host "    Next run:     $($Info.NextRunTime)"
+    Write-Information "  ${Name}:" -InformationAction Continue
+    Write-Information "    Contract:     $(Get-LLMWikiContractLabel -Valid $Valid)" -InformationAction Continue
+    Write-Information "    State:        $($Task.State)" -InformationAction Continue
+    Write-Information "    Logon type:   $($Task.Principal.LogonType)" -InformationAction Continue
+    Write-Information "    Last run:     $($Info.LastRunTime)" -InformationAction Continue
+    Write-Information "    Last result:  $($Info.LastTaskResult)" -InformationAction Continue
+    Write-Information "    Next run:     $($Info.NextRunTime)" -InformationAction Continue
 }
 
 function Test-LLMWikiTaskRegistration {
@@ -143,12 +154,12 @@ function Test-LLMWikiTaskRegistration {
     $name = $Specification.Name
     $task = Get-ScheduledTask -TaskName $name -ErrorAction SilentlyContinue
     if ($null -eq $task) {
-        Write-Host "  ${name}: NOT INSTALLED" -ForegroundColor Yellow
+        Write-Information "  ${name}: NOT INSTALLED" -InformationAction Continue
         return $false
     }
     try { $info = $task | Get-ScheduledTaskInfo -ErrorAction Stop }
     catch {
-        Write-Host "  ${name}: STATUS UNAVAILABLE" -ForegroundColor Yellow
+        Write-Information "  ${name}: STATUS UNAVAILABLE" -InformationAction Continue
         return $false
     }
     $checks = @(
@@ -168,7 +179,7 @@ function Test-LLMWikiScheduledTasks {
         [Parameter(Mandatory = $true)][string]$UvPath,
         [ValidateSet(1, 2)][int]$SpecVersion = 2
     )
-    $limits = Get-LLMWikiConfiguredLimitHours
+    $limits = Get-LLMWikiConfiguredTimeLimit
     $specifications = @(
         @{ Name = "LLMWiki-Nightly"; Kind = "nightly"; LimitHours = $limits.nightly },
         @{ Name = "LLMWiki-Weekly"; Kind = "weekly"; LimitHours = $limits.weekly }
@@ -207,22 +218,22 @@ function Get-LLMWikiVerificationState([bool]$Verified) {
     return "conflict"
 }
 
-function New-LLMWikiOutcome([object[]]$Value, [int]$ExitCode) {
+function ConvertTo-LLMWikiOutcome([object[]]$Value, [int]$ExitCode) {
     return [pscustomobject]@{ Value = $Value; ExitCode = $ExitCode }
 }
 
 function Get-LLMWikiInstalledState {
     return Get-LLMWikiScheduledTaskState `
-        -VaultRoot $VaultRoot `
-        -StateRoot $StateRoot `
-        -UvPath $UvPath `
-        -SpecVersion $SpecVersion
+        -VaultRoot $script:Request.VaultRoot `
+        -StateRoot $script:Request.StateRoot `
+        -UvPath $script:Request.UvPath `
+        -SpecVersion $script:Request.SpecVersion
 }
 
 function Write-LLMWikiTaskStateJson {
     $state = Get-LLMWikiInstalledState
     [Console]::Out.WriteLine((@{ state = $state } | ConvertTo-Json -Compress))
-    return New-LLMWikiOutcome -Value @() -ExitCode 0
+    return ConvertTo-LLMWikiOutcome -Value @() -ExitCode 0
 }
 
 function Get-LLMWikiStatusExitCode([bool]$Verified) {
@@ -231,40 +242,43 @@ function Get-LLMWikiStatusExitCode([bool]$Verified) {
 }
 
 function Show-LLMWikiTaskStatus {
-    Write-Host "=== Scheduled task status ===" -ForegroundColor Cyan
+    Write-Information "=== Scheduled task status ===" -InformationAction Continue
     $verified = Test-LLMWikiScheduledTasks `
-        -VaultRoot $VaultRoot `
-        -StateRoot $StateRoot `
-        -UvPath $UvPath `
-        -SpecVersion $SpecVersion
-    return New-LLMWikiOutcome -Value @($verified) -ExitCode (Get-LLMWikiStatusExitCode -Verified $verified)
+        -VaultRoot $script:Request.VaultRoot `
+        -StateRoot $script:Request.StateRoot `
+        -UvPath $script:Request.UvPath `
+        -SpecVersion $script:Request.SpecVersion
+    return ConvertTo-LLMWikiOutcome -Value @($verified) -ExitCode (Get-LLMWikiStatusExitCode -Verified $verified)
 }
 
-function Remove-LLMWikiScheduledTask([string]$Name) {
+function Remove-LLMWikiScheduledTask {
+    [CmdletBinding(SupportsShouldProcess = $true)]
+    param([string]$Name)
+    if (-not $PSCmdlet.ShouldProcess($Name, "Unregister scheduled task")) { return }
     try {
         Unregister-ScheduledTask -TaskName $Name -Confirm:$false -ErrorAction Stop
-        Write-Host "  removed: $Name" -ForegroundColor Green
+        Write-Information "  removed: $Name" -InformationAction Continue
     } catch {
-        Write-Host "  (not installed: $Name)" -ForegroundColor DarkGray
+        Write-Information "  (not installed: $Name)" -InformationAction Continue
     }
 }
 
-function Uninstall-LLMWikiScheduledTasks {
+function Uninstall-LLMWikiScheduledTaskSet {
     $currentState = Get-LLMWikiInstalledState
     if ($currentState -eq "conflict") {
         throw "Scheduled task ownership is ambiguous; refusing uninstall"
     }
-    if ($currentState -eq "absent") { return New-LLMWikiOutcome -Value @() -ExitCode 0 }
-    Write-Host "Uninstalling scheduled tasks..." -ForegroundColor Cyan
+    if ($currentState -eq "absent") { return ConvertTo-LLMWikiOutcome -Value @() -ExitCode 0 }
+    Write-Information "Uninstalling scheduled tasks..." -InformationAction Continue
     foreach ($name in $tasks) { Remove-LLMWikiScheduledTask -Name $name }
-    return New-LLMWikiOutcome -Value @() -ExitCode 0
+    return ConvertTo-LLMWikiOutcome -Value @() -ExitCode 0
 }
 
-function Resolve-LLMWikiInstallPaths {
+function Resolve-LLMWikiInstallLayout {
     $paths = @{
-        VaultRoot = [System.IO.Path]::GetFullPath($VaultRoot)
-        StateRoot = [System.IO.Path]::GetFullPath($StateRoot)
-        UvPath = [System.IO.Path]::GetFullPath($UvPath)
+        VaultRoot = [System.IO.Path]::GetFullPath($script:Request.VaultRoot)
+        StateRoot = [System.IO.Path]::GetFullPath($script:Request.StateRoot)
+        UvPath = [System.IO.Path]::GetFullPath($script:Request.UvPath)
     }
     $paths.RunnerPath = Join-Path $paths.VaultRoot "scripts\run-scheduled-task.ps1"
     if (-not (Test-Path -LiteralPath $paths.RunnerPath -PathType Leaf)) { throw "Missing: $($paths.RunnerPath)" }
@@ -273,7 +287,7 @@ function Resolve-LLMWikiInstallPaths {
     return $paths
 }
 
-function New-LLMWikiPathAction([string]$Kind, $Paths) {
+function ConvertTo-LLMWikiTaskAction([string]$Kind, $Paths) {
     return New-LLMWikiScheduledAction `
         -Kind $Kind `
         -VaultRoot $Paths.VaultRoot `
@@ -286,15 +300,15 @@ function New-LLMWikiPathAction([string]$Kind, $Paths) {
 function Get-LLMWikiSpecMarker {
     # What Test-LLMWikiTaskSpec looks for. A version 1 registration happens only when the
     # control plane rolls an update back to a record that predates the marker.
-    if ($SpecVersion -eq 2) { return " [llm-wiki-task-spec:2]" }
+    if ($script:Request.SpecVersion -eq 2) { return " [llm-wiki-task-spec:2]" }
     return ""
 }
 
-function Register-LLMWikiTasks($Paths) {
+function Register-LLMWikiTaskSet($Paths) {
     $specMarker = Get-LLMWikiSpecMarker
 
     # --- Nightly task: 03:00 every day ---
-    $nightlyAction = New-LLMWikiPathAction -Kind nightly -Paths $Paths
+    $nightlyAction = ConvertTo-LLMWikiTaskAction -Kind nightly -Paths $Paths
 
     $nightlyTrigger = New-ScheduledTaskTrigger -Daily -At 3am
 
@@ -317,7 +331,7 @@ function Register-LLMWikiTasks($Paths) {
         -LogonType Interactive `
         -RunLevel Limited
 
-    Write-Host "Registering LLMWiki-Nightly (daily 03:00)..." -ForegroundColor Cyan
+    Write-Information "Registering LLMWiki-Nightly (daily 03:00)..." -InformationAction Continue
     Register-ScheduledTask `
         -TaskName "LLMWiki-Nightly" `
         -Action $nightlyAction `
@@ -326,10 +340,10 @@ function Register-LLMWikiTasks($Paths) {
         -Principal $nightlyPrincipal `
         -Description "LLM-wiki: nightly queue drain + compile + lint. No user interaction required.$specMarker" |
         Out-Null
-    Write-Host "  registered" -ForegroundColor Green
+    Write-Information "  registered" -InformationAction Continue
 
     # --- Weekly task: Sunday 04:00 ---
-    $weeklyAction = New-LLMWikiPathAction -Kind weekly -Paths $Paths
+    $weeklyAction = ConvertTo-LLMWikiTaskAction -Kind weekly -Paths $Paths
 
     $weeklyTrigger = New-ScheduledTaskTrigger -Weekly -DaysOfWeek Sunday -At 4am
 
@@ -345,7 +359,7 @@ function Register-LLMWikiTasks($Paths) {
         -RestartCount 2 `
         -RestartInterval (New-TimeSpan -Minutes 30)
 
-    Write-Host "Registering LLMWiki-Weekly (Sunday 04:00)..." -ForegroundColor Cyan
+    Write-Information "Registering LLMWiki-Weekly (Sunday 04:00)..." -InformationAction Continue
     Register-ScheduledTask `
         -TaskName "LLMWiki-Weekly" `
         -Action $weeklyAction `
@@ -354,56 +368,59 @@ function Register-LLMWikiTasks($Paths) {
         -Principal $nightlyPrincipal `
         -Description "LLM-wiki: weekly deep maintenance + OKF conformance sweep + lint.$specMarker" |
         Out-Null
-    Write-Host "  registered" -ForegroundColor Green
+    Write-Information "  registered" -InformationAction Continue
 }
 
 # --- Optional: run now to verify ---
-function Start-LLMWikiRequestedTasks {
-    if ($RunNightlyNow) {
-        Write-Host "Starting LLMWiki-Nightly now..." -ForegroundColor Cyan
-        Start-ScheduledTask -TaskName "LLMWiki-Nightly"
+function Start-LLMWikiRequestedTask {
+    [CmdletBinding(SupportsShouldProcess = $true)]
+    param()
+    $requested = [ordered]@{
+        "LLMWiki-Nightly" = $script:Request.RunNightlyNow
+        "LLMWiki-Weekly" = $script:Request.RunWeeklyNow
     }
-    if ($RunWeeklyNow) {
-        Write-Host "Starting LLMWiki-Weekly now..." -ForegroundColor Cyan
-        Start-ScheduledTask -TaskName "LLMWiki-Weekly"
+    foreach ($name in @($requested.Keys | Where-Object { $requested[$_] })) {
+        if (-not $PSCmdlet.ShouldProcess($name, "Start scheduled task")) { continue }
+        Write-Information "Starting $name now..." -InformationAction Continue
+        Start-ScheduledTask -TaskName $name
     }
 }
 
 function Write-LLMWikiInstallSummary {
-    Write-Host ""
-    Write-Host "Done. Tasks registered for the current logged-on user:" -ForegroundColor Green
-    Write-Host "  LLMWiki-Nightly: every day at 03:00"
-    Write-Host "  LLMWiki-Weekly:  every Sunday at 04:00"
-    Write-Host ""
-    Write-Host "Check status:  .\install-scheduled-tasks.ps1 -Status"
-    Write-Host "Uninstall:     .\install-scheduled-tasks.ps1 -Uninstall"
-    Write-Host ""
-    Write-Host "Reports land at: $env:LLM_WIKI_STATE_ROOT\logs\nightly-*.md"
+    Write-Information "" -InformationAction Continue
+    Write-Information "Done. Tasks registered for the current logged-on user:" -InformationAction Continue
+    Write-Information "  LLMWiki-Nightly: every day at 03:00" -InformationAction Continue
+    Write-Information "  LLMWiki-Weekly:  every Sunday at 04:00" -InformationAction Continue
+    Write-Information "" -InformationAction Continue
+    Write-Information "Check status:  .\install-scheduled-tasks.ps1 -Status" -InformationAction Continue
+    Write-Information "Uninstall:     .\install-scheduled-tasks.ps1 -Uninstall" -InformationAction Continue
+    Write-Information "" -InformationAction Continue
+    Write-Information "Reports land at: $env:LLM_WIKI_STATE_ROOT\logs\nightly-*.md" -InformationAction Continue
 }
 
-function Install-LLMWikiScheduledTasks {
-    $paths = Resolve-LLMWikiInstallPaths
+function Install-LLMWikiScheduledTaskSet {
+    $paths = Resolve-LLMWikiInstallLayout
     $currentState = Get-LLMWikiInstalledState
     if ($currentState -eq "conflict") {
         throw "Scheduled task ownership is ambiguous; refusing registration"
     }
     if ($currentState -eq "equivalent") {
-        Write-Host "Scheduled tasks already match the LLM-Wiki contract." -ForegroundColor Green
-        return New-LLMWikiOutcome -Value @() -ExitCode 0
+        Write-Information "Scheduled tasks already match the LLM-Wiki contract." -InformationAction Continue
+        return ConvertTo-LLMWikiOutcome -Value @() -ExitCode 0
     }
-    Register-LLMWikiTasks -Paths $paths
-    Start-LLMWikiRequestedTasks
+    Register-LLMWikiTaskSet -Paths $paths
+    Start-LLMWikiRequestedTask
     Write-LLMWikiInstallSummary
-    return New-LLMWikiOutcome -Value @() -ExitCode 0
+    return ConvertTo-LLMWikiOutcome -Value @() -ExitCode 0
 }
 
 function Invoke-LLMWikiRequestedMode {
     $modes = [ordered]@{
-        "Write-LLMWikiTaskStateJson" = [bool]$StateJson
-        "Show-LLMWikiTaskStatus" = [bool]$Status
-        "Uninstall-LLMWikiScheduledTasks" = [bool]$Uninstall
+        "Write-LLMWikiTaskStateJson" = $script:Request.StateJson
+        "Show-LLMWikiTaskStatus" = $script:Request.Status
+        "Uninstall-LLMWikiScheduledTaskSet" = $script:Request.Uninstall
     }
-    $requested = @($modes.Keys | Where-Object { $modes[$_] }) + "Install-LLMWikiScheduledTasks"
+    $requested = @($modes.Keys | Where-Object { $modes[$_] }) + "Install-LLMWikiScheduledTaskSet"
     return & $requested[0]
 }
 

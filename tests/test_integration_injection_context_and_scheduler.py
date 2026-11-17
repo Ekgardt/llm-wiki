@@ -610,7 +610,7 @@ def test_windows_scheduler_status_accepts_only_the_registered_contract(tmp_path)
             {ps_literal(str(script))}, [ref]$tokens, [ref]$errors)
         if ($errors.Count) {{ throw ($errors | Out-String) }}
         foreach ($name in @(
-            'Get-LLMWikiLimitHours', 'Get-LLMWikiConfiguredLimitHours',
+            'Get-LLMWikiTimeLimit', 'Get-LLMWikiConfiguredTimeLimit', 'Get-LLMWikiContractLabel',
             'New-LLMWikiScheduledAction', 'Test-LLMWikiTaskSpec',
             'Test-LLMWikiScheduledTasks', 'Test-LLMWikiTaskAction', 'Test-LLMWikiTaskSchedule',
             'Test-LLMWikiTaskIdentity', 'Write-LLMWikiTaskStatus', 'Test-LLMWikiTaskRegistration'
