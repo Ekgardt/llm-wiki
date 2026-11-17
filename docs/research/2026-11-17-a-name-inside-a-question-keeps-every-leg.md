@@ -117,12 +117,13 @@ at 48, 6 better and none worse.
   turn about something else. Finer retrieval units (propositions or sentences inside a turn)
   are the general remedy and belong to the coverage item above.
 
-  Owner decision, task chat, 2026-11-17: the owner was given this cause and two options,
-  (1) accept this one loss now and check the question in the coverage item, or (2) hold the
-  change until finer retrieval units are built and measured on all 500 questions. The owner
-  answered "OK 1" (accept). Asked to confirm in words that they accept the loss on
-  `gpt4_93159ced` and that the fix belongs to the coverage item, the owner replied "I accept"
-  in the same chat on the same day.
+  Owner decision. The owner was given this cause and two options: (1) accept this one loss
+  now and check the question in the coverage item, or (2) hold the change until finer
+  retrieval units are built and measured on all 500 questions. Owner message task-178/"OK 1",
+  2026-11-17: they chose option 1. Owner message task-178/"I accept", 2026-11-17: the reply to
+  a request to confirm in words that they accept the loss on `gpt4_93159ced` and that its fix
+  belongs to the coverage item. The agent writing this note is not shown message ids, so each
+  message is identified by its text (translated from Russian).
 
 Where the reranker did not run on 072737a9: 1 `IMPACT` question, `profile_bypass`. `IMPACT` is
 not a reranking profile, and that is unchanged here. (An earlier run of the routing change alone,
