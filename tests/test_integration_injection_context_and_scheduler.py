@@ -1,4 +1,5 @@
-"""OpenCode forwarding and the node harness, the generated context file, and the Windows scheduler contract."""
+"""OpenCode forwarding and the node harness, the generated context file, and the Windows
+scheduler contract."""
 
 from __future__ import annotations
 
@@ -200,7 +201,9 @@ def test_opencode_node_harness_times_out_stalled_capture(tmp_path, opencode_plug
             kill() {{ killed = true; finish(143); }},
           }};
         }} }};
-        const {{ LlmWikiMemoryPlugin }} = await import({json.dumps(plugin_url)} + "?harness=timeout");
+        const {{ LlmWikiMemoryPlugin }} = await import(
+          {json.dumps(plugin_url)} + "?harness=timeout"
+        );
         const hooks = await LlmWikiMemoryPlugin({{ client: {{}}, directory: "project" }});
         const started = Date.now();
         await hooks.event({{ event: {{
@@ -246,7 +249,9 @@ def test_opencode_forwards_known_mutation_and_dirty_idle_without_fake_progress_s
             kill() {{ finish(143); }},
           }};
         }} }};
-        const {{ LlmWikiMemoryPlugin }} = await import({json.dumps(plugin_url)} + "?harness=signals");
+        const {{ LlmWikiMemoryPlugin }} = await import(
+          {json.dumps(plugin_url)} + "?harness=signals"
+        );
         const hooks = await LlmWikiMemoryPlugin({{ client: {{}}, directory: "/project" }});
         await hooks["tool.execute.after"]({{
           sessionId: "session-1", tool: "edit", input: {{ filePath: "src/app.py" }}
@@ -304,7 +309,9 @@ def test_codex_project_state_observes_session_start_before_recovery(monkeypatch,
             )
         ),
     )
-    monkeypatch.setattr(codex_memory, "project_state_path", lambda path: ("demo", tmp_path / "state.md"))
+    monkeypatch.setattr(
+        codex_memory, "project_state_path", lambda path: ("demo", tmp_path / "state.md")
+    )
     args = type("Args", (), {"cwd": str(tmp_path), "json": True})()
 
     assert codex_memory.command_project_state(args) == 0
@@ -327,7 +334,10 @@ def test_opencode_forwards_sessions_inside_and_beside_the_vault(opencode_plugin_
           }};
         }} }};
         const {{ LlmWikiMemoryPlugin }} = await import({json.dumps(plugin_url)} + "?harness=vault");
-        const sibling = await LlmWikiMemoryPlugin({{ client: {{}}, directory: "/work/wiki-client" }});
+        const sibling = await LlmWikiMemoryPlugin({{
+          client: {{}},
+          directory: "/work/wiki-client",
+        }});
         const vault = await LlmWikiMemoryPlugin({{ client: {{}}, directory: "/work/wiki" }});
         const created = {{ event: {{
           type: "session.created", properties: {{ sessionID: "session-1" }},
@@ -447,14 +457,26 @@ def test_install_scripts_generate_context(tmp_path):
             }
         }
     }
-    sh_codex_mcp = _shell_functions(install_sh, "write_codex_mcp_block", "add_codex_mcp_block", "codex_mcp_state_status", "configure_codex_mcp")
-    ps_codex_mcp = install_ps1.split("function Add-CodexMcpEntry {", 1)[1].split("\nfunction ", 1)[0]
+    sh_codex_mcp = _shell_functions(
+        install_sh,
+        "write_codex_mcp_block",
+        "add_codex_mcp_block",
+        "codex_mcp_state_status",
+        "configure_codex_mcp",
+    )
+    ps_codex_mcp_tail = install_ps1.split("function Add-CodexMcpEntry {", 1)[1]
+    ps_codex_mcp = ps_codex_mcp_tail.split("\nfunction ", 1)[0]
     assert (
         _unmet_substrings(
             (
                 ('CODEX_CONFIG="$HOME/.codex/config.toml"', sh_codex, True),
                 ("config-state", sh_codex_mcp, True),
-                ('uv run --locked --no-sync --directory "$vault_root" python scripts/codex_memory.py', sh_codex_mcp, True),
+                (
+                    'uv run --locked --no-sync --directory "$vault_root" '
+                    "python scripts/codex_memory.py",
+                    sh_codex_mcp,
+                    True,
+                ),
                 ('config-block --vault-root "$vault_root"', sh_codex_mcp, True),
                 ('write_codex_mcp_block "$block" "$config"', sh_codex_mcp, True),
                 ("config.bak", sh_codex_mcp, True),
@@ -487,7 +509,12 @@ def test_install_scripts_generate_context(tmp_path):
                 ('$codexConfig = Join-Path $env:USERPROFILE ".codex\\config.toml"', ps_codex, True),
                 ("function Install-CodexMcp", install_ps1, True),
                 ("config-state", install_ps1, True),
-                ('uv run --locked --no-sync --directory $VaultRoot python scripts/codex_memory.py', ps_codex_mcp, True),
+                (
+                    "uv run --locked --no-sync --directory $VaultRoot "
+                    "python scripts/codex_memory.py",
+                    ps_codex_mcp,
+                    True,
+                ),
                 ('config-block --vault-root $VaultRoot', ps_codex_mcp, True),
                 ('$block = $blockLines -join "`n"', ps_codex_mcp, True),
                 ("Copy-Item -LiteralPath $Config", install_ps1, True),
@@ -613,7 +640,11 @@ def _registered_task_stubs(root: str, state: str, uv_path: str, runner: str) -> 
                 -UvPath {ps_literal(uv_path)} `
                 -RunnerPath {ps_literal(runner)} `
                 -PowerShellPath 'pwsh.exe'
-            $limit = if ($kind -eq 'nightly') {{ {ps_literal(_task_limit("nightly"))} }} else {{ {ps_literal(_task_limit("weekly"))} }}
+            $limit = if ($kind -eq 'nightly') {{
+                {ps_literal(_task_limit("nightly"))}
+            }} else {{
+                {ps_literal(_task_limit("weekly"))}
+            }}
             [pscustomobject]@{{
                 State = 'Ready'
                 Description = 'LLM-wiki task [llm-wiki-task-spec:2]'
@@ -624,7 +655,9 @@ def _registered_task_stubs(root: str, state: str, uv_path: str, runner: str) -> 
                     Enabled = $true
                 }})
                 Principal = [pscustomobject]@{{
-                    LogonType = $(if ($script:invalid) {{ 'ServiceAccount' }} else {{ 'Interactive' }})
+                    LogonType = $(
+                        if ($script:invalid) {{ 'ServiceAccount' }} else {{ 'Interactive' }}
+                    )
                     UserId = 'operator'
                 }}
             }}

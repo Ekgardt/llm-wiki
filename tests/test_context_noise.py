@@ -31,6 +31,9 @@ from llm_wiki import integration_session_start
 from tests.forgotten_modules import forget_modules
 
 SCRIPT = Path(__file__).resolve().parent.parent / "scripts" / "session_start_context.py"
+_STALE_INDEX_HEALTH = (
+    "## Health\n\nOperational scope; retained history not checked.\nindex: stale\n\n"
+)
 
 
 @pytest.fixture(scope="module")
@@ -257,7 +260,7 @@ def test_session_start_injects_bounded_health_only_when_degraded(monkeypatch):
     monkeypatch.setattr(session_start_context, "advisory_block", lambda slug=None: "")
     monkeypatch.setattr(session_start_context, "impact_block", lambda: "")
 
-    assert session_start_context.health_block() == "## Health\n\nOperational scope; retained history not checked.\nindex: stale\n\n"
+    assert session_start_context.health_block() == _STALE_INDEX_HEALTH
     context = session_start_context.build_context()
     assert "## Health" in context
     assert len(context.encode("utf-8")) <= (
@@ -1090,7 +1093,7 @@ def test_a_complete_run_reports_its_findings(monkeypatch):
     monkeypatch.setattr(doctor, "run_doctor", lambda **kwargs: report)
     monkeypatch.setattr(doctor, "degraded_summary", lambda passed: "index: stale")
 
-    assert session_start_context.health_block() == "## Health\n\nOperational scope; retained history not checked.\nindex: stale\n\n"
+    assert session_start_context.health_block() == _STALE_INDEX_HEALTH
 
 
 def _knowledge_state(monkeypatch, state: dict) -> str:
