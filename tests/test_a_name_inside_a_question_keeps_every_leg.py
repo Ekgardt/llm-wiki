@@ -86,7 +86,10 @@ def _retrieved_with_a_reversing_reranker(
 
     monkeypatch.setattr(reranker, "reranker_installed", lambda: True)
     monkeypatch.setattr(reranker, "rerank", reversing)
-    hits = [_hit("c-named", "knowledge/notes/queue-notes.md"), _hit("c-other", "knowledge/notes/x.md")]
+    hits = [
+        _hit("c-named", "knowledge/notes/queue-notes.md"),
+        _hit("c-other", "knowledge/notes/x.md"),
+    ]
     profile = retrieval.planned_profile(query)
     result = retrieval.retrieve(
         query,
