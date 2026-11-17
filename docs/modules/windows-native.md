@@ -20,7 +20,7 @@ its ceiling is 100000 o200k_base tokens.
 
 Evidence: ../research/2026-11-02-windows-permissions-boundaries.md.
 
-## Windows native binding and ACL ownership (approved 2026-11-02)
+## Windows native binding and ACL ownership (2026-11-02)
 
 `scripts/llm_wiki/windows_native.py` owns the existing two ctypes structures,
 five kernel32 prototypes and single lazy cached loader. Handle operations remain

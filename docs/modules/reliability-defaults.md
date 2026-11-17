@@ -42,7 +42,7 @@ sources and staged qualification. No runtime path, storage schema, limit value o
 installed configuration changes. This packet alone does not finish modularizing
 the queue or establish lower full-task LLM cost.
 
-## Reliability defaults and queue heartbeat (approved 2026-11-02)
+## Reliability defaults and queue heartbeat (2026-11-02)
 
 `scripts/llm_wiki/reliability_defaults.py` owns the existing frozen
 ReliableMemoryDefaults and DEFAULTS. Values and fields are unchanged;

@@ -28,6 +28,7 @@
     "scripts/session_start_context.py",
     "tests/__init__.py",
     "tests/conftest.py",
+    "tests/forgotten_modules.py",
     "tests/module_context.py",
     "tests/module_context_paths.py",
     "tests/module_interface.py",

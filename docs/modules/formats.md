@@ -68,9 +68,9 @@ must be standard-library or relative within the module. CI shard discovery inclu
 nested module tests and records their measured cost. Golden records preserve
 syntax and identities while integration tests retain publication authority checks.
 
-## Isolated formats module (approved 2026-11-02)
+## Isolated formats module (2026-11-02)
 
-The owner approved the bounded formats pilot after the modularity study, not
+The bounded formats pilot follows the modularity study, not
 a fixed 74-module architecture. `scripts/llm_wiki/formats/` owns canonical JSON,
 SHA-256, the existing closed JSON-schema validator, source descriptors and
 compile receipt parsing. Its `canonical.py`, `schema.py`, `source.py`, and
@@ -92,7 +92,7 @@ qualification are separate; the working branch is not installed by this decision
 Research: `docs/research/2026-11-02-module-boundaries-validation.md`.
 Private decision: `knowledge/notes/isolated-formats-module-decision-20261102.md`.
 
-## Queue payload format (approved 2026-11-02)
+## Queue payload format (2026-11-02)
 
 `llm_wiki.formats.queue_payload` owns `PayloadValidation`, `validate_payload_blob`,
 their pure JSON/hash helpers and the existing four payload limits. It uses only

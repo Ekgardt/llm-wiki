@@ -1,7 +1,7 @@
 # BEAM local Parquet qualification
 
-2026-11-03. Explicitly approved by the owner in this session: implement and
-verify this plan. Qualification is still pending. No live installation is proposed.
+2026-11-03. Status: proposal; this note cites no owner message, so it records no owner
+approval. This branch implements and verifies the plan. Qualification is still pending. No live installation is proposed.
 
 ## Reproduced gap
 

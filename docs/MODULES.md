@@ -9,7 +9,7 @@ not carry it. It is as binding as that file.
 The links below name full owner contracts. Every packet must include its owned
 and dependency guides in full; global authority and runtime rules above still apply.
 
-## Isolated formats module (approved 2026-11-02)
+## Isolated formats module (2026-11-02)
 
 [formats](modules/formats.md).
 
@@ -17,11 +17,11 @@ and dependency guides in full; global authority and runtime rules above still ap
 
 [context-budget](modules/context-budget.md).
 
-## Queue payload format (approved 2026-11-02)
+## Queue payload format (2026-11-02)
 
 [formats](modules/formats.md).
 
-## Queue type contract (approved 2026-11-02)
+## Queue type contract (2026-11-02)
 
 [queue-contracts](modules/queue-contracts.md).
 
@@ -33,33 +33,33 @@ and dependency guides in full; global authority and runtime rules above still ap
 
 [process-liveness](modules/process-liveness.md).
 
-## Queue process cleanup (approved 2026-11-02)
+## Queue process cleanup (2026-11-02)
 
 [queue-process-cleanup](modules/queue-process-cleanup.md).
 
-## Queue child runtime (approved 2026-11-02)
+## Queue child runtime (2026-11-02)
 
 [queue-child-runtime](modules/queue-child-runtime.md).
 
-## Reliability defaults and queue heartbeat (approved 2026-11-02)
+## Reliability defaults and queue heartbeat (2026-11-02)
 
 [reliability-defaults](modules/reliability-defaults.md), [queue-heartbeat](modules/queue-heartbeat.md).
 
-## Queue SQL definitions (approved 2026-11-02)
+## Queue SQL definitions (2026-11-02)
 
 [queue-schema](modules/queue-schema.md).
 
-## Queue timing values (approved 2026-11-02)
+## Queue timing values (2026-11-02)
 
 [queue-timing](modules/queue-timing.md).
 
-## Windows native binding and ACL ownership (approved 2026-11-02)
+## Windows native binding and ACL ownership (2026-11-02)
 
 [windows-native](modules/windows-native.md), [windows-acl](modules/windows-acl.md).
 
 ### Approved completion mandate (2026-11-02)
 
-The owner approved sequential completion under
+Sequential completion follows
 `docs/research/2026-11-02-decomposition-completion-plan.md`, including refinement
 of internal boundaries within its responsibility families. Each boundary is
 documented and qualified before acceptance. Full maintenance packets remain
@@ -597,7 +597,7 @@ The runner retains process, clock and file operations and its existing callable 
 
 ### Approved dependency and annotation compatibility (2026-11-04)
 
-The owner approved [qualified dependency contracts](research/2026-11-04-qualified-contract-rollout-proposal.md)
+This branch implements the proposals for [qualified dependency contracts](research/2026-11-04-qualified-contract-rollout-proposal.md)
 and [native Python 3.14 annotations](research/2026-11-04-moved-classes-annotation-compatibility.md).
 Full source remains the default; every contracted boundary must pass the stated
 qualification gates. Native annotations preserve fields and historical pickle

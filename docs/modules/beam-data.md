@@ -39,7 +39,7 @@ packet must reconstruct every byte within 100000 o200k_base tokens.
 
 ## Approved decision — 2026-11-03
 
-The owner explicitly approved the [dependency proposal](../research/2026-11-03-beam-parquet-dependency-proposal.md).
+This module implements the [dependency proposal](../research/2026-11-03-beam-parquet-dependency-proposal.md).
 Adding PyArrow to the base would impose an unrelated binary package on every
 memory installation. Replacing the existing reader changes behavior and still
 adds a dependency. A separate extra expresses the current benchmark-only need.
@@ -50,7 +50,7 @@ Primary sources rechecked today: [Apache Arrow installation](https://arrow.apach
 [release metadata](https://pypi.org/pypi/pyarrow/26.0.1/json),
 [PyPA optional dependencies](https://packaging.python.org/en/latest/guides/writing-pyproject-toml/#dependencies-optional-dependencies),
 and [uv extras](https://docs.astral.sh/uv/concepts/projects/dependencies/#optional-dependencies).
-The choice of this boundary follows the existing reader and explicit approval.
+The choice of this boundary follows the existing reader and that proposal.
 
 ## Local evidence — 2026-11-03
 

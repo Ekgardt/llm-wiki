@@ -40,7 +40,8 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 - The CI policy test sees `--ignore-vuln` in any step of the dependency audit, in its
   bash-array, requirement-step and `=` forms, not only on the `pip-audit --locked` line.
 
-- Research notes no longer claim an owner approval they cannot cite.
+- Research notes, module guides and the agent contract written from 2026-11-02 on no longer claim an owner approval they cannot cite; such notes are marked as proposals or state the step taken.
+- A context test no longer leaves a ten-token budget behind for every later test in its process: the session-start module is imported before the shared budget is patched, and a guard test fails if a first import under the patch comes back.
 
 - `scripts/generation_catalog.py`, a facade that only re-exported the generation modules under
   `scripts/llm_wiki/generation_*.py`, is removed with its guide and the test that checked the

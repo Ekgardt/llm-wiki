@@ -1,7 +1,7 @@
 # Qualified dependency contracts for composition and integration
 
-Date: 2026-11-03. The owner explicitly approved implementing and verifying this
-pilot. Approval is not qualification; the full-source gate remains unchanged
+Date: 2026-11-03. Status: proposal; this note cites no owner message, so it records no
+owner approval. Implementation is not qualification; the full-source gate remains unchanged
 until the obligations below pass.
 
 ## Measured obstacle

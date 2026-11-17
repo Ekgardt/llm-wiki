@@ -40,4 +40,4 @@ serialized callers. Consumers import values directly from sqlite_contracts.
 
 Native Python 3.14 annotations resolve without loading historical facades. Fields,
 defaults and pickle paths are retained; raw annotation/signature representation
-changes as explicitly approved. Cold-process tests cover ordinary get_type_hints.
+changes, as the annotation compatibility note states. Cold-process tests cover ordinary get_type_hints.

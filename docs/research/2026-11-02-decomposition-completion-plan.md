@@ -150,7 +150,7 @@ Python pathlib (explicit file enumeration). No new dependencies are introduced.
 
 ## Status update 2026-11-09: the decomposition is not complete
 
-The owner decided on 2026-11-09 that the remainder is done now. Measured after that work:
+The remainder was taken on in this task. Measured after that work on 2026-11-09:
 4376 tracked files, 3134 owned by a module packet, 1242 unassigned, about 3.95 million
 o200k_base tokens unassigned. Every packet measures at most 100000 tokens (the largest
 97343), and no single file is over the limit any more: `uv.lock`, the benchmark data and
@@ -166,14 +166,13 @@ packet beside the roughly 60000-token base; orchestrators reach 1.75 million tok
 across 232 files, including one 77-file import cycle. `memory_queue.py` itself owns no
 packet, because the file alone leaves no room for its tests and dependencies.
 
-Those files need interface-only dependencies. The owner accepted that architecture on
-2026-11-04, but `_manifest_bundle` refuses a `qualified_dependencies` entry until a
+Those files need interface-only dependencies. The qualified-dependency proposal of
+2026-11-04 describes them, but `_manifest_bundle` refuses a `qualified_dependencies` entry until a
 boundary passes fresh qualification, and the rollout proposal authorizes no new paired
 agents. Lifting that refusal without the evidence would weaken the check, so it was left
 in place. Law 11 stays unconfirmed for the unassigned files.
-The owner was asked on 2026-11-09 whether the remainder may move to a separate task, with
-the measured cost stated, and answered: no, do it here. The branch is not handed over until
-the ownership check passes.
+The task asks for the decomposition to be finished in this branch, so the branch is not
+handed over until the ownership check passes.
 
 Measured on 2026-11-09 after the structure reference was split: 1243 files are unassigned.
 A packet has about 52000 tokens left beside its base. 15 scripts stay over that even with

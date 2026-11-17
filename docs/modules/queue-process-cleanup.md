@@ -75,7 +75,7 @@ in logs/queue-cleanup-preservation.json and logs/queue-cleanup-*.txt. Validation
 results are recorded after execution; neither installation nor native Windows/
 macOS success follows from Linux tests.
 
-## Queue process cleanup (approved 2026-11-02)
+## Queue process cleanup (2026-11-02)
 
 `scripts/llm_wiki/queue_process_cleanup.py` owns the existing child-tree discovery,
 termination escalation and verified cleanup algorithm extracted from queue_core:

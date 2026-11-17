@@ -805,9 +805,12 @@ def test_a_windows_install_under_whatif_registers_and_starts_nothing(tmp_path):
         $dryNotes = @(& {script} {paths} -RunNightlyNow -WhatIf 6>&1 |
             ForEach-Object {{ [string]$_ }})
         $dryRun = @($global:calls)
-        & {script} {paths} -RunNightlyNow 6>$null | Out-Null
-        @{{ dry_run = $dryRun; dry_notes = $dryNotes; real_run = @($global:calls) }} |
-            ConvertTo-Json -Compress
+        $realNotes = @(& {script} {paths} -RunNightlyNow 6>&1 |
+            ForEach-Object {{ [string]$_ }})
+        @{{
+            dry_run = $dryRun; dry_notes = $dryNotes
+            real_run = @($global:calls); real_notes = $realNotes
+        }} | ConvertTo-Json -Compress
         """
     )
 
@@ -825,3 +828,50 @@ def test_a_windows_install_under_whatif_registers_and_starts_nothing(tmp_path):
     real = ["register LLMWiki-Nightly", "register LLMWiki-Weekly", "start LLMWiki-Nightly"]
     assert (runs["dry_run"], runs["real_run"]) == ([], real)
     assert "No task was registered." in runs["dry_notes"]
+    assert _named_tasks(runs["real_notes"]) == {
+        "  LLMWiki-Nightly: every day at 03:00",
+        "  LLMWiki-Weekly: every Sunday at 04:00",
+    }
+
+
+def _named_tasks(notes):
+    return {line for line in notes if line.startswith("  LLMWiki-")}
+
+
+def test_the_install_summary_names_only_the_tasks_it_registered():
+    """A declined -Confirm for one task leaves the summary naming the other one alone."""
+    if shutil.which("pwsh") is None:
+        pytest.skip("PowerShell 7 is unavailable")
+    script = ps_literal(str(ROOT / "scripts" / "install-scheduled-tasks.ps1"))
+    command = textwrap.dedent(
+        f"""
+        $ErrorActionPreference = 'Stop'
+        $tokens = $null
+        $errors = $null
+        $ast = [System.Management.Automation.Language.Parser]::ParseFile(
+            {script}, [ref]$tokens, [ref]$errors)
+        if ($errors.Count) {{ throw ($errors | Out-String) }}
+        $fn = $ast.Find({{ param($node)
+            $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
+            $node.Name -eq 'Write-LLMWikiInstallSummary'
+        }}, $true)
+        if ($null -eq $fn) {{ throw 'Write-LLMWikiInstallSummary missing' }}
+        Invoke-Expression $fn.Extent.Text
+        @(Write-LLMWikiInstallSummary -Registered @('LLMWiki-Weekly') 6>&1 |
+            ForEach-Object {{ [string]$_ }}) | ConvertTo-Json -Compress
+        """
+    )
+
+    result = subprocess.run(
+        [require_tool("pwsh"), "-NoProfile", "-NonInteractive", "-Command", command],
+        capture_output=True,
+        text=True,
+        # pwsh startup alone can take ten seconds on a loaded hosted runner.
+        timeout=120,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    notes = json.loads(result.stdout.splitlines()[-1])
+    assert _named_tasks(notes) == {"  LLMWiki-Weekly: every Sunday at 04:00"}
+    assert "No task was registered." not in notes

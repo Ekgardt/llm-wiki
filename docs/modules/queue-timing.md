@@ -32,7 +32,7 @@ standalone maintenance packet. No live rollout is implied by qualification.
 
 Evidence: ../research/2026-11-02-queue-timing-boundary.md.
 
-## Queue timing values (approved 2026-11-02)
+## Queue timing values (2026-11-02)
 
 `scripts/llm_wiki/queue_timing.py` owns the existing UTC conversion and timestamp
 format/parsing functions, Retry-After readers and adopted retry delay calculation.

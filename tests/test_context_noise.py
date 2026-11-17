@@ -27,6 +27,8 @@ from pathlib import Path
 import pytest
 from llm_wiki import integration_session_start
 
+from tests.forgotten_modules import forget_modules
+
 SCRIPT = Path(__file__).resolve().parent.parent / "scripts" / "session_start_context.py"
 
 
@@ -766,19 +768,36 @@ def test_project_state_routes_mandatory_handoff_through_compiler(monkeypatch):
     )
 
 
-def test_project_handoff_alone_still_uses_shared_budget(monkeypatch):
+def _append_under_a_tiny_shared_budget(monkeypatch) -> str:
     import context_budget
     import integration_adapter
+    import session_start_context  # noqa: F401  # bound to the real budget before the patch
     from context_budget import ContextBudget
 
     monkeypatch.setattr(
         context_budget, "DEFAULT_CONTEXT_BUDGET", ContextBudget(None, 10, 0, 0)
     )
+    return integration_adapter.append_context([], "handoff-content-too-large")
 
-    result = integration_adapter.append_context([], "handoff-content-too-large")
+
+def test_project_handoff_alone_still_uses_shared_budget(monkeypatch):
+    result = _append_under_a_tiny_shared_budget(monkeypatch)
 
     assert "mandatory_budget_exceeded" in result
     assert "handoff-content-too-large" not in result
+
+
+def test_the_tiny_shared_budget_does_not_outlive_its_test(monkeypatch):
+    """A consumer first imported under the patch would keep the tiny budget for good."""
+    import context_budget
+
+    real_budget = context_budget.DEFAULT_CONTEXT_BUDGET
+    forget_modules(monkeypatch, "session_start_context")
+    with pytest.MonkeyPatch.context() as inner:
+        _append_under_a_tiny_shared_budget(inner)
+    import session_start_context
+
+    assert session_start_context.DEFAULT_CONTEXT_BUDGET is real_budget
 
 
 def test_integration_context_preserves_trailing_newline():

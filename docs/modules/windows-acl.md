@@ -29,7 +29,7 @@ The full context manifest includes all own tests, source dependencies, instructi
 and documentation and must stay within 100000 o200k_base tokens.
 Evidence: ../research/2026-11-02-windows-permissions-boundaries.md.
 
-## Windows native binding and ACL ownership (approved 2026-11-02)
+## Windows native binding and ACL ownership (2026-11-02)
 
 Shared canonical contract: [windows-native](windows-native.md).
 The complete guide is included in this owner's maintenance packet.

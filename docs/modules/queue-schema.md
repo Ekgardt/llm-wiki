@@ -26,7 +26,7 @@ executor and are not an isolated module maintenance packet.
 Evidence: ../research/2026-11-02-queue-schema-boundary.md. This step does not finish
 modularizing the queue and is not a rollout to the installed vault.
 
-## Queue SQL definitions (approved 2026-11-02)
+## Queue SQL definitions (2026-11-02)
 
 `scripts/llm_wiki/queue_schema.py` owns the existing v3 table, index and trigger
 SQL tuples, including generated immutable triggers. It has no imports and does

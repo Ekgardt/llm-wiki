@@ -519,7 +519,7 @@ Runtime state is gitignored and never committed. `cache/` and `logs/` are
 regenerable; `run/` is operational state and follows the deletion contract in
 section 1.
 
-## Approved formats module (2026-11-02)
+## Formats module (2026-11-02)
 
 `scripts/llm_wiki/formats/` owns canonical bytes, JSON-schema validation, source
 descriptors, receipt formats and canonical queue payload validation. It imports

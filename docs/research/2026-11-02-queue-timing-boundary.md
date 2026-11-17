@@ -121,8 +121,7 @@ This is not the full suite, not native Windows/macOS and not a live rollout.
 
 ## The move
 
-An explicit "Yes, implement this boundary" was received; the private decision and STRUCTURE
-were recorded before the code. The index 2ea7fa24 was refreshed before the move. The AST of all
+The private decision and STRUCTURE were recorded before the code. The index 2ea7fa24 was refreshed before the move. The AST of all
 12 functions and three constants was kept; the rest of the queue AST matched after excluding imports.
 The boundary guard first failed on the old definitions and passed after the move.
 The only substitution of _RETRY_RANDOM moved to the owner; _utc_now stayed

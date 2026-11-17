@@ -72,7 +72,7 @@ approval, alternatives, primary sources and validation results. Local evidence:
 logs/queue-child-*. Native Windows/macOS and installation are not inferred from
 Linux tests. The installed vault remains separate from candidate qualification.
 
-## Queue child runtime (approved 2026-11-02)
+## Queue child runtime (2026-11-02)
 
 `scripts/llm_wiki/queue_child_runtime.py` owns queue child spawn, Pipe protocol,
 bounded result decoding, deadline/cancellation/lease-loss observation and calls

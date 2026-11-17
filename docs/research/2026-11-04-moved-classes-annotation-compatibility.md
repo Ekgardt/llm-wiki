@@ -1,6 +1,6 @@
 # Moved classes retain annotation ownership
 
-Status: user approved and implemented in candidate 5bc08163 on 2026-11-04; native CI pending. Research date: 2026-11-04.
+Status: proposal implemented in candidate 5bc08163 on 2026-11-04; this note cites no owner message, so it records no owner approval; native CI pending. Research date: 2026-11-04.
 
 ## Evidence
 
@@ -43,7 +43,7 @@ Use Python 3.14's native deferred annotations in the affected value owners and
 make that existing OwnerLease dependency available at runtime. Keep nominal
 classes, fields, defaults, behavior, old facade aliases and serialization paths.
 Native annotation values and signature rendering differ from the former string
-representation; the user explicitly accepted that compatibility clarification on 2026-11-04. Recheck constructor parameters/defaults semantically, historical pickle
+representation; that compatibility difference is stated here rather than hidden. Recheck constructor parameters/defaults semantically, historical pickle
 roundtrips, isolated imports, no-facade annotation resolution, boundary closure,
 actual complexity, measured test weights and every full packet. Do not replace
 failures with Any, silence NameError or preload heavy facades.

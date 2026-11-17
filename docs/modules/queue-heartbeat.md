@@ -24,7 +24,7 @@ busy database, lease loss and termination of child execution.
 
 Evidence: docs/research/2026-11-02-queue-renewal-boundaries.md.
 
-## Reliability defaults and queue heartbeat (approved 2026-11-02)
+## Reliability defaults and queue heartbeat (2026-11-02)
 
 Shared canonical contract: [reliability-defaults](reliability-defaults.md).
 The complete guide is included in this owner's maintenance packet.
