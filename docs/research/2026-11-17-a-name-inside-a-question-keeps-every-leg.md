@@ -106,15 +106,23 @@ at 48, 6 better and none worse.
 
   Cause, traced stage by stage on this question's vault: the fact is a side clause of a turn
   about task-tracking apps, so the dense lane ranks the whole turn 89th. Under the old
-  lexical-only route every candidate was dense-silent, the lane score ordered user turns by
-  lexical rank alone, and the turn (lexical rank 18) came ninth. With the dense leg, user
+  lexical-only route every candidate was dense-silent, and the lane score ordered user turns by
+  lexical rank alone. Replaying that route (an explicit `EXACT` profile) on the current code puts
+  the turn (lexical rank 18) ninth after `_evidence_ordered`; the eighth place above is the base
+  commit a32a8354's own run, whose later steps differ. With the dense leg, user
   turns the dense lane finds closer to a career question ("looking for a mentor within my
   company", dense rank 10; "time off from work", dense rank 24) and the reranked turns pass
   it, and `_evidence_ordered` places it fourteenth; `_cover_then_fill` leaves the order
   unchanged. No stage is at fault: whole-turn scoring cannot see a fact that is a clause of a
   turn about something else. Finer retrieval units (propositions or sentences inside a turn)
-  are the general remedy and belong to the coverage item above. The owner accepted this one
-  loss on 2026-11-17 on that basis.
+  are the general remedy and belong to the coverage item above.
+
+  Owner decision, task chat, 2026-11-17: the owner was given this cause and two options,
+  (1) accept this one loss now and check the question in the coverage item, or (2) hold the
+  change until finer retrieval units are built and measured on all 500 questions. The owner
+  answered "OK 1" (accept). Asked to confirm in words that they accept the loss on
+  `gpt4_93159ced` and that the fix belongs to the coverage item, the owner replied "I accept"
+  in the same chat on the same day.
 
 Where the reranker did not run on 072737a9: 1 `IMPACT` question, `profile_bypass`. `IMPACT` is
 not a reranking profile, and that is unchanged here. (An earlier run of the routing change alone,
