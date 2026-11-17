@@ -488,11 +488,12 @@ _FILENAME_RE = re.compile(
     r"(?![A-Za-z0-9_/.-])"
 )
 _SLUG_RE = re.compile(r"\b(?P<slug>[a-z0-9]+(?:-[a-z0-9]+){1,12})\b")
-_SNAKE_RE = re.compile(r"\b(?P<snake>[a-z][a-z0-9]*(?:_[a-z0-9]+)+)\b")
+_SNAKE_RE = re.compile(r"\b(?P<snake>_*[a-z][a-z0-9]*(?:_[a-z0-9]+)+)\b")
 _CAMEL_RE = re.compile(r"\b(?P<camel>[A-Z][a-z0-9]+(?:[A-Z][a-z0-9]+)+)\b")
-# What is left of a lookup once its names are taken out: `.run` after a name is
-# a member of it, and any other letter is a word of a sentence.
-_MEMBER_RE = re.compile(r"(?<!\w)\.\w+")
+# What is left of a lookup once its names are taken out: `.run`, `::run`,
+# `->run` and `#L120` after a name are a member or an anchor of it, and any
+# other letter is a word of a sentence.
+_MEMBER_RE = re.compile(r"(?<!\w)(?:\.|::|->|#)\w+")
 _SENTENCE_WORD_RE = re.compile(r"[^\W\d_]")
 _QUESTION_RE = re.compile(
     r"(?:"
@@ -721,10 +722,11 @@ def _without_names(normalized: str, identifiers: tuple[str, ...]) -> str:
 def _is_identifier_lookup(normalized: str, identifiers: tuple[str, ...]) -> bool:
     """The query is names and their decoration, and no word of a sentence.
 
-    Backticks, quotes, brackets, a question mark, a `:120` line or a `.member`
-    after a name are decoration: `` `QueueWorker` `` and `QueueWorker.run` are
-    lookups. A name inside a sentence is a hint the lexical leg rewards; it does
-    not make the sentence a lookup. Before 2026-11-17 it did, and 40 of
+    Backticks, quotes, brackets, a question mark, a `:120` line, a `#L120`
+    anchor or a `.member`, `::member` or `->member` after a name are decoration:
+    `` `QueueWorker` ``, `QueueWorker::run` and `file.py::_private` are lookups.
+    A name inside a sentence is a hint the lexical leg rewards; it does not make
+    the sentence a lookup. Before 2026-11-17 it did, and 40 of
     LongMemEval's 500 questions ran without the cross-encoder because they held a
     hyphenated word such as "5-day"
     (docs/research/2026-11-17-a-name-inside-a-question-keeps-every-leg.md).

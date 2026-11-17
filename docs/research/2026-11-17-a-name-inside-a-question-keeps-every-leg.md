@@ -77,18 +77,23 @@ shared server.
 
 Turn recall at 12 changed on 19 questions: 17 better, 2 worse.
 
-- `3fe836c9` (pre-approval amount against the sale price) fell from 1.0 to 0.5 at every depth.
-  One of its two evidence turns no longer reaches the top 48, with or without the cross-encoder.
+- `3fe836c9` (pre-approval amount against the sale price) fell from 1.0 to 0.5 at every depth,
+  and this change does not fix it. One of its two evidence turns no longer reaches the top 48.
   Diagnosed by wrapping every stage of `retrieve` on this question's vault: the turn is found
   (lexical rank 3, dense rank 2, second in the fused order), and the coverage step
-  `_pulled_into_window` then displaces it to make room for chunks of other sessions admitted
-  for coverage; `_capped` cuts it. At depth 300, where everything fits, it stays second.
-  Inferred, not yet verified: the session's admitted chunk is its assistant reply on mortgage
-  insurance, which shares more question words ("more", "amount", "than", "price") than the user
-  turn holding the figure, so the user turn counts as a spare; the dense leg adds candidates,
-  so more places are handed over than before. The step belongs to the multi-session packing
-  item and is fixed there, with this question as its regression case.
-- `gpt4_93159ced` fell from 1.0 to 0.67 at 12 and is complete again at 24.
+  `_pulled_into_window` displaces it for chunks of other sessions admitted for coverage;
+  `_capped` cuts it. At depth 300, where everything fits, it stays second.
+  The cause, confirmed by setting the counted kind to empty on this question, after which the
+  turn is second in the top 12: `aggregation_pass.counted_kind` reads "how much more was the
+  pre-approval than" as counting "more", so every session saying "more" becomes an aspect to
+  cover. 48 of the 500 questions get such a kind from a comparison or a time span ("than",
+  "how many days ago"). A word rule for differences was written and withdrawn: the kind is read
+  from the question's words, and another phrasing would slip past any list. Follow-up, checked
+  by this question returning to 1.0 at 12 with no other question of the 500 losing turn recall:
+  the coverage step stops depending on words parsed from the question, in the multi-session
+  packing and word-list router items.
+- `gpt4_93159ced` fell from 1.0 to 0.67 at 12 and is complete again at 24. It is an ordering
+  of the cross-encoder, not of coverage, and is a regression case of the reranker comparison.
 
 Where the reranker did not run after the change:
 
