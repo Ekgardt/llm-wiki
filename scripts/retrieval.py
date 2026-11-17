@@ -3539,12 +3539,12 @@ def _complete_from_pages(
             _admit_pointed(source, by_source, state)
 
 
-def _may_displace(
-    chunk: RetrievalCandidate, admitted: frozenset[str], inside_count: Mapping[SourceKey, int]
-) -> bool:
-    if chunk.candidate_id in admitted:
-        return False
-    return inside_count.get(_source_key(chunk), 0) >= 2
+def _lane_best_ids(chunks: Sequence[RetrievalCandidate]) -> frozenset[str]:
+    """The first chunk of every source, in the order given."""
+    first: dict[SourceKey, str] = {}
+    for chunk in chunks:
+        first.setdefault(_source_key(chunk), chunk.candidate_id)
+    return frozenset(first.values())
 
 
 def _displaceable(
@@ -3552,20 +3552,14 @@ def _displaceable(
 ) -> list[RetrievalCandidate]:
     """The last chunks of the window a pulled chunk may take the place of.
 
-    Never an admitted chunk, and never a source's only chunk in the window: a
-    chunk is displaced only while its source keeps another chunk inside.
+    Never an admitted chunk, and never a source's best chunk in the window:
+    the chunk admitted for coverage may be a later one of its source, and the
+    lane-best it would otherwise leave unprotected is the one the lanes agree on.
     """
-    inside_count: dict[SourceKey, int] = {}
-    for chunk in inside:
-        inside_count[_source_key(chunk)] = inside_count.get(_source_key(chunk), 0) + 1
-    chosen: list[RetrievalCandidate] = []
-    for chunk in reversed(inside):
-        if len(chosen) >= wanted:
-            break
-        if _may_displace(chunk, admitted, inside_count):
-            chosen.append(chunk)
-            inside_count[_source_key(chunk)] -= 1
-    return list(reversed(chosen))
+    if wanted <= 0:
+        return []
+    kept = admitted | _lane_best_ids(inside)
+    return [chunk for chunk in inside if chunk.candidate_id not in kept][-wanted:]
 
 
 def _pulled_into_window(
@@ -3615,7 +3609,7 @@ def _cover_then_fill(
     """One chunk from every source that covers a distinct part of the question, then the fill.
 
     Four properties, each pinned by a test: a pool holding one source comes out
-    unchanged; a pool that fits the window comes out unchanged; a source's only
+    unchanged; a pool that fits the window comes out unchanged; a source's best
     chunk inside the window is never displaced; a source's chunks keep their
     order, except the one chunk admitted for coverage, which is the lane-best
     whenever the lane-best covers as much.
