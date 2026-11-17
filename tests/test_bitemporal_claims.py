@@ -268,10 +268,37 @@ def test_every_frozen_relation_is_classified_as_single_or_multi_valued():
     assert not SINGLE_VALUED_RELATIONS & MULTI_VALUED_RELATIONS
 
 
-def test_a_one_digit_fraction_is_a_valid_strict_timestamp():
-    from llm_wiki.claim_ledger import strict_rfc3339_utc
+def test_every_supported_python_reads_a_one_digit_fraction():
+    from llm_wiki.claim_ledger import canonical_time, strict_rfc3339_utc
 
     assert strict_rfc3339_utc("2026-08-19T00:00:00.5Z", label="valid_from") == "2026-08-19T00:00:00.5Z"
+    assert canonical_time("2026-08-19T00:00:00.5Z", nullable=False, label="from") == "2026-08-19T00:00:00.500000Z"
+
+
+def test_padding_changes_nothing_that_was_already_readable():
+    from llm_wiki.claim_ledger import canonical_time
+
+    assert canonical_time("2026-08-19T00:00:00.123456Z", nullable=False, label="from") == "2026-08-19T00:00:00.123456Z"
+    assert canonical_time("2026-08-19T00:00:00Z", nullable=False, label="from") == "2026-08-19T00:00:00Z"
+
+
+@pytest.mark.parametrize("reader", ["canonical", "strict"])
+def test_more_than_six_digits_is_left_to_be_refused(reader):
+    """Python keeps six digits and drops the rest; refusing names the lost precision."""
+    from llm_wiki.claim_ledger import canonical_time, strict_rfc3339_utc
+
+    text = "2026-08-19T00:00:00.1234567Z"
+    readers = {
+        "canonical": lambda: canonical_time(text, nullable=False, label="from"),
+        "strict": lambda: strict_rfc3339_utc(text, label="valid_from"),
+    }
+    with pytest.raises(ValueError, match="more than six fractional second digits"):
+        readers[reader]()
+
+
+def test_two_instants_a_tenth_of_a_microsecond_apart_are_not_an_empty_interval():
+    with pytest.raises(ValueError, match="more than six fractional second digits"):
+        validate_interval({"from": "2026-08-19T00:00:00.1234562Z", "to": "2026-08-19T00:00:00.1234567Z"})
 
 
 def test_a_sub_second_validity_interval_is_not_refused_as_inverted():

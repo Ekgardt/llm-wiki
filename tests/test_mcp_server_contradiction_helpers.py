@@ -7,7 +7,7 @@ from tests.mcp_server_support import (
 )
 
 
-class TestContradictionHelpers:
+class TestHelperFunctions:
     """The contradiction check the MCP tool wraps."""
 
     def test_check_contradiction_returns_structured_assessment(self, monkeypatch):

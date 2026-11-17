@@ -31,7 +31,7 @@ from tests.mcp_server_support import (
 from tests.slow_machine import LONG_TIMEOUT, SHORT_TIMEOUT
 
 
-class TestToolCallDeadlines(ToolCallHarness):
+class TestHandleToolCall(ToolCallHarness):
     """The handler deadline and the bounded worker slots of a tool call."""
 
     def test_grounded_deadline_starts_at_handler_entry_before_validation(self, monkeypatch):

@@ -16,7 +16,7 @@ from tests.mcp_server_support import (
 )
 
 
-class TestPageHelpers:
+class TestHelperFunctions:
     """The page reads and decision appends the MCP tools wrap."""
 
     def test_read_page_existing(self):

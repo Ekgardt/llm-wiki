@@ -23,7 +23,7 @@ from tests.mcp_server_support import (
 from tests.slow_machine import LONG_TIMEOUT
 
 
-class TestDoctorToolCalls(ToolCallHarness):
+class TestHandleToolCall(ToolCallHarness):
     """Doctor queue and transaction actions through the MCP tool call."""
 
     @pytest.mark.parametrize("action", ["queue-cancel", "queue-redrive"])

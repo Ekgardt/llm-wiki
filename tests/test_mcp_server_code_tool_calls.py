@@ -19,7 +19,7 @@ from tests.mcp_server_support import (
 )
 
 
-class TestCodeToolCalls(ToolCallHarness):
+class TestHandleToolCall(ToolCallHarness):
     """Architecture and dead-code answers through the MCP tool call."""
 
     @pytest.mark.parametrize(

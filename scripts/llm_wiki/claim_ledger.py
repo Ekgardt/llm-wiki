@@ -64,6 +64,9 @@ CLAIM_LEDGER_RE = re.compile(
 
 
 _RFC3339_UTC_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z$")
+# `datetime.fromisoformat` keeps six fractional digits and drops the rest, so two
+# distinct instants could compare equal; such a value is refused by name instead.
+_FINER_THAN_MICROSECONDS_RE = re.compile(r"T\d{2}:\d{2}:\d{2}\.\d{7,}")
 
 
 _DECIMAL_INPUT_RE = re.compile(
@@ -109,7 +112,13 @@ def _canonical_date_text(text: str, *, label: str) -> str:
     return text
 
 
+def require_microsecond_precision(text: str, *, label: str) -> None:
+    if _FINER_THAN_MICROSECONDS_RE.search(text) is not None:
+        raise ValueError(f"{label} has more than six fractional second digits")
+
+
 def _canonical_timestamp_text(text: str, *, label: str) -> str:
+    require_microsecond_precision(text, label=label)
     try:
         parsed = datetime.fromisoformat(text)
         if parsed.tzinfo is None or parsed.utcoffset() != UTC.utcoffset(parsed):
@@ -122,6 +131,7 @@ def _canonical_timestamp_text(text: str, *, label: str) -> str:
 def strict_rfc3339_utc(value: object, *, label: str) -> str:
     if not isinstance(value, str) or _RFC3339_UTC_RE.fullmatch(value) is None:
         raise ValueError(f"{label} must be a strict UTC RFC3339 timestamp")
+    require_microsecond_precision(value, label=label)
     try:
         parsed = datetime.fromisoformat(value)
     except ValueError as exc:
