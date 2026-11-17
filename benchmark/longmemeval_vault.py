@@ -358,9 +358,10 @@ def _key_the_haystack(
 
 
 def profile_for(question_text: str) -> str:
-    from retrieval import analyze_query
+    """The profile retrieval runs for this question, as the row reports it."""
+    from retrieval import planned_profile
 
-    return analyze_query(question_text).recommended_profile.upper()
+    return planned_profile(question_text)
 
 
 def _searchable(question_text: str, question_date: str) -> str:
@@ -380,14 +381,16 @@ def _searchable(question_text: str, question_date: str) -> str:
 
 def _retrieved_rows(
     question_text: str,
-    profile: str,
     limit: int | None = None,
     *,
     rerank: bool = True,
     since: str | None = None,
     as_of: str | None = None,
 ) -> list[dict]:
-    """The candidates for one query; a sub-query skips the cross-encoder; a dated leg bounds the days."""
+    """The candidates for one query; a sub-query skips the cross-encoder; a dated leg bounds the days.
+
+    No profile is passed: retrieval plans the legs as it does for the product.
+    """
     from retrieval import retrieve_via_search_memory
 
     return list(
@@ -395,7 +398,6 @@ def _retrieved_rows(
             question_text,
             limit=limit or _qa_candidates(),
             semantic=True,
-            profile=profile,
             rerank=rerank,
             since=since,
             as_of=as_of,
@@ -818,11 +820,11 @@ def retrieval_only() -> bool:
     return os.environ.get(RETRIEVAL_ONLY_VARIABLE, "").strip() == "1"
 
 
-def _retrieval_only_outcome(question: dict, searchable: str, profile: str) -> dict:
+def _retrieval_only_outcome(question: dict, searchable: str) -> dict:
     """Coverage at 12, 24 and 48 from one deeper ranking, and no answer."""
     from longmemeval_coverage import coverage_at_depths
 
-    deep = _retrieved_rows(searchable, profile, DEEPEST_DEPTH)
+    deep = _retrieved_rows(searchable, DEEPEST_DEPTH)
     return {
         "status": "retrieval_only",
         "coverage_depths": coverage_at_depths(question, deep),
@@ -841,7 +843,7 @@ def _evidence_windows(question: Mapping[str, object]) -> list[tuple[str, ...]]:
 def _answer_or_coverage(question, root, snapshot, rows, metrics, profile, searchable):
     """The reader's outcome, or — in a retrieval-only run — coverage in its place."""
     if retrieval_only():
-        return _retrieval_only_outcome(question, searchable, profile)
+        return _retrieval_only_outcome(question, searchable)
     return _answer_outcome(
         dated_question(question), root, snapshot, rows, metrics, profile,
         str(question.get("answer", "")),
@@ -851,9 +853,9 @@ def _answer_or_coverage(question, root, snapshot, rows, metrics, profile, search
         evidence=_evidence_windows(question),
         # The second look's way of asking for more than the first twelve, and
         # for what a fanned-out sub-query finds, without the cross-encoder.
-        retrieve=lambda limit: _retrieved_rows(searchable, profile, limit),
+        retrieve=lambda limit: _retrieved_rows(searchable, limit),
         search=lambda query, limit, **window: _retrieved_rows(
-            query, profile, limit, rerank=False, **window
+            query, limit, rerank=False, **window
         ),
         chosen=policy(),
     )
@@ -875,7 +877,7 @@ def run_question(question: dict, work: Path) -> dict:
     profile = profile_for(plain)
     retrieve_started = time.monotonic()
     searchable = _searchable(plain, str(question["question_date"]))
-    rows = _retrieved_rows(searchable, profile)
+    rows = _retrieved_rows(searchable)
     answer_started = time.monotonic()
     metrics: dict = {}
     outcome = _answer_or_coverage(
