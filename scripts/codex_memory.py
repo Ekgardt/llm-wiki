@@ -669,14 +669,23 @@ def _mcp_expected_args(vault_root: Path) -> list[str]:
 
 
 def _mcp_entry_state(table: dict[str, Any], vault_root: Path) -> str:
+    """`equivalent`, `deferred` (ours, but Codex hides its tools behind tool search), or `conflict`."""
     equivalent = (
         table.get("command") == "uv"
         and table.get("args") == _mcp_expected_args(vault_root)
         and table.get("enabled", True) is True
     )
-    if equivalent:
-        return "equivalent"
-    return "conflict"
+    if not equivalent:
+        return "conflict"
+    if "deferred" not in _omitted_surfaces(table):
+        return "deferred"
+    return "equivalent"
+
+
+def _omitted_surfaces(table: dict[str, Any]) -> list[object]:
+    """The `omit_tools_from` list; Codex shows a server's tools only on the surfaces left out."""
+    surfaces = table.get("omit_tools_from", [])
+    return surfaces if isinstance(surfaces, list) else []
 
 
 def _read_codex_document(config: Path) -> dict[str, Any] | str:

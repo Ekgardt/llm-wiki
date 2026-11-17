@@ -160,7 +160,8 @@ def test_generated_mcp_entries_use_exact_arguments(tmp_path: Path) -> None:
     config.write_text(
         '[mcp_servers.llm-wiki]\ncommand = "uv"\n'
         f"args = {args_literal}\n"
-        "enabled = true\n",
+        "enabled = true\n"
+        'omit_tools_from = ["deferred"]\n',
         encoding="utf-8",
     )
     assert codex_memory.codex_mcp_config_state(config, root) == "equivalent"

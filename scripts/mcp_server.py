@@ -4236,11 +4236,17 @@ def _build_tool_definitions() -> list:
     ]
 
 
+# Claude Code defers MCP tools behind its tool search by default; a tool that
+# carries this key is loaded with the session instead
+# (docs/research/2026-11-17-every-memory-tool-is-visible.md).
+ALWAYS_LOAD_META = {"anthropic/alwaysLoad": True}
+
+
 def _make_tool(**kwargs):
-    """Create a tool with structured output metadata when the SDK supports it."""
+    """Create a tool that loads with the session, with structured output when supported."""
     if MCP_STRUCTURED_OUTPUT_AVAILABLE:
         kwargs["outputSchema"] = envelope_schema()
-    return Tool(**kwargs)
+    return Tool(**kwargs, _meta=ALWAYS_LOAD_META)
 
 
 def _meta(*, deadline: float | None = None) -> dict:

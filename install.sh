@@ -147,13 +147,19 @@ add_codex_mcp_block() {
   block="$(printf '%s\n' \
     '[mcp_servers.llm-wiki]' \
     'command = "uv"' \
-    "args = [\"run\", \"--locked\", \"--no-sync\", \"--directory\", $vault_json, \"python\", \"scripts/mcp_server.py\"]")"
+    "args = [\"run\", \"--locked\", \"--no-sync\", \"--directory\", $vault_json, \"python\", \"scripts/mcp_server.py\"]" \
+    'omit_tools_from = ["deferred"]')"
   write_codex_mcp_block "$block" "$config"
 }
 
 codex_mcp_state_status() {
   case "$1" in
     equivalent) return 0 ;;
+    deferred)
+      # config.toml is never rewritten in place; say the one line that is missing.
+      warn "Codex hides the llm-wiki tools behind tool search; add this line to [mcp_servers.llm-wiki]:"
+      warn '  omit_tools_from = ["deferred"]'
+      return 0 ;;
     conflict|invalid) return 2 ;;
     *) return 1 ;;
   esac
