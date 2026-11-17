@@ -6,14 +6,15 @@ word ("5-day trip", "gin-to-vermouth", "week-long"), and every one of them then
 skipped the cross-encoder. Two callers made it worse: the answer path and the
 benchmark passed the planner's *recommendation* back as if the caller had chosen
 it, so EXACT and TEMPORAL questions ran lexical only and GRAPH ones lost the
-dense leg. Only a query that is one name and nothing else is a lookup; a file
-that has that name is still put first after reranking.
+dense leg. Only a query made of names and their decoration is a lookup, and a
+lookup keeps what it had: both legs, no cross-encoder, its lexical order.
 """
 from __future__ import annotations
 
+import json
 import sys
 from pathlib import Path
-from typing import Any, NoReturn
+from typing import Any
 
 import pytest
 
@@ -39,14 +40,85 @@ def test_a_question_holding_a_name_runs_hybrid(question: str) -> None:
     assert analysis.recommended_profile == "HYBRID"
 
 
-@pytest.mark.parametrize(
-    "query",
-    ["hook-scripts-defense-in-depth", "auth-decision.md", "QueueWorker", "scripts/retrieval.py"],
+LOOKUPS = (
+    "hook-scripts-defense-in-depth",
+    "auth-decision.md",
+    "QueueWorker",
+    "search_memory_rebuild",
+    "scripts/retrieval.py",
+    "`QueueWorker`",
+    "QueueWorker.run",
+    "search_memory_rebuild()",
+    "queue_worker.py:120",
 )
-def test_a_query_that_is_only_a_name_is_still_a_lookup(query: str) -> None:
-    from retrieval import analyze_query
 
-    assert analyze_query(query).recommended_profile == "EXACT"
+
+def _hit(candidate_id: str, path: str) -> dict[str, object]:
+    return {
+        "candidate_id": candidate_id,
+        "parent_id": path,
+        "relative_path": path,
+        "heading_path": (),
+        "source_sha256": "a" * 64,
+        "byte_start": 0,
+        "byte_end": 10,
+        "score": 1.0,
+        "type": "concept",
+        "content": f"text of {candidate_id}",
+    }
+
+
+def _retrieved_with_a_reversing_reranker(
+    query: str, monkeypatch: pytest.MonkeyPatch
+) -> tuple[Any, list[str]]:
+    """Run the product's planning and reranking; the cross-encoder reverses the pool."""
+    import reranker
+    import retrieval
+
+    scored: list[str] = []
+
+    def reversing(question: str, rows: list[dict[str, Any]], **_: Any) -> list[dict[str, Any]]:
+        scored.append(question)
+        return [
+            {**row, "rerank_score": float(place), "reranker_applied": True}
+            for place, row in enumerate(rows)
+        ][::-1]
+
+    monkeypatch.setattr(reranker, "reranker_installed", lambda: True)
+    monkeypatch.setattr(reranker, "rerank", reversing)
+    hits = [_hit("c-named", "knowledge/notes/queue-notes.md"), _hit("c-other", "knowledge/notes/x.md")]
+    profile = retrieval.planned_profile(query)
+    result = retrieval.retrieve(
+        query,
+        requested_profile=profile,
+        limit=2,
+        lexical_backend=lambda **_kwargs: hits,
+        dense_backend=lambda **_kwargs: hits,
+        rerank_enabled=True,
+        corpus_generation="gen-lookup",
+    )
+    return result, scored
+
+
+@pytest.mark.parametrize("query", LOOKUPS)
+def test_a_lookup_keeps_its_lexical_order_and_skips_the_cross_encoder(
+    query: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    result, scored = _retrieved_with_a_reversing_reranker(query, monkeypatch)
+
+    assert scored == []
+    assert result.trace.reranker_fallback_reason == "exact_match_bypass"
+    assert result.candidates[0].candidate_id == "c-named"
+
+
+@pytest.mark.parametrize("question", QUESTIONS_WITH_A_NAME)
+def test_a_question_holding_a_name_goes_through_the_cross_encoder(
+    question: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    result, scored = _retrieved_with_a_reversing_reranker(question, monkeypatch)
+
+    assert scored == [question]
+    assert result.trace.reranker_applied is True
 
 
 def test_a_name_does_not_switch_the_reranker_off(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -62,28 +134,53 @@ def test_a_name_does_not_switch_the_reranker_off(monkeypatch: pytest.MonkeyPatch
     assert decision == (True, None)
 
 
+_REFUSAL = json.dumps(
+    {
+        "schema_version": "grounded-answer/v1",
+        "status": "insufficient_evidence",
+        "claims": [],
+        "citations": [],
+        "reason": "nothing",
+    }
+)
+
+
+def _empty_snapshot() -> object:
+    from corpus_snapshot import CorpusSnapshot, SnapshotPolicy
+
+    policy = SnapshotPolicy((), (), False, None, 100, 1024 * 1024, 1024 * 1024, 100, 100, 8)
+    return CorpusSnapshot((), (), "0" * 64, policy)
+
+
 def test_the_answer_path_lets_retrieval_plan_the_legs(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The planner's recommendation is not the caller's choice of profile."""
+    """The planner's recommendation is not the caller's choice of profile.
+
+    Every search the answer makes is checked, the dated leg's included: a
+    question that names a time searches again inside those days.
+    """
     import retrieval
     from query_memory import grounded_qa
 
-    asked: list[object] = []
+    asked: list[tuple[str, object, object]] = []
 
-    class Stop(Exception):
-        pass
-
-    def recording(query: str, **kwargs: Any) -> NoReturn:
-        asked.append(kwargs.get("profile"))
-        raise Stop
+    def recording(query: str, **kwargs: Any) -> list[dict[str, Any]]:
+        asked.append((query, kwargs.get("profile"), kwargs.get("since")))
+        return []
 
     monkeypatch.setattr(retrieval, "retrieve_via_search_memory", recording)
 
-    with pytest.raises(Stop):
-        grounded_qa("decisions since 2025-01-01", vault=tmp_path, snapshot=object())
+    grounded_qa(
+        "Which book did I finish a week ago?\n(Current date: 2023/05/30 (Tue) 10:00)",
+        vault=tmp_path,
+        snapshot=_empty_snapshot(),
+        generator=lambda *_: _REFUSAL,
+    )
 
-    assert asked == [None]
+    assert len(asked) >= 2, asked
+    assert any(since is not None for _, _, since in asked), asked
+    assert [profile for _, profile, _ in asked] == [None] * len(asked)
 
 
 def _record_retrieval(monkeypatch: pytest.MonkeyPatch) -> list[tuple[str, object]]:

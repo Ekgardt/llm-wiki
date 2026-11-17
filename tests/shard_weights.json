@@ -133,7 +133,7 @@
   "test_a_missing_file_is_not_a_moved_parent.py": 2.08,
   "test_a_missing_leg_is_reported.py": 0.0,
   "test_a_moved_host_directory_is_still_the_host.py": 0.18,
-  "test_a_name_inside_a_question_keeps_every_leg.py": 0.04,
+  "test_a_name_inside_a_question_keeps_every_leg.py": 0.08,
   "test_a_name_is_resolved_before_the_graph_is_asked.py": 4.73,
   "test_a_named_file_stays_first.py": 0.01,
   "test_a_native_server_copy_leaves_with_its_owner.py": 0.03,

@@ -277,12 +277,13 @@ def _libraries_importable() -> bool:
 
 
 def _exact_bypass_reason(profile: str, intents: set[str]) -> str | None:
-    """A quoted phrase asks for those words; a name in a question does not.
+    """A quoted phrase or a bare name asks for that spelling; a name in a question does not.
 
-    A query that is one name keeps its file first without a bypass: retrieval
-    promotes an exact filename again after reranking.
+    A lookup such as `QueueWorker` keeps the fused order its lexical match earned:
+    the cross-encoder scores a passage against a sentence, and a name alone is
+    not one. A question that holds a name is reranked like any other question.
     """
-    if "quoted_phrase" in intents:
+    if intents & {"quoted_phrase", "identifier_lookup"}:
         return "exact_match_bypass"
     if profile in {"EXACT", "DIRECT"}:
         return "exact_match_bypass"
