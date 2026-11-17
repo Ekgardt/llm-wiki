@@ -844,7 +844,15 @@ def _evidence_windows(question: Mapping[str, object]) -> list[tuple[str, ...]]:
     return evidence_turns(question)
 
 
-def _answer_or_coverage(question, root, snapshot, rows, metrics, profile, searchable):
+def _answer_or_coverage(
+    question: dict[str, Any],
+    root: Path,
+    snapshot: object,
+    rows: list[dict[str, Any]],
+    metrics: dict[str, Any],
+    profile: str,
+    searchable: str,
+) -> dict[str, Any]:
     """The reader's outcome, or — in a retrieval-only run — coverage in its place."""
     if retrieval_only():
         return _retrieval_only_outcome(question, searchable)
