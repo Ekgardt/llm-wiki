@@ -192,7 +192,7 @@
         "require_repair_context",
         "resolve_compile_plan"
       ],
-      "contract_sha256": "34171b31de716afdd863d772d2952fa3c3ff43d4c11b1a727d479f65a7264112",
+      "contract_sha256": "882d20e65943f01ea55829884a92e61a6b1d809bc08602d7cb06d71dd72dbaf4",
       "integration_tests": [
         "tests/test_a_committed_source_resolves_an_older_compile_plan.py",
         "tests/test_a_long_entry_is_cut_inside_itself.py",

@@ -104,7 +104,7 @@
         "save_compile_repair",
         "write_archive_snapshot"
       ],
-      "contract_sha256": "15e08b4fbe8527ba525b0729fbedad71d3576f13a7e712dcc409a8560b8f8c3c",
+      "contract_sha256": "11a8dbd7be71c09e075c74e6dca9e215c288e675733c883cdf7d61fa3cfb87de",
       "integration_tests": [
         "tests/test_compile_resolution_failure_progress.py",
         "tests/test_compile_tree_execution.py"
@@ -200,7 +200,7 @@
         "draft_prompt_count",
         "pack_compile_batches"
       ],
-      "contract_sha256": "d8e95d061b5bb9ac335b1b8590239f859a4f998826bca4053f54e71c2a4c788a",
+      "contract_sha256": "b6e323f2ab52f39744faa37d27ff9a2a1ad7fa5ec96ae94f1eae275502e57149",
       "integration_tests": [
         "tests/test_compile_resolution_failure_progress.py",
         "tests/test_compile_tree_execution.py"
@@ -215,7 +215,7 @@
         "draft_prompt_text",
         "validated_critique_feedback"
       ],
-      "contract_sha256": "53b36103795d09165a4d5842f1ac53075d48b91fa11047cb11464cc3b917ee76",
+      "contract_sha256": "4de701e2f8944d096e9a86b81fcd8d74a7964057158a7a18895fa2691e6f643c",
       "integration_tests": [
         "tests/test_compile_resolution_failure_progress.py",
         "tests/test_compile_tree_execution.py"

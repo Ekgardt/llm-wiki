@@ -24,11 +24,18 @@ from workspace_revision import (
 from tests.shared_fixtures import copy_python_fixture
 from tests.slow_machine import SHORT_TIMEOUT
 from tests.workspace_revision_helpers import (
-    _isolated_global_git_configuration,  # noqa: F401
     _linux_memfd_available,
     _run_git,
     _symlink_or_skip,
+    isolate_global_git_configuration,
 )
+
+
+@pytest.fixture(autouse=True)
+def _isolated_global_git_configuration(
+    tmp_path_factory: pytest.TempPathFactory, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    isolate_global_git_configuration(tmp_path_factory, monkeypatch)
 
 
 def _junction_or_skip(link: Path, target: Path) -> None:
@@ -113,7 +120,6 @@ def test_verifier_reuses_computed_inventory_without_rescanning(
 
     def unexpected_rescan(*args, **kwargs):
         raise AssertionError("unchanged computed inventory was rescanned")
-        yield  # pragma: no cover - keep this replacement a generator
 
     monkeypatch.setattr(workspace_revision, "relevant_files", unexpected_rescan)
 

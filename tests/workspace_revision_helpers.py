@@ -53,8 +53,9 @@ def _absent_system_git_files(monkeypatch, home: Path) -> None:
     )
 
 
-@pytest.fixture(autouse=True)
-def _isolated_global_git_configuration(tmp_path_factory, monkeypatch) -> None:
+def isolate_global_git_configuration(
+    tmp_path_factory: pytest.TempPathFactory, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """Keep the machine's own Git configuration out of these contracts.
 
     `workspace_revision` deliberately declines its private-index fast path when

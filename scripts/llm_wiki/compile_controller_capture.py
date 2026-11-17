@@ -5,6 +5,7 @@ import zipfile
 from dataclasses import dataclass, replace
 from functools import partial
 from pathlib import Path
+from typing import Any
 
 import compile_progress as progress
 from llm_wiki import runtime_roots
@@ -31,7 +32,7 @@ from llm_wiki.compile_controller_reader import (
 from llm_wiki.sqlite_deadlines import operational_deadline_active
 
 
-def save_compile_inputs(queue, lease, checkpoint, inputs):
+def save_compile_inputs(queue: Any, lease: Any, checkpoint: Any, inputs: Any) -> Any:
     """Write record-addressable inputs without a whole-archive bytes object."""
     require_input_checkpoint(checkpoint)
     if compile_inputs_digest(inputs) != checkpoint.source_digest:

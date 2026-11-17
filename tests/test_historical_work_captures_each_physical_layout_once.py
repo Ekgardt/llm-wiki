@@ -1,5 +1,7 @@
 """One proof parses one immutable layout; its final live-source guard remains."""
 import time
+from collections.abc import Callable
+from typing import Any
 
 import pytest
 from llm_wiki import compile_pipeline_sources, doctor_transactions
@@ -10,11 +12,11 @@ from tests.doctor_exact_legacy_source_outcome_helpers import _reader
 from tests.historical_work_captures_each_physical_layout_once_helpers import _published_units
 
 
-def _record_parses(monkeypatch):
-    calls = []
-    original = compile_pipeline_sources.native_daily_frames
+def _record_parses(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    calls: list[str] = []
+    original: Callable[..., Any] = compile_pipeline_sources.native_daily_frames
 
-    def observed(*args, **kwargs):
+    def observed(*args: Any, **kwargs: Any) -> Any:
         calls.append(args[0])
         return original(*args, **kwargs)
 
@@ -22,7 +24,7 @@ def _record_parses(monkeypatch):
     return calls
 
 
-def test_complete_two_unit_proof_parses_one_physical_layout(exact_work, monkeypatch):
+def test_complete_two_unit_proof_parses_one_physical_layout(exact_work: Any, monkeypatch: pytest.MonkeyPatch) -> None:
     history, parts = _published_units(exact_work)
     calls = _record_parses(monkeypatch)
     with _reader(history) as (_database, reader):
@@ -30,7 +32,7 @@ def test_complete_two_unit_proof_parses_one_physical_layout(exact_work, monkeypa
     assert calls == [parts[0].logical_path]
 
 
-def test_separate_proofs_capture_separate_layouts(exact_work, monkeypatch):
+def test_separate_proofs_capture_separate_layouts(exact_work: Any, monkeypatch: pytest.MonkeyPatch) -> None:
     history, parts = _published_units(exact_work)
     calls = _record_parses(monkeypatch)
     with _reader(history) as (_database, reader):
@@ -39,7 +41,7 @@ def test_separate_proofs_capture_separate_layouts(exact_work, monkeypatch):
     assert calls == [parts[0].logical_path, parts[0].logical_path]
 
 
-def test_layout_reuse_still_honors_expired_deadline(exact_work):
+def test_layout_reuse_still_honors_expired_deadline(exact_work: Any) -> None:
     history, parts = _published_units(exact_work)
     with (
         _reader(history) as (_database, reader),

@@ -132,7 +132,7 @@
         "save_compile_preflight",
         "write_archive_snapshot"
       ],
-      "contract_sha256": "a4a29f69340a784c3fb583f8e111470f37e461efd3a04fca77a0fd288524f888",
+      "contract_sha256": "730f1587f133714c1459533519f0b22238a0fa14d0e17fd14063c253c52a8fb5",
       "integration_tests": [
         "tests/test_compile_durable_preflight.py"
       ]

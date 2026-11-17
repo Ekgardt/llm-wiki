@@ -18,15 +18,22 @@ from workspace_revision import (
 )
 
 from tests.workspace_revision_helpers import (
-    _isolated_global_git_configuration,  # noqa: F401
     _linux_memfd_available,
     _private_xdg_git_path,
     _run_git,
     _verification_git_call_counts,
+    isolate_global_git_configuration,
 )
 from tests.workspace_revision_race_helpers import (
     _qualify_private_git_wrapper,
 )
+
+
+@pytest.fixture(autouse=True)
+def _isolated_global_git_configuration(
+    tmp_path_factory: pytest.TempPathFactory, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    isolate_global_git_configuration(tmp_path_factory, monkeypatch)
 
 
 def _process_is_gone_or_zombie(pid: int) -> bool:

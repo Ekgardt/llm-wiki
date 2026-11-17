@@ -89,7 +89,7 @@
         "start_encoder_warmup",
         "warmup_retrieval_path"
       ],
-      "contract_sha256": "3d705af777671c656eba2509dd3c0c009aaad71424e06968fbb3a5bcd277c964",
+      "contract_sha256": "8a04e5c4fa847c407dce6ec4510280e254bb6582c0a7aa98893974dfea4de537",
       "integration_tests": [
         "tests/test_a_new_token_never_lands_in_someone_elses_file.py",
         "tests/test_mcp_http.py",

@@ -4,6 +4,7 @@ from __future__ import annotations
 import zipfile
 from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass
+from typing import Any
 
 import compile_progress as progress
 from llm_wiki.compile_call_runtime import CompileDelivery, ProviderOutcomeUnknown
@@ -113,8 +114,9 @@ def execute_planned_compile_tree(queue, lease, planned, snapshot, *, coordinator
             cancelled=cancelled, delivery=delivery)
 
 
-def execute_compile_tree(queue, lease, context, batch, *, coordinator, dependencies, trigger,
-                         owner=None, deadline=None, cancelled=None, delivery=None):
+def execute_compile_tree(queue: Any, lease: Any, context: Any, batch: Any, *, coordinator: Any,
+                         dependencies: Any, trigger: str, owner: Any = None, deadline: Any = None,
+                         cancelled: Any = None, delivery: Any = None) -> Any:
     """Execute disjoint retained source branches; incomplete work never proves success.
 
     The caller owns the open archive. An owned delivery blocks on unknown calls

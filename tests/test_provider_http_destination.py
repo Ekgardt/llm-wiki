@@ -26,9 +26,6 @@ class _Handler(BaseHTTPRequestHandler):
     do_POST = _reply
     do_DELETE = _reply
 
-    def log_message(self, *_args):
-        return  # Synthetic fixture traffic has no operational log.
-
 
 @contextmanager
 def _server(status=200):

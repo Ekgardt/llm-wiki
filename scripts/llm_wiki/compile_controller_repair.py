@@ -6,6 +6,7 @@ from collections import Counter
 from dataclasses import dataclass, replace
 from dataclasses import field as dataclass_field
 from functools import partial
+from typing import Any
 
 import compile_progress as progress
 from llm_wiki.compile_call_runtime import require_checkpoint
@@ -188,7 +189,8 @@ def _validate_repair_document(document, dependencies, deadline, handle):
     operational_deadline_active(deadline)
 
 
-def save_compile_repair(queue, lease, context, batch, failure, *, dependencies, deadline=None):
+def save_compile_repair(queue: Any, lease: Any, context: Any, batch: Any, failure: Any, *,
+                        dependencies: Any, deadline: Any = None) -> Any:
     """Retain a capacity repair decision before admitting any child model call."""
     operational_deadline_active(deadline)
     require_publication_context(queue, lease, context, batch, dependencies)
@@ -222,7 +224,8 @@ def _repair_child_identity(event, batch, feedback, record):
     return RepairCompileBatch(batch, tuple(feedback), progress.snapshot_event(event), digest, work_id)
 
 
-def read_compile_repair(queue, lease, event, context, batch, *, dependencies, deadline=None):
+def read_compile_repair(queue: Any, lease: Any, event: Any, context: Any, batch: Any, *,
+                        dependencies: Any, deadline: Any = None) -> Any:
     """Reconstruct checked children while the caller keeps the parent context open."""
     document, children = _read_verified_compile_repair(queue, lease, event, context, batch, dependencies, deadline)
     return tuple(_repair_child_identity(event, child, feedback, record)
@@ -289,7 +292,8 @@ def _repair_child_context(lease, admission, parent_context):
         'artifact': parent_context.details['artifact']})
 
 
-def begin_compile_repair_batch(queue, lease, child, parent_context, parent_batch, *, dependencies, deadline=None):
+def begin_compile_repair_batch(queue: Any, lease: Any, child: Any, parent_context: Any, parent_batch: Any, *,
+                               dependencies: Any, deadline: Any = None) -> Any:
     """Bind child authority to the exact retained decision and inherited context."""
     operational_deadline_active(deadline)
     document, _children = _read_verified_compile_repair(queue, lease, child.repair,

@@ -84,7 +84,7 @@
         "read_compile_execution",
         "write_archive_snapshot"
       ],
-      "contract_sha256": "548d89ddc0613d534a0931bd753801b3204bd49a476738ca9478c49ca7eb124d",
+      "contract_sha256": "5cf84ba9fdc1475f117f250c63ef0761366e65401cbaf62cada604a8326e25ad",
       "integration_tests": [
         "tests/test_compile_request_selection.py"
       ]

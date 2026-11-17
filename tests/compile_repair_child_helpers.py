@@ -1,6 +1,7 @@
 """Helpers shared by test_compile_repair_child.py and the test files importing them."""
 
 import json
+from typing import Any
 
 import llm_client
 from context_budget import TokenUsage
@@ -12,14 +13,14 @@ from tests.the_compile_decides_what_the_snapshot_already_knows_helpers import (
 )
 
 
-def _child_backend(monkeypatch, child):
+def _child_backend(monkeypatch: Any, child: Any) -> list[bool]:
     operations = [operation for record in child.feedback for operation in json.loads(record)['operations']]
     replies = iter((json.dumps({'operations': operations}),
         json.dumps({'reviews': [dict(slug=item['slug'], verdict='pass', reason='Source supports correction.')
                                 for item in operations]}), _source_review()))
-    calls = []
+    calls: list[bool] = []
 
-    def backend(*args):
+    def backend(*args: Any) -> Any:
         calls.append(True)
         return llm_client.BackendResponse(next(replies), TokenUsage(input_tokens=7, output_tokens=3))
 

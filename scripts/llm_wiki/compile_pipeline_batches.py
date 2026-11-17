@@ -11,7 +11,7 @@ from dataclasses import dataclass, replace
 from functools import partial
 from itertools import groupby
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from bounded_io import (  # noqa: E402
     read_stable_bytes,
@@ -979,7 +979,7 @@ def resolve_compile_plan(
 class CompileRepairCapacityError(RuntimeError):
     """Draft or review work that cannot fit beside its complete source group."""
 
-    def __init__(self, message, feedback):
+    def __init__(self, message: str, feedback: tuple[str, ...]) -> None:
         super().__init__(message)
         self.feedback = feedback
 
@@ -992,7 +992,7 @@ class CompilePlanUnavailable(RuntimeError):
     """
 
 
-def unresolved_compile_error(attempt):
+def unresolved_compile_error(attempt: Any) -> RuntimeError:
     message = _no_plan_message(attempt.lineage)
     capacity = any(item.endswith(':input_budget') for item in attempt.lineage)
     if capacity:

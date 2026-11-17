@@ -225,7 +225,7 @@
         "CompiledDaySupersession",
         "CurrentHistoricalSourceWork"
       ],
-      "contract_sha256": "724e9cd940da8b3126c83bea3d41c6c286d96e57a18bdba79ab4e8e1d02ad4c2",
+      "contract_sha256": "ed5dd54a3b2ac81b08377bb238f7c50795c65f6c99549c6a47cd87049860f743",
       "integration_tests": [
         "tests/test_historical_work_captures_each_physical_layout_once.py"
       ]

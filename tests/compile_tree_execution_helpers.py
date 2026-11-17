@@ -1,5 +1,8 @@
 """Helpers shared by test_compile_tree_execution.py and the test files importing them."""
 
+from collections.abc import Iterator
+from typing import Any
+
 import compile_controller as controller
 import pytest
 from llm_wiki import compile_pipeline_batches
@@ -13,7 +16,7 @@ from tests.repair_capacity_repartitions_complete_source_work_helpers import _bat
 
 
 @pytest.fixture
-def saved_tree(work, compiler_case):
+def saved_tree(work: Any, compiler_case: Any) -> Iterator[tuple[Any, Any, Any, Any]]:
     original, feedback = _batch(work[0].vault)
     snapshot = _snapshot(work, original.inputs)
     items = _consume(work, snapshot)
@@ -29,6 +32,6 @@ def saved_tree(work, compiler_case):
         items.close()
 
 
-def _execute_planned(work, saved_tree, **options):
+def _execute_planned(work: Any, saved_tree: Any, **options: Any) -> Any:
     return controller.execute_planned_compile_tree(work[0], work[1], saved_tree[0], saved_tree[1],
         coordinator=_coordinator(work), dependencies=_dependencies(), trigger='manual', **options)

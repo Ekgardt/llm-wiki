@@ -69,7 +69,7 @@
         "resolve_model_call",
         "run_model_call"
       ],
-      "contract_sha256": "a59dd69bd6bfcc4374b0fb25bbfc881cce7d63f611e93a7c2df0cc1b2611397e",
+      "contract_sha256": "f0c55954c65ebb39673279941c283057394b566c97927eeeb68ef3324ed29bc4",
       "integration_tests": [
         "tests/test_compile_archive_json_views.py",
         "tests/test_compile_artifact_retention.py",

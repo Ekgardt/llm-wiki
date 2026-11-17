@@ -101,7 +101,7 @@
         "save_compile_inputs",
         "write_archive_snapshot"
       ],
-      "contract_sha256": "0f924fffd2bb188bc2396b36c24dac79808bfcda7ff7f7c8c25098df910eaa49",
+      "contract_sha256": "ce8202a5d287213cda1acc5318888fd43da41bde38435b4ac44a0c0c193b655c",
       "integration_tests": [
         "tests/test_compile_durable_batch_context.py"
       ]

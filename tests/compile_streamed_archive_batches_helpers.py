@@ -4,6 +4,7 @@ import io
 import zipfile
 from contextlib import contextmanager
 from dataclasses import replace
+from typing import Any
 
 import compile_controller as controller
 from bounded_io import VerifiedByteRange
@@ -35,7 +36,7 @@ def _materialized_daily(part):
     return replace(part, native_frames=tuple(part.native_frames))
 
 
-def _many_days(count=8):
+def _many_days(count: int = 8) -> Any:
     first = _inputs()
     daily = first.dailies[0]
     source = first.sources[0]

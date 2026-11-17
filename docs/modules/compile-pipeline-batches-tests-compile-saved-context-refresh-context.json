@@ -104,7 +104,7 @@
         "save_compile_inputs",
         "write_archive_snapshot"
       ],
-      "contract_sha256": "c940ec38fec7ea406501fceac5487590e6c3f8188ee7f94033221a46f0f93add",
+      "contract_sha256": "411ddf71da56d694e0ff9026ee139c1df7b63b5ee1224bf65f733faeee3bece3",
       "integration_tests": [
         "tests/test_compile_saved_context_refresh.py"
       ]

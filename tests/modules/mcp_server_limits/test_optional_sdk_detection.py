@@ -41,3 +41,9 @@ def test_a_missing_core_sdk_reports_no_mcp(monkeypatch, blocked):
     limits = _fresh_limits(f'limits_without_{blocked.replace(".", "_")}')
     assert limits.MCP_AVAILABLE is False
     assert limits.MCP_CALL_TOOL_RESULT_AVAILABLE is False
+
+
+def test_a_module_without_the_name_is_an_absent_capability():
+    limits = _fresh_limits('limits_probing_absent_names')
+    assert limits._optional_sdk_name('mcp.types', 'NoSuchCapability') is None
+    assert limits._optional_sdk_name('mcp.no_such_module', 'Server') is None

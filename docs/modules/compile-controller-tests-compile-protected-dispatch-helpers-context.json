@@ -102,7 +102,7 @@
         "compile_inputs_digest",
         "write_archive_snapshot"
       ],
-      "contract_sha256": "204126029f1e585a1de27d41a6e015aef5c13523934a8dcc63fe6bb256d46493",
+      "contract_sha256": "214d40f8732863b597bf969b0b9cc9bc3d1482c9b05769bbc5833faffff55dd1",
       "integration_tests": [
         "tests/test_compile_atomic_capture.py",
         "tests/test_compile_delivery_scope.py",

@@ -205,7 +205,7 @@
         "source_line_choices",
         "validated_critique_feedback"
       ],
-      "contract_sha256": "e95e2b228655b81079483a6f18c2fc67af53b2e98e6cfdf7bb6add159095f2f5",
+      "contract_sha256": "0dc3fe8bd65e48369dd9059b0250b5edb37dc36070bbe9d9573040a19ec97093",
       "integration_tests": [
         "tests/test_compile_critic_preserves_native_claim_origin.py"
       ]

@@ -88,7 +88,7 @@
         "run_model_call",
         "write_archive_snapshot"
       ],
-      "contract_sha256": "fbced9fa2ddb9ffdfdcdc4390a43ec05738a1bf5a8459cc4bc42e5009b059cd0",
+      "contract_sha256": "a841255545bde59086a8076d78e1c89809444034c552f40989a1231aa77ebc0a",
       "integration_tests": [
         "tests/test_compile_source_overlap.py"
       ]

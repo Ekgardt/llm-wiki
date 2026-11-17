@@ -2,11 +2,12 @@
 from __future__ import annotations
 
 import concurrent.futures
+import importlib
 import itertools
 import threading
 from contextvars import ContextVar
 from pathlib import Path
-from typing import NamedTuple
+from typing import Any, NamedTuple
 
 # A queue commit locks readers out for milliseconds; wait it out instead of
 # reporting a live queue as unreadable.
@@ -61,7 +62,7 @@ PRECISE_ARCHITECTURE_MODES = frozenset(
     {"definition", "references", "implementations", "type", "diagnostics"}
 )
 MCP_WORKER_SLOTS = 4
-MCP_WORKERS: set[concurrent.futures.Future] = set()
+MCP_WORKERS: set[concurrent.futures.Future[object]] = set()
 MCP_WORKERS_LOCK = threading.Lock()
 _MCP_WORKER_IDS = itertools.count(1)
 _OPERATION_DEADLINE: ContextVar[float | None] = ContextVar(
@@ -77,31 +78,23 @@ RETRIEVAL_TRACE_SCHEMA = (
     Path(__file__).resolve().parents[1] / "schemas" / "retrieval-trace-v1.json"
 )
 
-MCP_AVAILABLE = False
-Resource = None
-ReadResourceContents = None
-CallToolResult = None
-TextContent = None
-Server = None
-stdio_server = None
-Tool = None
-try:
-    from mcp.server import Server
-    from mcp.server.stdio import stdio_server as stdio_server
-    from mcp.types import TextContent as TextContent
-    from mcp.types import Tool
-    MCP_AVAILABLE = True
-except ImportError:
-    pass
-try:
-    from mcp.types import CallToolResult
-except ImportError:
-    pass
-try:
-    from mcp.server.lowlevel.helper_types import ReadResourceContents
-    from mcp.types import Resource
-except ImportError:
-    pass
+
+def _optional_sdk_name(module: str, name: str) -> Any:
+    """One name from the MCP SDK, or None when the installed SDK lacks it."""
+    try:
+        return getattr(importlib.import_module(module), name)
+    except (ImportError, AttributeError):
+        return None
+
+
+Server: Any = _optional_sdk_name("mcp.server", "Server")
+stdio_server: Any = _optional_sdk_name("mcp.server.stdio", "stdio_server")
+TextContent: Any = _optional_sdk_name("mcp.types", "TextContent")
+Tool: Any = _optional_sdk_name("mcp.types", "Tool")
+CallToolResult: Any = _optional_sdk_name("mcp.types", "CallToolResult")
+ReadResourceContents: Any = _optional_sdk_name("mcp.server.lowlevel.helper_types", "ReadResourceContents")
+Resource: Any = _optional_sdk_name("mcp.types", "Resource")
+MCP_AVAILABLE = None not in (Server, stdio_server, TextContent, Tool)
 
 MCP_STRUCTURED_OUTPUT_AVAILABLE = "outputSchema" in getattr(Tool, "model_fields", {})
 MCP_CALL_TOOL_RESULT_AVAILABLE = MCP_AVAILABLE and {"content", "structuredContent", "isError"}.issubset(

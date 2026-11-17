@@ -18,7 +18,8 @@ from typing import Any, NamedTuple
 
 import generation_maintenance  # noqa: E402
 import reliable_memory
-from bounded_io import open_stable_range, read_stable_bytes
+from bounded_io import open_stable_range
+from bounded_io import read_stable_bytes as read_stable_bytes
 from llm_wiki import doctor_base, monotonic_deadline
 from llm_wiki.doctor_base import (
     MAX_OPERATIONAL_ROWS,
@@ -1269,14 +1270,14 @@ def _historical_unit_key(unit):
 class CurrentHistoricalSourceWork:
     """Exact new source work, without granting historical offset authority."""
 
-    def __init__(self, reader, previous):
+    def __init__(self, reader: Any, previous: dict[str, Any]) -> None:
         self.reader = reader
         self.previous = previous
-        self.captured = {}
-        self.layouts = {}
-        self.units = []
+        self.captured: dict[Any, Any] = {}
+        self.layouts: dict[Any, Any] = {}
+        self.units: list[Any] = []
         self.selector = reader._cached_selection()
-        self.owner = None
+        self.owner: contextlib.ExitStack | None = None
 
     def __enter__(self):
         self.reader._require_active()
@@ -1287,7 +1288,7 @@ class CurrentHistoricalSourceWork:
 
     def __exit__(self, *exception):
         try:
-            return self.owner.__exit__(*exception)
+            return self._require_source_scope().__exit__(*exception)
         finally:
             self.owner = None
             self.selector.prefix_source = None
@@ -1295,7 +1296,7 @@ class CurrentHistoricalSourceWork:
             self.layouts.clear()
             self.units.clear()
 
-    def verified(self):
+    def verified(self) -> Any:
         with self:
             return self._verify_current_work()
 
@@ -1324,10 +1325,10 @@ class CurrentHistoricalSourceWork:
         )
 
         self.reader._require_active()
-        self._require_source_scope()
+        owner = self._require_source_scope()
         if logical in self.layouts:
             return self.layouts[logical]
-        raw = self.owner.enter_context(self.reader._open_daily(logical))
+        raw = owner.enter_context(self.reader._open_daily(logical))
         with self.reader._breadcrumb_record_parsing():
             frames = native_daily_frames(logical, raw, self.reader.vault_root)
             layout = _HistoricalDailyLayout(logical, raw, frames)
@@ -1336,9 +1337,10 @@ class CurrentHistoricalSourceWork:
         self.layouts[logical] = layout
         return self.layouts[logical]
 
-    def _require_source_scope(self):
+    def _require_source_scope(self) -> contextlib.ExitStack:
         if self.owner is None:
             raise ValueError("historical capture requires an active source scope")
+        return self.owner
 
     def _matching_unit(self, source):
         layout = self._capture(source["logical_path"])

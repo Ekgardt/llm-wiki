@@ -8,6 +8,7 @@ import zipfile
 from collections.abc import Sequence
 from dataclasses import asdict, fields
 from functools import partial
+from typing import Any
 
 import compile_progress as progress
 from bounded_io import VerifiedByteRange, immutable_source_digest
@@ -270,7 +271,7 @@ def discard_record(_name, _data):
     """Identity computation does not publish archive entries."""
 
 
-def compile_inputs_digest(inputs):
+def compile_inputs_digest(inputs: Any) -> str:
     """Bind all record metadata and original byte digests, without base64 copies."""
     manifest = _archive_manifest(inputs, blob_digest, discard_record)
     return hashlib.sha256(snapshot_json(manifest)).hexdigest()

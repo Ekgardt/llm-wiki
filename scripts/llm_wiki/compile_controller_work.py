@@ -2,9 +2,11 @@
 from __future__ import annotations
 
 import hashlib
+from collections.abc import Callable
 from contextlib import closing
 from dataclasses import dataclass, replace
 from dataclasses import field as dataclass_field
+from typing import Any
 
 import compile_progress as progress
 from llm_wiki.compile_call_runtime import CompileDelivery
@@ -31,9 +33,9 @@ from llm_wiki.compile_controller_reader import open_compile_inputs
 from llm_wiki.compile_controller_repair import RepairProof
 
 
-def execute_compile_work(queue, lease, snapshot, *, coordinator, dependencies, request, plan,
-                         trigger, owner=None, deadline=None, cancelled=None,
-                         capture=capture_current_compile_context):
+def execute_compile_work(queue: Any, lease: Any, snapshot: Any, *, coordinator: Any, dependencies: Any,
+                         request: Any, plan: Any, trigger: str, owner: Any = None, deadline: Any = None,
+                         cancelled: Any = None, capture: Any = capture_current_compile_context) -> Any:
     """Execute every retained root, then prove full coverage before returning success.
 
     Preflight refusals remain in the retained plan and prevent final proof. The
@@ -175,7 +177,7 @@ def compile_root_details(origin, source_digest, dependency_digest, request):
                                  compile_identity_digest(request))
 
 
-def begin_compile_work(queue, lease, prepare):
+def begin_compile_work(queue: Any, lease: Any, prepare: Callable[[], Any]) -> Any:
     """Find retained original work before any live input/dependency preparation.
 
     prepare is called only for new work and returns source digest, dependency

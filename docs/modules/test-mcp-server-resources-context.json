@@ -121,7 +121,7 @@
         "run_server",
         "timeout_envelope_text"
       ],
-      "contract_sha256": "ec4c77e24b3e17ac90206df81e4956d252dc99e530026eae40c5b1a9748f6a9c",
+      "contract_sha256": "84bc4137429e790b5899f5de3d5d73074f9d7beeb911c58cd0551f4d229d0c8f",
       "integration_tests": [
         "tests/test_a_context_answer_fits_the_budget_it_was_given.py",
         "tests/test_a_context_answer_says_when_its_corpus_was_read.py",

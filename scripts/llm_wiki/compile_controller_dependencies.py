@@ -7,6 +7,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from functools import partial
 from pathlib import Path
+from typing import Any
 
 import compile_progress as progress
 from llm_wiki.compile_controller_base import compile_identity_digest
@@ -218,7 +219,7 @@ class CompileDependencies:
             raise TypeError('compile dependency inspector must be callable')
 
     @classmethod
-    def capture(cls, inspect):
+    def capture(cls, inspect: Callable[[], Any]) -> CompileDependencies:
         return cls(compile_dependency_digest(inspect()), inspect)
 
     def verify(self):

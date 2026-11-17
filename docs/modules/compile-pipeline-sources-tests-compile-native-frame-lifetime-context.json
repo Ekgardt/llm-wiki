@@ -99,7 +99,7 @@
         "compile_inputs_digest",
         "write_archive_snapshot"
       ],
-      "contract_sha256": "515b6c5ce6d687910f38eb6af2e549914e92f5325406b0e3453053fac5cc01ee",
+      "contract_sha256": "855b62f3f5c4c526b7b1c171b039e4b2a15a2a0398a7133bce4af95633115576",
       "integration_tests": [
         "tests/test_compile_native_frame_lifetime.py"
       ]

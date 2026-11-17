@@ -81,7 +81,7 @@
         "save_compile_inputs",
         "write_archive_snapshot"
       ],
-      "contract_sha256": "04784f126ae55d80410f47b3127ea98a6798f0669f144e3d58f4ff5747c0ea3f",
+      "contract_sha256": "9421dcc0d3d01fc264f7d6f4b7468efb3cd38fb2c04e750f5610397bd12d96dd",
       "integration_tests": [
         "tests/test_compile_probe_replay.py"
       ]

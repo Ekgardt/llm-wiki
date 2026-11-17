@@ -78,7 +78,7 @@
         "run_model_call",
         "write_archive_snapshot"
       ],
-      "contract_sha256": "7cfc97727bc63e2ea2ef839621e4768119d3718f212bd8bd96bd533e155a5841",
+      "contract_sha256": "f1bdf430c3fb0af419171c38f6432fc8295728c526f17fc63eb217f8d962eadb",
       "integration_tests": [
         "tests/test_compile_delivery_scope.py"
       ]

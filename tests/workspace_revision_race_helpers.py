@@ -8,10 +8,6 @@ from pathlib import Path
 import pytest
 import workspace_revision
 
-from tests.workspace_revision_helpers import (
-    _isolated_global_git_configuration,  # noqa: F401
-    )
-
 
 def _qualify_private_git_wrapper(
     monkeypatch: pytest.MonkeyPatch,

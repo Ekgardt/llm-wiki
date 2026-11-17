@@ -79,7 +79,7 @@
         "compile_inputs_digest",
         "write_archive_snapshot"
       ],
-      "contract_sha256": "71f79cff16dce8dd30c3d868ef6dd56579ea261c62a2b29ec7909a5b7ae07186",
+      "contract_sha256": "7d2b06f8b8b781c4951c4fd5f3d9ede17b29888ce7d5ab3ea0aa8d062c985b74",
       "integration_tests": [
         "tests/test_compile_verified_original_ranges.py",
         "tests/test_evidence_verified_ranges.py",

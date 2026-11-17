@@ -1,6 +1,7 @@
 """Helpers shared by test_compile_critic_drop_cannot_complete_source_work.py and the test files importing them."""
 
 import json
+from typing import Any
 from unittest.mock import Mock
 
 from compile_cache import CompileCache
@@ -22,7 +23,7 @@ def _inputs(root):
     return compile_pipeline_sources.snapshot_compile_inputs([path])
 
 
-def _proposed(slug='cedar-merge-order'):
+def _proposed(slug: str = 'cedar-merge-order') -> Any:
     operation = _operation('create', slug)
     operation['summary'] = 'A project-specific merge order was observed.'
     operation['body_markdown'] = 'Project Cedar merged change C after changes A and B.'

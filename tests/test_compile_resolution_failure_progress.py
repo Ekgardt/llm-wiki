@@ -1,6 +1,7 @@
 """An exhausted validated-plan attempt must not starve independent source work."""
 import json
 from types import SimpleNamespace
+from typing import Any, NoReturn
 
 import compile_controller as controller
 import llm_client
@@ -24,16 +25,16 @@ from tests.compile_work_completion_helpers import _plan
 from tests.repair_capacity_repartitions_complete_source_work_helpers import _batch
 
 
-def _invalid_first_child(monkeypatch, saved_tree):
+def _invalid_first_child(monkeypatch: pytest.MonkeyPatch, saved_tree: Any) -> list[bool]:
     original = compile_pipeline_batches.resolve_compile_plan
-    calls = []
+    calls: list[bool] = []
     first = saved_tree[3][0]
 
-    def invalid(*args):
+    def invalid(*args: object) -> llm_client.BackendResponse:
         calls.append(True)
         return llm_client.BackendResponse('not a JSON plan')
 
-    def resolve(*args, **kwargs):
+    def resolve(*args: Any, **kwargs: Any) -> Any:
         child = SimpleNamespace(feedback=kwargs['critic_feedback'])
         _child_backend(monkeypatch, child)
         if child.feedback == first.feedback:
@@ -45,8 +46,8 @@ def _invalid_first_child(monkeypatch, saved_tree):
 
 
 def test_invalid_first_child_keeps_failure_and_finishes_sibling_without_repeating_calls(
-    work, compiler_case, saved_tree, monkeypatch,
-):
+    work: Any, compiler_case: Any, saved_tree: Any, monkeypatch: pytest.MonkeyPatch,
+) -> None:
     calls = _invalid_first_child(monkeypatch, saved_tree)
     assert _execute_planned(work, saved_tree) is None
     first, second = saved_tree[3]
@@ -62,11 +63,11 @@ def test_invalid_first_child_keeps_failure_and_finishes_sibling_without_repeatin
 
 
 def test_failure_diagnostic_write_error_stops_before_sibling(
-    work, compiler_case, saved_tree, monkeypatch,
-):
+    work: Any, compiler_case: Any, saved_tree: Any, monkeypatch: pytest.MonkeyPatch,
+) -> None:
     _invalid_first_child(monkeypatch, saved_tree)
 
-    def unavailable(*args, **kwargs):
+    def unavailable(*args: object, **kwargs: object) -> NoReturn:
         raise OSError('failure diagnostic storage unavailable')
 
     point_compile_path(monkeypatch, 'record_compile_source_failures', unavailable)
@@ -75,7 +76,7 @@ def test_failure_diagnostic_write_error_stops_before_sibling(
     assert work[0].get_compile_event(saved_tree[3][1].work_id) is None
 
 
-def test_only_exhausted_resolution_has_specific_failure_type():
+def test_only_exhausted_resolution_has_specific_failure_type() -> None:
     attempt = SimpleNamespace(lineage=('draft:fake:validation_error',), critic_feedback=())
     failure = compile_pipeline_batches.unresolved_compile_error(attempt)
     assert isinstance(failure, compile_pipeline_batches.CompilePlanUnavailable)
@@ -83,24 +84,24 @@ def test_only_exhausted_resolution_has_specific_failure_type():
     assert 'validation_error' in str(failure)
 
 
-def test_capacity_failure_keeps_existing_repartition_contract():
+def test_capacity_failure_keeps_existing_repartition_contract() -> None:
     attempt = SimpleNamespace(lineage=('draft:fake:input_budget',), critic_feedback=('complete proposal',))
     failure = compile_pipeline_batches.unresolved_compile_error(attempt)
     assert isinstance(failure, compile_pipeline_batches.CompileRepairCapacityError)
     assert failure.feedback == attempt.critic_feedback
 
 
-def _root_resolver(monkeypatch, feedback):
+def _root_resolver(monkeypatch: pytest.MonkeyPatch, feedback: Any) -> list[bool]:
     original = compile_pipeline_batches.resolve_compile_plan
     operations = [item for record in feedback for item in json.loads(record)['operations']]
     first_day = min(item['evidence'][0]['daily_date'] for item in operations)
-    calls = []
+    calls: list[bool] = []
 
-    def invalid(*args):
+    def invalid(*args: object) -> llm_client.BackendResponse:
         calls.append(True)
         return llm_client.BackendResponse('invalid JSON')
 
-    def resolve(*args, **kwargs):
+    def resolve(*args: Any, **kwargs: Any) -> Any:
         dates = {part.logical_path.rsplit('/', 1)[1][:-3] for part in kwargs['batch'].inputs.dailies}
         selected = [item for item in operations if item['evidence'][0]['daily_date'] in dates]
         _child_backend(monkeypatch, SimpleNamespace(feedback=(json.dumps({'operations': selected}),)))
@@ -113,8 +114,8 @@ def _root_resolver(monkeypatch, feedback):
 
 
 def test_failed_first_root_allows_later_root_but_never_whole_work_completion(
-    work, compiler_case, monkeypatch,
-):
+    work: Any, compiler_case: Any, monkeypatch: pytest.MonkeyPatch,
+) -> None:
     batch, feedback = _batch(work[0].vault)
     snapshot = _snapshot(work, batch.inputs)
     calls = _root_resolver(monkeypatch, feedback)

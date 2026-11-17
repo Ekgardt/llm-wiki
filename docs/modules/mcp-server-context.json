@@ -131,7 +131,7 @@
         "PRECISE_ARCHITECTURE_MODES",
         "RETRIEVAL_TRACE_SCHEMA"
       ],
-      "contract_sha256": "d2dff6967f6b8fceb301089f80c5584411b48c8410b75355aa1bbeb63fd12bd3",
+      "contract_sha256": "2a0b410c5deae108edb3d23fd2865420cc53a5d252bb0e008a5849d7b3710a1c",
       "integration_tests": [
         "tests/test_mcp_server_navigation_adapters.py",
         "tests/test_mcp_server_precise_requests.py",

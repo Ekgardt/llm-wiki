@@ -66,7 +66,7 @@
         "compile_inputs_digest",
         "write_compile_capture"
       ],
-      "contract_sha256": "fd1e66525e8b9bffd997aac6e137ed5a5206ccbff2c406a632408f0e0ec80c5f",
+      "contract_sha256": "50e3564964b39490ac9b1a3612d5508fa03511a70049d7c6c6c43d36f8795818",
       "integration_tests": [
         "tests/test_compile_streaming_capture.py"
       ]

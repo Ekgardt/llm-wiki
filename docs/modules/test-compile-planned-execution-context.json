@@ -99,7 +99,7 @@
         "save_compile_inputs",
         "write_archive_snapshot"
       ],
-      "contract_sha256": "1f9e5e3ae33e2df6c78a57bf15223ad69facab6c25f4d4e5d8ab593f8f162c94",
+      "contract_sha256": "8f8f399e5db983b12e42172a618754e6e3d13b8680ad324613ec6a7d22fbc8d7",
       "integration_tests": [
         "tests/test_compile_archive_json_views.py",
         "tests/test_compile_artifact_retention.py",
@@ -214,7 +214,7 @@
         "CompileRepairCapacityError",
         "draft_prompt_count"
       ],
-      "contract_sha256": "1298d63668b8cebee3a116c821f17c8a07d5c5e1915c216307c138c029896c30",
+      "contract_sha256": "70b42f955454a2afc2ac6c4049a3fccb029a0fd5f7cef925df1440ba2eefd7d4",
       "integration_tests": [
         "tests/test_compile_planned_execution.py"
       ]

@@ -82,7 +82,7 @@
         "save_compile_capture",
         "write_archive_snapshot"
       ],
-      "contract_sha256": "b38603921d05a27f4f279c3a34041779e33edfa7b94fcc618b6f5d5f8a71927e",
+      "contract_sha256": "0fc7e574e1e857a25f031eee10d11ff3175241f6e97e434807ea4ee1b4391d7a",
       "integration_tests": [
         "tests/test_compile_task_origin.py"
       ]

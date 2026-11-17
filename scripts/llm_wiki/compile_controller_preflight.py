@@ -3,8 +3,10 @@ from __future__ import annotations
 
 import hashlib
 from collections import Counter
+from collections.abc import Generator
 from dataclasses import dataclass, replace
 from functools import partial
+from typing import Any
 
 import compile_progress as progress
 from llm_wiki.compile_controller_archive import archive_record_value, blob_digest, snapshot_json
@@ -190,8 +192,8 @@ class _PreflightMatch:
             raise progress.ProgressCorrupt('preflight replay has trailing records')
 
 
-def iter_compile_preflight(queue, lease, snapshot, *, dependencies, request, plan,
-                           on_refused, deadline=None):
+def iter_compile_preflight(queue: Any, lease: Any, snapshot: Any, *, dependencies: Any, request: Any,
+                           plan: Any, on_refused: Any, deadline: Any = None) -> Generator[Any]:
     """Yield verified batches only after a complete preflight is durable.
 
     Reuse the existing writer as an exact-byte comparator instead of maintaining

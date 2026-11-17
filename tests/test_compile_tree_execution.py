@@ -1,5 +1,6 @@
 """Saved partitions execute independently without masking incomplete delivery."""
 from types import SimpleNamespace
+from typing import Any, NoReturn
 
 import compile_controller as controller
 import compile_progress as progress
@@ -22,16 +23,16 @@ from tests.compile_tree_execution_helpers import (
 )
 
 
-def _execute(work, repair, **options):
+def _execute(work: Any, repair: Any, **options: Any) -> Any:
     return controller.execute_compile_tree(work[0], work[1], repair[1], repair[0],
         coordinator=_coordinator(work), dependencies=_dependencies(), trigger='manual', **options)
 
 
-def _backend_per_leaf(monkeypatch):
+def _backend_per_leaf(monkeypatch: pytest.MonkeyPatch) -> list[list[Any]]:
     original = compile_pipeline_batches.resolve_compile_plan
-    calls = []
+    calls: list[list[Any]] = []
 
-    def resolve(*args, **kwargs):
+    def resolve(*args: Any, **kwargs: Any) -> Any:
         child = SimpleNamespace(feedback=kwargs['critic_feedback'])
         calls.append(_child_backend(monkeypatch, child))
         return original(*args, **kwargs)
@@ -40,11 +41,11 @@ def _backend_per_leaf(monkeypatch):
     return calls
 
 
-def _forbidden(*args, **kwargs):
+def _forbidden(*args: object, **kwargs: object) -> NoReturn:
     raise AssertionError('completed tree called the model again')
 
 
-def test_tree_executes_saved_partition_and_resumes_without_model(work, repair, monkeypatch):
+def test_tree_executes_saved_partition_and_resumes_without_model(work: Any, repair: Any, monkeypatch: pytest.MonkeyPatch) -> None:
     saved = _save(work, repair)
     calls = _backend_per_leaf(monkeypatch)
     completed = _execute(work, repair)
@@ -56,7 +57,7 @@ def test_tree_executes_saved_partition_and_resumes_without_model(work, repair, m
     assert work[0].get(work[1].id).state == 'leased'
 
 
-def test_tree_executes_nested_saved_partition(work, repair, monkeypatch):
+def test_tree_executes_nested_saved_partition(work: Any, repair: Any, monkeypatch: pytest.MonkeyPatch) -> None:
     saved = _save(work, repair)
     branch = _read(work, repair, saved)[1]
     context = controller.begin_compile_repair_batch(work[0], work[1], branch, repair[1], repair[0],
@@ -70,17 +71,17 @@ def test_tree_executes_nested_saved_partition(work, repair, monkeypatch):
     assert work[0].get_compile_event(branch.work_id).stage == 'published'
 
 
-def test_uncertain_child_does_not_stop_sibling_or_become_success(work, saved_tree, monkeypatch):  # noqa: F811
+def test_uncertain_child_does_not_stop_sibling_or_become_success(work: Any, saved_tree: Any, monkeypatch: pytest.MonkeyPatch) -> None:  # noqa: F811
     saved = saved_tree[2]
     first, second = saved_tree[3]
     original = compile_pipeline_batches.resolve_compile_plan
-    calls = []
+    calls: list[str] = []
 
-    def timeout(*args):
+    def timeout(*args: object) -> NoReturn:
         calls.append('unknown')
         raise TimeoutError('provider may have run')
 
-    def resolve(*args, **kwargs):
+    def resolve(*args: Any, **kwargs: Any) -> Any:
         child = SimpleNamespace(feedback=kwargs['critic_feedback'])
         _child_backend(monkeypatch, child)
         if child.feedback == first.feedback:
@@ -101,7 +102,7 @@ def test_uncertain_child_does_not_stop_sibling_or_become_success(work, saved_tre
     assert calls == ['unknown']
 
 
-def test_planned_tree_owns_archive_and_accepts_existing_delivery(work, saved_tree, monkeypatch):  # noqa: F811
+def test_planned_tree_owns_archive_and_accepts_existing_delivery(work: Any, saved_tree: Any, monkeypatch: pytest.MonkeyPatch) -> None:  # noqa: F811
     calls = _backend_per_leaf(monkeypatch)
     with controller.CompileDelivery(work[0], work[1]) as delivery:
         completed = _execute_planned(work, saved_tree, delivery=delivery, capture=_forbidden)
@@ -111,11 +112,11 @@ def test_planned_tree_owns_archive_and_accepts_existing_delivery(work, saved_tre
     assert _execute_planned(work, saved_tree, capture=_forbidden) == completed
 
 
-def test_new_capacity_failure_is_saved_and_executed_in_same_tree(work, repair, monkeypatch):
+def test_new_capacity_failure_is_saved_and_executed_in_same_tree(work: Any, repair: Any, monkeypatch: pytest.MonkeyPatch) -> None:
     original = compile_pipeline_batches.resolve_compile_plan
-    feedback_seen = []
+    feedback_seen: list[Any] = []
 
-    def resolve(*args, **kwargs):
+    def resolve(*args: Any, **kwargs: Any) -> Any:
         feedback = kwargs['critic_feedback']
         feedback_seen.append(feedback)
         if not feedback:
@@ -129,12 +130,12 @@ def test_new_capacity_failure_is_saved_and_executed_in_same_tree(work, repair, m
     assert feedback_seen[0] == ()
 
 
-def test_indivisible_child_does_not_hide_or_stop_other_sources(work, repair, monkeypatch):
+def test_indivisible_child_does_not_hide_or_stop_other_sources(work: Any, repair: Any, monkeypatch: pytest.MonkeyPatch) -> None:
     saved = _save(work, repair)
     first, second = _read(work, repair, saved)
     original = compile_pipeline_batches.resolve_compile_plan
 
-    def resolve(*args, **kwargs):
+    def resolve(*args: Any, **kwargs: Any) -> Any:
         child = SimpleNamespace(feedback=kwargs['critic_feedback'])
         if child.feedback == first.feedback:
             raise compile_pipeline_batches.CompileRepairCapacityError('indivisible', first.feedback)
@@ -154,11 +155,13 @@ def test_indivisible_child_does_not_hide_or_stop_other_sources(work, repair, mon
     progress.ProgressConflict('authority changed'),
     RuntimeError('semantic rejection'),
 ])
-def test_unsafe_failure_stops_tree_before_admitting_siblings(work, repair, monkeypatch, failure):
+def test_unsafe_failure_stops_tree_before_admitting_siblings(
+    work: Any, repair: Any, monkeypatch: pytest.MonkeyPatch, failure: Exception,
+) -> None:
     saved = _save(work, repair)
     children = _read(work, repair, saved)
 
-    def unavailable(*args, **kwargs):
+    def unavailable(*args: object, **kwargs: object) -> NoReturn:
         raise failure
 
     point_compile_path(monkeypatch, 'resolve_compile_plan', unavailable)
@@ -168,7 +171,7 @@ def test_unsafe_failure_stops_tree_before_admitting_siblings(work, repair, monke
 
 
 @pytest.mark.parametrize('options', [{'deadline': 0}, {'cancelled': lambda: True}])
-def test_tree_checks_cancellation_before_child_admission(work, repair, options):
+def test_tree_checks_cancellation_before_child_admission(work: Any, repair: Any, options: dict[str, Any]) -> None:
     saved = _save(work, repair)
     children = _read(work, repair, saved)
     with pytest.raises(TimeoutError):

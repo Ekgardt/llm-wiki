@@ -21,7 +21,14 @@ from workspace_revision import (
     diff_workspace_revisions,
 )
 
-from tests.workspace_revision_helpers import _isolated_global_git_configuration  # noqa: F401
+from tests.workspace_revision_helpers import isolate_global_git_configuration
+
+
+@pytest.fixture(autouse=True)
+def _isolated_global_git_configuration(
+    tmp_path_factory: pytest.TempPathFactory, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    isolate_global_git_configuration(tmp_path_factory, monkeypatch)
 
 
 def _entries(revision: WorkspaceRevision) -> dict[str, RevisionEntry]:

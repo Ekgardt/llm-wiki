@@ -29,15 +29,20 @@ from tests.capture_terminal_helpers import (  # noqa: E402
     _expire_capture_lease,
     _FakeNoContentProvider,
     _NoContentProcessor,
-    _own_session_vault,  # noqa: F401
     _ready_intent_binding,
     _TimedCaptureProcessor,
+    keep_session_records_out_of_the_vault,
 )
 from tests.queue_v3_capture_links_helpers import (  # noqa: E402
     _capture_binding,  # noqa: E402
     _coordinator,
     _queue,
 )
+
+
+@pytest.fixture(autouse=True)
+def _own_session_vault(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    return keep_session_records_out_of_the_vault(tmp_path, monkeypatch)
 
 
 def _publish_decision(

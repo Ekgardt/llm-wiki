@@ -10,7 +10,7 @@ from dataclasses import replace
 from functools import partial
 from itertools import groupby
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from claims import (
     claim_json_bytes,
@@ -1001,7 +1001,7 @@ def _verdicts_for_reviews(reviews):
     return verdicts
 
 
-def validated_critique_feedback(batch, reviews, *, inputs=None):
+def validated_critique_feedback(batch: Sequence[Any], reviews: Any, *, inputs: Any = None) -> tuple[str, ...]:
     slugs = {str(item['slug']) for item in batch}
     operations = [_review_feedback_operation(item, inputs) for item in batch]
     feedback = {'operations': operations, 'reviews': _batch_review_records(reviews, slugs)}

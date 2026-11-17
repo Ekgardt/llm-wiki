@@ -57,7 +57,7 @@
         "snapshot_json",
         "write_archive_snapshot"
       ],
-      "contract_sha256": "48d1f18455810f754fe4248bf6a88dc8dab27fdb9a5802d6ddaf8fece1d9cf24",
+      "contract_sha256": "7e61968f08227fe74d6af04d1a6849661c200dc466882853a4a491bb54b2f27d",
       "integration_tests": [
         "tests/test_compile_archive_json_views.py",
         "tests/test_compile_artifact_retention.py",

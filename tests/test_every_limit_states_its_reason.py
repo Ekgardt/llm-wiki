@@ -97,7 +97,7 @@ def _vault(tmp_path: Path, notes: int, toml: str | None = None) -> Path:
     return tmp_path
 
 
-def test_without_a_file_every_ceiling_has_its_declared_default(tmp_path: Path) -> None:
+def test_without_a_file_every_ceiling_is_the_constant_it_replaced(tmp_path: Path) -> None:
     values = settings.effective(tmp_path, environ={})
     assert {name: item.value for name, item in values.items()} == REPLACED
     assert {item.source for item in values.values()} == {settings.DEFAULT_SOURCE}

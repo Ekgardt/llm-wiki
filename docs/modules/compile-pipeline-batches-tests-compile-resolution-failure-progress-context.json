@@ -112,7 +112,7 @@
         "save_compile_repair",
         "write_archive_snapshot"
       ],
-      "contract_sha256": "29320bb25509c95a41124ed9e78b27b213acb165d472cc0dc563634a14b5c661",
+      "contract_sha256": "91a8e67338409f0ee56d1917e9ef2e76288934241e9bc2ccafda3ca72d58fe6b",
       "integration_tests": [
         "tests/test_compile_resolution_failure_progress.py"
       ]
@@ -229,7 +229,7 @@
         "resolve_compile_plan",
         "unresolved_compile_error"
       ],
-      "contract_sha256": "384bcc425be9c32c5aa3bad02752449a0379505bbd58a2dc09d06eccaa6cad35",
+      "contract_sha256": "6f5f3001f8f171890dac4681d348569a99b152ad0ee585076b404b08f346477c",
       "integration_tests": [
         "tests/test_compile_resolution_failure_progress.py"
       ]
@@ -243,7 +243,7 @@
         "draft_prompt_text",
         "validated_critique_feedback"
       ],
-      "contract_sha256": "53b36103795d09165a4d5842f1ac53075d48b91fa11047cb11464cc3b917ee76",
+      "contract_sha256": "4de701e2f8944d096e9a86b81fcd8d74a7964057158a7a18895fa2691e6f643c",
       "integration_tests": [
         "tests/test_compile_resolution_failure_progress.py"
       ]

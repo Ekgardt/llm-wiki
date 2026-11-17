@@ -93,7 +93,7 @@
         "validate_capture_archive",
         "write_archive_snapshot"
       ],
-      "contract_sha256": "afaa424c5d0fc548af163edc2a3fbc14fdc214842c8d2d92c89b21cdb0469652",
+      "contract_sha256": "9d11f881b75d775362266e869889336fc187f693c4e2c92cbe86b1059ae510f5",
       "integration_tests": [
         "tests/test_compile_streamed_capture_validation.py"
       ]

@@ -1,15 +1,17 @@
 """Helpers shared by test_repair_capacity_repartitions_complete_source_work.py and the test files importing them."""
 
 import json
+from pathlib import Path
+from typing import Any
 
 from llm_wiki import compile_pipeline_batches, compile_pipeline_prompts, compile_pipeline_sources
 
 from tests.compile_critic_drop_cannot_complete_source_work_helpers import _proposed
 
 
-def _batch(root):
-    paths = []
-    operations = []
+def _batch(root: Path) -> tuple[Any, Any]:
+    paths: list[Path] = []
+    operations: list[Any] = []
     for day in (14, 15, 16):
         date = f'2026-07-{day}'
         quote = f'Project Cedar recorded supported change {day}.'
@@ -29,14 +31,14 @@ def _batch(root):
     return batch, compile_pipeline_prompts.validated_critique_feedback(operations, reviews)
 
 
-def _records(feedback, name):
+def _records(feedback: Any, name: str) -> list[str]:
     return sorted(json.dumps(item, sort_keys=True) for record in feedback
                   for item in json.loads(record)[name])
 
 
-def _parts(children):
+def _parts(children: Any) -> list[Any]:
     return [part for child, _feedback in children for part in child.inputs.dailies]
 
 
-def _combined_feedback(children):
+def _combined_feedback(children: Any) -> tuple[str, ...]:
     return tuple(record for _child, feedback in children for record in feedback)

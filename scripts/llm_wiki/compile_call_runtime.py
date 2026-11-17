@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from dataclasses import replace
 from functools import partial
+from typing import Any
 
 import llm_wiki.compile_event_records as progress
 from llm_wiki.compile_answer_records import (
@@ -70,14 +71,14 @@ class CompileDelivery:
     responsibility, as does renewing the existing queue lease.
     """
 
-    def __init__(self, queue, lease):
+    def __init__(self, queue: Any, lease: Any) -> None:
         self.queue = queue
         self.lease = lease
         self._entered = False
         self._active = False
         self._unknown = False
 
-    def __enter__(self):
+    def __enter__(self) -> CompileDelivery:
         if self._entered:
             raise progress.ProgressConflict('compile delivery already entered')
         self._entered = True
@@ -103,7 +104,7 @@ class CompileDelivery:
         if not self._active:
             raise progress.ProgressConflict('compile delivery is not active')
 
-    def run(self, checkpoint, *, request_digest, invoke):
+    def run(self, checkpoint: Any, *, request_digest: str, invoke: Any) -> Any:
         self._require_active()
         checkpoint = progress.snapshot_event(checkpoint)
         require_checkpoint(checkpoint)

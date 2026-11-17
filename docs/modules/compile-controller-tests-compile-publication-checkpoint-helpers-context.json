@@ -102,7 +102,7 @@
         "save_compile_publication",
         "write_archive_snapshot"
       ],
-      "contract_sha256": "05d98d54c9df8b0b99c4b9e6e8199bd986c9ebdc2885d05ec2cfc468d9d44b1c",
+      "contract_sha256": "1241083b6416f0cc4fe173266f30523f0c0ee280efa771ff8db6d6c5576a5443",
       "integration_tests": [
         "tests/test_compile_publication_checkpoint.py",
         "tests/test_compile_publication_completion.py",

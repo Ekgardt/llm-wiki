@@ -1029,9 +1029,12 @@ def _is_literal_loopback_endpoint(endpoint: str) -> bool:
 class _RejectProviderRedirects(urllib.request.HTTPRedirectHandler):
     """A provider response cannot authorize a different destination or method."""
 
-    def redirect_request(self, req, fp, code, msg, headers, _newurl):
+    def _refuse(self, req, fp, code, _msg, _headers):
         fp.close()
         raise urllib.error.HTTPError(req.full_url, code, "provider_redirect_refused", None, None)
+
+    http_error_301 = http_error_302 = http_error_303 = _refuse
+    http_error_307 = http_error_308 = _refuse
 
 
 def open_provider_request(request: urllib.request.Request, *, timeout: float):

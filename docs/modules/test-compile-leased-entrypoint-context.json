@@ -88,7 +88,7 @@
         "compile_inputs_digest",
         "write_archive_snapshot"
       ],
-      "contract_sha256": "d5314caede1cede26fb1ba4e1c333497c482b9a87dc125cd7a369b72102a3c79",
+      "contract_sha256": "08cf429471b892cc72b6dd319461058ddfc5788a0665d6bf75c2e4798054b4ac",
       "integration_tests": [
         "tests/test_compile_leased_entrypoint.py"
       ]

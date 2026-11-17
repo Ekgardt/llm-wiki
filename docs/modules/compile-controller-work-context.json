@@ -75,7 +75,7 @@
       "names": [
         "CompileDelivery"
       ],
-      "contract_sha256": "9c431c34eb272730c46261a873a1867d1d762d5a8f046b13f594c134fc5ab040",
+      "contract_sha256": "e73fc08b606d2e07ddb2a700f45a7f83edaa8925c3b00677331508e109d10698",
       "integration_tests": [
         "tests/modules/compile_call_runtime/test_lifecycle.py",
         "tests/test_compile_call_controller.py"
@@ -136,7 +136,7 @@
         "iter_saved_compile_preflight",
         "save_compile_preflight"
       ],
-      "contract_sha256": "46427de3ed5e3c15ef154282d9dc28a275ff731f2c4188e3733e8760f8fe800e",
+      "contract_sha256": "c48d78e3a6c7614e1cb3dc342a036ef4943567f0d40c5feaefe6e43fede55013",
       "integration_tests": [
         "tests/test_a_blocked_task_has_a_way_back.py",
         "tests/test_an_answer_says_how_old_its_index_is.py",

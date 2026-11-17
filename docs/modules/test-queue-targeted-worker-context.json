@@ -87,7 +87,7 @@
         "compile_inputs_digest",
         "write_archive_snapshot"
       ],
-      "contract_sha256": "0e690966fdf0cb89e8c36425dfdbdf0a1d57f58f6b5f20d84fc184653b3b429d",
+      "contract_sha256": "ca897bb269d16fe1308febc2cc1551b8f1a45ce64736edb99d47fe42930bae2c",
       "integration_tests": [
         "tests/test_queue_targeted_worker.py"
       ]

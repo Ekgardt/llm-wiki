@@ -67,7 +67,7 @@
         "write_archive_snapshot",
         "write_compile_context_delta"
       ],
-      "contract_sha256": "d566600ee00d8fd1ba7fe5e26507874a8ea7fdac83ec984d545f9575125b45a7",
+      "contract_sha256": "313608e8d9821691ca19167ef009f77e44bf6cce037b0cf383bec47f8f99b902",
       "integration_tests": [
         "tests/test_compile_context_delta.py"
       ]

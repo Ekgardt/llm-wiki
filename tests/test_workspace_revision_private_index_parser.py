@@ -18,12 +18,19 @@ from workspace_revision import (
 
 from tests.slow_machine import SHORT_TIMEOUT
 from tests.workspace_revision_helpers import (
-    _isolated_global_git_configuration,  # noqa: F401
     _linux_memfd_available,
     _run_git,
     _symlink_or_skip,
     _verification_git_call_counts,
+    isolate_global_git_configuration,
 )
+
+
+@pytest.fixture(autouse=True)
+def _isolated_global_git_configuration(
+    tmp_path_factory: pytest.TempPathFactory, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    isolate_global_git_configuration(tmp_path_factory, monkeypatch)
 
 
 def _rechecksum_index(content: bytes, hash_name: str = "sha1") -> bytes:

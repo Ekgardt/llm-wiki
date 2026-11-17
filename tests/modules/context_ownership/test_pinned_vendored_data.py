@@ -35,7 +35,8 @@ def synthetic_pin(monkeypatch):
     monkeypatch.setattr(module_ownership, 'PINNED_VOCABULARIES', pin)
 
 
-def test_a_pinned_vocabulary_completes_ownership_without_a_module(tmp_path, synthetic_pin):
+@pytest.mark.usefixtures('synthetic_pin')
+def test_a_pinned_vocabulary_completes_ownership_without_a_module(tmp_path):
     report = ownership_report(tmp_path, tracked=_repository(tmp_path))
     assert report['complete'] is True
     assert report['pinned_vendored_data'] == [VENDORED_NAME]
@@ -43,7 +44,8 @@ def test_a_pinned_vocabulary_completes_ownership_without_a_module(tmp_path, synt
     assert (report['owned_count'], report['pinned_count'], report['tracked_count']) == (1, 1, 2)
 
 
-def test_an_untracked_file_beside_the_vocabulary_is_not_inventory(tmp_path, synthetic_pin):
+@pytest.mark.usefixtures('synthetic_pin')
+def test_an_untracked_file_beside_the_vocabulary_is_not_inventory(tmp_path):
     tracked = _repository(tmp_path)
     _write(tmp_path, 'tests/data/tiktoken/.DS_Store', b'finder')
     _write(tmp_path, f'{VENDORED_NAME}.0f3e.tmp', b'partial download')
@@ -52,21 +54,24 @@ def test_an_untracked_file_beside_the_vocabulary_is_not_inventory(tmp_path, synt
     assert report['pinned_vendored_data'] == [VENDORED_NAME]
 
 
-def test_a_changed_vocabulary_is_refused_and_left_in_place(tmp_path, synthetic_pin):
+@pytest.mark.usefixtures('synthetic_pin')
+def test_a_changed_vocabulary_is_refused_and_left_in_place(tmp_path):
     tracked = _repository(tmp_path, vocabulary=b'dGFtcGVyZWQ= 0\n')
     with pytest.raises(AssertionError, match='Vendored synthetic differs from its pin'):
         ownership_report(tmp_path, tracked=tracked)
     assert (tmp_path / VENDORED_NAME).read_bytes() == b'dGFtcGVyZWQ= 0\n'
 
 
-def test_an_unpinned_file_beside_the_vocabulary_is_refused(tmp_path, synthetic_pin):
+@pytest.mark.usefixtures('synthetic_pin')
+def test_an_unpinned_file_beside_the_vocabulary_is_refused(tmp_path):
     tracked = _repository(tmp_path) | {'tests/data/tiktoken/extra'}
     _write(tmp_path, 'tests/data/tiktoken/extra', b'payload')
     with pytest.raises(AssertionError, match=r"Unpinned vendored vocabulary: \['extra'\]"):
         ownership_report(tmp_path, tracked=tracked)
 
 
-def test_a_vocabulary_claimed_by_a_module_is_refused(tmp_path, synthetic_pin):
+@pytest.mark.usefixtures('synthetic_pin')
+def test_a_vocabulary_claimed_by_a_module_is_refused(tmp_path):
     tracked = _repository(tmp_path)
     manifest = 'docs/modules/one-context.json'
     data = {'files': [manifest, VENDORED_NAME], 'ownership': {'files': [manifest, VENDORED_NAME]}}

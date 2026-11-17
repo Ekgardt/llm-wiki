@@ -17,12 +17,19 @@ from workspace_revision import (
 
 from tests.workspace_revision_helpers import (
     _indexed_git_config_variables,
-    _isolated_global_git_configuration,  # noqa: F401
     _linux_memfd_available,
     _private_xdg_git_path,
     _run_git,
     _verification_git_call_counts,
+    isolate_global_git_configuration,
 )
+
+
+@pytest.fixture(autouse=True)
+def _isolated_global_git_configuration(
+    tmp_path_factory: pytest.TempPathFactory, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    isolate_global_git_configuration(tmp_path_factory, monkeypatch)
 
 
 def _scenario_modified(repository: Path) -> None:

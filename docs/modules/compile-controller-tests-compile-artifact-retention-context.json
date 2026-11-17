@@ -55,7 +55,7 @@
         "confirm_compile_work",
         "save_compile_inputs"
       ],
-      "contract_sha256": "86165f52fdc77aa4a12d6e8748d1f45acaa5b3d2dbe860b8619e5859a773b478",
+      "contract_sha256": "35fb0dd0a8708f1efe261292243898e711f920f8b90ea9fd9b474890c6dafc20",
       "integration_tests": [
         "tests/test_compile_artifact_retention.py"
       ]

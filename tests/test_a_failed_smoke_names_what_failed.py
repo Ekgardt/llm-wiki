@@ -54,3 +54,11 @@ def test_a_credential_in_doctors_stderr_stays_out_of_the_smoke_failure() -> None
     cause = install_smoke.doctor_reply_cause(completed)
 
     assert "abcdefghijklmnop1234" not in cause
+
+
+def test_a_report_that_is_not_a_mapping_names_no_failing_check() -> None:
+    assert install_smoke.vault_findings_note("not a report") == ""
+
+
+def test_checks_that_are_not_a_list_name_no_failing_check() -> None:
+    assert install_smoke.vault_findings_note({"checks": 5}) == ""

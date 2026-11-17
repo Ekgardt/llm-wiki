@@ -106,7 +106,7 @@
         "snapshot_json",
         "write_archive_snapshot"
       ],
-      "contract_sha256": "03d8417169242e436776f4f4161ddafedd7087de8a564d22c7f181cba35e6ef5",
+      "contract_sha256": "6fbaf16e651f978cb1024cf1f33b589a6742e74815b4786cffd3caf6271d2ed6",
       "integration_tests": [
         "tests/test_compile_publication_checkpoint.py"
       ]

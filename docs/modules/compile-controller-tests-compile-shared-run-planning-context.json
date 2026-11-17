@@ -107,7 +107,7 @@
         "save_compile_inputs",
         "write_archive_snapshot"
       ],
-      "contract_sha256": "7cd00cc99d45e7de970e227eb13501e672790588468972f90ac3f33e29f09659",
+      "contract_sha256": "d01a2c28820698f302ab0f91acbb1e7b994683cff0cbe7aeb8fb2fe9ba7a70c0",
       "integration_tests": [
         "tests/test_compile_shared_run_planning.py"
       ]

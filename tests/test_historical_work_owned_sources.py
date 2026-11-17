@@ -1,5 +1,7 @@
 """A historical verdict cannot outlive changed source evidence."""
 import weakref
+from collections.abc import Callable
+from typing import Any
 
 import compile_receipts
 import pytest
@@ -12,17 +14,17 @@ from tests.doctor_exact_legacy_source_outcome_helpers import _reader
 from tests.historical_work_captures_each_physical_layout_once_helpers import _published_units
 
 
-def test_source_change_after_final_witness_cannot_return_success(exact_work, monkeypatch):
+def test_source_change_after_final_witness_cannot_return_success(exact_work: Any, monkeypatch: pytest.MonkeyPatch) -> None:
     history, parts = _published_units(exact_work)
     path = history[0] / parts[0].logical_path
     original_bytes = path.read_bytes()
     with _reader(history) as (_database, reader):
         work = doctor_transactions.CurrentHistoricalSourceWork(reader, history[4])
-        witness = work._witnesses_hold
-        calls = []
-        sources = []
+        witness: Callable[..., bool] = work._witnesses_hold
+        calls: list[bool] = []
+        sources: list[Any] = []
 
-        def changed_after_witness(*args):
+        def changed_after_witness(*args: object) -> object:
             result = witness(*args)
             calls.append(True)
             if len(calls) == 2:
@@ -39,12 +41,12 @@ def test_source_change_after_final_witness_cannot_return_success(exact_work, mon
         assert not work.captured
 
 
-def test_historical_verification_never_reads_whole_daily(exact_work, monkeypatch):
+def test_historical_verification_never_reads_whole_daily(exact_work: Any, monkeypatch: pytest.MonkeyPatch) -> None:
     history, parts = _published_units(exact_work)
     path = history[0] / parts[0].logical_path
     read = doctor_transactions.read_stable_bytes
 
-    def refuse_daily(target, *args, **kwargs):
+    def refuse_daily(target: Any, *args: Any, **kwargs: Any) -> Any:
         if target == path:
             raise AssertionError("historical proof read the entire daily")
         return read(target, *args, **kwargs)
@@ -59,7 +61,7 @@ def test_historical_verification_never_reads_whole_daily(exact_work, monkeypatch
         assert work.verified()
 
 
-def test_layout_releases_unselected_parts_and_closes_its_source(exact_work):
+def test_layout_releases_unselected_parts_and_closes_its_source(exact_work: Any) -> None:
     history, parts = _published_units(exact_work)
     with _reader(history) as (_database, reader):
         with doctor_transactions.CurrentHistoricalSourceWork(reader, history[4]) as work:
@@ -76,12 +78,12 @@ def test_layout_releases_unselected_parts_and_closes_its_source(exact_work):
         assert source.stream.closed
 
 
-def test_selected_historical_unit_retains_coordinates_not_part_payloads(exact_work, monkeypatch):
+def test_selected_historical_unit_retains_coordinates_not_part_payloads(exact_work: Any, monkeypatch: pytest.MonkeyPatch) -> None:
     history, _parts = _published_units(exact_work)
-    observed = []
-    original = compile_receipts.daily_part_record
+    observed: list[weakref.ref[Any]] = []
+    original: Callable[..., Any] = compile_receipts.daily_part_record
 
-    def tracked(*args):
+    def tracked(*args: Any) -> Any:
         part = original(*args)
         observed.append(weakref.ref(part))
         return part

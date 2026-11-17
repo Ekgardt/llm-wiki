@@ -84,7 +84,7 @@
         "CompileDelivery",
         "ProviderOutcomeUnknown"
       ],
-      "contract_sha256": "77d202f40f58614e31d161b7d61583ac99e55c606b578526c5ba55fa7d64cc6d",
+      "contract_sha256": "3215fa3cb43225c9155f69075df9b3fbfad6fd687766fa2fa3f0fc7be9cf842d",
       "integration_tests": [
         "tests/modules/compile_call_runtime/test_lifecycle.py",
         "tests/test_compile_call_controller.py"
@@ -154,7 +154,7 @@
         "execute_context_compile_batch",
         "read_compile_repair"
       ],
-      "contract_sha256": "6e42f114c66cd67f0d93bfa32201ebf2f4023b7dde1f48890636174d7a004767",
+      "contract_sha256": "8183cbbfd297133659cdb67f69ac868573130badc338e75d30024e7b0c1f4255",
       "integration_tests": [
         "tests/test_compile_planned_execution.py",
         "tests/test_compile_retained_planning.py"
@@ -167,7 +167,7 @@
         "CompileRepairCapacityError",
         "refresh_compile_batch_from_context"
       ],
-      "contract_sha256": "7c16578a5543a1c144d820a1ce20aa759f8d9abdbf62ad203ba7988b39b6b4e8",
+      "contract_sha256": "c8262640cc43b672316ca19d0b1ae5de4bbb71453728e2cbb6d1558427e93e45",
       "integration_tests": [
         "tests/test_a_committed_source_resolves_an_older_compile_plan.py",
         "tests/test_a_long_entry_is_cut_inside_itself.py",

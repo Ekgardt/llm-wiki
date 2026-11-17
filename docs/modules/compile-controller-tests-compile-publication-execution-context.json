@@ -103,7 +103,7 @@
         "save_compile_publication",
         "write_archive_snapshot"
       ],
-      "contract_sha256": "f8209b0a71baa539350da43cd3f2a57191910a268474ce885ca3c3b26531d952",
+      "contract_sha256": "bacc2573d2799a3e955b37e2877dd4e22c6800244803b3fb18f691cce8fb381e",
       "integration_tests": [
         "tests/test_compile_publication_execution.py"
       ]

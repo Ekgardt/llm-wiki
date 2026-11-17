@@ -84,6 +84,6 @@ def _replies(monkeypatch: pytest.MonkeyPatch, replies: list[str]) -> list[str]:
     return prompts
 
 
-def _source_review(complete=True):
+def _source_review(complete: bool = True) -> str:
     """Explicit model verdict for fixtures testing publication, not semantic quality."""
     return json.dumps({'source_review': {'complete': complete, 'reason': 'Fixture source assessment.'}})

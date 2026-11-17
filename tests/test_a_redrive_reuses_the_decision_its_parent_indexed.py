@@ -16,15 +16,20 @@ import operational_ownership
 import pytest
 import queue_core  # noqa: E402
 
-from tests.capture_terminal_helpers import (  # noqa: F401
+from tests.capture_terminal_helpers import (
     _assert_major_daily_file_once,
     _FakeNoContentProvider,
     _NoContentProcessor,
-    _own_session_vault,
     _ready_intent_binding,
     _TimedCaptureProcessor,
+    keep_session_records_out_of_the_vault,
 )
 from tests.queue_v3_capture_links_helpers import _coordinator, _queue
+
+
+@pytest.fixture(autouse=True)
+def _own_session_vault(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    return keep_session_records_out_of_the_vault(tmp_path, monkeypatch)
 
 
 def _crash_after_decision(*_args, **_kwargs):

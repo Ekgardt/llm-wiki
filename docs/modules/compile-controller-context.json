@@ -119,7 +119,7 @@
         "resolve_model_call",
         "run_model_call"
       ],
-      "contract_sha256": "a59dd69bd6bfcc4374b0fb25bbfc881cce7d63f611e93a7c2df0cc1b2611397e",
+      "contract_sha256": "f0c55954c65ebb39673279941c283057394b566c97927eeeb68ef3324ed29bc4",
       "integration_tests": [
         "tests/compile_archive_daily_sharing_helpers.py",
         "tests/compile_execution_inventory_helpers.py",
@@ -195,7 +195,7 @@
         "snapshot_json",
         "write_archive_snapshot"
       ],
-      "contract_sha256": "1e76ca53bab339ef31b3c913a70cc10c7b36fa5dd2b5a102fc05c8da339f1172",
+      "contract_sha256": "232e75201fd8a89ac052df91737de9e23a6ef93f7b9ae1f8e18f25f5052287ec",
       "integration_tests": [
         "tests/test_compile_streamed_json_metadata.py"
       ]
@@ -222,7 +222,7 @@
         "open_compile_batch_context",
         "open_prepared_compile_batch"
       ],
-      "contract_sha256": "01c38ca4b4bf8974ed029c38dbcf775b3bd26accc6fb8013081ba924d87f130e",
+      "contract_sha256": "24b4e5c09c23a0d8678c56853f81b84cada11d248d9f5d84673fe8065a80aa6f",
       "integration_tests": [
         "tests/test_a_blocked_task_has_a_way_back.py",
         "tests/test_an_answer_says_how_old_its_index_is.py",
@@ -250,7 +250,7 @@
         "save_compile_capture",
         "save_compile_inputs"
       ],
-      "contract_sha256": "9a6a4c0dbcbbfd95737089af3ebf2bd0c5abaef52b5b30d96d95a23fdd7073ee",
+      "contract_sha256": "4068f124293fc98ddbf461385fe47f3477c43c54ecd023a77a239d955fc6be54",
       "integration_tests": [
         "tests/test_compile_atomic_capture.py",
         "tests/test_compile_durable_stream_capture.py"
@@ -298,7 +298,7 @@
         "compile_runtime_library",
         "compile_work_identity"
       ],
-      "contract_sha256": "0d2d7a4a2e59f936c8c6379716e7ba5ef40b20ab4db328d60bdede41818d81ff",
+      "contract_sha256": "a236fc1e14c91c1f5823d655660e852cc5f41d66820cfb3da0e6d6f6e94fb0e6",
       "integration_tests": [
         "tests/test_compile_dependency_identity.py",
         "tests/test_compile_execution_inventory.py"
@@ -312,7 +312,7 @@
         "preflight_source_records",
         "save_compile_preflight"
       ],
-      "contract_sha256": "e9cec847e6ead58295823c06f6fcdf8c587f883995db059393e5d7d1967c55a5",
+      "contract_sha256": "11b2356c46c3105f74f6864bb8b89d7ea12f3fcabf46a6072ed910ac533b76f9",
       "integration_tests": [
         "tests/test_a_blocked_task_has_a_way_back.py",
         "tests/test_an_answer_says_how_old_its_index_is.py",
@@ -363,7 +363,7 @@
         "read_compile_repair",
         "save_compile_repair"
       ],
-      "contract_sha256": "fc2f8b211698b7b2b50f8780fbba48399e368766a08ec27d96b84a80bcb3d838",
+      "contract_sha256": "060ca563c41f5599d4865cba347f3f7fa1aca82868fe9c4896030ef23828b9bc",
       "integration_tests": [
         "tests/test_compile_planned_execution.py",
         "tests/test_compile_retained_planning.py"
@@ -378,7 +378,7 @@
         "execute_compile_work",
         "load_compile_inputs"
       ],
-      "contract_sha256": "4825296a3277b53c1586b193504ecb4c92e5e65f9f6d30be52e41f224a00357b",
+      "contract_sha256": "e8a09bfc89e0d92ca9399a2f7247834d275bd685469e0d2fbc0309d6ebc78d22",
       "integration_tests": [
         "tests/test_compile_retained_planning.py"
       ]

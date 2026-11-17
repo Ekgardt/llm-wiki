@@ -46,11 +46,13 @@ def isolated_roundtrip(kind):
 
 @pytest.mark.parametrize('kind', ['boolean', 'deferred'])
 def test_spawn_roundtrip_without_executor(kind):
-    code = ('from tests.modules.queue_child_runtime.test_spawn import isolated_roundtrip; '
-            f'isolated_roundtrip({kind!r})')
     result = subprocess.run(
-        [sys.executable, '-c', code], cwd=ROOT, text=True, capture_output=True,
+        [sys.executable, '-m', 'tests.modules.queue_child_runtime.test_spawn', kind], cwd=ROOT, text=True, capture_output=True,
         env={**os.environ, 'PYTHONPATH': str(ROOT / 'scripts')}, check=False,
         timeout=SHORT_TIMEOUT * 2,
     )
     assert result.returncode == 0, result.stderr
+
+
+if __name__ == '__main__':
+    isolated_roundtrip(sys.argv[1])

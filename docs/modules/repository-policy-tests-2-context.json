@@ -44,17 +44,21 @@
     "tests/test_a_phrase_is_dated_once_and_only_the_user_is_read.py",
     "tests/test_module_registry_integration.py",
     "tests/test_nothing_private_reaches_the_public_repository.py",
-    "tests/test_readme_i18n.py"
+    "tests/test_readme_i18n.py",
+    "tests/test_removed_tests_have_guards.py",
+    "docs/research/2026-11-17-where-each-removed-test-is-guarded.md"
   ],
   "ownership": {
     "files": [
       "benchmark/run_selective_forgetting.py",
       "docs/modules/repository-policy-tests-2-context.json",
       "docs/modules/repository-policy-tests-2.md",
+      "docs/research/2026-11-17-where-each-removed-test-is-guarded.md",
       "tests/test_a_phrase_is_dated_once_and_only_the_user_is_read.py",
       "tests/test_module_registry_integration.py",
       "tests/test_nothing_private_reaches_the_public_repository.py",
-      "tests/test_readme_i18n.py"
+      "tests/test_readme_i18n.py",
+      "tests/test_removed_tests_have_guards.py"
     ]
   },
   "qualified_dependencies": [

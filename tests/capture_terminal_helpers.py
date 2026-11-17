@@ -11,8 +11,7 @@ import pytest
 from reliable_memory import canonical_json_bytes, publish_runtime_file, sha256_bytes
 
 
-@pytest.fixture(autouse=True)
-def _own_session_vault(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+def keep_session_records_out_of_the_vault(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     """Keep the session record these tests provoke out of the owner's vault.
 
     `process_new_capture` keeps the session before anything judges it, and it

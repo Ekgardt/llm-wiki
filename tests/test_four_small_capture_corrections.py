@@ -21,7 +21,8 @@ def own_state(tmp_path, monkeypatch):
     return run
 
 
-def test_the_prompt_counter_keeps_the_sessions_counted_most_recently(own_state):
+@pytest.mark.usefixtures("own_state")
+def test_the_prompt_counter_keeps_the_sessions_counted_most_recently():
     import prompt_capture_followup
 
     bound = prompt_capture_followup.MAX_PROMPT_COUNTERS
@@ -45,7 +46,8 @@ def test_a_stray_byte_in_a_short_transcript_does_not_lose_the_session(tmp_path):
     assert text == "we decided to keep � the queue\n"
 
 
-def test_a_reducer_commit_preserves_entries_that_fit_the_state_byte_budget(own_state):
+@pytest.mark.usefixtures("own_state")
+def test_a_reducer_commit_preserves_entries_that_fit_the_state_byte_budget():
     import project_checkpoint
     from project_journal import CheckpointReducer
 

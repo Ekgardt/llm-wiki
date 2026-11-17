@@ -12,14 +12,19 @@ import flush_memory
 import operational_ownership
 import pytest
 
-from tests.capture_terminal_helpers import (  # noqa: F401
+from tests.capture_terminal_helpers import (
     _crash_before_ledger,
     _FakeNoContentProvider,
     _NoContentProcessor,
-    _own_session_vault,
     _ready_intent_binding,
+    keep_session_records_out_of_the_vault,
 )
 from tests.queue_v3_capture_links_helpers import _coordinator, _queue
+
+
+@pytest.fixture(autouse=True)
+def _own_session_vault(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    return keep_session_records_out_of_the_vault(tmp_path, monkeypatch)
 
 
 def _died_between_decision_and_ledger(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):

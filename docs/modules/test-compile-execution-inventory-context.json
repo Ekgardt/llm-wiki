@@ -80,7 +80,7 @@
         "run_candidate_call",
         "write_archive_snapshot"
       ],
-      "contract_sha256": "9d6b11fa6b4989bcc15cea0add3207c774de48787312044b60f2ab53a0f805e9",
+      "contract_sha256": "8007c0624607f26ca306665c770a5c56464bdcd0c6d83221356260cc4fbe384c",
       "integration_tests": [
         "tests/test_compile_archive_json_views.py",
         "tests/test_compile_artifact_retention.py",

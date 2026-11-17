@@ -104,7 +104,7 @@
         "save_compile_inputs",
         "write_archive_snapshot"
       ],
-      "contract_sha256": "7966e5c1761f2ef7e57ce87a77ee64f5f183f93237f264ed01824c64810f0c61",
+      "contract_sha256": "8175cf6e4902fca19724b65175e1d25c259462e2feae6e5cc058a81175cab05e",
       "integration_tests": [
         "tests/test_compile_queue_completion.py",
         "tests/test_compile_resolution_failure_progress.py",
@@ -249,7 +249,7 @@
         "draft_prompt_text",
         "validated_critique_feedback"
       ],
-      "contract_sha256": "53b36103795d09165a4d5842f1ac53075d48b91fa11047cb11464cc3b917ee76",
+      "contract_sha256": "4de701e2f8944d096e9a86b81fcd8d74a7964057158a7a18895fa2691e6f643c",
       "integration_tests": [
         "tests/test_compile_queue_completion.py",
         "tests/test_compile_resolution_failure_progress.py",

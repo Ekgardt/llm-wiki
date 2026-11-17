@@ -180,7 +180,7 @@
         "source_line_choices",
         "validated_critique_feedback"
       ],
-      "contract_sha256": "3c98e0aab1fddd07ed9444c19b2915848a09c99c984712045cee74917f962b12",
+      "contract_sha256": "728c3f521962a06ea3aced6315d2dd1b3fb42a0766922efcebaf1028f291d2a6",
       "integration_tests": [
         "tests/test_critic_feedback_reuses_only_exact_offered_quotes.py"
       ]

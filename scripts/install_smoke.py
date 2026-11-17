@@ -67,14 +67,14 @@ def production_imports() -> dict[str, bool]:
     return result
 
 
-def _has_required_shape(value: dict, required: dict[str, type]) -> bool:
+def _has_required_shape(value: dict[str, object], required: dict[str, type]) -> bool:
     return all(
         key in value and isinstance(value[key], expected) for key, expected in required.items()
     )
 
 
 def _validate_doctor_report(value: object) -> dict[str, object]:
-    required = {
+    required: dict[str, type] = {
         "schema_version": str,
         "generated_at": str,
         "overall_status": str,
@@ -110,21 +110,28 @@ def doctor_report(root: Path, state_root: Path, timeout: float) -> dict[str, obj
     return checked_doctor_report(completed)
 
 
-def checked_doctor_report(completed: subprocess.CompletedProcess) -> dict[str, object]:
+def checked_doctor_report(completed: subprocess.CompletedProcess[str]) -> dict[str, object]:
     """The report, read before the exit code: an `error` exits 2 and must be named."""
     report = _validate_doctor_report(_parsed_doctor_output(completed))
     if _install_is_broken(report):
         raise SmokeFailure(doctor_error_message(report))
-    if completed.returncode != _EXPECTED_EXIT[report["overall_status"]]:
+    if completed.returncode != _EXPECTED_EXIT[str(report["overall_status"])]:
         raise SmokeFailure("Doctor failed during install smoke")
     return report
 
 
-def _failing_checks(report: dict) -> list[str]:
-    return [str(check.get("id")) for check in report.get("checks", []) if isinstance(check, dict) and check.get("status") == "error"]
+def _failing_checks(report: object) -> list[str]:
+    return [str(check.get("id")) for check in _reported_checks(report) if check.get("status") == "error"]
 
 
-def _install_is_broken(report: dict) -> bool:
+def _reported_checks(report: object) -> list[dict[str, object]]:
+    checks = report.get("checks", []) if isinstance(report, dict) else []
+    if not isinstance(checks, list):
+        return []
+    return [check for check in checks if isinstance(check, dict)]
+
+
+def _install_is_broken(report: dict[str, object]) -> bool:
     """An `error` in a check the installer owns, or an `error` that names no check."""
     if report["overall_status"] != "error":
         return False
@@ -132,7 +139,7 @@ def _install_is_broken(report: dict) -> bool:
     return not failing or bool(INSTALL_OWNED_CHECKS.intersection(failing))
 
 
-def doctor_error_message(report: dict) -> str:
+def doctor_error_message(report: dict[str, object]) -> str:
     failing = _failing_checks(report)
     return (
         "Doctor reported error in: "
@@ -141,7 +148,7 @@ def doctor_error_message(report: dict) -> str:
     )
 
 
-def _parsed_doctor_output(completed: subprocess.CompletedProcess) -> object:
+def _parsed_doctor_output(completed: subprocess.CompletedProcess[str]) -> object:
     encoded = completed.stdout.encode("utf-8", errors="replace")
     if len(encoded) > MAX_CHILD_BYTES:
         raise SmokeFailure("Doctor output exceeded the install smoke bound")
@@ -151,7 +158,7 @@ def _parsed_doctor_output(completed: subprocess.CompletedProcess) -> object:
         raise SmokeFailure(f"Doctor did not return valid JSON ({doctor_reply_cause(completed)})") from exc
 
 
-def doctor_reply_cause(completed: subprocess.CompletedProcess) -> str:
+def doctor_reply_cause(completed: subprocess.CompletedProcess[str]) -> str:
     """What doctor gave instead of a report: its exit code and the end of its stderr."""
     tail = redact_secrets(completed.stderr or "").strip()[-STDERR_TAIL_CHARS:]
     return f"exit {completed.returncode}; stderr: {tail or '(empty)'}"
@@ -306,7 +313,7 @@ def emit_report(encoded: str, destination: Path | None) -> None:
     destination.write_text(encoded + "\n", encoding="utf-8")
 
 
-def vault_findings_note(doctor: dict) -> str:
+def vault_findings_note(doctor: object) -> str:
     """The vault errors the install left in place, named so the operator sees them."""
     failing = _failing_checks(doctor)
     if not failing:

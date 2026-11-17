@@ -61,7 +61,7 @@
         "PRECISE_ARCHITECTURE_MODES",
         "Tool"
       ],
-      "contract_sha256": "dc0f035d19d0d0c360ca6f0b9bca3b302b74a947aeb1f5cf286fe364b6bb0c79",
+      "contract_sha256": "d47c58f3911121ed2dc8b3f36c4a4aefba3243ae0f22b546db9b4cd09fdb4926",
       "integration_tests": [
         "tests/test_mcp_server_navigation_adapters.py",
         "tests/test_mcp_server_precise_requests.py",

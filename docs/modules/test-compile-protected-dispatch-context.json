@@ -133,7 +133,7 @@
         "snapshot_json",
         "write_archive_snapshot"
       ],
-      "contract_sha256": "27c2ccc58c9460a87b92c1d64b3d92c7770198834a7d42a40f377b5cb33068ce",
+      "contract_sha256": "bc9a3944ddd22562885627083263c8349d3f4ea81a7dcec5b61d271efc16f767",
       "integration_tests": [
         "tests/test_compile_protected_dispatch.py"
       ]

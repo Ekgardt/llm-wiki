@@ -1,5 +1,8 @@
 """Helpers shared by test_compile_repair_checkpoint.py and the test files importing them."""
 
+from collections.abc import Iterator
+from typing import Any
+
 import compile_controller as controller
 import pytest
 from llm_wiki import compile_pipeline_batches
@@ -10,7 +13,7 @@ from tests.repair_capacity_repartitions_complete_source_work_helpers import _bat
 
 
 @pytest.fixture
-def repair(work, compiler_case):
+def repair(work: Any, compiler_case: Any) -> Iterator[tuple[Any, Any, Any]]:
     original, feedback = _batch(work[0].vault)
     snapshot = _snapshot(work, original.inputs)
     items = _consume(work, snapshot)
@@ -22,12 +25,12 @@ def repair(work, compiler_case):
         items.close()
 
 
-def _save(work, repair):
+def _save(work: Any, repair: Any) -> Any:
     batch, context, failure = repair
     return controller.save_compile_repair(work[0], work[1], context, batch, failure,
         dependencies=_dependencies())
 
 
-def _read(work, repair, saved):
+def _read(work: Any, repair: Any, saved: Any) -> Any:
     return controller.read_compile_repair(work[0], work[1], saved, repair[1], repair[0],
         dependencies=_dependencies())

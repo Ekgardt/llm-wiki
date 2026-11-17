@@ -69,7 +69,7 @@
         "preflight_source_records",
         "write_archive_snapshot"
       ],
-      "contract_sha256": "1c15a8fc5ac72e9c23728a66f5436649800811568c13b6bc3cc25f3201c85267",
+      "contract_sha256": "56b8257016bda836de15e2343fc172844b1953d13a52cdb3e657c9a15c63b07c",
       "integration_tests": [
         "tests/test_compile_restores_original_ranges.py"
       ]

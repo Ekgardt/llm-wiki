@@ -60,7 +60,7 @@
         "restored_archive_record",
         "write_archive_snapshot"
       ],
-      "contract_sha256": "7cbb0c91149d4d1c7835f998acc37b26c7729e10f5f48cb22cf697d1d8225432",
+      "contract_sha256": "9f9cc243d3d0df9f10dbbe6b22f45222529b5019dd847bafe204ed8d5f014a85",
       "integration_tests": [
         "tests/test_compile_original_digest_proof.py"
       ]

@@ -116,7 +116,7 @@
         "save_compile_publication",
         "write_archive_snapshot"
       ],
-      "contract_sha256": "c6b99c49ca4ae0e5e77a6ecb313d7a7edb85c06eca40315db11900c93fdf62c7",
+      "contract_sha256": "ad2256bafd48d035cbea8a4287ddb9e1dafd2f216acc5c8f3d8f3e02605b34c3",
       "integration_tests": [
         "tests/test_compile_publication_completion.py"
       ]

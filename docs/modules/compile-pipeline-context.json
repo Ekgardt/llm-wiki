@@ -644,7 +644,7 @@
         "require_repair_context",
         "resolve_compile_plan"
       ],
-      "contract_sha256": "8c9e23f2200189e509c6bdedb80dd0c0bca5b1919a64d96cfb51e37281752e30",
+      "contract_sha256": "6f3cd885a7d011b6abf2f3547678ea058cf35fd5e6bb0e816163d8e12968b938",
       "integration_tests": [
         "tests/compile_binds_the_protected_source_view_helpers.py",
         "tests/compile_daily_part_lifetime_helpers.py",
@@ -865,7 +865,7 @@
         "source_layout_resolution",
         "validated_critique_feedback"
       ],
-      "contract_sha256": "ddd4082a0f81060ec3a91391133082aa97b56cd8f627b45df1c6331b042e87e1",
+      "contract_sha256": "49e4f63fee894ab9a179511bf3d84422025e33a17ad2e13b91ffd4b0b1bc40b1",
       "integration_tests": [
         "tests/compile_binds_the_protected_source_view_helpers.py",
         "tests/compile_daily_part_lifetime_helpers.py",

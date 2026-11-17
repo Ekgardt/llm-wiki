@@ -120,7 +120,7 @@
         "critique_prompt",
         "validated_critique_feedback"
       ],
-      "contract_sha256": "9309d42736d2111c24ddca5f757aba18fd556779ff694761d615917bedab558f",
+      "contract_sha256": "95b7ccb711190caf3c600d26a46aee75588adf17512d6e420b09c3ffb5a0ec97",
       "integration_tests": [
         "tests/test_repair_partition_reuses_immutable_evidence_layout.py"
       ]

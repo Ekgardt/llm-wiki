@@ -98,7 +98,7 @@
       "names": [
         "execute_compile_work"
       ],
-      "contract_sha256": "c507d39bc5065f7a09ce5dc4406f838a81f2d878873a41417ff27194fab7047b",
+      "contract_sha256": "b3abb8ec8016b115b61be4b63100411732044d7a2e2598baa597b5213aeecbba",
       "integration_tests": [
         "tests/test_compile_retained_planning.py"
       ]

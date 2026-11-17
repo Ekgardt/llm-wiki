@@ -81,7 +81,7 @@
         "save_compile_inputs",
         "write_archive_snapshot"
       ],
-      "contract_sha256": "59b73ba4360d19a0c34108b4baebf355eec1276e138e2cd45fda19162962cb97",
+      "contract_sha256": "1b9320357ffff0aac25596022777e754ff0624cd4785a52b30ebae8840c0cf3b",
       "integration_tests": [
         "tests/test_compile_batch_admission.py"
       ]

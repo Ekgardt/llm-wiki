@@ -93,7 +93,7 @@
         "pack_compile_batches",
         "unresolved_compile_error"
       ],
-      "contract_sha256": "81a59e5d0f74a17085ee44122bfd68fa62463be7261270df09dd6204a8bc1a2e",
+      "contract_sha256": "f13e0f596cc3251e9f5a1e4b0e082ea46bfd7454ca13920641cfe9107f4f4107",
       "integration_tests": [
         "tests/test_repair_capacity_repartitions_complete_source_work.py"
       ]
@@ -117,7 +117,7 @@
         "packing_budget",
         "validated_critique_feedback"
       ],
-      "contract_sha256": "486ea6e60cc2927c5eab85123a9b9e90e22fb10575fb0b06dc5398b9942ada1a",
+      "contract_sha256": "aca4de104d2c46341e05414ecf5214b52db083b44e7f4bee517a6ace9791b57e",
       "integration_tests": [
         "tests/test_repair_capacity_repartitions_complete_source_work.py"
       ]

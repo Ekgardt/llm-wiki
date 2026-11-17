@@ -152,7 +152,7 @@
         "PRECISE_ARCHITECTURE_MODES",
         "Tool"
       ],
-      "contract_sha256": "c8c645bab698a07dd11b7ce9c82c1f784911a8a1b5436e50f4791c3d06757fc3",
+      "contract_sha256": "ade24146ab9b40b95d20181ad02978381bff3d6714fce1cb5b76bb96d0510774",
       "integration_tests": [
         "tests/test_a_context_answer_fits_the_budget_it_was_given.py",
         "tests/test_a_context_answer_says_when_its_corpus_was_read.py",

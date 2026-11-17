@@ -79,7 +79,7 @@
         "save_compile_capture",
         "write_archive_snapshot"
       ],
-      "contract_sha256": "65cc581c345996ec2a6cb3d288d0c13c240b0a5500e5b508817bd7dab3e48e77",
+      "contract_sha256": "f16ede8c8d033c5c07c86e1b514247c3fe96afa6fc94165e16b65fd469d0cd73",
       "integration_tests": [
         "tests/test_compile_archive_json_views.py",
         "tests/test_compile_artifact_retention.py",

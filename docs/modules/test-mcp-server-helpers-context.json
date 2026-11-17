@@ -70,7 +70,7 @@
       "names": [
         "MCP_WORKERS"
       ],
-      "contract_sha256": "efdf13e0c29e4d1a08e46ded8ecfecddcb99d54257fd2e4440a43e3908020ba3",
+      "contract_sha256": "067448c7d2e59dfcb3dcbf439822b8fadc9a3fff83b0d34d0df3e7f1dff11ce2",
       "integration_tests": [
         "tests/test_a_context_answer_fits_the_budget_it_was_given.py",
         "tests/test_a_context_answer_says_when_its_corpus_was_read.py",

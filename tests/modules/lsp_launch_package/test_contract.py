@@ -188,10 +188,13 @@ def test_incomplete_manifest_refuses_launch_and_removes_its_tree(tmp_path, limit
     import subprocess
 
     root = Path(__file__).resolve().parents[3]
-    command = 'from tests.modules.lsp_launch_package.test_contract import _limited_manifest_probe; _limited_manifest_probe()'
     result = subprocess.run(
-        [sys.executable, '-c', command, str(tmp_path), str(limit)],
+        [sys.executable, '-m', 'tests.modules.lsp_launch_package.test_contract', str(tmp_path), str(limit)],
         cwd=root, env={**os.environ, 'PYTHONPATH': os.pathsep.join((str(root / 'scripts'), str(root)))},
         capture_output=True, text=True, check=True, timeout=LONG_TIMEOUT,
     )
     assert json.loads(result.stdout) == {'errno': errno.EFBIG, 'remaining': []}
+
+
+if __name__ == '__main__':
+    _limited_manifest_probe()

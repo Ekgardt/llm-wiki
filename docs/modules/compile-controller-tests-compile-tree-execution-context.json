@@ -112,7 +112,7 @@
         "save_compile_repair",
         "write_archive_snapshot"
       ],
-      "contract_sha256": "333f79c6b1c603dcaf8656cf59894169a125d5b9c5f8b7b9498329f0fe928284",
+      "contract_sha256": "c4661ae63733510c23278f239296fd8ee853de683a16d1405a3cf0c3abf21176",
       "integration_tests": [
         "tests/test_compile_tree_execution.py"
       ]
@@ -217,7 +217,7 @@
         "pack_compile_batches",
         "resolve_compile_plan"
       ],
-      "contract_sha256": "5d1da80d157ddbcacbd9afaa0774d95e61a3ba9921480aa863304fb6c94a4b5d",
+      "contract_sha256": "179d280aa1a4f445ac23e0d80a6787235676dc52df45440f6b101c01adf9590d",
       "integration_tests": [
         "tests/test_compile_tree_execution.py"
       ]
@@ -231,7 +231,7 @@
         "draft_prompt_text",
         "validated_critique_feedback"
       ],
-      "contract_sha256": "53b36103795d09165a4d5842f1ac53075d48b91fa11047cb11464cc3b917ee76",
+      "contract_sha256": "4de701e2f8944d096e9a86b81fcd8d74a7964057158a7a18895fa2691e6f643c",
       "integration_tests": [
         "tests/test_compile_tree_execution.py"
       ]

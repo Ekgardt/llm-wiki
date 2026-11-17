@@ -65,7 +65,7 @@
         "snapshot_json",
         "write_archive_snapshot"
       ],
-      "contract_sha256": "2f1a5932e3fb08e4b017b6ac89e96c967f652446e291646b6cb151e1e784adb4",
+      "contract_sha256": "8d1014f98fed3603831fb347a279b525628e3d70bc1b0e8d318d36d3ecd8cf18",
       "integration_tests": [
         "tests/test_compile_streamed_json_metadata.py"
       ]
@@ -102,7 +102,7 @@
       "names": [
         "CompileDependencies"
       ],
-      "contract_sha256": "9067bd29d5c4b33e955c34d020ae8c4947af9bdbf127754eb60364bc679431ec",
+      "contract_sha256": "5e1ee9dc44f91f0c40cdb3cb08a670d99411e0a890c3da1aabb85739fd5f12fb",
       "integration_tests": [
         "tests/test_compile_dependency_identity.py",
         "tests/test_compile_execution_inventory.py"

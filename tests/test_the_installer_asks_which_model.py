@@ -88,15 +88,14 @@ def test_codex_offers_its_catalog(tmp_path: Path, monkeypatch) -> None:
 class _Listing(BaseHTTPRequestHandler):
     payloads: dict[str, object] = {}
 
-    def do_GET(self) -> None:  # noqa: N802 - the http.server name
+    def _reply(self) -> None:
         body = json.dumps(self.payloads.get(self.path, {})).encode()
         self.send_response(200)
         self.send_header("Content-Type", "application/json")
         self.end_headers()
         self.wfile.write(body)
 
-    def log_message(self, *_args) -> None:
-        return None
+    do_GET = _reply
 
 
 @pytest.fixture
