@@ -32,6 +32,7 @@ in_installer() {
   run in_installer "codex_mcp_state_status deferred"
 
   [ "$status" -eq 0 ]
+  [[ "$output" == *'add "deferred" to its omit_tools_from list'* ]]
   [[ "$output" == *'omit_tools_from = ["deferred"]'* ]]
 }
 

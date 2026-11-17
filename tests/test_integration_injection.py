@@ -3609,15 +3609,26 @@ def test_windows_installer_error_stops_native_child_and_later_steps(
 
 
 def _mcp_config_kept(config: Path, scenario: str, original: str, before: bytes) -> bool:
-    """An absent entry is appended after the original text; any other config is untouched."""
+    """An absent entry is appended after the original text and then reads as equivalent;
+    any other config is untouched."""
     if scenario == "absent":
-        return config.read_text(encoding="utf-8").startswith(original) and (
-            config.read_bytes() != before
-        )
+        return _appended_an_equivalent_entry(config, original, before)
     return config.read_bytes() == before
 
 
-def _codex_mcp_toml(vault: Path, *, quoted: bool, conflicting: bool = False) -> str:
+def _appended_an_equivalent_entry(config: Path, original: str, before: bytes) -> bool:
+    _ensure_scripts_on_path()
+    import codex_memory
+
+    text = config.read_text(encoding="utf-8")
+    appended = text.startswith(original) and config.read_bytes() != before
+    return appended and codex_memory.codex_mcp_config_state(config, ROOT) == "equivalent"
+
+
+def _codex_mcp_toml(
+    vault: Path, *, quoted: bool, conflicting: bool = False, deferred: bool = False
+) -> str:
+    """An entry as the installer writes it; `deferred` leaves out the line that shows its tools."""
     table = '[mcp_servers."llm-wiki"]' if quoted else "[mcp_servers.llm-wiki]"
     args = (
         ["python", "other.py"]
@@ -3632,13 +3643,14 @@ def _codex_mcp_toml(vault: Path, *, quoted: bool, conflicting: bool = False) -> 
             "scripts/mcp_server.py",
         ]
     )
-    return f'{table}\ncommand = "uv"\nargs = {json.dumps(args)}\n'
+    shown = "" if deferred else 'omit_tools_from = ["deferred"]\n'
+    return f'{table}\ncommand = "uv"\nargs = {json.dumps(args)}\n{shown}'
 
 
 @pytest.mark.parametrize(
     ("scenario", "expected_exit"),
-    [("equivalent", 0), ("conflicting", 2), ("absent", 0)],
-    ids=["quoted-equivalent", "conflicting", "absent"],
+    [("equivalent", 0), ("deferred", 0), ("conflicting", 2), ("absent", 0)],
+    ids=["quoted-equivalent", "deferred", "conflicting", "absent"],
 )
 def test_unix_installer_mcp_function_uses_parser_in_temp_home(tmp_path, scenario, expected_exit):
     bash = Path(r"C:\Program Files\Git\bin\bash.exe")
@@ -3652,7 +3664,12 @@ def test_unix_installer_mcp_function_uses_parser_in_temp_home(tmp_path, scenario
     original = (
         'model = "gpt-5.6"\n'
         if scenario == "absent"
-        else _codex_mcp_toml(ROOT, quoted=True, conflicting=scenario == "conflicting")
+        else _codex_mcp_toml(
+            ROOT,
+            quoted=True,
+            conflicting=scenario == "conflicting",
+            deferred=scenario == "deferred",
+        )
     )
     config.write_text(original, encoding="utf-8")
     before = config.read_bytes()
@@ -3688,8 +3705,8 @@ def test_unix_installer_mcp_function_uses_parser_in_temp_home(tmp_path, scenario
 
 @pytest.mark.parametrize(
     ("scenario", "expected_exit"),
-    [("equivalent", 0), ("conflicting", 2), ("absent", 0)],
-    ids=["quoted-equivalent", "conflicting", "absent"],
+    [("equivalent", 0), ("deferred", 0), ("conflicting", 2), ("absent", 0)],
+    ids=["quoted-equivalent", "deferred", "conflicting", "absent"],
 )
 def test_windows_installer_mcp_function_uses_parser_in_temp_home(tmp_path, scenario, expected_exit):
     source = ROOT / "install.ps1"
@@ -3699,7 +3716,12 @@ def test_windows_installer_mcp_function_uses_parser_in_temp_home(tmp_path, scena
     original = (
         'model = "gpt-5.6"\n'
         if scenario == "absent"
-        else _codex_mcp_toml(ROOT, quoted=True, conflicting=scenario == "conflicting")
+        else _codex_mcp_toml(
+            ROOT,
+            quoted=True,
+            conflicting=scenario == "conflicting",
+            deferred=scenario == "deferred",
+        )
     )
     config.write_text(original, encoding="utf-8")
     before = config.read_bytes()

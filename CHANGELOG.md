@@ -7,7 +7,7 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Added
-- Every memory tool is in the agent's tool list from the first turn instead of waiting behind a tool search. The MCP server marks each of its 12 tools with `_meta: {"anthropic/alwaysLoad": true}` for Claude Code, and the installers write `omit_tools_from = ["deferred"]` into the Codex entry they add. An existing Codex entry without the line is not rewritten: `codex_memory.py config-state` answers `deferred` and both installers print the line to add. The always-loaded part of the tools measures 10 755 bytes, and a test holds it under 12 KiB (docs/research/2026-11-17-every-memory-tool-is-visible.md).
+- Every memory tool is in the agent's tool list from the first turn instead of waiting behind a tool search. The MCP server marks each of its 12 tools with `_meta: {"anthropic/alwaysLoad": true}` for Claude Code, and the installers write `omit_tools_from = ["deferred"]` into the Codex entry they add. An existing Codex entry without the line is not rewritten: `codex_memory.py config-state` answers `deferred`, and both installers say to add `"deferred"` to the entry's `omit_tools_from` list, or the whole line when the entry has none (a second `omit_tools_from` key would make the file unreadable to Codex). The always-loaded part of the tools measures 10 755 bytes, and a test holds it under 12 KiB (docs/research/2026-11-17-every-memory-tool-is-visible.md).
 
 ### Changed
 - The three READMEs are rewritten to match the code as it is: removed features (loop detector, agent timeline, feedback capture) and the unverifiable comparison table are gone; the agents, hooks, search, maintenance, backup and code navigation are described as they work today.
