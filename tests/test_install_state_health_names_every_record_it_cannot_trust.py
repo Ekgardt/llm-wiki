@@ -413,8 +413,27 @@ def test_transaction_resources_must_be_a_list_of_objects(resources: object) -> N
         {"state": "present", "preimage": "preimages/.."},
         {"state": "present", "preimage": "preimages/nested/value.bin"},
         {"state": "present", "preimage": "preimages\\..\\escape.bin"},
+        {"state": "present", "preimage": "preimages/..\\..\\escape.bin"},
+        {"state": "present", "preimage": "preimages/a\\b.bin"},
+        {"state": "present", "preimage": "preimages/value.bin:stream"},
+        {"state": "present", "preimage": "preimages/C:value.bin"},
+        {"state": "present", "preimage": "preimages/"},
+        {"state": "present", "preimage": "preimages/."},
     ],
-    ids=["no-reference", "outside-preimages", "climbs-out", "the-parent", "nested", "backslash"],
+    ids=[
+        "no-reference",
+        "outside-preimages",
+        "climbs-out",
+        "the-parent",
+        "nested",
+        "no-preimages-directory",
+        "backslash-climbs-out",
+        "backslash-in-name",
+        "alternate-stream",
+        "drive-letter",
+        "empty-name",
+        "the-directory-itself",
+    ],
 )
 def test_a_preimage_reference_outside_preimages_is_refused(tmp_path: Path, origin: _Record) -> None:
     with pytest.raises(InstallControlError, match="install_preimage_reference_invalid"):

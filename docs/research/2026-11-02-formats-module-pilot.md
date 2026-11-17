@@ -1,7 +1,7 @@
 # The first module: formats and source identity
 
-2026-11-02. Implementation of the bounded pilot on the base `3e1def7e`; its approval is recorded in
-the working session of that branch, which the repository does not hold.
+2026-11-02. Implementation of the bounded pilot on the base `3e1def7e`.
+This note cites no owner message, so it records no owner approval.
 This is not the completion of splitting the whole project and not an installation of the unfinished
 compile branch into the working vault.
 
@@ -90,7 +90,7 @@ of the fixed parts, the weight table, the facades and the module: **88 passed**.
 
 ## Requalification: current test contracts
 
-After the user's command "continue", the causes of all eight failures were checked
+The causes of all eight failures were checked
 against the current code and a fresh built-in graph. Production code was not changed.
 
 - The streaming original is a borrowed `VerifiedByteRange`, valid until
@@ -134,7 +134,7 @@ Source: `logs/formats-followup-full.txt`, `logs/formats-followup-full.xml`,
 
 ## Direct consumer imports
 
-The next step of the same approved pilot moves 58 production files to
+The next step of the same pilot moves 58 production files to
 the formats owner. Before the change, an AST inventory found 78 imports of moved
 names through the old modules and two qualified calls in doctor. After
 the move there are no such calls. In 27 files, the direct dependency on the old

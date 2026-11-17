@@ -1,6 +1,6 @@
 # Queue timing: time normalization and retry calculation
 
-Date: 2026-11-02. Status: recorded as approved by the user in the working session of that branch, which the repository does not hold. Research: 1a1f50b4; move: after the fix 2ea7fa24.
+Date: 2026-11-02. Status: This note cites no owner message, so it records no owner approval. Research: 1a1f50b4; move: after the fix 2ea7fa24.
 
 ## The proposed move
 
@@ -67,7 +67,7 @@ Evidence: logs/queue-timing-graph.json; logs/queue-timing-inventory.json.
 Baseline memory_queue, adopted Retry-After, small integrity gaps and failed capture:
 127 passed, 2.96s. Evidence: logs/queue-timing-baseline.txt.
 
-After approval, record the private decision and STRUCTURE before the code. Move
+Order: record the private decision and STRUCTURE before the code. Move
 the bodies without changes and confirm the AST; delete the old definitions. Add
 tests/modules/queue_timing, docs/modules/queue-timing.md and a context manifest.
 Own tests: timezone/naive/None/microseconds; bool, negative, NaN/Inf, HTTP-date,
@@ -109,7 +109,7 @@ the old jitter; the task's failure is not masked as a successful run.
 Regressions check the shared parser and both queue implementations: the task leaves leased
 for ready, drops the lease token, keeps the failed attempt and respects the retry time.
 The project test of an independent next capture is included. At the time of the separate fix, the structural move
-of queue_timing was awaiting approval; its AST baseline must be taken after
+of queue_timing was not yet made; its AST baseline must be taken after
 this separate fix, not pretend to match the faulty version.
 
 
@@ -119,7 +119,7 @@ logs/queue-retry-numeric-related.txt/.xml; logs/queue-retry-numeric-python310.tx
 This is not the full suite, not native Windows/macOS and not a live rollout.
 
 
-## The approved move
+## The move
 
 An explicit "Yes, implement this boundary" was received; the private decision and STRUCTURE
 were recorded before the code. The index 2ea7fa24 was refreshed before the move. The AST of all

@@ -2,11 +2,11 @@
 
 Date: 2026-09-29. Status: implemented in the same change.
 
-## The owner's requirement
+## The requirement
 
-"everything must be included + Pyright; all the other language packages are installed
-by the user separately for the language they need" (2026-09-29, translated from Russian;
-the working session of that branch records it; the repository holds no copy of the conversation). An install brings every Python
+The change was built to this requirement: every component is included, plus Pyright; the
+other language packages are installed separately for the language they are needed for.
+This note cites no owner message, so it records no owner approval; it records the requirement the change implements. An install brings every Python
 component of the product; of the four managed language servers only Pyright comes
 with it, and TypeScript, Go and Rust stay one explicit command each
 (`scripts/install_language_server.py --profile <name>`), because each is large and
@@ -61,8 +61,8 @@ Sources, read today:
 
 - Disk and time: a full install adds torch (CPU) and transformers, and the
   reranker weights (about 2.2 GB in the Hugging Face cache on this machine), to the
-  e5 encoder it already fetched. That is the price of "everything", accepted by the
-  owner's requirement.
+  e5 encoder it already fetched. That is the price of "everything", which the
+  requirement asks for.
 - A second index: `download.pytorch.org` is PyTorch's own and serves only `torch`
   because the index is explicit. If it is unreachable, a Linux install fails at the
   dependency step with uv's message, instead of silently taking a CUDA build.

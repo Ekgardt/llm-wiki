@@ -50,7 +50,7 @@
         "read_v2_snapshot",
         "validated_install_record"
       ],
-      "contract_sha256": "c53d331d4c3a436886c12ad3a9d3cf924c97aebb3d6e4e32c98e7778646c5c2d",
+      "contract_sha256": "ceedcc0de792372e67b541d6a737dbd6547d26cbc312d580affc868eba5d136d",
       "integration_tests": [
         "tests/test_a_changed_file_is_named_and_can_be_taken_over.py",
         "tests/test_a_changed_task_setting_reaches_an_installed_machine.py",

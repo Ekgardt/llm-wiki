@@ -70,6 +70,15 @@ def test_a_provider_no_test_reaches_is_held_whole(tmp_path):
     assert 'scripts/provider.py' in planned['files']
 
 
+def test_a_provider_reached_by_no_name_is_held_whole(tmp_path):
+    root, manifest = _tree(tmp_path, 'import provider\n')
+
+    planned = planned_manifest(root, manifest, {})
+
+    assert 'scripts/provider.py' in planned['files']
+    assert 'scripts/provider.py' not in _described(planned)
+
+
 FACADE = 'from helper import value\n\n\ndef own() -> int:\n    return 2\n'
 
 
@@ -108,7 +117,7 @@ def test_a_facade_name_of_its_own_is_no_evidence_for_what_it_imports(tmp_path):
 def test_a_declared_directory_is_kept_and_its_files_are_owned_not_listed(tmp_path):
     root, manifest = _tree(tmp_path, 'from provider import visible\n')
     (root / 'tests/modules/consumer').mkdir(parents=True)
-    (root / 'tests/modules/consumer/test_consumer.py').write_text('import helper\n', encoding='utf-8')
+    (root / 'tests/modules/consumer/test_consumer.py').write_text('from helper import value\n', encoding='utf-8')
     data = json.loads(manifest.read_bytes())
     data['directories'] = data['ownership']['directories'] = ['tests/modules/consumer']
     manifest.write_text(json.dumps(data), encoding='utf-8')

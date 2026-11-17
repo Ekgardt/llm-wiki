@@ -6,17 +6,21 @@
     "AGENTS.md",
     "CLAUDE.md",
     "benchmark/__init__.py",
+    "benchmark/flush_classification_metrics.py",
+    "benchmark/run_flush_classification.py",
     "docs/AGENTS.md",
     "docs/STRUCTURE.md",
     "docs/modules/benchmark-run-benchmark.md",
     "docs/modules/context-bundle.md",
     "docs/modules/context-records.md",
     "docs/modules/context-tooling.md",
+    "docs/modules/flush-classification-metrics.md",
     "docs/modules/flush-memory-tests-the-classifier-reads-the-conversation-context.json",
     "docs/modules/flush-memory-tests-the-classifier-reads-the-conversation.md",
     "docs/modules/model-choice.md",
     "docs/modules/product-structure.md",
     "docs/modules/project-governance.md",
+    "docs/modules/run-flush-classification.md",
     "docs/modules/test-support.md",
     "rules/development-laws.md",
     "scripts/__init__.py",
@@ -44,14 +48,6 @@
   },
   "qualified_dependencies": [
     {
-      "provider": "benchmark/run_flush_classification.py",
-      "names": [],
-      "contract_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-      "integration_tests": [
-        "tests/test_flush_classification_benchmark.py"
-      ]
-    },
-    {
       "provider": "scripts/flush_memory.py",
       "names": [
         "CLASSIFICATION_SYSTEM_PROMPT",
@@ -68,12 +64,25 @@
       ]
     },
     {
+      "provider": "scripts/llm_client.py",
+      "names": [
+        "call_llm"
+      ],
+      "contract_sha256": "69cae5b47f126ae4e45e541f3401efae2ad068c9c9cac4da4a08a082d7190feb",
+      "integration_tests": [
+        "tests/test_a_blocked_task_has_a_way_back.py",
+        "tests/test_a_changed_task_setting_reaches_an_installed_machine.py",
+        "tests/test_a_check_is_judged_when_it_ends.py"
+      ]
+    },
+    {
       "provider": "scripts/llm_wiki/classification_protocol.py",
       "names": [
+        "CLASSIFICATION_SYSTEM_PROMPT",
         "build_classification_prompt",
         "classify_response"
       ],
-      "contract_sha256": "4e04b1b73c2eea30cdebbbeeaf51ba5d4d1d74ffbd6f512c1116fa9807326a0a",
+      "contract_sha256": "c02a380c7b08c4726b1786bfdf5371ae251e90accdd803b02573eb3061a9a928",
       "integration_tests": [
         "tests/test_the_classifier_reads_the_conversation.py"
       ]
@@ -103,9 +112,10 @@
     {
       "provider": "scripts/reliable_memory.py",
       "names": [
+        "validate_schema",
         "validate_state_root"
       ],
-      "contract_sha256": "8680515cd873056a7c8a36e0057d91f2f83f23c48841263697676ff91f7ff964",
+      "contract_sha256": "e4b305e54809218b52d218b8fc59e959f458220ebd5c46cd084c92893b9493ba",
       "integration_tests": [
         "tests/test_the_classifier_reads_the_conversation.py"
       ]

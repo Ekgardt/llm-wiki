@@ -1,7 +1,6 @@
 # The next stage: reliability parameters and lease renewal
 
-2026-11-02. Based on add477d3. The working session of that branch records the user's answer
-"Yes, implement both steps" (translated from Russian; the repository holds no copy). The decision and STRUCTURE were recorded before the production changes.
+2026-11-02. Based on add477d3. This note cites no owner message, so it records no owner approval. The decision and STRUCTURE were recorded before the production changes.
 
 ## Two sequential moves
 
@@ -26,7 +25,7 @@ Each module has its own tests/modules/reliability_defaults/ and
 tests/modules/queue_heartbeat/, and a guide and manifest in docs/modules/ under the matching
 hyphenated name. The full package of each must be ≤100000 o200k_base tokens.
 Both moves are qualified sequentially; a failure of the first is not hidden by
-carrying out the second. Approval of this plan permits both named steps.
+carrying out the second. The plan covers both named steps.
 
 ## Why this order
 
@@ -104,7 +103,7 @@ The original set of reliable_memory, queue heartbeat stop, lease renewal and sto
 the child process on lease loss: **97 passed, 3 skipped**, 6.47 s on Linux.
 This is a baseline, not a qualification of the move not yet carried out.
 
-After approval: private decision and STRUCTURE before the code; old AST and pickle
+Order: private decision and STRUCTURE before the code; old AST and pickle
 samples; red boundary checks; migration without duplication; identical values,
 identity and old pickle bytes; isolated imports; real heartbeat threads and
 stop timeout, source refresh/error; busy/expiry cases; queue/compile lock handoff,
@@ -174,4 +173,4 @@ is recorded in logs/queue-heartbeat-final.txt/.xml. This is not the full regress
 Repeated check:25passed (14 own and 11 global complexity/shape),34.78s.
 CI weights/discovery:8passed. Ruff and git diff --check passed. All ten
 declared packages fit within100000; the queue source remains129165tokens.
-Both approved moves are complete in the candidate; the installed vault was not changed.
+Both moves are complete in the candidate; the installed vault was not changed.

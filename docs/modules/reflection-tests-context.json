@@ -13,6 +13,7 @@
     "docs/modules/formats.md",
     "docs/modules/markdown-store.md",
     "docs/modules/markdown-transaction-tests-markdown-coordinator-parts.md",
+    "docs/modules/migrate-to-okf.md",
     "docs/modules/model-choice.md",
     "docs/modules/product-structure.md",
     "docs/modules/project-governance.md",
@@ -27,6 +28,7 @@
     "scripts/llm_wiki/context_bundle.py",
     "scripts/llm_wiki/formats/__init__.py",
     "scripts/llm_wiki/markdown_store.py",
+    "scripts/migrate_to_okf.py",
     "scripts/rebuild_memory_index.py",
     "scripts/reflection.py",
     "tests/__init__.py",
@@ -214,9 +216,11 @@
       "names": [
         "index_file",
         "notes_dir",
+        "projects_dir",
+        "reports_dir",
         "vault_root"
       ],
-      "contract_sha256": "da13d2621b143ba87e8432b5db61e9ee4e8e770ddb92be8549f1d40e69148115",
+      "contract_sha256": "7e2d2ce94e70317158da9df5655fe92406d02f63a14d76044f765583cdbe1677",
       "integration_tests": [
         "tests/test_a_continuation_keeps_its_original_entry.py",
         "tests/test_a_prompt_checkpoint_does_not_outwait_its_host.py",
@@ -270,15 +274,6 @@
         "tests/test_a_backup_image_carries_what_git_does_not.py",
         "tests/test_a_backup_snapshots_what_hooks_write.py",
         "tests/test_a_backup_takes_what_any_installed_vault_holds.py"
-      ]
-    },
-    {
-      "provider": "scripts/migrate_to_okf.py",
-      "names": [],
-      "contract_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-      "integration_tests": [
-        "tests/test_migrate_to_okf_exemptions.py",
-        "tests/test_okf_migration_binds_content_to_its_source_snapshot.py"
       ]
     },
     {
@@ -367,6 +362,18 @@
       "contract_sha256": "6996986733aff8ab379a49ff913796288b35a03330b3f3d67951ced08a779207",
       "integration_tests": [
         "tests/test_automatic_writer_integration.py"
+      ]
+    },
+    {
+      "provider": "scripts/vault_editorial.py",
+      "names": [
+        "EDITORIAL_NAMES"
+      ],
+      "contract_sha256": "077ffd345188bc0a58980339e0b3573ab5ffa108410f0104e75efdbfefd94e57",
+      "integration_tests": [
+        "tests/modules/vault_editorial/test_policy.py",
+        "tests/test_a_blocked_task_has_a_way_back.py",
+        "tests/test_a_capacity_refusal_does_not_corrupt_a_generation.py"
       ]
     }
   ]

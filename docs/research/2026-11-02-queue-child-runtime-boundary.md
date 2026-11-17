@@ -1,7 +1,6 @@
 # The next module: managing the queue's child execution
 
-2026-11-02. Based on f44e5a6b. The working session of that branch records the user's answer
-"Yes, implement this boundary" (translated from Russian; the repository holds no copy). The decision and STRUCTURE were recorded before the implementation.
+2026-11-02. Based on f44e5a6b. This note cites no owner message, so it records no owner approval. The decision and STRUCTURE were recorded before the implementation.
 
 ## The concrete boundary
 
@@ -97,7 +96,7 @@ a global registry/dynamic executor lookup hides the dependency. The chosen optio
 a narrow entrypoint parameter with the old adapter, because it keeps the spawn ABI
 and the diagnostic policy while the transport is imported independently.
 
-## Acceptance after approval
+## Acceptance of the implementation
 
 Record the decision and STRUCTURE before the code. Pin the original wire bytes, defaults,
 errors and the existing integration tests. Check the isolated import and a real

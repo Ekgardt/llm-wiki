@@ -108,7 +108,12 @@ def _describable(plan: Plan, provider: Path, accesses: SourceAccesses) -> bool:
     if not is_provider_source(plan.root, provider) or provider in accesses.opaque:
         return False
     accessed = accesses.accessed.get(provider, set())
-    if patches_depend_on_internals(plan.root, provider, accesses.patched.get(provider, set()), accessed):
+    return bool(accessed) and _contract_holds(plan, provider, accesses, accessed)
+
+
+def _contract_holds(plan: Plan, provider: Path, accesses: SourceAccesses, accessed: set[str]) -> bool:
+    patched = accesses.patched.get(provider, set())
+    if patches_depend_on_internals(plan.root, provider, patched, accessed):
         return False
     _text, unknown = provider_contract(plan.root, provider, accessed)
     return not unknown and bool(_evidence(plan, provider))
@@ -299,7 +304,12 @@ def _why_whole(plan: Plan, provider: Path) -> str:
 
 def _undescribable_because(plan: Plan, provider: Path, accesses: SourceAccesses) -> str:
     accessed = accesses.accessed.get(provider, set())
-    patched = accesses.patched.get(provider, set())
+    if not accessed:
+        return 'no name of it is reached, so a description would hold nothing'
+    return _contract_breaks(plan, provider, accessed, accesses.patched.get(provider, set()))
+
+
+def _contract_breaks(plan: Plan, provider: Path, accessed: set[str], patched: set[str]) -> str:
     if patches_depend_on_internals(plan.root, provider, patched, accessed):
         return f'a stand-in depends on its internals: patched {sorted(patched)[:6]}'
     _text, unknown = provider_contract(plan.root, provider, accessed)

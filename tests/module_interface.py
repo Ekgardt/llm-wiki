@@ -8,7 +8,7 @@ from pathlib import Path
 from tests.module_context_paths import path_loaded_sources, syntax_nodes
 
 PATCH_CALLS = frozenset({'patch', 'setattr', 'delattr', 'object'})
-IMPORT_CALLS = frozenset({'setitem', 'import_module', '__import__'})
+IMPORT_CALLS = frozenset({'setitem', 'import_module', '__import__', 'importorskip'})
 READ_CALLS = frozenset({'getattr', 'hasattr'})
 PROVIDER_ROOTS = ('scripts', 'benchmark')
 PACKAGE_ROOT = 'scripts'

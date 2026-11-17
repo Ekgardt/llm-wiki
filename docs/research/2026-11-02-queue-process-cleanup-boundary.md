@@ -1,7 +1,6 @@
 # The next queue slice: stopping the process tree
 
-2026-11-02. The working session of that branch records the user's answer "continue" after a concrete
-boundary was proposed (translated from Russian; the repository holds no copy). The decision was recorded before the code; the implementation results are below.
+2026-11-02. This note cites no owner message, so it records no owner approval. The decision was recorded before the code; the implementation results are below.
 Basis: 81d4c01c, index generation-18e454e27e69b91c-8bb023e5.
 
 ## What is proposed
@@ -83,7 +82,7 @@ Three independent primary sources were checked on 2026-11-02:
   checks existence and permissions; a successful send to a group does not prove the death
   of all its processes. A separate termination check remains mandatory.
 
-## Implementation order after approval
+## Implementation order
 
 1. Record the private decision and update STRUCTURE before moving the code.
 2. Pin the AST of the definitions, the constants, defaults and the original results of
@@ -119,7 +118,7 @@ refused_signal or delivered_signal or branch_is_skipped`.
 
 ## Implementation and qualification
 
-After approval the decision was recorded in the private queue-process-cleanup-decision-20261102,
+The decision was recorded in the private queue-process-cleanup-decision-20261102,
 and STRUCTURE was updated before the move. All 30 function ASTs and three constants matched
 81d4c01c. The remaining executor AST matched after excluding imports and the move.
 22 definitions of tests/helper objects matched after replacing the name of

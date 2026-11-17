@@ -1,6 +1,6 @@
 # The next queue slice: types and errors of the public contract
 
-2026-11-02. The working session of that branch records the user's answer "Continue without stopping" after this slice was proposed (translated from Russian; the repository holds no copy). The implementation and checks are described below.
+2026-11-02. This note cites no owner message, so it records no owner approval. The implementation and checks are described below.
 Basis: fec3fbaf, the current built-in index and the AST of the sources.
 
 ## The concrete change
@@ -42,7 +42,7 @@ This step does not change the work of the store, leases, SQL, migrations, subpro
 
 ## Compatibility and verification
 
-1. Record the approval in knowledge/notes and update docs/STRUCTURE before the code.
+1. Record the decision in knowledge/notes and update docs/STRUCTURE before the code.
 2. Pin trusted pickle samples of the original types and errors; keep
    support for the old module/name through re-exports. Check the old samples,
    new round-trips and a real spawn transition. No unpickling of external data is added.
@@ -106,7 +106,7 @@ Evidence: `logs/queue-contracts-definitions.json`, `logs/queue-contracts-consume
 
 ## Implementation and evidence
 
-The approval is recorded in the private decision `queue-contracts-decision-20261102`;
+The private decision page is `queue-contracts-decision-20261102`;
 STRUCTURE was updated before the move. All 20 class ASTs match fec3fbaf. After
 excluding imports and the moved classes, the AST of the remaining queue also matches.
 Six consumers were switched directly; operations and lazy import sites were kept.

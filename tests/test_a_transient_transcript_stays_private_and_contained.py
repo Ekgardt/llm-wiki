@@ -19,6 +19,10 @@ posix_only = pytest.mark.skipif(
     os.name != "posix",
     reason="POSIX file modes, directory descriptors and renames of an open file",
 )
+replaces_an_open_file = pytest.mark.skipif(
+    os.name != "posix",
+    reason="deletes a file whose descriptor is still open, which Windows refuses",
+)
 
 
 @pytest.fixture
@@ -306,6 +310,7 @@ def test_windows_refuses_a_file_it_cannot_restrict_and_removes_it(
     assert not list(_transient_dir(state_root).iterdir())
 
 
+@replaces_an_open_file
 def test_windows_keeps_a_stranger_that_replaced_the_file(
     state_root: Path, envelope: EventEnvelope, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -319,6 +324,7 @@ def test_windows_keeps_a_stranger_that_replaced_the_file(
     assert stranger.read_text(encoding="utf-8") == "stranger"
 
 
+@replaces_an_open_file
 def test_windows_refuses_a_file_swapped_during_the_write(
     state_root: Path, envelope: EventEnvelope, monkeypatch: pytest.MonkeyPatch
 ) -> None:

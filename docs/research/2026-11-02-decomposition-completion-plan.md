@@ -1,6 +1,6 @@
 # Completing the LLM Wiki decomposition
 
-Date: 2026-11-02. Status: approved by the user; independent refinement of internal boundaries is allowed.
+Date: 2026-11-02. Status: the plan below. This note cites no owner message, so it records no owner approval.
 Base: bccb6a9c248f0abe5ded75144887d2f01ffc1a81, a separate working branch.
 
 ## Goal and checkable completion
@@ -95,7 +95,6 @@ baseline and boundary violation test are recorded. If a package exceeds the budg
 a standalone duty, not by lines or the size of an arbitrary slice.
 It is proposed to allow such refinements within the listed families without
 a new sign-off for each file. Deviation from these bounds needs approval.
-Permission was received on 2026-11-02: "Yes, approve the whole plan and the independent refinement of boundaries".
 
 ## What the mandate does not include
 

@@ -1,7 +1,7 @@
 # The next slice: the format of a queue task's content
 
-2026-11-02. The user approved the described move with the answer "continue".
-The decision is recorded in the private page queue-payload-formats-decision-20261102.
+2026-11-02. This note cites no owner message, so it records no owner approval.
+The private decision page is queue-payload-formats-decision-20261102.
 Basis: `d4d9f394`, the current built-in generation
 `generation-18e4487016b74277-ee8a87cf`, supplemented by reading the source.
 
@@ -14,7 +14,7 @@ the SQLite executor sits an independent format: `PayloadValidation` and
 This mixes the format's owner with the executor; it is not claimed that extracting
 one validator will solve the whole size of the queue or remove the current nightly errors.
 
-It was approved to add `scripts/llm_wiki/formats/queue_payload.py` to the already extracted
+The change adds `scripts/llm_wiki/formats/queue_payload.py` to the already extracted
 formats module. The contiguous block from `PayloadValidation` to
 `_parsed_canonical_payload` moves, including the internal helpers and `_PAYLOAD_CONTAINERS`,
 together with the four existing payload limits: bytes, depth, string bytes, container

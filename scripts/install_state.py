@@ -12,6 +12,7 @@ from collections.abc import Callable, Mapping, Sequence
 from contextvars import ContextVar
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Protocol, TypeGuard
 
 from llm_wiki.formats.canonical import canonical_json_bytes
 from llm_wiki.formats.schema import validate_schema
@@ -592,7 +593,9 @@ def _active_v2_install_health(
     return _active_v2_base_health(install_root, manifest, transaction)
 
 
-def _v2_transaction_operation(transaction: Mapping[str, object] | None) -> bool:
+def _v2_transaction_operation(
+    transaction: Mapping[str, object] | None,
+) -> TypeGuard[Mapping[str, object]]:
     if transaction is None or transaction.get("schema") != "install-transaction/v2":
         return False
     return transaction.get("operation") in {
@@ -668,17 +671,23 @@ def active_install_health_for_schema(
     return _active_install_health(install_root, manifest, transaction)
 
 
-PROVIDER_READ_PROOF = ContextVar("install_provider_read_proof", default=None)
+class ProviderReadProof(Protocol):
+    def read(self, path: Path, limit: int) -> bytes: ...
 
 
-def _provider_proof_bytes(path, limit):
+PROVIDER_READ_PROOF: ContextVar[ProviderReadProof | None] = ContextVar(
+    "install_provider_read_proof", default=None
+)
+
+
+def _provider_proof_bytes(path: Path, limit: int) -> bytes:
     proof = PROVIDER_READ_PROOF.get()
     if proof is None:
         return path.read_bytes()
     return proof.read(path, limit)
 
 
-def validated_install_record(raw, record_type):
+def validated_install_record(raw: bytes, record_type: str) -> dict[str, object]:
     value = strict_json_object(raw)
     try:
         validate_schema(value, _install_schema(value, record_type))

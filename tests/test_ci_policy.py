@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import json
 import re
 import shlex
 from pathlib import Path
 
+import pytest
 import yaml
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -422,4 +424,25 @@ def test_dependency_audit_covers_all_marker_variants():
     assert any('osv' not in args for args in audits)
     assert any({'--vulnerability-service', 'osv', '--strict', '--format', 'json'} <= set(args) for args in audits)
     assert _audit_commands_containing('scripts/check_dependency_audit.py uv.lock')
-    assert not any('--ignore-vuln' in args for args in audits)
+
+
+def _accepts_an_advisory(job: dict[str, object]) -> bool:
+    """Any step text that tells pip-audit to ignore an advisory, in any spelling."""
+    return '--ignore-vuln' in json.dumps(job)
+
+
+def test_the_dependency_audit_accepts_no_advisory():
+    assert not _accepts_an_advisory(_workflow()['jobs']['dependency-audit'])
+
+
+@pytest.mark.parametrize(
+    'run',
+    [
+        'accepted+=(--ignore-vuln "${advisory}")\npip-audit --requirement r.txt "${accepted[@]}"',
+        'pip-audit --requirement r.txt --ignore-vuln GHSA-x',
+        'pip-audit --locked --ignore-vuln=GHSA-x',
+    ],
+    ids=['bash-array', 'requirement-step', 'equals-form'],
+)
+def test_every_way_of_accepting_an_advisory_is_seen(run):
+    assert _accepts_an_advisory({'steps': [{'run': run}]})

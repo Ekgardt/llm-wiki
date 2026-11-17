@@ -757,3 +757,71 @@ def test_a_windows_uninstall_under_whatif_unregisters_nothing(tmp_path):
     runs = json.loads(result.stdout.splitlines()[-1])
     both = ["LLMWiki-Nightly", "LLMWiki-Weekly"]
     assert (runs["dry_run"], sorted(runs["real_run"])) == ([], both)
+
+
+_ABSENT_SCHEDULER_STUBS = textwrap.dedent(
+    """
+    function New-ScheduledTaskAction {
+        param($Execute, $Argument)
+        [pscustomobject]@{ Execute = $Execute; Arguments = $Argument }
+    }
+    function New-ScheduledTaskTrigger { [pscustomobject]@{ Kind = 'trigger' } }
+    function New-ScheduledTaskSettingsSet { [pscustomobject]@{ Kind = 'settings' } }
+    function New-ScheduledTaskPrincipal { [pscustomobject]@{ Kind = 'principal' } }
+    function Get-ScheduledTask { param($TaskName, $ErrorAction) }
+    $global:calls = [System.Collections.Generic.List[string]]::new()
+    function Register-ScheduledTask {
+        param($TaskName, $Action, $Trigger, $Settings, $Principal, $Description)
+        $global:calls.Add("register $TaskName")
+    }
+    function Start-ScheduledTask { param($TaskName) $global:calls.Add("start $TaskName") }
+    """
+)
+
+
+def test_a_windows_install_under_whatif_registers_and_starts_nothing(tmp_path):
+    """`-WhatIf` reaches registration and the requested start, and the summary says so."""
+    if shutil.which("pwsh") is None:
+        pytest.skip("PowerShell 7 is unavailable")
+    script = ps_literal(str(ROOT / "scripts" / "install-scheduled-tasks.ps1"))
+    runner = tmp_path / "vault" / "scripts" / "run-scheduled-task.ps1"
+    runner.parent.mkdir(parents=True)
+    runner.write_text("", encoding="utf-8")
+    uv_path = tmp_path / "uv.exe"
+    uv_path.write_text("", encoding="utf-8")
+    paths = " ".join(
+        f"-{name} {ps_literal(str(value))}"
+        for name, value in (
+            ("VaultRoot", tmp_path / "vault"),
+            ("StateRoot", tmp_path / "state"),
+            ("UvPath", uv_path),
+        )
+    )
+
+    command = textwrap.dedent(
+        f"""
+        $ErrorActionPreference = 'Stop'
+        {_ABSENT_SCHEDULER_STUBS}
+        $dryNotes = @(& {script} {paths} -RunNightlyNow -WhatIf 6>&1 |
+            ForEach-Object {{ [string]$_ }})
+        $dryRun = @($global:calls)
+        & {script} {paths} -RunNightlyNow 6>$null | Out-Null
+        @{{ dry_run = $dryRun; dry_notes = $dryNotes; real_run = @($global:calls) }} |
+            ConvertTo-Json -Compress
+        """
+    )
+
+    result = subprocess.run(
+        [require_tool("pwsh"), "-NoProfile", "-NonInteractive", "-Command", command],
+        capture_output=True,
+        text=True,
+        # pwsh startup alone can take ten seconds on a loaded hosted runner.
+        timeout=120,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    runs = json.loads(result.stdout.splitlines()[-1])
+    real = ["register LLMWiki-Nightly", "register LLMWiki-Weekly", "start LLMWiki-Nightly"]
+    assert (runs["dry_run"], runs["real_run"]) == ([], real)
+    assert "No task was registered." in runs["dry_notes"]

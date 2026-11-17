@@ -310,6 +310,7 @@ function Register-LLMWikiTaskSet {
     [CmdletBinding(SupportsShouldProcess = $true)]
     param($Paths)
     $specMarker = Get-LLMWikiSpecMarker
+    $registered = [System.Collections.Generic.List[string]]::new()
 
     # --- Nightly task: 03:00 every day ---
     $nightlyAction = ConvertTo-LLMWikiTaskAction -Kind nightly -Paths $Paths
@@ -346,6 +347,7 @@ function Register-LLMWikiTaskSet {
             -Description "LLM-wiki: nightly queue drain + compile + lint. No user interaction required.$specMarker" |
             Out-Null
         Write-Information "  registered" -InformationAction Continue
+        $registered.Add("LLMWiki-Nightly")
     }
 
     # --- Weekly task: Sunday 04:00 ---
@@ -376,7 +378,9 @@ function Register-LLMWikiTaskSet {
             -Description "LLM-wiki: weekly deep maintenance + OKF conformance sweep + lint.$specMarker" |
             Out-Null
         Write-Information "  registered" -InformationAction Continue
+        $registered.Add("LLMWiki-Weekly")
     }
+    return ,$registered.ToArray()
 }
 
 # --- Optional: run now to verify ---
@@ -394,11 +398,18 @@ function Start-LLMWikiRequestedTask {
     }
 }
 
-function Write-LLMWikiInstallSummary {
+function Write-LLMWikiInstallSummary([string[]]$Registered) {
+    # Names only what was registered: -WhatIf or a declined -Confirm registers nothing.
+    $schedules = @{ "LLMWiki-Nightly" = "every day at 03:00"; "LLMWiki-Weekly" = "every Sunday at 04:00" }
     Write-Information "" -InformationAction Continue
+    if ($Registered.Count -eq 0) {
+        Write-Information "No task was registered." -InformationAction Continue
+        return
+    }
     Write-Information "Done. Tasks registered for the current logged-on user:" -InformationAction Continue
-    Write-Information "  LLMWiki-Nightly: every day at 03:00" -InformationAction Continue
-    Write-Information "  LLMWiki-Weekly:  every Sunday at 04:00" -InformationAction Continue
+    foreach ($name in $Registered) {
+        Write-Information "  ${name}: $($schedules[$name])" -InformationAction Continue
+    }
     Write-Information "" -InformationAction Continue
     Write-Information "Check status:  .\install-scheduled-tasks.ps1 -Status" -InformationAction Continue
     Write-Information "Uninstall:     .\install-scheduled-tasks.ps1 -Uninstall" -InformationAction Continue
@@ -416,10 +427,9 @@ function Install-LLMWikiScheduledTaskSet {
         Write-Information "Scheduled tasks already match the LLM-Wiki contract." -InformationAction Continue
         return ConvertTo-LLMWikiOutcome -Value @() -ExitCode 0
     }
-    Register-LLMWikiTaskSet -Paths $paths
+    $registered = Register-LLMWikiTaskSet -Paths $paths
     Start-LLMWikiRequestedTask
-    if ($WhatIfPreference) { return ConvertTo-LLMWikiOutcome -Value @() -ExitCode 0 }
-    Write-LLMWikiInstallSummary
+    Write-LLMWikiInstallSummary -Registered $registered
     return ConvertTo-LLMWikiOutcome -Value @() -ExitCode 0
 }
 

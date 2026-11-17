@@ -10,6 +10,7 @@
     "docs/modules/context-bundle.md",
     "docs/modules/context-records.md",
     "docs/modules/context-tooling.md",
+    "docs/modules/mcp-http.md",
     "docs/modules/mcp-server-tests-shared-server-warms-the-same-way-context.json",
     "docs/modules/mcp-server-tests-shared-server-warms-the-same-way.md",
     "docs/modules/model-choice.md",
@@ -20,6 +21,7 @@
     "scripts/__init__.py",
     "scripts/llm_wiki/__init__.py",
     "scripts/llm_wiki/context_bundle.py",
+    "scripts/mcp_http.py",
     "tests/__init__.py",
     "tests/conftest.py",
     "tests/module_context.py",
@@ -66,13 +68,33 @@
       ]
     },
     {
-      "provider": "scripts/mcp_http.py",
-      "names": [],
-      "contract_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "provider": "scripts/llm_wiki/runtime_roots.py",
+      "names": [
+        "run_dir"
+      ],
+      "contract_sha256": "74b8793a703c1648e780252fc4ed74d65ddbb10411935e7151d2beddf5c2418a",
       "integration_tests": [
-        "tests/test_a_new_token_never_lands_in_someone_elses_file.py",
-        "tests/test_mcp_http.py",
-        "tests/test_the_http_guard_refuses_what_it_cannot_judge.py"
+        "tests/test_a_backup_image_carries_what_git_does_not.py",
+        "tests/test_a_bad_model_file_is_fetched_again.py",
+        "tests/test_a_block_opens_one_entry.py"
+      ]
+    },
+    {
+      "provider": "scripts/mcp_server.py",
+      "names": [
+        "MCP_AVAILABLE",
+        "MCP_OPERATION_SECONDS",
+        "build_server",
+        "close_navigation_session_manager",
+        "settle_inference",
+        "start_encoder_warmup",
+        "warmup_retrieval_path"
+      ],
+      "contract_sha256": "8a04e5c4fa847c407dce6ec4510280e254bb6582c0a7aa98893974dfea4de537",
+      "integration_tests": [
+        "tests/test_a_context_answer_fits_the_budget_it_was_given.py",
+        "tests/test_a_context_answer_says_when_its_corpus_was_read.py",
+        "tests/test_a_context_answer_sends_its_text_once.py"
       ]
     },
     {

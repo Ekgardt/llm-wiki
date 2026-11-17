@@ -1,8 +1,8 @@
 # Proposal: isolated LLM Wiki modules of up to 100,000 tokens
 
 Research date: 2026-11-02. Status: **a draft for approval, not an accepted architecture**.
-The working session of that branch records that the user allowed the research and the
-preparation of a scheme. No sources were
+This note cites no owner message, so it records no owner approval.
+No sources were
 moved, no paths were changed and nothing was installed. This research does not
 lift the pause of the earlier task under item 7.
 

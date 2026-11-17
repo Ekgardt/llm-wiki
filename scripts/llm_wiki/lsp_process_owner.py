@@ -195,7 +195,7 @@ class OwnerDirectory:
             os.unlink(name, dir_fd=self.owner_handle)
         self._forget_temp_name(name)
 
-    def _delete_temp_handle(self, handle: object) -> None:
+    def _delete_temp_handle(self, handle: int) -> None:
         """Delete through the handle and always close it, keeping the first error."""
         delete_error: BaseException | None = None
         try:
@@ -834,7 +834,7 @@ class OwnerDirectory:
         self._remove_posix_owner_root()
         os.fsync(self.parent_handle)
 
-    def _delete_child(self, handle: object) -> None:
+    def _delete_child(self, handle: int) -> None:
         try:
             _windows_workspace.delete_handle(handle)
         finally:
@@ -898,14 +898,13 @@ class OwnerDirectory:
             return
         self._remove_success_scratch_windows()
 
-    def _verify_lexical_identity_posix(self) -> None:
+    def _verify_lexical_identity_posix(self, owner: int) -> None:
         if _current_identity(self.owner_root.parent) != self.parent_identity:
             raise RuntimeError("owner_root parent identity changed during startup")
-        if _current_identity(self.owner_root) != self.owner_identity:
+        current = _current_identity(self.owner_root)
+        if current is None or current != self.owner_identity:
             raise RuntimeError("LSP owner root identity changed during startup")
-        _verify_descriptor(
-            self.owner_handle, self.owner_identity, mode=0o700, directory=True
-        )
+        _verify_descriptor(owner, current, mode=0o700, directory=True)
 
     def _check_windows_parent_identity(self, parent: int) -> None:
         if (
@@ -946,7 +945,7 @@ class OwnerDirectory:
         if self.owner_handle is None or self.owner_identity is None:
             raise RuntimeError("LSP owner directory was not created")
         if os.name == "posix":
-            self._verify_lexical_identity_posix()
+            self._verify_lexical_identity_posix(self.owner_handle)
             return
         self._verify_lexical_identity_windows()
 

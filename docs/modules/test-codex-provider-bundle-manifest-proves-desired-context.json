@@ -104,7 +104,7 @@
         "transaction_resources",
         "validate_schema"
       ],
-      "contract_sha256": "bb7b987fe1a261d0c356b9ca8285ad5eda05e541a6afe655cf7cf6d03afda136",
+      "contract_sha256": "a80428a3f5d0093e2c38b94b34b20a915cf5e33abfeade3a9eaa089f16101ba7",
       "integration_tests": [
         "tests/test_a_backup_image_carries_what_git_does_not.py",
         "tests/test_a_backup_snapshots_what_hooks_write.py",

@@ -1,6 +1,6 @@
 # The declarative queue schema: the next module
 
-Status: the working session of that branch records the user's answer "continue" after the plan was discussed (translated from Russian; the repository holds no copy).
+Status: This note cites no owner message, so it records no owner approval.
 Research date: 2026-11-02. Original candidate version: ad59363f.
 
 ## Boundary and purpose
@@ -84,7 +84,7 @@ in logs/queue-schema-baseline-contract.json; the graph in logs/queue-schema-grap
 Do not duplicate the SQL itself in a fixture: use verifiable baseline digests
 and small behaviour scenarios, including the real trigger/constraint prohibitions.
 
-After approval: first the private decision and STRUCTURE, then the code.
+Order: first the private decision and STRUCTURE, then the code.
 Own tests/modules/queue_schema, guide docs/modules/queue-schema.md and
 manifest docs/modules/queue-schema-context.json. Check:
 
@@ -105,11 +105,10 @@ Do not claim the full suite, native platform qualification or a live rollout wit
 
 Additional baseline: tests/test_queue_v3_corruption.py: 29 passed, 12.01 s;
 logs/queue-schema-corruption-baseline.txt. These are checks of the original implementation,
-not proof of the move not yet carried out. The user's answer
-"by best practices?" refines the justification and is not counted as approval.
+not proof of the move not yet carried out. 
 
 
-## Implementation of the approved boundary
+## Implementation of the boundary
 
 The private decision and STRUCTURE were recorded before the code. The SQL block was moved byte for byte,
 and the remaining queue AST matched after excluding imports and the moved definitions.

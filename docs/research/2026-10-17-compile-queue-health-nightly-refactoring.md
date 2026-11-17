@@ -1,9 +1,8 @@
 # Refactoring of compilation, the queue, diagnostics and nightly maintenance
 
-Research date: 2026-10-17. Status: recorded as approved by the owner on 2026-10-17 in the working session of that
-branch, which the repository does not hold; implementation and installation are not yet complete.
+Research date: 2026-10-17. Status: implementation and installation are not yet complete. This note cites no owner message, so it records no owner approval.
 
-The goal is to separate checking current work from checking the whole accumulated history, to make the nightly cycle's results unambiguous, and to stop blocking usable sources because of a neighbouring source that is too large. This is a change in the behaviour of diagnostics and execution. The owner gave explicit approval under section 0 of AGENTS.md; the decision is recorded in knowledge/notes/compile-queue-health-nightly-refactoring-decision-20261017.md. No new databases, daemon, dependencies or runtime roots are proposed.
+The goal is to separate checking current work from checking the whole accumulated history, to make the nightly cycle's results unambiguous, and to stop blocking usable sources because of a neighbouring source that is too large. This is a change in the behaviour of diagnostics and execution. The decision page is the private knowledge/notes/compile-queue-health-nightly-refactoring-decision-20261017.md. No new databases, daemon, dependencies or runtime roots are proposed.
 
 ## What is confirmed now
 
@@ -152,9 +151,8 @@ CI also found the old value 4 in the expected result of a PowerShell test; the e
 
 ### Configurable full survey and limit review, October 17
 
-The working session records that the owner said to continue after a specific settings
-proposal and separately required all limits to comply with law 9. The decision and STRUCTURE were recorded before
-the code change. The registry now contains `doctor.nightly_seconds` with the usual environment
+This step follows a specific settings proposal and applies law 9 to every limit.
+The decision and STRUCTURE were recorded before the code change. The registry now contains `doctor.nightly_seconds` with the usual environment
 alias; the nightly doctor and the outer deadline calculation read one value of the selected
 vault. Invalid values are explicitly refused. The previous 60 seconds is a compatible original
 profile whose sufficiency for an arbitrary corpus is not proven. The mere existence
@@ -1257,8 +1255,8 @@ as untrusted data for each child; previously that path assumed every feedback
 record contained operation reviews and raised KeyError. Regression tests first
 reproduced this failure. No source/context truncation is introduced.
 
-The owner approved `compile.validation_retries` (standard environment override
-`LLM_WIKI_COMPILE_VALIDATION_RETRIES`) before implementation. Default 2 correction
+The setting `compile.validation_retries` (standard environment override
+`LLM_WIKI_COMPILE_VALIDATION_RETRIES`) was decided before implementation. Default 2 correction
 passes is an explicit cost/quality compromise, not a measured optimum. It is
 nonnegative with no additional upper cap, and must be reconsidered after changes
 to models, prompts or workload using complete-cycle evidence. The hidden constant
@@ -1566,7 +1564,7 @@ anonymous RSS). Concurrent code indexing added memory pressure. The dependent
 installation chain stopped without claiming success. The already-tested
 97b46523 changes were subsequently installed as manifest generation 71; the
 source's quarantined attempt received a committed matching-byte retry without
-deleting the original refusal. The approved health budget was installed as
+deleting the original refusal. The health budget was installed as
 generation 72, followed by the user's selected Sol 6.1 / medium provider.
 Full generation, full nightly/weekly completion, and full CI remain unverified.
 The remaining Windows 3.12 shard exceeded its existing one-hour CI limit;

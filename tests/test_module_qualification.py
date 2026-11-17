@@ -133,6 +133,8 @@ def test_a_declaration_must_match_what_is_really_used(tmp_path):
     'from provider import *\n',
     'import provider\ngetattr(provider, name)\n',
     'import provider\ngetattr(provider, "_hidden")\n',
+    'import pytest\nbound = pytest.importorskip("provider")\nbound._hidden()\n',
+    'import importlib\nbound = importlib.import_module("provider")\nbound.visible("x")\n',
 ])
 def test_reaching_around_public_names_keeps_the_full_source(tmp_path, consumer):
     root, path = _tree(tmp_path, consumer)
@@ -211,6 +213,12 @@ def test_no_real_test_across_the_boundary_refuses_the_description(tmp_path):
     manifest['qualified_dependencies'][0]['integration_tests'] = []
     with pytest.raises(AssertionError, match='no real test crosses'):
         validate_qualified(root, manifest, {consumer})
+
+
+def test_an_empty_description_is_refused(tmp_path):
+    root, consumer = _tree(tmp_path, 'import pytest\nbound = pytest.importorskip("provider")\n')
+    with pytest.raises(AssertionError, match='empty description'):
+        validate_qualified(root, _manifest(root, ()), {consumer})
 
 
 def test_a_provider_cannot_be_both_described_and_included(tmp_path):

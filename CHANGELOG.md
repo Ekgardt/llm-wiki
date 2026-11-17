@@ -26,7 +26,21 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 - `scripts/install-scheduled-tasks.ps1` honours `-WhatIf`: it reports each scheduled-task
   registration, removal and start without making it, and a test proves an uninstall under
-  `-WhatIf` unregisters nothing.
+  `-WhatIf` unregisters nothing and an install under `-WhatIf` registers and starts nothing. Its
+  closing summary names only the tasks really registered, and says "No task was
+  registered." after `-WhatIf` or a declined `-Confirm` instead of reporting both as done.
+
+- A packet no longer describes a provider its files reach by no name. A file imported
+  through `pytest.importorskip` or `importlib.import_module` is bound to a variable the
+  analyser could not follow, so `scripts/mcp_http.py` was carried as an empty description;
+  the analyser now treats such an import as opaque and the packet carries the whole source,
+  the planner keeps the whole source of any provider reached by no name, and qualification
+  refuses an empty description.
+
+- The CI policy test sees `--ignore-vuln` in any step of the dependency audit, in its
+  bash-array, requirement-step and `=` forms, not only on the `pip-audit --locked` line.
+
+- Research notes no longer claim an owner approval they cannot cite.
 
 - `scripts/generation_catalog.py`, a facade that only re-exported the generation modules under
   `scripts/llm_wiki/generation_*.py`, is removed with its guide and the test that checked the

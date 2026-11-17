@@ -1,6 +1,6 @@
 # Windows permissions: remove the dependency of basic IO on the queue and transactions
 
-Research date: 2026-11-02. Status: the working session of that branch records the user's approval of both sequential steps; the repository holds no copy.
+Research date: 2026-11-02. Status: two sequential steps. This note cites no owner message, so it records no owner approval.
 Original version: dd3ad044. This is the next boundary of the overall decomposition plan.
 
 ## The confirmed cause of the coupling
@@ -97,7 +97,7 @@ Baseline: transaction, reliable memory, non-ASCII owner and native handle-width 
 on Linux: 154 passed, 8 skipped, 3.15 s. Evidence: logs/windows-permissions-baseline.txt.
 The skips are not declared a native Windows qualification.
 
-After explicit approval: private decision and STRUCTURE before the code; each step separately
+Order: private decision and STRUCTURE before the code; each step separately
 with AST comparisons (imports are normalized), a red/green boundary guard, an isolated import,
 identity/cache tests, faithful mocked subprocess outcomes and the existing native tests.
 Check a Unicode owner, an extra ACE, a malformed/failed command, inherited-vs-explicit,
@@ -106,7 +106,7 @@ are checked together with the queue, transaction/recovery, reliable_memory and c
 Each stage: Python 3.10, global CCN/shape, Ruff, CI discovery/weights, the full token
 budget; commit/push and refreshing the index. Do not claim native Windows without running it.
 A live rollout, rebuilding operational state, changing the security policy and a new
-WinAPI surface are not part of the moves being approved.
+WinAPI surface are not part of these moves.
 
 Additional readers baseline: 5 passed, 0.32s;
 logs/windows-permissions-reader-baseline.txt.
@@ -134,7 +134,7 @@ Ruff and diff checks are clean. Skips are not proof of the native platform.
 22 functions were moved from transaction/queue; their AST matches after removing
 the reverse imports. The other bodies of transaction, queue, archive, compile_cache,
 evidence_resolver and LSP matched without imports. In reliable_memory the comparison
-additionally normalizes exactly two approved redirections of Windows-only
+additionally normalizes exactly two named redirections of Windows-only
 calls: hardening and boolean verification; the strict verifier changes only its import.
 
 The boundary guard first caught the old definitions and the reverse imports of basic IO.

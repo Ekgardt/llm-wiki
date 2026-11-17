@@ -71,6 +71,7 @@ def _require_evidence(root: Path, item: Dependency) -> None:
 def _require_dependency(root: Path, item: Dependency, accesses: SourceAccesses, files: set[Path]) -> None:
     provider = _contained(root, item.provider)
     assert provider not in files, f'{item.provider}: both full source and description in one packet'
+    assert item.names, f'{item.provider}: an empty description proves nothing; keep its source'
     assert set(item.names) == accesses.accessed.get(provider, set()), f'{item.provider}: declared names differ from use'
     _require_public_use(root, provider, accesses)
     _require_current(root, provider, item)

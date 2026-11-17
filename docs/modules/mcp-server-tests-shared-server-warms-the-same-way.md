@@ -4,7 +4,7 @@
 
 These files do not import `scripts/mcp_server.py`, the module they are filed with. The product code they import directly is carried in this packet as follows:
 
-- `scripts/mcp_http.py`: its exact derived description.
+- `scripts/mcp_http.py`: its whole source.
 
 The owned files and the complete maintenance context are listed in the `-context.json`
 manifest next to this guide.

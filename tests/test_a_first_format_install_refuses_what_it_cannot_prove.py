@@ -15,7 +15,7 @@ from install_state import (
 )
 from llm_wiki import install_transactions as transactions
 from llm_wiki.formats.canonical import canonical_json_bytes
-from llm_wiki.install_records import prepare_install_root
+from llm_wiki.install_records import error_code, prepare_install_root
 from llm_wiki.install_v2_transactions import install_resources
 
 from tests.install_control_helpers import _release
@@ -91,10 +91,9 @@ def _edit_transaction(tmp_path: Path, **changes: object) -> None:
 
 
 def _refused(code: str, action: Callable[[], object]) -> None:
-    """The refusal's code is the message up to its first colon, not text that contains it."""
     with pytest.raises(InstallControlError) as raised:
         action()
-    assert str(raised.value).split(":", 1)[0] == code
+    assert error_code(raised.value) == code
 
 
 def test_a_request_without_resources_is_refused() -> None:
