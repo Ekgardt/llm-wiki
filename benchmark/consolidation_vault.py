@@ -232,7 +232,7 @@ def run_arm(question: dict, root: Path, state: Path) -> dict:
     plain = str(question["question"])
     profile = vault_harness.profile_for(plain)
     retrieve_started = time.monotonic()
-    rows = vault_harness._retrieved_rows(plain, profile)
+    rows = vault_harness._retrieved_rows(plain)
     answer_started = time.monotonic()
     outcome = _answered(question, root, snapshot, rows, profile)
     finished = time.monotonic()

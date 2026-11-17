@@ -277,7 +277,12 @@ def _libraries_importable() -> bool:
 
 
 def _exact_bypass_reason(profile: str, intents: set[str]) -> str | None:
-    if intents & {"quoted_phrase", "exact_identifier"}:
+    """A quoted phrase asks for those words; a name in a question does not.
+
+    A query that is one name keeps its file first without a bypass: retrieval
+    promotes an exact filename again after reranking.
+    """
+    if "quoted_phrase" in intents:
         return "exact_match_bypass"
     if profile in {"EXACT", "DIRECT"}:
         return "exact_match_bypass"

@@ -664,7 +664,7 @@ _PROFILE_BY_INTENT = (
     ("graph_relation", "GRAPH"),
     ("temporal", "TEMPORAL"),
     ("quoted_phrase", "EXACT"),
-    ("exact_identifier", "EXACT"),
+    ("identifier_lookup", "EXACT"),
     ("question", "HYBRID"),
 )
 
@@ -706,6 +706,17 @@ def _is_question(stripped: str, normalized: str) -> bool:
     return stripped.endswith("?") or stripped.endswith("？")
 
 
+def _is_identifier_lookup(normalized: str, identifiers: tuple[str, ...]) -> bool:
+    """The whole query is one name and nothing else.
+
+    A name inside a sentence is a hint the lexical leg rewards; it does not make
+    the sentence a lookup. Before 2026-11-17 it did, and 40 of LongMemEval's 500
+    questions ran without the cross-encoder because they held a hyphenated word
+    such as "5-day" (docs/research/2026-11-17-a-name-inside-a-question-keeps-every-leg.md).
+    """
+    return normalized in identifiers
+
+
 def _shape_intents(
     stripped: str, normalized: str, phrases: tuple[str, ...], identifiers: tuple[str, ...]
 ) -> list[str]:
@@ -713,6 +724,7 @@ def _shape_intents(
     present = (
         (bool(phrases), "quoted_phrase"),
         (bool(identifiers), "exact_identifier"),
+        (_is_identifier_lookup(normalized, identifiers), "identifier_lookup"),
         (_is_question(stripped, normalized), "question"),
     )
     return [intent for found, intent in present if found]
@@ -4378,6 +4390,16 @@ def planned_request(
     if requested is not None:
         return requested, PROFILE_SIGNALS[requested]
     return _planned_semantic_request(analysis.recommended_profile)
+
+
+def planned_profile(query: str) -> str:
+    """The profile a semantic search of `query` runs when its caller names none.
+
+    A caller that only wants to label or report the profile asks this, and passes
+    no profile to retrieval: handing the planner's recommendation back as if the
+    caller had chosen it ran EXACT and TEMPORAL questions lexical only.
+    """
+    return planned_request(None, analyze_query(query), semantic=True)[0]
 
 
 def _planned_semantic_request(recommended: str) -> tuple[str, tuple[str, ...]]:

@@ -1594,7 +1594,7 @@ def _answer_corpus(vault: Path, deadline: float) -> object:
 def _default_candidates(
     question: str,
     *,
-    profile: str,
+    profile: str | None,
     deadline: float,
     limit: int = QA_MAX_CANDIDATES,
     since: str | None = None,
@@ -1738,9 +1738,9 @@ def grounded_qa(
     selected_deadline = _resolved_deadline(deadline)
     _check_deadline(selected_deadline)
     selected_profile = _resolved_profile(profile, question)
-    fetch = _resolved_retriever(retrieve, candidates, question, selected_profile, selected_deadline)
+    fetch = _resolved_retriever(retrieve, candidates, question, profile, selected_deadline)
     seek = _resolved_search(
-        search, candidates is not None or retrieve is not None, selected_profile, selected_deadline
+        search, candidates is not None or retrieve is not None, profile, selected_deadline
     )
     single = _AnswerPass(
         question,
@@ -2415,11 +2415,16 @@ def _resolved_deadline(deadline: float | None) -> float:
 
 
 def _resolved_profile(profile: str | None, question: str) -> str:
-    from retrieval import analyze_query
+    """The profile the answer is built and reported under.
+
+    Retrieval is given the caller's own choice, which is usually none, so that
+    it plans the legs itself; see `retrieval.planned_profile`.
+    """
+    from retrieval import planned_profile
 
     if profile is not None:
         return profile.upper()
-    return analyze_query(question).recommended_profile.upper()
+    return planned_profile(question)
 
 
 def _resolved_candidates(
@@ -2434,7 +2439,7 @@ def _resolved_candidates(
 def _resolved_search(
     search: Callable[[str, int], Iterable[object]] | None,
     fixed: bool,
-    profile: str,
+    profile: str | None,
     deadline: float,
 ) -> Callable[[str, int], Iterable[object]] | None:
     """How to search for something else; None when the caller decided retrieval.
@@ -2455,7 +2460,7 @@ def _resolved_retriever(
     retrieve: Callable[[int], Iterable[object]] | None,
     candidates: Iterable[object] | None,
     question: str,
-    profile: str,
+    profile: str | None,
     deadline: float,
 ) -> Callable[[int], Iterable[object]] | None:
     """How to ask retrieval for more; None when the caller fixed the candidates."""
