@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
+from typing import Any, NoReturn
 
 import pytest
 
@@ -48,7 +49,7 @@ def test_a_query_that_is_only_a_name_is_still_a_lookup(query: str) -> None:
     assert analyze_query(query).recommended_profile == "EXACT"
 
 
-def test_a_name_does_not_switch_the_reranker_off(monkeypatch) -> None:
+def test_a_name_does_not_switch_the_reranker_off(monkeypatch: pytest.MonkeyPatch) -> None:
     import reranker
 
     monkeypatch.setattr(reranker, "reranker_installed", lambda: True)
@@ -61,7 +62,9 @@ def test_a_name_does_not_switch_the_reranker_off(monkeypatch) -> None:
     assert decision == (True, None)
 
 
-def test_the_answer_path_lets_retrieval_plan_the_legs(tmp_path: Path, monkeypatch) -> None:
+def test_the_answer_path_lets_retrieval_plan_the_legs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """The planner's recommendation is not the caller's choice of profile."""
     import retrieval
     from query_memory import grounded_qa
@@ -71,7 +74,7 @@ def test_the_answer_path_lets_retrieval_plan_the_legs(tmp_path: Path, monkeypatc
     class Stop(Exception):
         pass
 
-    def recording(query, **kwargs):
+    def recording(query: str, **kwargs: Any) -> NoReturn:
         asked.append(kwargs.get("profile"))
         raise Stop
 
@@ -83,20 +86,92 @@ def test_the_answer_path_lets_retrieval_plan_the_legs(tmp_path: Path, monkeypatc
     assert asked == [None]
 
 
-def test_the_benchmark_lets_retrieval_plan_the_legs(monkeypatch) -> None:
-    import longmemeval_vault
+def _record_retrieval(monkeypatch: pytest.MonkeyPatch) -> list[tuple[str, object]]:
+    """Every query retrieval is asked, with the profile it was handed."""
     import retrieval
 
-    asked: list[object] = []
-    monkeypatch.setattr(
-        retrieval,
-        "retrieve_via_search_memory",
-        lambda query, **kwargs: asked.append(kwargs.get("profile")) or [],
-    )
+    asked: list[tuple[str, object]] = []
+
+    def recording(query: str, **kwargs: Any) -> list[dict[str, Any]]:
+        asked.append((query, kwargs.get("profile")))
+        return []
+
+    monkeypatch.setattr(retrieval, "retrieve_via_search_memory", recording)
+    return asked
+
+
+def test_the_benchmark_lets_retrieval_plan_the_legs(monkeypatch: pytest.MonkeyPatch) -> None:
+    import longmemeval_vault
+
+    asked = _record_retrieval(monkeypatch)
 
     longmemeval_vault._retrieved_rows("what depends on search_memory")
 
-    assert asked == [None]
+    assert asked == [("what depends on search_memory", None)]
+
+
+QUESTION = {
+    "question_id": "q1",
+    "question_type": "multi-session",
+    "question": "How many shirts did I pack for my 5-day trip?",
+    "question_date": "2023/05/20 (Sat) 02:21",
+    "answer": "7",
+    "haystack_sessions": [],
+    "answer_session_ids": [],
+}
+
+
+def test_a_benchmark_question_is_retrieved_unplanned_and_reported_as_planned(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import longmemeval_vault as harness
+
+    asked = _record_retrieval(monkeypatch)
+    monkeypatch.setattr(harness, "prepare_environment", lambda work: (tmp_path, tmp_path))
+    monkeypatch.setattr(harness, "_adopt", lambda root, state: None)
+    monkeypatch.setattr(harness, "ingest_sessions", lambda root, question: ([], 0))
+    monkeypatch.setattr(harness, "build_generation", lambda *args: (object(), {}))
+    monkeypatch.setattr(harness, "_warm_reranker", lambda: None)
+    monkeypatch.setattr(harness, "_answer_or_coverage", lambda *args: {})
+    monkeypatch.setattr(harness, "_measured_compile", lambda *args: {})
+
+    record = harness.run_question(QUESTION, tmp_path)
+
+    assert [profile for _, profile in asked] == [None]
+    assert record["profile"] == "HYBRID"
+
+
+def test_retrieval_only_coverage_reads_the_dated_question_without_a_profile(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import longmemeval_coverage
+    import longmemeval_vault as harness
+
+    asked = _record_retrieval(monkeypatch)
+    monkeypatch.setenv(harness.RETRIEVAL_ONLY_VARIABLE, "1")
+    monkeypatch.setattr(longmemeval_coverage, "coverage_at_depths", lambda question, rows: {})
+    searchable = "How many shirts did I pack for my 5-day trip? 2023-05-20"
+
+    outcome = harness._answer_or_coverage(QUESTION, None, None, [], {}, "HYBRID", searchable)
+
+    assert outcome["status"] == "retrieval_only"
+    assert asked == [(searchable, None)]
+
+
+def test_a_consolidation_arm_lets_retrieval_plan_the_legs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import consolidation_vault
+
+    asked = _record_retrieval(monkeypatch)
+    monkeypatch.setattr(consolidation_vault, "build_generation", lambda *args: (object(), {}))
+    monkeypatch.setattr(consolidation_vault, "daily_relative_paths", lambda root: [])
+    monkeypatch.setattr(consolidation_vault, "_answered", lambda *args: {})
+
+    record = consolidation_vault.run_arm(QUESTION, tmp_path, tmp_path)
+
+    assert asked == [(QUESTION["question"], None)]
+    assert record["profile"] == "HYBRID"
 
 
 @pytest.mark.parametrize(

@@ -33,6 +33,7 @@ import tempfile
 import time
 from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
+from typing import Any
 
 REPO = Path(__file__).resolve().parent.parent
 BUILD_DEADLINE_SECONDS = 900.0
@@ -361,7 +362,8 @@ def profile_for(question_text: str) -> str:
     """The profile retrieval runs for this question, as the row reports it."""
     from retrieval import planned_profile
 
-    return planned_profile(question_text)
+    planned: str = planned_profile(question_text)
+    return planned
 
 
 def _searchable(question_text: str, question_date: str) -> str:
@@ -387,7 +389,9 @@ def _retrieved_rows(
     since: str | None = None,
     as_of: str | None = None,
 ) -> list[dict]:
-    """The candidates for one query; a sub-query skips the cross-encoder; a dated leg bounds the days.
+    """The candidates for one query.
+
+    A sub-query skips the cross-encoder; a dated leg bounds the days.
 
     No profile is passed: retrieval plans the legs as it does for the product.
     """
@@ -820,7 +824,7 @@ def retrieval_only() -> bool:
     return os.environ.get(RETRIEVAL_ONLY_VARIABLE, "").strip() == "1"
 
 
-def _retrieval_only_outcome(question: dict, searchable: str) -> dict:
+def _retrieval_only_outcome(question: dict[str, Any], searchable: str) -> dict[str, Any]:
     """Coverage at 12, 24 and 48 from one deeper ranking, and no answer."""
     from longmemeval_coverage import coverage_at_depths
 
