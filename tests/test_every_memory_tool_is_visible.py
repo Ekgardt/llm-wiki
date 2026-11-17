@@ -50,16 +50,36 @@ def test_the_always_loaded_list_stays_within_its_budget() -> None:
     assert len(json.dumps(model_facing)) <= MODEL_FACING_BUDGET_BYTES
 
 
-def _codex_block(installer: str) -> str:
+# Where each installer's written Codex block opens and closes: the printf that
+# builds it in install.sh, the here-string in install.ps1. Anchoring on the block
+# itself keeps a warning that quotes the line from standing in for it.
+_WRITTEN_BLOCK = {
+    "install.sh": ('block="$(printf', 'write_codex_mcp_block "$block"'),
+    "install.ps1": ('$block = @"', '"@'),
+}
+
+
+def _written_codex_block(installer: str) -> str:
     text = (ROOT / installer).read_text(encoding="utf-8")
-    start = text.index("[mcp_servers.llm-wiki]")
-    return text[start : start + 400]
+    opening, closing = _WRITTEN_BLOCK[installer]
+    assert text.count(opening) == 1, installer
+    start = text.index(opening)
+    return text[start : text.index(closing, start + len(opening))]
 
 
 def test_both_installers_keep_codex_from_deferring_the_tools() -> None:
-    for installer in ("install.sh", "install.ps1"):
-        block = _codex_block(installer)
-        assert re.search(r"omit_tools_from = \[\\?\"deferred\\?\"\]", block), installer
+    for installer in _WRITTEN_BLOCK:
+        block = _written_codex_block(installer)
+        assert "[mcp_servers.llm-wiki]" in block, installer
+        line = r"^\s*'?omit_tools_from = \[\"deferred\"\]('\)\")?$"
+        assert re.search(line, block, re.M), installer
+
+
+def test_the_deferred_advice_extends_an_existing_list() -> None:
+    """An entry may already list other surfaces; a second key would break the file."""
+    for installer in _WRITTEN_BLOCK:
+        text = (ROOT / installer).read_text(encoding="utf-8")
+        assert 'add "deferred" to its omit_tools_from list' in text, installer
 
 
 def test_an_installed_codex_entry_with_the_line_is_equivalent(tmp_path: Path) -> None:

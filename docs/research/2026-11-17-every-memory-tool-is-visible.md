@@ -18,8 +18,10 @@ round trip was spent on every first use.
 - `install.sh` and `install.ps1` write `omit_tools_from = ["deferred"]` into
   the Codex entry they add. Codex then puts the tools in the initial list.
 - `config.toml` is never rewritten in place. `codex_memory.py config-state`
-  answers `deferred` for an entry that is ours but lacks the line, and both
-  installers print the line to add.
+  answers `deferred` for an entry that is ours but does not list `deferred` in
+  `omit_tools_from`. Both installers then say to add `"deferred"` to the entry's
+  `omit_tools_from` list, or the whole line when the entry has none: the entry may
+  already list other surfaces, and TOML refuses a second key of the same name.
 - `tests/test_every_memory_tool_is_visible.py` pins all of this and a size
   budget. The model-facing part of the 12 tools (name, description, input
   schema) measured 10 755 bytes, about 2 700 tokens; the budget is 12 KiB.
