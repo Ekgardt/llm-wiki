@@ -3667,7 +3667,14 @@ def test_unix_installer_mcp_function_uses_parser_in_temp_home(tmp_path, scenario
     source = (ROOT / "install.sh").read_text(encoding="utf-8")
     warn = re.search(r"(?m)^warn\(\)\s*\{.*\}$", source)
     assert warn, "warn missing"
-    function = warn.group(0) + "\n" + _shell_functions(source, "write_codex_mcp_block", "add_codex_mcp_block", "codex_mcp_state_status", "configure_codex_mcp")
+    codex_functions = _shell_functions(
+        source,
+        "write_codex_mcp_block",
+        "add_codex_mcp_block",
+        "codex_mcp_state_status",
+        "configure_codex_mcp",
+    )
+    function = warn.group(0) + "\n" + codex_functions
     home = tmp_path / "home"
     config = home / ".codex" / "config.toml"
     config.parent.mkdir(parents=True)
