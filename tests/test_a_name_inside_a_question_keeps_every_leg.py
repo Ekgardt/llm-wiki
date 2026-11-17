@@ -142,7 +142,7 @@ def test_a_benchmark_question_is_retrieved_unplanned_and_reported_as_planned(
 
 
 def test_retrieval_only_coverage_reads_the_dated_question_without_a_profile(
-    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     import longmemeval_coverage
     import longmemeval_vault as harness
@@ -152,7 +152,7 @@ def test_retrieval_only_coverage_reads_the_dated_question_without_a_profile(
     monkeypatch.setattr(longmemeval_coverage, "coverage_at_depths", lambda question, rows: {})
     searchable = "How many shirts did I pack for my 5-day trip? 2023-05-20"
 
-    outcome = harness._answer_or_coverage(QUESTION, None, None, [], {}, "HYBRID", searchable)
+    outcome = harness._answer_or_coverage(QUESTION, tmp_path, None, [], {}, "HYBRID", searchable)
 
     assert outcome["status"] == "retrieval_only"
     assert asked == [(searchable, None)]
