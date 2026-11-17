@@ -34,7 +34,7 @@ row insertion and exact-fence projection cleanup on a supplied SQLite connection
 The registry retains transaction control and proof that an owner may be reclaimed;
 SQL, counter scope and binding-before-fence deletion order remain unchanged.
 
-## Approved annotation compatibility — 2026-11-04
+## Annotation compatibility — 2026-11-04
 
 Native Python 3.14 annotations resolve without loading historical facades. Fields,
 defaults and pickle paths are retained; raw annotation/signature representation

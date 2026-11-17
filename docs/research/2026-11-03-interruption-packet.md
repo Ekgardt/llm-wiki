@@ -1,6 +1,6 @@
 # Existing interruption helper as an isolated packet
 
-Date: 2026-11-03. Designed under the approved decomposition mandate.
+Date: 2026-11-03. Designed under the decomposition mandate.
 Base: 4abf9ccd. Production changes are not planned: qualify the already independent
 `scripts/interruption.py` in place, preserving its bytes and import path.
 

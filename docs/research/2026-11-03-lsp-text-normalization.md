@@ -1,6 +1,6 @@
 # LSP terminal-text normalization boundary
 
-Date: 2026-11-03. Base: 8f61a0e4. Designed under the approved decomposition mandate.
+Date: 2026-11-03. Base: 8f61a0e4. Designed under the decomposition mandate.
 Move only _is_control, _collapses_to_space, _LogScanner and _normalize_log_text
 from lsp_security to scripts/llm_wiki/lsp_text.py. The owner uses unicodedata only.
 Existing path validation imports the same _is_control function via its root alias;

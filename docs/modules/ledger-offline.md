@@ -32,7 +32,7 @@ Built-in index at7eab3a62, generation-18e4a7241779680d-3fb30704, covers2326sourc
 Architecture/callers and complete source searches confirm the standalone benchmark
 entry and product dependencies. Baseline five tests pass. Keep the existing cohesive
 stand; merging runtime execution broadens dependencies, while helper-level splitting
-adds unnecessary interfaces. The approved decomposition plan covers this boundary.
+adds unnecessary interfaces. The decomposition plan covers this boundary.
 
 Primary sources checked: [bounded contexts](https://martinfowler.com/bliki/BoundedContext.html),
 [import contracts](https://import-linter.readthedocs.io/en/stable/contract_types/),

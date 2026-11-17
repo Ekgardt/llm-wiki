@@ -1,6 +1,6 @@
 # Qualify the existing local ONNX encoder in place
 
-Date: 2026-11-03; internal responsibility under the approved decomposition plan.
+Date: 2026-11-03; internal responsibility under the decomposition plan.
 
 `scripts/onnx_encoder.py` already has no local product imports. It owns cached
 model/tokenizer lookup, CPU session creation, token padding, masked mean pooling,

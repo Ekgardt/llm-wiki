@@ -12,7 +12,7 @@ this packet selects only that section and the preamble. Any changed source byte
 invalidates the catalog. No text is summarized or omitted from the record.
 
 The 2026-11-03 reviewed boundary follows the existing version headings under the
-approved whole-project plan. Its research and catalog update procedure are in
+whole-project plan. Its research and catalog update procedure are in
 the shared release-history guide. The module's complete maintenance packet must
 fit the same 100000 o200k_base ceiling. A future oversized Unreleased record
 requires a new semantic decomposition, not a silent truncation or raised limit.

@@ -36,7 +36,7 @@ policy dependency, including an actual weighted read without corpus collection.
 
 ## Qualification — 2026-11-03
 
-The approved whole-project plan permits this responsibility boundary. The
+The whole-project plan permits this responsibility boundary. The
 preceding corpus-policy transfer removed the reverse collector import; this step
 keeps algorithms unchanged and makes existing tests independently maintainable.
 Alternatives were duplicating tests/data or carrying the whole retrieval/capture

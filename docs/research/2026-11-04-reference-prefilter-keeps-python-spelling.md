@@ -13,7 +13,7 @@ Research checked [Python lexical rules](https://docs.python.org/3.14/reference/l
 [Unicode identifier normalization](https://www.unicode.org/reports/tr31/),
 [PEP3131](https://peps.python.org/pep-3131/) and
 [Vulture's analysis limits](https://github.com/jendrikseipp/vulture).
-The runtime remains the approved Python3.14 series. The installed interpreter's
+The runtime remains the Python3.14 series. The installed interpreter's
 Unicode database defines normalization; this work does not substitute a new
 Unicode release. Tokenization honors source encodings and exposes literal
 spelling; ast.literal_eval decodes literals without executing arbitrary code.

@@ -82,9 +82,10 @@
     {
       "provider": "scripts/context_compiler.py",
       "names": [
+        "DEFAULT_CONTEXT_BUDGET",
         "compile_context_items"
       ],
-      "contract_sha256": "23b1ffbfd102d5b171b6535f6c6997b12c598befccfd3dc0c9d8afaef214fe00",
+      "contract_sha256": "9a3a6549fa205ce22d09f7b6caf3b8f0eed39fc846776e22600b5473f62c0cb8",
       "integration_tests": [
         "tests/test_context_noise.py"
       ]

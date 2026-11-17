@@ -32,7 +32,7 @@ actual CCN/shape, Ruff and exact reconstruction <=100000 tokens remain required.
 
 ## Boundary research — 2026-11-03
 
-The approved decomposition mandate permits a pure scoring owner separate from
+The decomposition mandate permits a pure scoring owner separate from
 provider execution. Keeping it in the runner couples grading to IO; splitting
 individual rate helpers would fragment one metric definition. Dataclass fields
 and source function bodies move intact, preserving the existing parser binding.

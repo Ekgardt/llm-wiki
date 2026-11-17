@@ -1,6 +1,6 @@
 # Queue child runtime
 
-Approved 2026-11-02. `llm_wiki.queue_child_runtime` owns child process lifecycle
+2026-11-02. `llm_wiki.queue_child_runtime` owns child process lifecycle
 and the bounded byte protocol independently of queue storage and capture policy.
 Dependencies are stdlib, queue_contracts and queue_process_cleanup. It imports
 neither queue_core, memory_state nor capture diagnostics.
@@ -68,7 +68,7 @@ in its corrected docstring. The lifecycle runner intentionally gains a name and
 required child_entry argument and changes its Process target to that argument;
 the queue adapter preserves its previous signature. Other runtime logic is
 unchanged. See `docs/research/2026-11-02-queue-child-runtime-boundary.md` for
-approval, alternatives, primary sources and validation results. Local evidence:
+decision, alternatives, primary sources and validation results. Local evidence:
 logs/queue-child-*. Native Windows/macOS and installation are not inferred from
 Linux tests. The installed vault remains separate from candidate qualification.
 
@@ -86,5 +86,5 @@ Tests live in `tests/modules/queue_child_runtime/`; guide and complete context
 manifest live at `docs/modules/queue-child-runtime.md` and
 `docs/modules/queue-child-runtime-context.json`, with the 100,000-token gate.
 Real queue/compile process scenarios remain additional qualification. This adds
-no runtime path, database, daemon or dependency. Approval is recorded in
+no runtime path, database, daemon or dependency. The decision is recorded in
 `knowledge/notes/queue-child-runtime-decision-20261102.md`.

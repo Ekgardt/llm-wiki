@@ -1,6 +1,6 @@
 # Queue database compatibility independent of the executor
 
-Date: 2026-11-03. Two connected internal transfers under the approved mandate.
+Date: 2026-11-03. Two connected internal transfers under the mandate.
 
 First, compile_journal_schema owns the existing QUEUE_SCHEMA_VERSION,
 SCHEMA_STATEMENTS, _require_schema_object and _require_schema. The event journal

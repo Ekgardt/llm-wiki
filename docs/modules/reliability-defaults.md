@@ -1,6 +1,6 @@
 # Reliability defaults
 
-Approved 2026-11-02. `llm_wiki.reliability_defaults` owns the existing frozen
+2026-11-02. `llm_wiki.reliability_defaults` owns the existing frozen
 ReliableMemoryDefaults dataclass and DEFAULTS instance. It imports only stdlib.
 All 21 values, field types/order, constructor and frozen semantics are unchanged.
 These are existing reliability contract values, not new operator configuration.
@@ -35,9 +35,9 @@ and checks facade identity and exact old/new pickle bytes for the class, default
 and customized instances. Fresh-interpreter tests reject reliable_memory, queue
 and state imports while constructing the owned defaults. IO/SQLite, queue,
 transactions, ownership, capture, archives, repair and backup scenarios provide
-additional integration evidence. Python 3.14 is the approved runtime series.
+additional integration evidence. Python 3.14 is the target runtime series.
 
-See docs/research/2026-11-02-queue-renewal-boundaries.md for approval, alternatives,
+See docs/research/2026-11-02-queue-renewal-boundaries.md for the decision, alternatives,
 sources and staged qualification. No runtime path, storage schema, limit value or
 installed configuration changes. This packet alone does not finish modularizing
 the queue or establish lower full-task LLM cost.
@@ -61,7 +61,7 @@ Required old class names are identical aliases, not wrappers.
 Each has own tests under `tests/modules/<module_name>/` and a guide/context
 manifest under `docs/modules/` using the hyphenated name. Complete packets obey
 the 100,000-token ceiling. No runtime path, schema, daemon or numeric policy
-changes. Approval: `knowledge/notes/queue-renewal-boundaries-decision-20261102.md`.
+changes. Decision record: `knowledge/notes/queue-renewal-boundaries-decision-20261102.md`.
 
 ## Capture transport policy — 2026-11-03
 

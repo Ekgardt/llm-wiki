@@ -40,7 +40,7 @@ planning papers and shared September14 reply-JSON rationale remain complete
 context dependencies with separate historical ownership. Historical numerical
 claims are dated evidence, not a new measurement of today's product.
 
-The approved autonomous plan permits qualification of existing cohesive owners.
+The autonomous plan permits qualification of existing cohesive owners.
 Alternatives were duplicated unit tests, whole-query source context for pure
 policy changes, or new protocol wrappers. Exact test transfer and the existing
 concrete dependency keep the boundary simple. Three independent primary sources

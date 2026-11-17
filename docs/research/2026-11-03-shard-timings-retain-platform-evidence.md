@@ -1,6 +1,6 @@
 # Shard timings retain platform evidence
 
-Date: 2026-11-03. Internal correction under the approved decomposition plan.
+Date: 2026-11-03. Internal correction under the decomposition plan.
 
 Run 41720238934 at c2dd7466 cancelled Windows shard 4 at the existing hour
 limit. Its report contains 2912 cases and 3481.29 summed case seconds. The

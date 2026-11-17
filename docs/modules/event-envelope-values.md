@@ -50,7 +50,7 @@ The pure construction/identity/immutable-value contract belongs to
 [Event envelope values](event-envelope-values.md); physical native-frame
 reading stays in `event_envelope`, with direct compatibility aliases for producers.
 
-## Approved annotation compatibility — 2026-11-04
+## Annotation compatibility — 2026-11-04
 
 Native Python 3.14 annotations resolve without loading historical facades. Fields,
 defaults and pickle paths are retained; raw annotation/signature representation

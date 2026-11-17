@@ -32,7 +32,7 @@ Ruff and exact <=100000 token reconstruction remain gates.
 
 ## Boundary research — 2026-11-04
 
-This follows the approved decomposition plan and the preceding document codec.
+This follows the decomposition plan and the preceding document codec.
 Keeping IO with publication couples a read-only task to transaction dependencies;
 per-helper modules would fragment one deadline/archive contract. Relevant primary
 sources checked in this session: [bounded contexts](https://martinfowler.com/bliki/BoundedContext.html),

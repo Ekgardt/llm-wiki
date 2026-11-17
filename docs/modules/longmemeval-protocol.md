@@ -28,7 +28,7 @@ The built-in index at 00d38f78, get_architecture, callers and full source search
 identify the judge and exporter consumers; all 12 original tests pass. Keeping
 these two existing cohesive files avoids either coupling protocol values to model
 execution or fragmenting a small interchange adapter into an arbitrary owner.
-Python 3.14 is already approved; no dependency or runtime upgrade is involved.
+Python 3.14 is already the target runtime; no dependency or runtime upgrade is involved.
 
 Sources checked: [bounded contexts](https://martinfowler.com/bliki/BoundedContext.html),
 [import contracts](https://import-linter.readthedocs.io/en/stable/contract_types/),

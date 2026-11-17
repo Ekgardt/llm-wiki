@@ -1,6 +1,6 @@
 # Coordinator database admission and certification
 
-Date: 2026-11-03. Internal boundary under the approved decomposition mandate.
+Date: 2026-11-03. Internal boundary under the decomposition mandate.
 
 Move three existing functions exactly: _require_inside_state_root,
 require_coordinator_v3_openable and validate_coordinator_v3_database. The new

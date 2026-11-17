@@ -51,7 +51,7 @@ Sources checked: [bounded contexts](https://martinfowler.com/bliki/BoundedContex
 
 ## Runtime publication default provenance
 
-The facade retains extend_entity_pages(limit=20) for the approved behavior-preserving
+The facade retains extend_entity_pages(limit=20) for the behavior-preserving
 contract; callers can already supply another limit. No measured justification for
 20 was found. The September27 inventory marked this constant not worked, and the
 old contiguous block let an unrelated neighbour comment satisfy the presence guard.

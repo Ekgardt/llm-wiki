@@ -56,7 +56,7 @@ Three independent primary sources checked on this date:
 They support structured sections and byte identity; hashes do not prove semantic
 independence, authenticity or correctness of old claims. Those limits remain.
 
-Source: approved whole-project and large-artifact plans; built-in graph
+Source: whole-project and large-artifact plans; built-in graph
 `generation-18e497cc6edd3281-8112f26c`; actual CHANGELOG boundaries and source;
 existing record baseline: 85 tests passed. Run `tests/modules/release_history`,
 all record/ownership checks, and every full packet budget.

@@ -14,6 +14,7 @@ Useful signal must survive:
 from __future__ import annotations
 
 import faulthandler
+import inspect
 import json
 import os
 import re
@@ -770,6 +771,7 @@ def test_project_state_routes_mandatory_handoff_through_compiler(monkeypatch):
 
 def _append_under_a_tiny_shared_budget(monkeypatch) -> str:
     import context_budget
+    import context_compiler  # noqa: F401  # bound to the real budget before the patch
     import integration_adapter
     import session_start_context  # noqa: F401  # bound to the real budget before the patch
     from context_budget import ContextBudget
@@ -792,12 +794,16 @@ def test_the_tiny_shared_budget_does_not_outlive_its_test(monkeypatch):
     import context_budget
 
     real_budget = context_budget.DEFAULT_CONTEXT_BUDGET
-    forget_modules(monkeypatch, "session_start_context")
+    forget_modules(monkeypatch, "session_start_context", "context_compiler")
     with pytest.MonkeyPatch.context() as inner:
         _append_under_a_tiny_shared_budget(inner)
+    import context_compiler
     import session_start_context
 
+    budget_default = inspect.signature(context_compiler.compile_context_items).parameters["budget"]
     assert session_start_context.DEFAULT_CONTEXT_BUDGET is real_budget
+    assert context_compiler.DEFAULT_CONTEXT_BUDGET is real_budget
+    assert budget_default.default is real_budget
 
 
 def test_integration_context_preserves_trailing_newline():

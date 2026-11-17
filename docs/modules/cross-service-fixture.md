@@ -26,7 +26,7 @@ history, and must reconstruct every path and byte under 100000 o200k_base tokens
 
 ## Decision evidence — 2026-11-03
 
-This cohesive builder can be qualified in place under the approved autonomous
+This cohesive builder can be qualified in place under the autonomous
 decomposition plan. Splitting its small implementation would add indirection;
 merging the parity runner would mix fixture construction with execution and
 evaluation. No source, command, data or runtime contract changes.

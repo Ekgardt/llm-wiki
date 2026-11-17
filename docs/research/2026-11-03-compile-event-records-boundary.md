@@ -1,6 +1,6 @@
 # Compile event values independent of journal storage
 
-Date: 2026-11-03. Internal boundary refinement under the approved completion plan.
+Date: 2026-11-03. Internal boundary refinement under the completion plan.
 
 compile_call_runtime imports compile_progress only for event validation, artifact
 identity, digest/snapshot helpers and exception types. compile_answer_records needs

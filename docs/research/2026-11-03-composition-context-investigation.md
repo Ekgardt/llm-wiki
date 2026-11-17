@@ -9,7 +9,7 @@ product even after implementation responsibilities are separated. Measure actual
 source-only closure before deciding whether that obstacle exists; packet totals
 must additionally include instructions, contracts, tests and framing.
 
-The approved completion plan asks for complete necessary dependency contracts,
+The completion plan asks for complete necessary dependency contracts,
 not a prescribed number of new files or a second product. A possible later
 refinement is an explicit, qualified public dependency contract: full provider
 interface source plus semantics, real provider/consumer contract tests and exact

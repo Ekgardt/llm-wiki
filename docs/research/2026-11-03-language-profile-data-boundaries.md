@@ -1,6 +1,6 @@
 # Language profile data without runtime discovery
 
-Date: 2026-11-03. Base: d4a66774. Designed under the approved decomposition
+Date: 2026-11-03. Base: d4a66774. Designed under the decomposition
 mandate; implemented and qualified in the isolated candidate; evidence below.
 
 ## Observed coupling and chosen boundaries

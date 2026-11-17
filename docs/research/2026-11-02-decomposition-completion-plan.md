@@ -171,8 +171,9 @@ Those files need interface-only dependencies. The qualified-dependency proposal 
 boundary passes fresh qualification, and the rollout proposal authorizes no new paired
 agents. Lifting that refusal without the evidence would weaken the check, so it was left
 in place. Law 11 stays unconfirmed for the unassigned files.
-The task asks for the decomposition to be finished in this branch, so the branch is not
-handed over until the ownership check passes.
+The task request asks to finish the module decomposition and to "do everything in this
+task" (the owner's words, rendered in English), so the branch is not handed over until the
+ownership check passes.
 
 Measured on 2026-11-09 after the structure reference was split: 1243 files are unassigned.
 A packet has about 52000 tokens left beside its base. 15 scripts stay over that even with

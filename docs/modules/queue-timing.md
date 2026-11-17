@@ -42,4 +42,4 @@ The queue reaches the owner's functions as the same objects. RNG tests patch the
 The existing seven-day Retry-After bound, defaults, full jitter and time semantics
 remain unchanged. Own tests and the complete ≤100,000-token context manifest live
 under `tests/modules/queue_timing` and `docs/modules/queue-timing*` respectively.
-Approval: `knowledge/notes/queue-timing-boundary-decision-20261102.md`.
+Decision record: `knowledge/notes/queue-timing-boundary-decision-20261102.md`.

@@ -9,7 +9,7 @@ Reproduction: logs/context-source-read-reproduction.json; current built-in calle
 graph: logs/context-source-read-graph.json at 67aebe6c. Graph coverage is partial;
 all boundary sources were searched and consumer test bodies inspected directly.
 
-Under the approved completion mandate, preserve consumer-source assertions as
+Under the completion mandate, preserve consumer-source assertions as
 integration tests grouped by their consuming subsystem, outside pure packets.
 They remain required in regression and remain unassigned integration work until
 separately qualified. Moving them does not certify a complete project.

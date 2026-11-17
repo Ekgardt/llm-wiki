@@ -1,6 +1,6 @@
 # Queue migration planning on supplied connections
 
-2026-11-03; approved completion mandate; baseline 8a434963.
+2026-11-03; completion mandate; baseline 8a434963.
 
 Move the existing v2 schema validation, task lineage ordering, byte-preserving
 payload conversion, SQL statement planning and exact reconciliation functions to

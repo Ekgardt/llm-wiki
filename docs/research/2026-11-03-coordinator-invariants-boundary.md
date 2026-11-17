@@ -1,6 +1,6 @@
 # Coordinator supplied-connection invariants
 
-Date: 2026-11-03. Internal decomposition under the approved whole-project mandate.
+Date: 2026-11-03. Internal decomposition under the whole-project mandate.
 
 The schema declarations already have an independent owner. The next responsibility
 is read-only validation of the rows on an already-open connection: the migration

@@ -52,7 +52,7 @@ Alternatives: requiring all callers to provide defining globals shifts the defec
 to consumers; changing __module__ loses historical serialization identity;
 resolving each class dictionary manually adds mutation logic and can disagree with
 dataclass field metadata; fake facade modules create import-order hazards. The
-native mechanism fits the already-approved Python 3.14 runtime, with the visible
+native mechanism fits the Python 3.14 runtime the task moved to, with the visible
 representation tradeoff stated above. No additional library is proposed.
 
 ## Sources
@@ -88,6 +88,6 @@ SQLite and event consumer checks: 280 passed, 5 platform skips. The first consum
 command named a nonexistent test file and ran no tests; the corrected selection
 produced the result above. All 169 measured functions satisfy CCN/if/depth limits;
 Ruff clean. All159 complete packets reconstructed exact paths and bytes, largest
-99806tokens. This approval report is currently outside those packets. No live
+99806tokens. This report is currently outside those packets. No live
 installation or full-current/native CI success is claimed. Evidence: logs/native-
 annotations-{red,consumers,bundles}.txt and approved-contracts-annotations-graph.json.

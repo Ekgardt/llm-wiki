@@ -1,6 +1,6 @@
 # Complete the existing queue argument-validation owner
 
-2026-11-03; baseline016257e0; approved autonomous decomposition mandate.
+2026-11-03; baseline016257e0; autonomous decomposition mandate.
 Extend existing `llm_wiki.queue_validation` rather than creating another generic
 utility module. Move the remaining pure capture descriptor/path/identity/fence
 checks and their direct pure helpers from memory_queue. SQL, transaction and

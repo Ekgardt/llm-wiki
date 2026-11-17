@@ -1,6 +1,6 @@
 # Paired maintenance: correctness observed, full cost unavailable
 
-Date: 2026-11-03. The owner explicitly authorized two independent subagents.
+Date: 2026-11-03. Two independent subagents took part.
 Both started from fd9918c4 in separate detached checkouts, with Python 3.14.7,
 the same task and fresh built-in architecture/caller evidence. The full arm
 read answer_budget.py; the contract arm read the verified interface and semantics
@@ -32,11 +32,11 @@ correctness evidence and does not qualify unrelated boundaries.
 
 **Status: correctness observed; cost instrumentation incomplete; source omission
 not adopted.** The canonical full-source gate and 100000-token ceiling remain
-unchanged. Condition 6 of the approved pilot remains incomplete until an
+unchanged. Condition 6 of the pilot proposal remains incomplete until an
 instrumented paired task supplies actual full-cycle costs.
 
 Retained evidence: each isolated participant's report, original patch and test
 logs under `logs/paired-trial/`; root's `paired-root-cross-check.json` and
 `paired-maintenance-result.json`; fresh baseline candidate qualification. A
 missing counter is represented by null, never by an estimated savings number.
-Related: [approved pilot](2026-11-03-qualified-dependency-contract-proposal.md).
+Related: [pilot proposal](2026-11-03-qualified-dependency-contract-proposal.md).

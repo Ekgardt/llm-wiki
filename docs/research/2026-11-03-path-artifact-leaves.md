@@ -1,6 +1,6 @@
 # Existing path derivation and verified-artifact owners
 
-2026-11-03; baseline6780ef23; approved autonomous decomposition mandate.
+2026-11-03; baseline6780ef23; autonomous decomposition mandate.
 Qualify `scripts/lsp_paths.py` and `scripts/verified_artifacts.py` in place, as
 separate owners. Both are already stdlib-only leaves; relocating them would add
 compatibility work without removing a dependency. Keep production bytes, public

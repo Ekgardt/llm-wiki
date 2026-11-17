@@ -1,6 +1,6 @@
 # Process-tree owner and its independent process fixture
 
-2026-11-03; approved autonomous boundary mandate; baseline 058f5710.
+2026-11-03; autonomous boundary mandate; baseline 058f5710.
 The documentation decomposition reduces the complete existing process-tree source,
 focused tests and full fake LSP fixture to 99122 tokens before the owner guide,
 manifest, boundary guards and unread-proc regression. It still cannot be qualified

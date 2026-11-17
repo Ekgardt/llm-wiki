@@ -17,7 +17,7 @@ all its providers even when they are individually well separated. Merely moving
 that wiring into another file does not reduce its transitive source closure.
 
 The user's original limit is unchanged: every complete maintenance packet <=100000
-o200k_base tokens. The approved completion plan requires necessary dependency
+o200k_base tokens. The completion plan requires necessary dependency
 contracts. Requiring every dependency implementation recursively in every packet
 is a stronger current qualification rule; changing it needs explicit acceptance,
 not a silent exception to make a count pass.
@@ -81,6 +81,6 @@ Three independent primary sources checked in the preceding investigation on
 - Seemann, Composition Root (2011):
   https://blog.ploeh.dk/2011/07/28/CompositionRoot/
 
-Related: 2026-11-03-composition-context-investigation.md; approved
-2026-11-02-decomposition-completion-plan.md. While approval or pilot evidence is
+Related: 2026-11-03-composition-context-investigation.md;
+2026-11-02-decomposition-completion-plan.md. While pilot evidence is
 missing, retain the existing source-closure gate and continue independent work.

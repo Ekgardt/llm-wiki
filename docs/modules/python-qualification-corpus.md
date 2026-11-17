@@ -10,7 +10,7 @@ Preserve exactly100000physical lines,48Python files,32padding modules,seed411,
 source/gold/workload hashes, complete mutation fields, source ranges, UTF-8 byte
 versus codepoint positions, Unicode symbols, broken-file cases and error behavior.
 The fixture's pythonVersion3.10 is pinned test data, not the project runtime;
-execution uses the approvedPython3.14 series. No corpus output is rebaselined.
+execution uses the Python3.14 series. No corpus output is rebaselined.
 
 Six pure tests and their helpers move with unchanged function/decorator ASTs.
 The module-scoped generated_pair fixture, one byte-offset helper and the shared

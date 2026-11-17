@@ -33,7 +33,7 @@ POSIX behavior, explicit-versus-inherited verification differences, commands,
 timeouts, native signatures and error policy are preserved. Both modules have
 own tests and complete ≤100,000-token context manifests under tests/modules and
 docs/modules. No new runtime path, WinAPI surface or security policy is added.
-Approval: `knowledge/notes/windows-permissions-boundaries-decision-20261102.md`.
+Decision record: `knowledge/notes/windows-permissions-boundaries-decision-20261102.md`.
 
 `loaded_module_filename(handle)` resolves a module already loaded by the current
 process through GetModuleFileNameW. The handle is borrowed: this helper neither

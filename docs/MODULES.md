@@ -57,7 +57,7 @@ and dependency guides in full; global authority and runtime rules above still ap
 
 [windows-native](modules/windows-native.md), [windows-acl](modules/windows-acl.md).
 
-### Approved completion mandate (2026-11-02)
+### Completion mandate (2026-11-02)
 
 Sequential completion follows
 `docs/research/2026-11-02-decomposition-completion-plan.md`, including refinement
@@ -254,7 +254,7 @@ historical/data artifacts without rewriting the originals. Selected packet recor
 retain exact source bytes and provenance; complete coverage and unique ownership
 are checked separately, so a partial selection cannot claim a whole file. Code
 imports and mandatory guides remain whole. This implements the record-view part
-of the approved completion plan; see
+of the completion plan; see
 [research](research/2026-11-03-large-artifact-context-investigation.md).
 
 Full contract: [exact record contexts](modules/context-records.md).
@@ -341,14 +341,16 @@ Queue and coordinator schema validators share it; schema versions remain unchang
 
 ### Unified Python runtime
 
-The supported runtime is Python 3.14.x for installation, development and CI, as
-approved on 2026-11-03. Metadata excludes 3.15 until required binary dependencies
-provide compatible builds; reassess that boundary when upstream support arrives.
+The supported runtime is Python 3.14.x for installation, development and CI. The
+owner requested it with the module decomposition ("Yes, change the CI, including
+the move to Python 3.14", rendered in English). Metadata excludes 3.15 until required
+binary dependencies provide compatible builds; reassess that boundary when upstream
+support arrives.
 A project interpreter pin selects 3.14, and installers select that series for
 bootstrap and environment creation. Linux, Windows and macOS remain tested; the
 current native macOS lane is ARM64. Intel macOS full dependencies are not qualified:
 both the previous and updated ONNX Runtime locks lack its binary distribution.
-See [the approved plan](research/2026-11-03-python314-unified-runtime-proposal.md).
+See [the plan](research/2026-11-03-python314-unified-runtime-proposal.md).
 
 ### Native replacement test support
 
@@ -595,7 +597,7 @@ maintenance ownership does not certify transport deadlines.
 Full owner contract: [selective-forgetting metrics](modules/selective-forgetting-metrics.md).
 The runner retains process, clock and file operations and its existing callable names.
 
-### Approved dependency and annotation compatibility (2026-11-04)
+### Dependency and annotation compatibility (2026-11-04)
 
 This branch implements the proposals for [qualified dependency contracts](research/2026-11-04-qualified-contract-rollout-proposal.md)
 and [native Python 3.14 annotations](research/2026-11-04-moved-classes-annotation-compatibility.md).

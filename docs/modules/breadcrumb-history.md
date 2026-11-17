@@ -40,7 +40,7 @@ Sources rechecked: [CommonMark headings](https://spec.commonmark.org/0.31.2/#atx
 [RFC 8259](https://www.rfc-editor.org/info/rfc8259/), and
 [Python hashlib](https://docs.python.org/3.14/library/hashlib.html).
 They inform syntax, strict metadata interchange and byte digests; none proves
-semantic sufficiency. This applies the existing approved
+semantic sufficiency. This applies the existing
 [record-context design](context-records.md), with independent review of record
 selection and full packet limits. Rewriting history, quota-sized fragments and
 omitting all history were rejected. Catalogs are maintenance metadata only;

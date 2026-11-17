@@ -4,7 +4,7 @@ Date: 2026-11-03. Native evidence: workflow41633236235 at e2d9d318.
 No failed gate is waived and no benchmark measurements are rewritten.
 
 1. Code-navigation qualification still explicitly requires machine-readable
-Python3.10.x even though the approved runtime is3.14. Linux native correctness
+Python3.10.x even though the target runtime is3.14. Linux native correctness
 passed, all measured performance/correctness values were within existing limits,
 but the obsolete series gate marked the evidence incomplete. Update the series
 predicate and current fixture manifest/schema to3.14; retain Linux-only measured
@@ -38,7 +38,7 @@ Prefer these compatible measured versions over an unmeasured model-stack upgrade
 in a behavior-preserving decomposition. Make constraints explicit with the frozen
 benchmark as their reason and real paired remeasurement as the condition for
 updating them. This is neither an old-Python fallback nor a claim that newer
-packages are defective. The approved migration permits compatible dependency
+packages are defective. The migration permits compatible dependency
 updates; security fixes remain in force. Keep historical baseline bytes and
 matrix binding unchanged, verify original benchmark scenarios now reach their
 intended quality/tamper checks, and qualify actual installations in native CI.
@@ -50,7 +50,7 @@ in74bd1524; the smaller measured dependency set supersedes its probe versions.
 
 Primary sources and actual current tooling: PSF Python version/packaging contracts,
 Astral uv universal constraints and no-build resolution, PyPA pip-audit universal
-collector and OpenSSF OSV advisories. See the already researched approved Python
+collector and OpenSSF OSV advisories. See the already researched Python
 proposal and all-marker audit design; no new package or advisory service is added.
 - https://docs.astral.sh/uv/concepts/resolution/
 - https://docs.python.org/3.14/library/platform.html

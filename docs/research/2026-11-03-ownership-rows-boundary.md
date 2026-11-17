@@ -1,6 +1,6 @@
 # Ownership rows inside the caller's transaction
 
-Date: 2026-11-03. Internal boundary under the approved whole-project mandate.
+Date: 2026-11-03. Internal boundary under the whole-project mandate.
 
 Transfer _AcquireRequest, _row_process, _next_owner_epoch, _insert_owner_row,
 _owner_key and _delete_owner_projections, with the three existing projection SQL

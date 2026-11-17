@@ -1,6 +1,6 @@
 # SQLite connection and lock-probe ownership
 
-2026-11-03; approved completion mandate; baseline 8d8df4c4.
+2026-11-03; completion mandate; baseline 8d8df4c4.
 
 Move the 29 remaining reliable_memory functions into llm_wiki.sqlite_io:
 connection open/configure/close-on-failure, bounded two-connection lock probes,
@@ -50,7 +50,7 @@ actual complete packet size before counting the owner as ready.
 
 Qualification refinement: the first complete packet with own tests was 100325
 tokens and correctly failed its budget guard. The sole bounded_io dependency was
-three shared ancestor predicates. The approved internal refinement gives those
+three shared ancestor predicates. The internal refinement gives those
 predicates a single path_ancestry owner; sqlite_io's lazy import names that owner.
 No predicates or tests were omitted. Details and independent research:
 2026-11-03-path-ancestry-boundary.md. All 29 function ASTs remain identical apart

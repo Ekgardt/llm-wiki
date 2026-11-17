@@ -1,6 +1,6 @@
 # Codex turn capture policy: qualify the existing in-memory boundary
 
-Date: 2026-11-03. Internal boundary under the approved decomposition plan.
+Date: 2026-11-03. Internal boundary under the decomposition plan.
 
 ## Responsibility and evidence
 

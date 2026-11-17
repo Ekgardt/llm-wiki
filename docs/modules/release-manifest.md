@@ -39,7 +39,7 @@ this owner and retains the unchanged 100000 o200k_base ceiling.
 
 ## Research and decision — 2026-11-03
 
-The approved whole-project plan permits independent responsibility boundaries.
+The whole-project plan permits independent responsibility boundaries.
 Keep the existing concrete helper: a new runtime interface, distribution or
 file move would add complexity without improving this already independent
 boundary. Combining it with tag orchestration and that consumer's full

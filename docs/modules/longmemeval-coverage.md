@@ -27,7 +27,7 @@ tests/test_the_report_says_how_much_evidence_reached_the_reader.py with normal
 pytest bootstrap. The packet retains source, tests, fixtures, instructions and
 history below 100000 o200k_base tokens, with exact file reconstruction. Fresh-process
 import guards include scripts and benchmark roots and refuse executor dependencies.
-Python 3.14 is the approved runtime; there is no installation or dependency change.
+Python 3.14 is the target runtime; there is no installation or dependency change.
 
 ## Qualification research — 2026-11-03
 

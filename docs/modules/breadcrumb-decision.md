@@ -39,7 +39,7 @@ order and fully qualified pickle identity are compatibility contracts.
 [bounded contexts](https://martinfowler.com/bliki/BoundedContext.html) and
 [pytest integration](https://docs.pytest.org/en/stable/explanation/goodpractices.html)
 were checked in this session. No dependency or runtime version changes. The
-approved decomposition mandate permits this internal boundary; live installation
+decomposition mandate permits this internal boundary; live installation
 remains separately controlled.
 
 docs/research/2026-09-23-one-limit-one-place.md is not in this packet: it records where read-chunk and

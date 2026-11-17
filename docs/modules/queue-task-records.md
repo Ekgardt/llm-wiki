@@ -55,7 +55,7 @@ single-row formatter in `queue_task_records`. Full contract:
 [queue evidence records](queue-evidence-records.md);
 [research](../research/2026-11-03-queue-evidence-record-boundary.md).
 
-## Approved annotation compatibility — 2026-11-04
+## Annotation compatibility — 2026-11-04
 
 Native Python 3.14 annotations resolve without loading historical facades. Fields,
 defaults and pickle paths are retained; raw annotation/signature representation

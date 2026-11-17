@@ -30,7 +30,7 @@ oversized protected state does not replace either current or previous file.
 
 ## Qualification — 2026-11-03
 
-The approved whole-project plan permits this internal boundary. Keeping value
+The whole-project plan permits this internal boundary. Keeping value
 operations in the state coordinator couples tests to unrelated runtime initialization.
 Duplicating eviction in producers risks drift; a new framework or a frozen budget
 would change contracts. Explicit existing-budget injection retains responsibility

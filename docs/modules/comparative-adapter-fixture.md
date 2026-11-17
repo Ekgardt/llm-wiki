@@ -27,7 +27,7 @@ exact reconstruction under 100000 o200k_base tokens remain required.
 
 ## Decision evidence — 2026-11-03
 
-The approved autonomous plan permits qualifying a cohesive existing file in
+The autonomous plan permits qualifying a cohesive existing file in
 place. Absorbing the runner would mix synthetic fixture behavior with execution
 and evaluation; fragmenting this small fixture adds indirection. Existing
 source, commands, metrics and integration tests remain unchanged.

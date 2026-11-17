@@ -1,6 +1,6 @@
 # Graph storage-value contract packet
 
-Date: 2026-11-03. Prepared at 1214d765 under the approved decomposition mandate.
+Date: 2026-11-03. Prepared at 1214d765 under the decomposition mandate.
 
 The already independent scripts/graph_storable.py remains byte-identical. Its
 owner covers text admissibility, identity-key fallback and recursive metadata

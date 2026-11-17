@@ -27,7 +27,7 @@ The fresh built-in graph and complete source search confirm a standalone report
 reader and its tests. Preserve the cohesive implementation; combining it with
 benchmark execution would import unrelated lifecycle ownership, while dividing
 its small aggregation pipeline provides no demonstrated benefit. Existing source
-and schema contracts stay unchanged; Python 3.14 remains the approved runtime.
+and schema contracts stay unchanged; Python 3.14 remains the target runtime.
 
 Primary sources checked: [bounded contexts](https://martinfowler.com/bliki/BoundedContext.html),
 [import contracts](https://import-linter.readthedocs.io/en/stable/contract_types/),

@@ -1,6 +1,6 @@
 # Windows Python library identity comes from the loaded module
 
-Date: 2026-11-03. Correction within the approved Python 3.14 qualification.
+Date: 2026-11-03. Correction within the Python 3.14 qualification.
 
 Native Windows end-to-end job125943374616 on19d78215 passed the previous
 fingerprint stage and retained artifact13234815297: ValueError, Python shared-library

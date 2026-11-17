@@ -1,6 +1,6 @@
 # Existing retrieval leaf owners
 
-Date: 2026-11-03. Under the approved whole-project decomposition mandate, qualify
+Date: 2026-11-03. Under the whole-project decomposition mandate, qualify
 three existing modules in place: lane_score, temporal_anchor and evidence_sufficiency.
 No production path or source byte changes; no retraining, new date interpretation,
 threshold, cap, model dependency or runtime service. Pure tests move with unchanged

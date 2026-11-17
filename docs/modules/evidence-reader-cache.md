@@ -30,7 +30,7 @@ The lease boundary does not make arbitrary use of a leaked raw connection safe.
 
 ## Qualification — 2026-11-03
 
-The approved autonomous plan supports retaining an already cohesive module.
+The autonomous plan supports retaining an already cohesive module.
 Combining this cache with graph construction or catalog validation would broaden
 its responsibility; adding a new protocol framework has no demonstrated benefit.
 No package, runtime location or database format changes.

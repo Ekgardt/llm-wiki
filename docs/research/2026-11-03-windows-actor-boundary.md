@@ -1,6 +1,6 @@
 # Windows actor SID lookup outside the ownership registry
 
-Date: 2026-11-03. Internal boundary under the approved decomposition mandate.
+Date: 2026-11-03. Internal boundary under the decomposition mandate.
 
 ## Existing responsibility
 

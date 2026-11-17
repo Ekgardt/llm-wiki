@@ -5,7 +5,7 @@ files larger than the user ceiling: uv.lock, contradiction-v1 benchmark JSON and
 the historical developer-audit status. The existing whole-file packet machinery
 cannot truthfully claim these files fit. They remain unassigned until supported.
 
-Candidate principle under the approved completion plan: logical record views
+Candidate principle under the completion plan: logical record views
 with original byte spans, preserved source path/digest, explicit context records,
 and an independently checked whole-file coverage/reconstruction proof. Never
 rewrite an authoritative lockfile or benchmark merely to shrink LLM context.
@@ -55,7 +55,7 @@ individual hashes and exact concatenation. Changed source or record bytes fail;
 there is no implicit clipping, normalization, reserialization or stale reuse.
 
 Initial eligible source classes are documentation Markdown, benchmark JSON and
-the dependency lockfile named by the approved plan. Executable source/test imports
+the dependency lockfile named by the plan. Executable source/test imports
 and mandatory full guides/instructions cannot be replaced by records. Catalogs
 record reviewed logical boundaries, not quota-sized arbitrary chunks. Format-aware
 catalog generation is separate from byte validation: a digest does not prove a

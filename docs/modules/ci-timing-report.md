@@ -23,7 +23,7 @@ Run the original test file and tests/modules/ci_timing_report with normal pytest
 bootstrap. Static imports and a fresh-process import guard prevent dependencies on
 executors; real XML, file and CLI assertions retain their behavior. Full serialized
 context must fit 100000 o200k_base tokens and reconstruct exact paths/bytes. Python 3.14
-is the approved runtime; OS qualification remains separately reported.
+is the target runtime; OS qualification remains separately reported.
 
 ## Decision evidence — 2026-11-03
 

@@ -1,11 +1,11 @@
 # Canonical module contracts beside their owners
 
-2026-11-03; approved full decomposition mandate; baselinef95cb681.
+2026-11-03; full decomposition mandate; baselinef95cb681.
 The largest packet is97517 tokens. STRUCTURE has accumulated detailed descriptions
 of each extracted module, so every isolated owner repeatedly receives contracts
 for unrelated modules. The append-only style also left stale ownership prose,
 corrected in the preceding phase. Do not remove necessary context or weaken the
-limit. Decompose this documentation by the already approved code responsibilities.
+limit. Decompose this documentation by the code responsibilities.
 
 Keep docs/STRUCTURE.md as the canonical entry point: original global architecture,
 three-zone/runtime/security contracts, completion mandate, whole-packet rules,
@@ -81,7 +81,7 @@ No Windows/macOS run or live installation is claimed.
 
 ## Follow-up for the subsequent owners (2026-11-03, c43455da)
 
-The same approved organization is needed again: 79 packets fit, but the newest
+The same organization is needed again: 79 packets fit, but the newest
 compile-answer packet is 99312 tokens. Per-owner descriptions appended after the
 first consolidation again occupy every unrelated maintenance packet. Rechecked
 Diataxis reference, Google large-doc organization and Microsoft scannable content
@@ -130,7 +130,7 @@ The complete prior db6baf57 suite finished with 16339 passed, 244 skipped and
 
 ## Follow-up after 111 packets (2026-11-03, 010acd8b)
 
-Apply the same approved model to 14 recent single-owner paragraphs. They belong
+Apply the same model to 14 recent single-owner paragraphs. They belong
 to ownership-validation, context-ownership, codex-turn-policy, windows-actor,
 coordinator-invariants, ownership-timing, coordinator-validation, runtime-metadata,
 ownership-rows, release-manifest, corpus-membership-policy, provenance, page-facts
@@ -156,7 +156,7 @@ LLM task-cost results. No production or manifest change and no live installation
 
 ## Follow-up after 144 packets (2026-11-03, 22846c9c)
 
-The same approved transfer now covers 16 module-only paragraphs from the final
+The same transfer now covers 16 module-only paragraphs from the final
 benchmark and capture boundaries, copied whole to 20 existing guides. Every
 preceding byte, heading, anchor, global paragraph and manifest stays unchanged.
 Root navigation retains all owner links. Relative links are rebased reversibly;

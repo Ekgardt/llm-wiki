@@ -1,6 +1,6 @@
 # Qualify byte-exact sentence pruning in place
 
-Date: 2026-11-03; internal responsibility under the approved decomposition plan.
+Date: 2026-11-03; internal responsibility under the decomposition plan.
 
 `scripts/evidence_pruning.py` already accepts source bytes, a range, the question
 and an encoder callable. It returns byte spans and imports no product module.

@@ -19,7 +19,7 @@ No current time, environment root, operational state or compile trigger is read.
 
 ## Qualification — 2026-11-03
 
-The approved autonomous plan permits the internal split. Selection is shared by
+The autonomous plan permits the internal split. Selection is shared by
 compile, pending-work, lint, co-activation, fact keys and MCP readers; storing it
 with runtime coordination adds unrelated initialization. Duplicating the rule in
 consumers risks drift. Adding calendar validation or changing open-day scheduling

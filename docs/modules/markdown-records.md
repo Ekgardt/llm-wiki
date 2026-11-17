@@ -20,7 +20,7 @@ Source: [boundary research](../research/2026-11-03-ownership-and-markdown-record
 PreconditionChangedError also identifies a target snapshot lost during capture or
 staging. It remains a ValueError subtype; the coordinator decides whether to retry.
 
-## Approved annotation compatibility — 2026-11-04
+## Annotation compatibility — 2026-11-04
 
 Native Python 3.14 annotations resolve without loading historical facades. Fields,
 defaults and pickle paths are retained; raw annotation/signature representation

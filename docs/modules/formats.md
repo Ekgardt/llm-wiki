@@ -1,6 +1,6 @@
 # Formats module
 
-Approved pilot, 2026-11-02. This is the first extracted module, not completion of
+Pilot, 2026-11-02. This is the first extracted module, not completion of
 repository-wide modularization or evidence of a reduction in real task tokens.
 
 `llm_wiki.formats` owns canonical JSON bytes and SHA-256, the existing closed
@@ -101,5 +101,5 @@ public objects unchanged for compatibility and imports its payload byte ceiling.
 Repair reads the validator from its owner. SQLite, task transitions, ownership,
 worker execution and migrations remain in the queue. The complete formats packet
 includes the new source and tests; its existing 100,000-token gate applies.
-See `docs/research/2026-11-02-queue-payload-boundary.md`; private approval:
+See `docs/research/2026-11-02-queue-payload-boundary.md`; private decision record:
 `knowledge/notes/queue-payload-formats-decision-20261102.md`.

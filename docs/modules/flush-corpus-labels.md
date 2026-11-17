@@ -41,7 +41,7 @@ or modified by the isolated tests.
 A single pure labels module groups the records with their interpretation and
 agreement measure. Keeping it in the IO builder requires importing capture and
 provider infrastructure to parse a JSON answer; one module per small helper
-would fragment a single responsibility. The approved broad decomposition plan
+would fragment a single responsibility. The broad decomposition plan
 permits this internal boundary while preserving public commands and data.
 
 Sources checked: [bounded contexts](https://martinfowler.com/bliki/BoundedContext.html),

@@ -1,6 +1,6 @@
 # Ownership time values, separate from clocks and registry IO
 
-Date: 2026-11-03. Internal boundary under the approved decomposition mandate.
+Date: 2026-11-03. Internal boundary under the decomposition mandate.
 
 Transfer _as_utc, _timestamp, _parse_timestamp, _timing,
 _require_lease_timing and _LONG_LEASE_ROLES exactly from operational_ownership

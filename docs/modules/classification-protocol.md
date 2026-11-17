@@ -29,7 +29,7 @@ queue still imports the old name, so that condition is not met.
 
 The common prompt and parser define one protocol. Splitting them risks the stand
 measuring a different prompt, while retaining them in capture forces unrelated
-runtime imports into pure scoring. The approved autonomous decomposition plan
+runtime imports into pure scoring. The autonomous decomposition plan
 covers this internal leaf; no runtime location, installation, dependency, data
 schema or provider behavior changes. Existing source/callers and tests identify
 capture, deferred queue flush, and the benchmark as consumers. Dynamic graph

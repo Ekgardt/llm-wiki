@@ -21,7 +21,7 @@ guards reject product executors in both scripts and benchmark search roots.
 
 Run tests/modules/benchmark_arm_comparison and the retained original test file with
 normal pytest bootstrap. No production path, public command, dependency, runtime
-root or installation changes. Python 3.14 is the approved runtime.
+root or installation changes. Python 3.14 is the target runtime.
 
 ## Qualification research — 2026-11-03
 

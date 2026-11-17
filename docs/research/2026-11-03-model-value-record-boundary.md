@@ -1,6 +1,6 @@
 # Provider value records before transport
 
-Date: 2026-11-03. Internal refinement under the approved decomposition mandate.
+Date: 2026-11-03. Internal refinement under the decomposition mandate.
 The retained-answer verifier in memory_queue imports compile_controller, whose
 value-type import loads llm_client and the DLP/provider transport dependencies.
 The first prerequisite is a real downward data boundary, not an import exception.

@@ -13,7 +13,7 @@ functions and methods dispatched by a base retain their conservative treatment.
 The AST decides whether a name is a reference. Source admission uses a raw-hit
 fast path and standard Python spelling rules, including normalization, decoded
 literals and concatenation. A conservative token hit alone proves no reference.
-The runtime remains the approved Python3.14 series; no new package or cache.
+The runtime remains the Python3.14 series; no new package or cache.
 
 Six original pure tests move unchanged from the mixed stored-graph test file.
 The complete scoped-reader test file stays at its original path and belongs to

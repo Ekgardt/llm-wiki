@@ -32,7 +32,7 @@ Declared confidence maps to existing values; unknown values remain unstated.
 
 ## Qualification and alternatives — 2026-11-03
 
-The approved autonomous decomposition plan permits existing cohesive owners to
+The autonomous decomposition plan permits existing cohesive owners to
 stay at their public paths. Combining this reader with MCP would retain an
 unbounded composition dependency; adding a protocol wrapper or copying policy
 would add machinery without separating state. Keeping the source and its full

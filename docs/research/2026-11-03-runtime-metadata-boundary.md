@@ -1,6 +1,6 @@
 # Metadata validation without descriptor-based identity capture
 
-Date: 2026-11-03. Internal boundary under the approved decomposition mandate.
+Date: 2026-11-03. Internal boundary under the decomposition mandate.
 
 The unchanged coordinator-validation budget check failed at105385tokens;124
 behavior checks passed. Source inspection found that sqlite_io uses only

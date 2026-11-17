@@ -74,4 +74,4 @@ contract live in `docs/modules/queue-contracts-context.json` and
 `docs/modules/queue-contracts.md`. The 100,000-token ceiling includes all owned
 source, tests, data and necessary instructions/contracts. Process/queue integration
 remains additional qualification. No database, runtime, limit or command changes.
-Private approval: `knowledge/notes/queue-contracts-decision-20261102.md`.
+Private decision record: `knowledge/notes/queue-contracts-decision-20261102.md`.

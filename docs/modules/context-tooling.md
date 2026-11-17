@@ -5,7 +5,7 @@ pilot research stays intact in the repository and in the formats and tooling
 packets. Selecting relevant maintenance context does not delete that history.
 Full AGENTS.md, CLAUDE.md, development-laws.md and STRUCTURE.md remain in every
 packet. Their authority, security, recovery and deployment rules are not replaced
-by this guide. The approved completion plan permits internal boundary refinement;
+by this guide. The completion plan permits internal boundary refinement;
 installation in the live vault still needs separate owner permission.
 
 ## Responsibility and compatibility
@@ -15,7 +15,7 @@ state owner, not by line count or a prescribed module quota. Keep public command
 formats, schemas, environment contracts, runtime roots, ownership fences and
 Markdown/Git authority. Do not add services, a second coordinator, generic buses
 or interface layers merely to obtain smaller files. Existing independent files
-can be qualified in place. Python 3.14 is the approved runtime series (2026-11-03); dependency and platform
+can be qualified in place. Python 3.14 is the target runtime series (2026-11-03); dependency and platform
 changes still need evidence and explicit authorization.
 
 Every implementation has one owner. Retain public aliases only for demonstrated
@@ -127,7 +127,7 @@ measurement checks; for a refused packet it names the largest borrowed whole
 files and why each could not be described. The measurement tools are test-only; they do not
 change product behavior or runtime state.
 
-Sources: the approved decomposition completion plan and research documents on
+Sources: the decomposition completion plan and research documents on
 context-source-closure, module-file-ownership, module-contract-documentation,
 test-import-context-closure and canonical-module-qualification-context. The three
 2026-11-02 pilot documents remain full historical evidence in formats/tooling.

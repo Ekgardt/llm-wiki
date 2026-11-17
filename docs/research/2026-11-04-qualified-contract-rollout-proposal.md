@@ -1,7 +1,7 @@
 # Conditional use of qualified dependency contracts
 
 Date: 2026-11-04. Status: explicitly accepted by the owner on 2026-11-04; no canonical
-source omission has been enabled. This follows the approved pilot, not a waiver
+source omission has been enabled. This follows the pilot proposal, not a waiver
 of the development laws or the 100000-token limit.
 
 ## Concrete evidence and limitation

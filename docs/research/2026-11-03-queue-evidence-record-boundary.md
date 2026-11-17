@@ -1,6 +1,6 @@
 # Queue evidence representation and one attempt-history mapper
 
-Date: 2026-11-03. Two ordered refinements under the approved decomposition mandate:
+Date: 2026-11-03. Two ordered refinements under the decomposition mandate:
 first reuse the identical attempt-history representation; then isolate immutable
 queue evidence records. Neither change moves SQL, permissions or transaction fences.
 

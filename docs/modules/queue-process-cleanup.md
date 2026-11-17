@@ -1,11 +1,11 @@
 # Queue process cleanup
 
-Approved 2026-11-02. `scripts/llm_wiki/queue_process_cleanup.py` owns the existing
+2026-11-02. `scripts/llm_wiki/queue_process_cleanup.py` owns the existing
 queue child-tree discovery, termination escalation and verified cleanup. It
 depends only on stdlib, `queue_contracts.QueueOperationError` and the common
 `process_liveness.pid_alive` probe. It does not launch jobs or own their leases.
 
-The later approved queue_child_runtime extraction makes that module the direct
+The later queue_child_runtime extraction makes that module the direct
 owner of `ChildRun` and handshake calls into cleanup. queue_core retains the
 required aliases used by existing consumers; the cleanup implementation stays
 unchanged. Launch orchestration is described in queue-child-runtime.md.
@@ -89,5 +89,5 @@ Own tests live in `tests/modules/queue_process_cleanup/`; the complete context
 manifest and guide are `docs/modules/queue-process-cleanup-context.json` and
 `docs/modules/queue-process-cleanup.md`. The packet is bounded by the user's
 100,000-token ceiling; worker/spawn scenarios remain additional qualification.
-No runtime root, database, dependency or daemon is added. Approval is recorded
+No runtime root, database, dependency or daemon is added. The decision is recorded
 in `knowledge/notes/queue-process-cleanup-decision-20261102.md`.

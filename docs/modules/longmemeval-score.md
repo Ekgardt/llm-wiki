@@ -49,7 +49,7 @@ Sources checked: [bounded contexts](https://martinfowler.com/bliki/BoundedContex
 [JSON semantics](https://docs.python.org/3.14/library/json.html).
 These support boundaries/interchange, not fresh scientific validation of historical
 metrics. Python3.14, dependencies, benchmark datasets and live installation stay as
-previously approved. No new benchmark efficacy or full-cycle token savings claim.
+they were. No new benchmark efficacy or full-cycle token savings claim.
 
 ## Canonical structure contract — 2026-11-03
 

@@ -3,7 +3,7 @@
 Date: 2026-11-03. This is a separate repeat of the
 [first pair](2026-11-03-dependency-contract-paired-maintenance-result.md), whose
 missing usage counters remain missing. No retrospective counters are invented.
-The owner authorized two independent participants. Both fresh detached fd9918c4
+Two independent participants took part. Both fresh detached fd9918c4
 checkouts used Python 3.14.7, the same task, graph and allowed context, Codex CLI
 0.166.0, and the existing selected gpt-6-astra / medium setting. Neither received
 the first pair's solution or the other arm's work. FULL read the complete

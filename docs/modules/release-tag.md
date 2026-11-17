@@ -30,7 +30,7 @@ packet does not cover arbitrary edits to old release history; use the relevant
 history owner for that work. The release-history and pending-history owners
 together preserve every byte. No original test is weakened to accept records.
 
-This 2026-11-03 qualification follows the approved autonomous completion plan,
+This 2026-11-03 qualification follows the autonomous completion plan,
 the existing release-manifest boundary research and the release-history semantic
 review. Its purpose is bounded maintenance ownership, not a new release policy.
 The original combined full-file packet exceeded 100000 tokens; exact complete

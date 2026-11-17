@@ -1,6 +1,6 @@
 # Coordinator schema declarations and inspection
 
-Date: 2026-11-03. Internal transfer under the approved decomposition mandate.
+Date: 2026-11-03. Internal transfer under the decomposition mandate.
 The separately reproduced literal-normalization defect was repaired first in
 243fe271. This transfer preserves that corrected behavior exactly.
 
@@ -47,5 +47,5 @@ Primary sources checked 2026-11-03 (three independent publishers):
   https://docs.python.org/3.14/library/sqlite3.html
 - OWASP structured-input allowlist validation:
   https://cheatsheetseries.owasp.org/cheatsheets/Input_Validation_Cheat_Sheet.html
-Python 3.14 is now the approved runtime, implemented separately in 74bd1524.
+Python 3.14 is now the target runtime, implemented separately in 74bd1524.
 This extraction makes no further runtime or support change.

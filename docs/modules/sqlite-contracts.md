@@ -36,7 +36,7 @@ and sqlite_deadlines own their named control policies, with direct aliases for
 the old names. Class pickle names remain reliable_memory for existing
 serialized callers. Consumers import values directly from sqlite_contracts.
 
-## Approved annotation compatibility — 2026-11-04
+## Annotation compatibility — 2026-11-04
 
 Native Python 3.14 annotations resolve without loading historical facades. Fields,
 defaults and pickle paths are retained; raw annotation/signature representation

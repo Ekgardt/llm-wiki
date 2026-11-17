@@ -30,7 +30,7 @@ Alternatives rejected: skip native cases, relax owner-only checks, reduce payloa
 size to shorten IDs, change expected upgrade results, or let tests reach the actual
 uv binary unintentionally. Production runtime behavior and security remain intact.
 Windows E2E processor_exception is separate and still lacks its underlying reason;
-the approved Python migration added failure-artifact retention to expose it on the
+the Python migration added failure-artifact retention to expose it on the
 next run. No timeout increase or ignored failure is part of this work.
 
 Primary sources checked 2026-11-03, three independent publishers:

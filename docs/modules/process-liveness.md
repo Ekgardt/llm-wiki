@@ -6,7 +6,7 @@ comparison. Its production bytes and public interfaces are unchanged. Queue
 cleanup now calls its existing `pid_alive` directly instead of passing through
 `memory_state._is_pid_alive`.
 
-The later approved queue cleanup extraction moves that queue-specific adapter
+The later queue cleanup extraction moves that queue-specific adapter
 to `llm_wiki.queue_process_cleanup`; queue_core keeps an identical imported
 object for its existing consumers. The common process_liveness implementation
 and its invalid-input policy remain unchanged.
@@ -84,7 +84,7 @@ owner boundary. Importing the state adapter keeps unrelated initialization in
 process cleanup. Copying OS probes would duplicate security policy. Changing the
 generic invalid-PID policy would alter other consumers. Adding a new adapter
 module or provider abstraction is unnecessary. No new limits or dependencies
-are introduced; Python 3.14 is the approved runtime series.
+are introduced; Python 3.14 is the target runtime series.
 
 Primary references checked 2026-11-02:
 [Python imports](https://docs.python.org/3.14/reference/import.html) explains module

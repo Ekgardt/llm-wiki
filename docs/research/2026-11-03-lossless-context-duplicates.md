@@ -1,6 +1,6 @@
 # Lossless duplicate bodies in maintenance context packets
 
-2026-11-03; within the approved compression/completion mandate. This changes only
+2026-11-03; within the compression/completion mandate. This changes only
 maintenance packet serialization, not product data, source files or runtime paths.
 
 Measurement on 446bdafa found AGENTS.md and CLAUDE.md each contribute 7516 tokens

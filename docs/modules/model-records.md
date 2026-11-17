@@ -43,7 +43,7 @@ canonical JSON, defaults and shallow frozen semantics stay unchanged. The
 [model records contract](model-records.md) and its complete context packet
 cover the data boundary; real provider and compile recovery tests remain required.
 
-## Approved annotation compatibility — 2026-11-04
+## Annotation compatibility — 2026-11-04
 
 Native Python 3.14 annotations resolve without loading historical facades. Fields,
 defaults and pickle paths are retained; raw annotation/signature representation

@@ -1,6 +1,6 @@
 # Qualify existing leaf owners without moving their production code
 
-Date: 2026-11-03. Boundaries under the approved whole-project mandate;
+Date: 2026-11-03. Boundaries under the whole-project mandate;
 production files qualified in place.
 
 Source inspection identifies five existing standard-library-only responsibilities:

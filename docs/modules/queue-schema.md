@@ -35,5 +35,5 @@ not open or change a database. SQL bytes, ordering and names remain unchanged.
 contracts, migrations, adoption, repair and execution. The extraction adds no
 schema version or runtime path. Own tests live in `tests/modules/queue_schema`;
 `docs/modules/queue-schema-context.json` measures the complete maintenance packet
-against the existing 100,000-token limit. Approval:
+against the existing 100,000-token limit. Decision record:
 `knowledge/notes/queue-schema-boundary-decision-20261102.md`.

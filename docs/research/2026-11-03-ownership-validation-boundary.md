@@ -1,6 +1,6 @@
 # Ownership input validation and marker representation
 
-Date: 2026-11-03. Investigation under the approved whole-project mandate;
+Date: 2026-11-03. Investigation under the whole-project mandate;
 not implemented or qualified by this document.
 
 The registry combines pure checks of incoming values and stored marker fields with
@@ -41,7 +41,7 @@ Primary sources checked on 2026-11-03 (three independent publishers):
   depend on the current fail-fast typed error contract.
 
 Before implementation: refresh/query the built-in graph; inspect all callers and
-monkeypatch sites; record the exact approved internal boundary; preserve baseline
+monkeypatch sites; record the exact internal boundary; preserve baseline
 valid/invalid outputs and exact AST. Qualification must include isolated imports,
 real SQLite row fixtures, malformed/canonical JSON, boundary values, unchanged
 registry integration, CCN and the full <=100000-token packet. Native integration

@@ -1,6 +1,6 @@
 # LSP credential-text redaction boundary
 
-Date: 2026-11-03. Base: daf01519. Designed under the approved decomposition
+Date: 2026-11-03. Base: daf01519. Designed under the decomposition
 mandate; implementation/qualification pending in the isolated candidate.
 
 ## Responsibility

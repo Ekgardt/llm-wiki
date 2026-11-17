@@ -31,7 +31,7 @@ remains the project's compatibility requirement. No dependency version changes.
 Alternative extraction into a new storage facade adds indirection to an existing
 independent owner; copying helpers duplicates authoritative behavior; including
 all 77044 tokens of mixed historical orchestration in every storage prompt exceeds
-the full-packet ceiling. Use the approved exact-record mechanism with complete
+the full-packet ceiling. Use the exact-record mechanism with complete
 catalog and original byte reconstruction. Do not summarize required source.
 
 The historical Markdown was inspected for fenced/indented code, blockquotes and
