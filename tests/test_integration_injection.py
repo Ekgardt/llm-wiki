@@ -2401,11 +2401,33 @@ def test_codex_mcp_config_state_accepts_exact_enabled_table(tmp_path, quoted):
     config.write_text(
         f'{table}\ncommand = "uv"\n'
         f'args = ["run", "--locked", "--no-sync", "--directory", {json.dumps(str(ROOT))}, '
-        '"python", "scripts/mcp_server.py"]\nenabled = true\n',
+        '"python", "scripts/mcp_server.py"]\nenabled = true\n'
+        'omit_tools_from = ["deferred"]\n',
         encoding="utf-8",
     )
 
     assert codex_memory.codex_mcp_config_state(config, ROOT) == "equivalent"
+
+
+@pytest.mark.parametrize(
+    "omitted", ["", 'omit_tools_from = []\n', 'omit_tools_from = ["code_mode"]\n']
+)
+def test_codex_mcp_config_state_names_an_entry_whose_tools_wait_for_tool_search(
+    tmp_path, omitted
+):
+    """Our entry without `omit_tools_from = ["deferred"]` is ours, but Codex hides its tools."""
+    _ensure_scripts_on_path()
+    import codex_memory
+
+    config = tmp_path / "config.toml"
+    config.write_text(
+        '[mcp_servers.llm-wiki]\ncommand = "uv"\n'
+        f'args = ["run", "--locked", "--no-sync", "--directory", {json.dumps(str(ROOT))}, '
+        f'"python", "scripts/mcp_server.py"]\n{omitted}',
+        encoding="utf-8",
+    )
+
+    assert codex_memory.codex_mcp_config_state(config, ROOT) == "deferred"
 
 
 @pytest.mark.parametrize(
