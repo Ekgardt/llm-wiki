@@ -50,6 +50,11 @@ LOOKUPS = (
     "QueueWorker.run",
     "search_memory_rebuild()",
     "queue_worker.py:120",
+    "QueueWorker::run",
+    "QueueWorker->run",
+    "queue_worker.py#L120",
+    "scripts/corpus_snapshot.py::_walk_knowledge",
+    "_walk_knowledge",
 )
 
 
