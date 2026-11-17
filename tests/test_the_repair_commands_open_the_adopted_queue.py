@@ -15,6 +15,7 @@ from pathlib import Path
 import markdown_transaction
 import memory_queue
 import pytest
+import queue_core
 from reliable_memory import sha256_bytes
 
 from tests.adopted_vault import adopt, tamper_payload
@@ -22,7 +23,7 @@ from tests.adopted_vault import adopt, tamper_payload
 
 def _dead_corrupt_task(root: Path, state_root: Path) -> str:
     """A capture-bound task whose payload was tampered with, demoted by a claim."""
-    queue = memory_queue.active_or_legacy_memory_queue(root, state_root)
+    queue = queue_core.active_or_legacy_memory_queue(root, state_root)
     registry = queue.ownership_registry()
     coordinator = markdown_transaction.active_markdown_coordinator(root, state_root)
     intent_id = sha256_bytes(b"intent:corrupt")
@@ -50,7 +51,7 @@ def _run_cli(
     arguments: list[str],
 ) -> tuple[int, dict[str, object]]:
     monkeypatch.setattr(sys, "argv", ["memory_queue.py", *arguments])
-    code = memory_queue._cli()
+    code = memory_queue.cli()
     return code, json.loads(capsys.readouterr().out)
 
 

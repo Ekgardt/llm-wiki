@@ -8,7 +8,7 @@ import subprocess
 from pathlib import Path
 
 import pytest
-from impact_analysis import _changed_ranges, analyze_impact
+from impact_analysis import analyze_impact, changed_ranges
 
 
 @pytest.fixture(autouse=True)
@@ -93,12 +93,12 @@ def test_an_edit_on_a_crlf_checkout_names_only_its_symbol_exactly(tmp_path) -> N
 
 
 def test_a_change_of_line_endings_alone_is_still_a_change() -> None:
-    assert _changed_ranges(COMMITTED, CHECKED_OUT) != []
+    assert changed_ranges(COMMITTED, CHECKED_OUT) != []
 
 
 def test_only_line_endings_apart_is_no_edit_inside_other_changes() -> None:
     edited = CHECKED_OUT.replace(b"def beta():\r\n    return 1", b"def beta():\r\n    return 2")
 
-    ranges = _changed_ranges(COMMITTED, edited)
+    ranges = changed_ranges(COMMITTED, edited)
 
     assert [(item["new"]["line_start"], item["new"]["line_end"]) for item in ranges] == [(6, 6)]

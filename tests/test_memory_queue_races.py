@@ -7,7 +7,7 @@ import random
 import sqlite3
 import sys
 import threading
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -19,9 +19,14 @@ if str(SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_DIR))
 
 import markdown_transaction  # noqa: E402
-import memory_queue  # noqa: E402
 import operational_ownership  # noqa: E402
-from memory_queue import LeaseFenceError, MemoryQueue  # noqa: E402
+import queue_core  # noqa: E402
+from queue_core import (  # noqa: E402
+    LeaseFenceError,
+    MemoryQueue,
+)
+
+from tests.sqlite_errors import busy_database_error  # noqa: E402
 
 
 def _worked(module, processor, *, max_tasks: int = 1):
@@ -30,7 +35,7 @@ def _worked(module, processor, *, max_tasks: int = 1):
         processor,
         max_tasks=max_tasks,
         idle_seconds=0,
-        processor_runner=module._run_processor_inline,
+        processor_runner=module.run_processor_inline,
     )
 
 
@@ -59,7 +64,7 @@ class _SeventhBeatWait:
 
 class LockedClock:
     def __init__(self) -> None:
-        self._now = datetime(2026, 7, 14, tzinfo=timezone.utc)
+        self._now = datetime(2026, 7, 14, tzinfo=UTC)
         self._lock = threading.Lock()
 
     def __call__(self) -> datetime:
@@ -136,8 +141,8 @@ def _v3_queue(tmp_path: Path):
     coordinator = tmp_path / "run/markdown-transactions-v3.candidate.sqlite3"
     queue_path = tmp_path / "run/queue-v3.candidate.sqlite3"
     markdown_transaction.initialize_coordinator_v3_candidate(coordinator, source_v2=None)
-    memory_queue.initialize_queue_v3_candidate(queue_path, source_v2=None)
-    return memory_queue.MemoryQueue._from_v3_candidate(queue_path, state_root=tmp_path)
+    queue_core.initialize_queue_v3_candidate(queue_path, source_v2=None)
+    return queue_core.MemoryQueue.from_v3_candidate(queue_path, state_root=tmp_path)
 
 
 def test_queue_projection_failure_releases_only_the_exact_canonical_token(
@@ -314,10 +319,10 @@ def test_drain_heartbeats_long_handler_past_270_seconds(
         return real_heartbeat(lease, lease_seconds=lease_seconds)
 
     monkeypatch.setattr(queue, "heartbeat", heartbeat)
-    monkeypatch.setattr(memory_queue, "_queue", lambda **_kwargs: queue)
+    monkeypatch.setattr(queue_core, "default_queue", lambda **_kwargs: queue)
 
     summary = _worked(
-        memory_queue,
+        queue_core,
         # The handler waits for the heartbeat thread to reach its seventh beat.
         # Two seconds was not enough on a loaded runner, and the task then
         # failed on the fixture rather than on the behaviour under test.
@@ -364,9 +369,9 @@ def test_drain_reports_failure_when_heartbeat_loses_fence(
             raise
 
     monkeypatch.setattr(primary, "heartbeat", heartbeat)
-    monkeypatch.setattr(memory_queue, "_queue", lambda **_kwargs: primary)
+    monkeypatch.setattr(queue_core, "default_queue", lambda **_kwargs: primary)
 
-    summary = _worked(memory_queue, lambda task: fence_lost.wait(SHORT_TIMEOUT))
+    summary = _worked(queue_core, lambda task: fence_lost.wait(SHORT_TIMEOUT))
     assert (summary.succeeded, summary.failed, summary.dead) == (0, 1, 0)
     task = primary.get(task_id)
     assert replacement[0] is not None
@@ -388,13 +393,13 @@ def test_a_busy_database_makes_the_worker_wait_instead_of_dying(tmp_path, monkey
     def busy_once(owner, **options):
         attempts.append(owner)
         if len(attempts) == 1:
-            raise sqlite3.OperationalError("database is locked")
+            raise busy_database_error()
         return real_claim(owner, **options)
 
     monkeypatch.setattr(queue, "claim", busy_once)
-    monkeypatch.setattr(memory_queue, "_queue", lambda **options: queue)
+    monkeypatch.setattr(queue_core, "default_queue", lambda **options: queue)
 
-    summary = memory_queue.run_worker(
+    summary = queue_core.run_worker(
         lambda payload: True,
         max_tasks=1,
         max_seconds=30,
@@ -405,17 +410,3 @@ def test_a_busy_database_makes_the_worker_wait_instead_of_dying(tmp_path, monkey
     assert len(attempts) >= 2
     assert summary.succeeded == 1
     assert queue.get(task_id).state == "succeeded"
-
-
-def test_the_windows_process_tree_comes_from_the_kernel_snapshot(monkeypatch):
-    """One source, present on every supported Windows and needing no subprocess."""
-    monkeypatch.setattr(memory_queue, "_windows_process_pairs", lambda: [(11, 5), (12, 11)])
-
-    assert memory_queue._tracked_descendant_pids(5, "nt") == {11, 12}
-
-
-def test_a_failed_snapshot_reports_unknown_rather_than_empty(monkeypatch):
-    """An unknown descendant set must not read as a verified clean tree."""
-    monkeypatch.setattr(memory_queue, "_windows_process_pairs", lambda: None)
-
-    assert memory_queue._tracked_descendant_pids(5, "nt") is None

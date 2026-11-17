@@ -14,14 +14,13 @@ from types import SimpleNamespace
 
 import pytest
 
+from tests.forgotten_modules import forget_modules
 from tests.slow_machine import LONG_TIMEOUT, PAUSE_TIMEOUT
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 
 from code_graph import (  # noqa: E402
     LANGUAGE_MAP,
-    _get_parser,
-    _louvain_communities,
     detect_communities,
     detect_language,
     enrich_python_semantics,
@@ -29,7 +28,9 @@ from code_graph import (  # noqa: E402
     find_dead_code,
     get_architecture,
     index_directory,
+    louvain_communities,
     parse_file,
+    parser_attempt,
 )
 from code_languages import CODE_LANGUAGE_BY_SUFFIX  # noqa: E402
 from import_resolver import (  # noqa: E402
@@ -37,24 +38,7 @@ from import_resolver import (  # noqa: E402
     resolve_python_imports_and_calls,
 )
 
-
-def _activate_graph(tmp_path, repository=None):
-    from generation_catalog import GenerationCatalog
-    from repository_scope import resolve_repository_scope
-
-    from tests.test_evidence_graph_recovery import _publish, _rich_graph_records
-
-    catalog = GenerationCatalog(tmp_path / "state")
-    scope = resolve_repository_scope(repository or tmp_path)
-    _publish(
-        catalog,
-        "active",
-        graph_records=_rich_graph_records(),
-        repository_scope=scope.as_dict(),
-    )
-    catalog.register("active")
-    catalog.activate("active", expected_active=None)
-    return catalog
+from tests.code_graph_helpers import _activate_graph
 
 
 def _activate_nested_repository_graph(tmp_path, monkeypatch):
@@ -103,10 +87,9 @@ def test_public_facades_query_active_evidence_graph_before_live_scan(tmp_path, m
     import code_graph
 
     catalog = _activate_graph(tmp_path)
-    monkeypatch.setattr(code_graph, "_generation_catalog", lambda directory: catalog)
+    monkeypatch.setattr("llm_wiki.code_graph_generation.generation_catalog", lambda directory: catalog)
     monkeypatch.setattr(
-        code_graph,
-        "_workspace_call_graph",
+        "llm_wiki.code_graph_workspace.workspace_call_graph",
         lambda directory: (_ for _ in ()).throw(AssertionError("live scan used")),
     )
 
@@ -133,7 +116,7 @@ def test_store_first_reports_generation_completeness_and_unresolved_count(
     import code_graph
 
     catalog = _activate_graph(tmp_path)
-    monkeypatch.setattr(code_graph, "_generation_catalog", lambda directory: catalog)
+    monkeypatch.setattr("llm_wiki.code_graph_generation.generation_catalog", lambda directory: catalog)
 
     callers = code_graph.find_callers("callee", tmp_path, with_report=True)
     architecture = code_graph.get_architecture(tmp_path, with_report=True)
@@ -155,10 +138,9 @@ def test_dependency_and_path_facades_prefer_active_generation(tmp_path, monkeypa
     import code_graph
 
     catalog = _activate_graph(tmp_path)
-    monkeypatch.setattr(code_graph, "_generation_catalog", lambda directory: catalog)
+    monkeypatch.setattr("llm_wiki.code_graph_generation.generation_catalog", lambda directory: catalog)
     monkeypatch.setattr(
-        code_graph,
-        "_workspace_call_graph",
+        "llm_wiki.code_graph_workspace.workspace_call_graph",
         lambda directory: (_ for _ in ()).throw(AssertionError("live scan used")),
     )
 
@@ -201,10 +183,10 @@ def test_repository_binding_rejects_same_basename_repository_in_shared_state(
     tmp_path, monkeypatch
 ):
     import code_graph
-    from generation_catalog import GenerationCatalog
+    from llm_wiki.generation_catalog_store import GenerationCatalog
     from repository_scope import resolve_repository_scope
 
-    from tests.test_evidence_graph_recovery import _publish, _rich_graph_records
+    from tests.evidence_graph_recovery_helpers import _publish, _rich_graph_records
 
     repository_a = tmp_path / "owner-a" / "project"
     repository_b = tmp_path / "owner-b" / "project"
@@ -250,8 +232,7 @@ def test_repository_binding_exact_scope_still_uses_store(tmp_path, monkeypatch):
     catalog = _activate_graph(tmp_path, repository)
     monkeypatch.setenv("LLM_WIKI_STATE_ROOT", str(catalog.state_root))
     monkeypatch.setattr(
-        code_graph,
-        "_workspace_call_graph",
+        "llm_wiki.code_graph_workspace.workspace_call_graph",
         lambda directory: (_ for _ in ()).throw(AssertionError("live scan used")),
     )
 
@@ -263,16 +244,14 @@ def test_repository_binding_exact_scope_still_uses_store(tmp_path, monkeypatch):
 
 def test_external_repository_uses_canonical_state_root_without_env(tmp_path, monkeypatch):
     import code_graph
-    import memory_state
 
     repository = tmp_path / "external-repository"
     repository.mkdir()
     catalog = _activate_graph(tmp_path, repository)
     monkeypatch.delenv("LLM_WIKI_STATE_ROOT", raising=False)
-    monkeypatch.setattr(memory_state, "STATE_ROOT", catalog.state_root)
+    monkeypatch.setenv("LLM_WIKI_STATE_ROOT", str(catalog.state_root))
     monkeypatch.setattr(
-        code_graph,
-        "_workspace_call_graph",
+        "llm_wiki.code_graph_workspace.workspace_call_graph",
         lambda directory: (_ for _ in ()).throw(AssertionError("live scan used")),
     )
 
@@ -341,18 +320,17 @@ def test_community_cache_is_bounded_and_scoped_to_pinned_generation(
     import code_graph
 
     catalog = _activate_graph(tmp_path)
-    monkeypatch.setattr(code_graph, "_generation_catalog", lambda directory: catalog)
-    graph = code_graph._active_evidence_graph(tmp_path)
+    monkeypatch.setattr("llm_wiki.code_graph_generation.generation_catalog", lambda directory: catalog)
+    graph = code_graph.active_evidence_graph(tmp_path)
     calls = graph.edges(edge_types=("CALLS",), max_rows=10_000)
     computed = []
     monkeypatch.setattr(
-        code_graph,
-        "_louvain_communities",
+        "llm_wiki.code_graph_communities.louvain_communities",
         lambda value: computed.append(value) or [["caller", "callee"]],
     )
 
     try:
-        repeated = [code_graph._stored_communities(graph, calls) for _ in range(2)]
+        repeated = [code_graph.stored_communities(graph, calls) for _ in range(2)]
         cached = len(graph._derived_code_graph_cache)
     finally:
         graph.close()
@@ -363,7 +341,7 @@ def test_community_cache_is_bounded_and_scoped_to_pinned_generation(
 
 def test_generation_catalog_can_open_existing_catalog_read_only(tmp_path, monkeypatch):
     import code_graph
-    import generation_catalog
+    from llm_wiki import generation_catalog_store
 
     catalog = _activate_graph(tmp_path)
     monkeypatch.setenv("LLM_WIKI_STATE_ROOT", str(catalog.state_root))
@@ -373,19 +351,19 @@ def test_generation_catalog_can_open_existing_catalog_read_only(tmp_path, monkey
     def cancelled():
         return False
 
-    original_open = generation_catalog.GenerationCatalog.open_existing_read_only
+    original_open = generation_catalog_store.GenerationCatalog.open_existing_read_only
 
     def capture_open(_cls, state_root, **options):
         captured.update(options)
         return original_open(state_root, **options)
 
     monkeypatch.setattr(
-        generation_catalog.GenerationCatalog,
+        generation_catalog_store.GenerationCatalog,
         "open_existing_read_only",
         classmethod(capture_open),
     )
 
-    reader = code_graph._generation_catalog(
+    reader = code_graph.generation_catalog(
         tmp_path,
         read_only=True,
         deadline=deadline,
@@ -437,7 +415,7 @@ def test_active_evidence_graph_forwards_read_only_deadline_and_cancellation(
         captured["scope"] = (directory, options)
         return original_resolve(directory, **options)
 
-    monkeypatch.setattr(code_graph, "_generation_catalog", open_catalog)
+    monkeypatch.setattr("llm_wiki.code_graph_generation.generation_catalog", open_catalog)
     monkeypatch.setattr(
         evidence_graph.EvidenceGraph,
         "open_active_for_repository",
@@ -445,7 +423,7 @@ def test_active_evidence_graph_forwards_read_only_deadline_and_cancellation(
     )
     monkeypatch.setattr(repository_scope, "resolve_repository_scope", resolve_scope)
 
-    opened = code_graph._active_evidence_graph(
+    opened = code_graph.active_evidence_graph(
         tmp_path,
         read_only=True,
         deadline=deadline,
@@ -489,7 +467,7 @@ def test_active_evidence_graph_preserves_legacy_no_keyword_path(tmp_path, monkey
         calls.append(("graph", received_catalog))
         return graph
 
-    monkeypatch.setattr(code_graph, "_generation_catalog", open_catalog)
+    monkeypatch.setattr("llm_wiki.code_graph_generation.generation_catalog", open_catalog)
     monkeypatch.setattr(repository_scope, "resolve_repository_scope", resolve_scope)
     monkeypatch.setattr(
         evidence_graph.EvidenceGraph,
@@ -504,7 +482,7 @@ def test_active_evidence_graph_preserves_legacy_no_keyword_path(tmp_path, monkey
         lambda *_args, **_options: None,
     )
 
-    assert code_graph._active_evidence_graph(tmp_path).database_path is graph.database_path
+    assert code_graph.active_evidence_graph(tmp_path).database_path is graph.database_path
     assert calls == [
         ("catalog", tmp_path),
         ("scope", tmp_path),
@@ -525,8 +503,7 @@ def test_active_evidence_graph_propagates_delayed_scope_deadline(
         return False
 
     monkeypatch.setattr(
-        code_graph,
-        "_generation_catalog",
+        "llm_wiki.code_graph_generation.generation_catalog",
         lambda _directory, **_options: SimpleNamespace(
             catalog_path=tmp_path / "catalog.sqlite3"
         ),
@@ -539,7 +516,7 @@ def test_active_evidence_graph_propagates_delayed_scope_deadline(
     monkeypatch.setattr(repository_scope, "resolve_repository_scope", delayed_scope)
 
     with pytest.raises(TimeoutError, match="scope deadline"):
-        code_graph._active_evidence_graph(
+        code_graph.active_evidence_graph(
             tmp_path,
             read_only=True,
             deadline=deadline,
@@ -558,10 +535,10 @@ def test_active_evidence_graph_propagates_timeout(tmp_path, monkeypatch):
     def timed_out(_directory, **_options):
         raise TimeoutError("catalog deadline reached")
 
-    monkeypatch.setattr(code_graph, "_generation_catalog", timed_out)
+    monkeypatch.setattr("llm_wiki.code_graph_generation.generation_catalog", timed_out)
 
     with pytest.raises(TimeoutError, match="deadline"):
-        code_graph._active_evidence_graph(
+        code_graph.active_evidence_graph(
             tmp_path,
             read_only=True,
             deadline=time.monotonic() + 5,
@@ -572,10 +549,10 @@ def test_active_evidence_graph_propagates_timeout(tmp_path, monkeypatch):
 def test_store_facades_switch_only_after_generation_activation(tmp_path, monkeypatch):
     import code_graph
     from evidence_graph import EvidenceGraph
-    from generation_catalog import GenerationCatalog
+    from llm_wiki.generation_catalog_store import GenerationCatalog
     from repository_scope import resolve_repository_scope
 
-    from tests.test_evidence_graph_recovery import _publish, _rich_graph_records
+    from tests.evidence_graph_recovery_helpers import _publish, _rich_graph_records
 
     catalog = GenerationCatalog(tmp_path / "state")
     scope = resolve_repository_scope(tmp_path).as_dict()
@@ -587,7 +564,7 @@ def test_store_facades_switch_only_after_generation_activation(tmp_path, monkeyp
     )
     catalog.register("prior")
     catalog.activate("prior", expected_active=None)
-    monkeypatch.setattr(code_graph, "_generation_catalog", lambda directory: catalog)
+    monkeypatch.setattr("llm_wiki.code_graph_generation.generation_catalog", lambda directory: catalog)
 
     _publish(
         catalog,
@@ -624,10 +601,10 @@ def test_store_facades_switch_only_after_generation_activation(tmp_path, monkeyp
 
 def test_store_hotspots_count_distinct_callers_not_call_sites(tmp_path, monkeypatch):
     import code_graph
-    from generation_catalog import GenerationCatalog
+    from llm_wiki.generation_catalog_store import GenerationCatalog
     from repository_scope import resolve_repository_scope
 
-    from tests.test_evidence_graph_recovery import _publish, _rich_graph_records
+    from tests.evidence_graph_recovery_helpers import _publish, _rich_graph_records
 
     records = _rich_graph_records()
     records["assertions"].append(
@@ -649,7 +626,7 @@ def test_store_hotspots_count_distinct_callers_not_call_sites(tmp_path, monkeypa
     )
     catalog.register("active")
     catalog.activate("active", expected_active=None)
-    monkeypatch.setattr(code_graph, "_generation_catalog", lambda directory: catalog)
+    monkeypatch.setattr("llm_wiki.code_graph_generation.generation_catalog", lambda directory: catalog)
 
     hotspots = code_graph.get_architecture(tmp_path)["hotspots"]
 
@@ -660,17 +637,18 @@ def test_explicit_live_request_bypasses_active_store(tmp_path, monkeypatch):
     import code_graph
 
     catalog = _activate_graph(tmp_path)
-    monkeypatch.setattr(code_graph, "_generation_catalog", lambda directory: catalog)
+    monkeypatch.setattr("llm_wiki.code_graph_generation.generation_catalog", lambda directory: catalog)
     (tmp_path / "live.py").write_text(
         "def target(): pass\ndef caller(): target()\n", encoding="utf-8"
     )
     for name in (
-        "_store_find_callers", "_store_find_callees", "_store_find_dead_code",
-        "_store_get_architecture", "_store_detect_communities",
+        "code_graph_calls.store_find_callers", "code_graph_calls.store_find_callees",
+        "code_graph_dead_code.store_find_dead_code",
+        "code_graph_architecture.store_get_architecture",
+        "code_graph_communities.store_detect_communities",
     ):
         monkeypatch.setattr(
-            code_graph,
-            name,
+            "llm_wiki." + name,
             lambda *_args: (_ for _ in ()).throw(AssertionError("store used")),
         )
 
@@ -689,8 +667,7 @@ def test_invalid_active_store_uses_live_fallback(tmp_path, monkeypatch):
     import code_graph
 
     monkeypatch.setattr(
-        code_graph,
-        "_generation_catalog",
+        "llm_wiki.code_graph_generation.generation_catalog",
         lambda directory: (_ for _ in ()).throw(sqlite3.DatabaseError("invalid")),
     )
     (tmp_path / "live.py").write_text("def target(): pass\ntarget()\n", encoding="utf-8")
@@ -857,8 +834,8 @@ class TestParseFile:
 
         path = tmp_path / "example.go"
         path.write_text("package demo\nfunc greet() {}\n", encoding="utf-8")
-        code_graph._ts.pop("go", None)
-        monkeypatch.setattr("code_graph.importlib.import_module", lambda name: (_ for _ in ()).throw(ImportError(name)))
+        code_graph.tree_sitter_parsers.pop("go", None)
+        monkeypatch.setattr("llm_wiki.code_graph_parse.importlib.import_module", lambda name: (_ for _ in ()).throw(ImportError(name)))
 
         result = parse_file(path)
 
@@ -868,11 +845,11 @@ class TestParseFile:
     def test_grammar_loaders_are_lazy_and_cached(self, monkeypatch):
         import code_graph
 
-        code_graph._ts.clear()
+        code_graph.tree_sitter_parsers.clear()
         imported = []
-        monkeypatch.setattr(code_graph.importlib, "import_module", lambda name: imported.append(name) or (_ for _ in ()).throw(ImportError(name)))
+        monkeypatch.setattr("llm_wiki.code_graph_parse.importlib.import_module", lambda name: imported.append(name) or (_ for _ in ()).throw(ImportError(name)))
 
-        assert _get_parser("go") is None
+        assert parser_attempt("go") == (None, "ImportError: tree_sitter_go")
         assert imported == ["tree_sitter_go"]
 
     def test_each_language_has_a_materialized_query_file(self):
@@ -948,7 +925,7 @@ class TestParseFile:
         assert "demo.app" not in imports
 
     def test_all_new_languages_have_useful_regex_fallback(self, tmp_path, monkeypatch):
-        monkeypatch.setattr("code_graph._get_parser", lambda language: None)
+        monkeypatch.setattr("llm_wiki.code_graph_parse.parser_attempt", lambda language: (None, None))
 
         for filename, source, function, class_name, call, imported in FALLBACK_CASES:
             result = _parsed_language_case(tmp_path, filename, source)
@@ -1579,7 +1556,7 @@ class TestGetArchitecture:
             encoding="utf-8",
         )
         monkeypatch.setattr(
-            "code_graph._communities_from_edges", lambda edges: [["first", "shared"]]
+            "llm_wiki.code_graph_communities.communities_from_edges", lambda edges: [["first", "shared"]]
         )
 
         architecture = get_architecture(tmp_path)
@@ -1628,8 +1605,8 @@ class TestLouvainCommunities:
         }
 
         expected = [["a", "b", "c"], ["x", "y", "z"]]
-        assert _louvain_communities(edges) == expected
-        assert _louvain_communities(reversed_edges) == expected
+        assert louvain_communities(edges) == expected
+        assert louvain_communities(reversed_edges) == expected
 
     def test_detect_communities_uses_real_caller_to_callee_edges(self, tmp_path):
         (tmp_path / "modules.py").write_text(
@@ -1655,7 +1632,7 @@ class TestLouvainCommunities:
             "c": {"a": 1.0, "b": 3.0},
         }
 
-        assert code_graph._aggregate_louvain_graph(graph, {"a": 0, "b": 0, "c": 1}) == {
+        assert code_graph.aggregate_louvain_graph(graph, {"a": 0, "b": 0, "c": 1}) == {
             0: {0: 14.0, 1: 4.0},
             1: {0: 4.0},
         }
@@ -1861,8 +1838,8 @@ class TestPythonSemanticEnrichment:
         source = tmp_path / "service.py"
         source.write_text("target()\n", encoding="utf-8")
         calls = [{"name": "target", "line": 1, "column": 0, "confidence": "unknown"}]
-        monkeypatch.delitem(sys.modules, "jedi", raising=False)
-        monkeypatch.setattr("code_graph.importlib.import_module", lambda name: (_ for _ in ()).throw(ImportError()))
+        forget_modules(monkeypatch, "jedi")
+        monkeypatch.setattr("llm_wiki.code_graph_parse.importlib.import_module", lambda name: (_ for _ in ()).throw(ImportError()))
 
         assert enrich_python_semantics(source, calls, tmp_path) == calls
 

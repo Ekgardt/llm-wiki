@@ -19,8 +19,8 @@ ROOT =Path(__file__).resolve().parents[1]
 _REPORT_WHERE_THE_RELATIVE_IMPORT_LANDED = """
 import sys
 sys.path.append(sys.argv[1])
-import scripts.code_graph
-print(sys.modules["scripts.value_references"].__file__)
+import scripts.code_extractor
+print(sys.modules["scripts.python_parse"].__file__)
 """
 
 
@@ -38,4 +38,4 @@ def test_a_relative_import_lands_in_this_checkout_beside_another_scripts_package
     )
 
     assert result.returncode == 0, result.stderr
-    assert Path(result.stdout.strip()) == ROOT / "scripts" / "value_references.py"
+    assert Path(result.stdout.strip()) == ROOT / "scripts" / "python_parse.py"

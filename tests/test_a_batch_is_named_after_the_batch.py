@@ -29,9 +29,9 @@ SCRIPTS_DIR = Path(__file__).resolve().parent.parent / "scripts"
 if str(SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_DIR))
 
-import integration_adapter  # noqa: E402
+import project_checkpoint  # noqa: E402
 
-_name = integration_adapter._batch_occurrence_id
+_name = project_checkpoint.batch_occurrence_id
 
 
 def test_two_batches_ending_at_the_same_event_are_named_differently() -> None:

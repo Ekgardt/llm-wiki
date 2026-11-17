@@ -1,0 +1,210 @@
+{
+  "encoding": "o200k_base",
+  "max_tokens": 100000,
+  "serialization": "exact-duplicates/v1",
+  "files": [
+    "AGENTS.md",
+    "CLAUDE.md",
+    "docs/AGENTS.md",
+    "docs/STRUCTURE.md",
+    "docs/modules/context-bundle.md",
+    "docs/modules/context-records.md",
+    "docs/modules/context-tooling.md",
+    "docs/modules/markdown-transaction-tests-queue-v3-capture-links-helpers.md",
+    "docs/modules/model-choice.md",
+    "docs/modules/product-structure.md",
+    "docs/modules/project-governance.md",
+    "docs/modules/queue-timing.md",
+    "docs/modules/reliable-memory-tests-capture-terminal-helpers.md",
+    "docs/modules/test-a-failed-capture-does-not-block-other-ready-captures-context.json",
+    "docs/modules/test-a-failed-capture-does-not-block-other-ready-captures.md",
+    "docs/modules/test-support.md",
+    "rules/development-laws.md",
+    "scripts/__init__.py",
+    "scripts/llm_wiki/__init__.py",
+    "scripts/llm_wiki/context_bundle.py",
+    "scripts/llm_wiki/queue_timing.py",
+    "tests/__init__.py",
+    "tests/capture_terminal_helpers.py",
+    "tests/conftest.py",
+    "tests/module_context.py",
+    "tests/module_context_paths.py",
+    "tests/module_interface.py",
+    "tests/module_interface_render.py",
+    "tests/module_qualification.py",
+    "tests/module_record_context.py",
+    "tests/module_records.py",
+    "tests/queue_v3_capture_links_helpers.py",
+    "tests/shared_fixtures.py",
+    "tests/slow_machine.py",
+    "tests/test_a_failed_capture_does_not_block_other_ready_captures.py"
+  ],
+  "ownership": {
+    "files": [
+      "docs/modules/test-a-failed-capture-does-not-block-other-ready-captures-context.json",
+      "docs/modules/test-a-failed-capture-does-not-block-other-ready-captures.md",
+      "tests/test_a_failed_capture_does_not_block_other_ready_captures.py"
+    ]
+  },
+  "qualified_dependencies": [
+    {
+      "provider": "scripts/capture_diagnostics.py",
+      "names": [
+        "DurableWorkExhausted",
+        "outcome_of",
+        "record_capture_failure"
+      ],
+      "contract_sha256": "441a8f7cc7fa5b5cab1e30f74989aa04d8df607ba3ce5c2fd51a06f06c8b369c",
+      "integration_tests": [
+        "tests/test_a_failed_capture_does_not_block_other_ready_captures.py"
+      ]
+    },
+    {
+      "provider": "scripts/flush_memory.py",
+      "names": [
+        "process_new_capture",
+        "run_capture_worker_once",
+        "settled_capture_failure"
+      ],
+      "contract_sha256": "3b968a0abf796cd2504b3385c4c1e63de7fe15292488bb48a66d04b44e54cd38",
+      "integration_tests": [
+        "tests/test_a_capture_keeps_its_claim_while_it_asks.py",
+        "tests/test_a_dead_task_names_its_reason.py",
+        "tests/test_a_failed_capture_does_not_block_other_ready_captures.py"
+      ]
+    },
+    {
+      "provider": "scripts/installed_memory_repair.py",
+      "names": [
+        "repair_installed_vault"
+      ],
+      "contract_sha256": "6ab4497d3ed56413bc24ea5ae9e993acf118980056b046072877a80df4f52a18",
+      "integration_tests": [
+        "tests/test_a_failed_capture_does_not_block_other_ready_captures.py"
+      ]
+    },
+    {
+      "provider": "scripts/integration_adapter.py",
+      "names": [
+        "run_active_capture_worker_once"
+      ],
+      "contract_sha256": "abec007a9ce69bc369751ddeebd94b07eda34a0e95afe6aaddb7b8c1c6093d5d",
+      "integration_tests": [
+        "tests/test_a_capture_that_fails_says_so.py",
+        "tests/test_a_checkpoint_records_what_was_done.py",
+        "tests/test_a_claude_prompt_takes_the_ingest_path.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_client.py",
+      "names": [
+        "LLMResult",
+        "provider_candidates"
+      ],
+      "contract_sha256": "89a7c0e62421dea8ca803b70969c4f5b6c32459c8b85c7516cec933709782e06",
+      "integration_tests": [
+        "tests/test_a_failed_capture_does_not_block_other_ready_captures.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/generation_catalog_store.py",
+      "names": [
+        "GenerationCatalog"
+      ],
+      "contract_sha256": "b18194ebe04bf988b4474379fcb5243516550d43b745a00eaed1453f7844c983",
+      "integration_tests": [
+        "tests/test_a_blocked_task_has_a_way_back.py",
+        "tests/test_a_build_in_flight_is_not_an_orphan.py",
+        "tests/test_a_capacity_refusal_does_not_corrupt_a_generation.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/model_choice.py",
+      "names": [
+        "using_root"
+      ],
+      "contract_sha256": "d45f2655cb61963e77617d1dfd7d617b134ad77cc770b59b335d0856e5d65019",
+      "integration_tests": [
+        "tests/test_a_failed_capture_does_not_block_other_ready_captures.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/queue_store.py",
+      "names": [
+        "utc_now"
+      ],
+      "contract_sha256": "5273fc7ebea33a3fc1ea250bb5cabbde7be34e2c0eb506969b1cc98adc13cf0a",
+      "integration_tests": [
+        "tests/test_a_failed_capture_does_not_block_other_ready_captures.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/reliability_defaults.py",
+      "names": [
+        "DEFAULTS"
+      ],
+      "contract_sha256": "f37296a83c15073e42a6cc8b86b88c2d19c548ac19a4ef6d0ca2f7af925c90c8",
+      "integration_tests": [
+        "tests/test_a_failed_capture_does_not_block_other_ready_captures.py"
+      ]
+    },
+    {
+      "provider": "scripts/markdown_transaction.py",
+      "names": [
+        "MarkdownCoordinator",
+        "active_markdown_coordinator",
+        "initialize_coordinator_v3_candidate"
+      ],
+      "contract_sha256": "6cfad5e4cc382b81261d28dd7d6893e666519b8f3404651dc8ad935f7189151b",
+      "integration_tests": [
+        "tests/test_a_failed_capture_does_not_block_other_ready_captures.py"
+      ]
+    },
+    {
+      "provider": "scripts/memory_state.py",
+      "names": [
+        "spawn_detached"
+      ],
+      "contract_sha256": "dcb2fe6881a5dbed0a93b5ecc98b1174d33b66f0b38fc59c2ef5e37d0445763c",
+      "integration_tests": [
+        "tests/test_a_failed_capture_does_not_block_other_ready_captures.py"
+      ]
+    },
+    {
+      "provider": "scripts/queue_core.py",
+      "names": [
+        "MemoryQueue",
+        "active_memory_queue",
+        "initialize_queue_v3_candidate"
+      ],
+      "contract_sha256": "a3a735c1dffaab034f9ed706f2eb2a2eb66ebfb3c245f38543e2cc70e8c82910",
+      "integration_tests": [
+        "tests/test_a_failed_capture_does_not_block_other_ready_captures.py"
+      ]
+    },
+    {
+      "provider": "scripts/reliable_memory.py",
+      "names": [
+        "DEFAULTS",
+        "canonical_json_bytes",
+        "publish_runtime_file",
+        "sha256_bytes",
+        "validate_state_root"
+      ],
+      "contract_sha256": "65b7facb05a30af0005898478feec620a71947b1aac6e08e39bce4cffd94ae43",
+      "integration_tests": [
+        "tests/test_a_failed_capture_does_not_block_other_ready_captures.py"
+      ]
+    },
+    {
+      "provider": "scripts/repository_scope.py",
+      "names": [
+        "sanitized_git_environment"
+      ],
+      "contract_sha256": "fd550ae20761afad50b37fa3a71044a162485b0e4d4b3e2af9b5b22e143c2bec",
+      "integration_tests": [
+        "tests/test_a_failed_capture_does_not_block_other_ready_captures.py"
+      ]
+    }
+  ]
+}

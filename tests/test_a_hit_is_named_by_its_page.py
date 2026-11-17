@@ -22,9 +22,9 @@ def _row(ancestry: list[str], content: str) -> dict[str, object]:
 
 
 def test_a_section_hit_carries_the_page_title() -> None:
-    import search_memory
+    import generation_search
 
-    result = search_memory._generation_result(
+    result = generation_search.generation_result(
         _row(["The Vault Updates Its Own Code", "Related"], "## Related\n- [[a]] — why.\n"), "g"
     )
 
@@ -32,16 +32,16 @@ def test_a_section_hit_carries_the_page_title() -> None:
 
 
 def test_a_page_without_headings_is_named_by_its_file() -> None:
-    import search_memory
+    import generation_search
 
-    assert search_memory._generation_result(_row([], "plain text\n"), "g")["title"] == "x"
+    assert generation_search.generation_result(_row([], "plain text\n"), "g")["title"] == "x"
 
 
 def test_no_two_fields_of_an_agent_row_carry_one_identifier() -> None:
+    import generation_search
     import mcp_server
-    import search_memory
 
-    row = mcp_server._agent_row(search_memory._generation_result(_row(["Page", "Part"], "text\n"), "g"))
+    row = mcp_server.agent_row(generation_search.generation_result(_row(["Page", "Part"], "text\n"), "g"))
     identifiers = [value for value in row.values() if isinstance(value, str) and _HEX64.match(value)]
 
     assert len(identifiers) == len(set(identifiers))

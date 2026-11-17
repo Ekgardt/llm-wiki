@@ -15,7 +15,7 @@ OLD = b"".join(f"def f{n}():\n    return {n}\n\n".encode() for n in range(10))
 def test_two_edits_are_two_ranges_and_the_lines_between_are_not_changed() -> None:
     new = OLD.replace(b"return 1\n", b"return 100\n").replace(b"return 8\n", b"return 800\n")
 
-    ranges = impact_analysis._changed_ranges(OLD, new)
+    ranges = impact_analysis.changed_ranges(OLD, new)
 
     assert [(item["new"]["line_start"], item["new"]["line_end"]) for item in ranges] == [(5, 5), (26, 26)]
 
@@ -42,6 +42,6 @@ def test_changed_files_are_asked_for_by_value_not_read_whole() -> None:
     graph = _Graph()
     changes = [{"old_path": "pkg/a.py", "new_path": "pkg/a.py"}]
 
-    found = impact_analysis._project_file_ids(graph, changes, impact_analysis.ImpactLimits(), float("inf"))
+    found = impact_analysis.project_file_ids(graph, changes, impact_analysis.ImpactLimits(), float("inf"))
 
     assert (found, graph.asked[0]["values"]) == ({"file:1"}, ["pkg/a.py", "pkg\\a.py"])

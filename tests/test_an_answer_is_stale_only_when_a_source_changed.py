@@ -10,7 +10,6 @@ import os
 from pathlib import Path
 
 import mcp_server
-import memory_state
 import pytest
 
 PAST = 1_000_000_000
@@ -31,34 +30,34 @@ def vault(tmp_path: Path, monkeypatch) -> Path:
     (generation / "source-manifest.json").write_text(json.dumps({"sources": sources}), encoding="utf-8")
     for path in [*root.rglob("*"), *generation.iterdir()]:
         os.utime(path, (PAST, PAST))
-    monkeypatch.setattr(memory_state, "ROOT", root)
-    monkeypatch.setattr(memory_state, "STATE_ROOT", state)
-    getattr(getattr(mcp_server, "_recorded_memory_digests", None), "cache_clear", lambda: None)()
+    monkeypatch.setenv("LLM_WIKI_ROOT", str(root))
+    monkeypatch.setenv("LLM_WIKI_STATE_ROOT", str(state))
+    getattr(getattr(mcp_server, "recorded_memory_digests", None), "cache_clear", lambda: None)()
     return root
 
 
 def test_a_touched_page_is_not_a_change(vault: Path) -> None:
     os.utime(vault / PAGE)
 
-    assert mcp_server._answer_freshness(GENERATION, []) == "fresh"
+    assert mcp_server.answer_freshness(GENERATION, []) == "fresh"
 
 
 def test_an_edited_page_is(vault: Path) -> None:
     (vault / PAGE).write_text("# A\n\nAlpha, edited.\n", encoding="utf-8")
 
-    assert mcp_server._answer_freshness(GENERATION, []) == "stale"
+    assert mcp_server.answer_freshness(GENERATION, []) == "stale"
 
 
 def test_a_new_page_is_and_a_new_readme_is_not(vault: Path) -> None:
     (vault / "knowledge" / "notes" / "README.md").write_text("# Notes\n", encoding="utf-8")
-    readme_only = mcp_server._answer_freshness(GENERATION, [])
+    readme_only = mcp_server.answer_freshness(GENERATION, [])
     (vault / "knowledge" / "notes" / "b.md").write_text("# B\n", encoding="utf-8")
 
-    assert (readme_only, mcp_server._answer_freshness(GENERATION, [])) == ("fresh", "stale")
+    assert (readme_only, mcp_server.answer_freshness(GENERATION, [])) == ("fresh", "stale")
 
 
 def test_a_removed_page_is(vault: Path) -> None:
     (vault / PAGE).unlink()
     os.utime(vault / "knowledge" / "notes")
 
-    assert mcp_server._answer_freshness(GENERATION, []) == "stale"
+    assert mcp_server.answer_freshness(GENERATION, []) == "stale"

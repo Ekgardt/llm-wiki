@@ -20,7 +20,7 @@ Since 2026-09-22 the search is one of two remedies. On the recorded run of
 2026-09-18 every one of the 26 refusals on answerable questions had already
 been searched for and refused again; most had the evidence in the prompt. When
 the shown evidence covers the question by `evidence_sufficiency`'s measure,
-`query_memory._refusal_look` reads it once more with the coverage stated as
+`query_memory.refusal_look` reads it once more with the coverage stated as
 data instead of searching for what is already in hand.
 """
 

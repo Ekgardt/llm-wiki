@@ -14,17 +14,20 @@ from __future__ import annotations
 import random
 import sqlite3
 import sys
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
+import queue_core  # noqa: E402
 
 SCRIPTS_DIR = Path(__file__).resolve().parent.parent / "scripts"
 if str(SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_DIR))
 
-import memory_queue  # noqa: E402
-from memory_queue import MemoryQueue, QueueOperationError  # noqa: E402
+from queue_core import (  # noqa: E402
+    MemoryQueue,
+    QueueOperationError,
+)
 
 _DAY = "2026-01-01"
 _DIGEST = "c" * 64
@@ -34,7 +37,7 @@ _UNRELATED = {"page": "knowledge/notes/a-page.md", "written_at": f"{_DAY}T09:00:
 
 class _Clock:
     def __init__(self) -> None:
-        self.now = datetime(2026, 7, 14, 12, 0, tzinfo=timezone.utc)
+        self.now = datetime(2026, 7, 14, 12, 0, tzinfo=UTC)
 
     def __call__(self) -> datetime:
         return self.now
@@ -47,8 +50,8 @@ def queue(tmp_path: Path) -> MemoryQueue:
 
 def _v3_queue(tmp_path: Path) -> MemoryQueue:
     candidate = tmp_path / "run" / "queue-v3.candidate.sqlite3"
-    memory_queue.initialize_queue_v3_candidate(candidate, source_v2=None)
-    return MemoryQueue._from_v3_candidate(candidate, state_root=tmp_path)
+    queue_core.initialize_queue_v3_candidate(candidate, source_v2=None)
+    return MemoryQueue.from_v3_candidate(candidate, state_root=tmp_path)
 
 
 def test_a_timestamp_of_the_fenced_day_is_not_a_reference(queue: MemoryQueue) -> None:

@@ -1,0 +1,273 @@
+{
+  "encoding": "o200k_base",
+  "max_tokens": 100000,
+  "serialization": "exact-duplicates/v1",
+  "files": [
+    "AGENTS.md",
+    "CLAUDE.md",
+    "docs/AGENTS.md",
+    "docs/STRUCTURE.md",
+    "docs/modules/compile-paths.md",
+    "docs/modules/compile-pipeline-sources-tests-a-continuation-keeps-its-original-entry-helpers.md",
+    "docs/modules/compile-pipeline-tests-secondary-receipt-consumers-keep-authority-context.json",
+    "docs/modules/compile-pipeline-tests-secondary-receipt-consumers-keep-authority.md",
+    "docs/modules/context-bundle.md",
+    "docs/modules/context-records.md",
+    "docs/modules/context-tooling.md",
+    "docs/modules/doctor-another-legacy-receipt-is-not-the-staged-receipt-helpers.md",
+    "docs/modules/model-choice.md",
+    "docs/modules/product-structure.md",
+    "docs/modules/project-governance.md",
+    "docs/modules/reliable-memory-tests-compile-transactions-helpers.md",
+    "docs/modules/script-sources.md",
+    "docs/modules/test-support.md",
+    "rules/development-laws.md",
+    "scripts/__init__.py",
+    "scripts/llm_wiki/__init__.py",
+    "scripts/llm_wiki/context_bundle.py",
+    "tests/__init__.py",
+    "tests/a_continuation_keeps_its_original_entry_helpers.py",
+    "tests/compile_paths.py",
+    "tests/compile_transactions_helpers.py",
+    "tests/conftest.py",
+    "tests/doctor_another_legacy_receipt_is_not_the_staged_receipt_helpers.py",
+    "tests/module_context.py",
+    "tests/module_context_paths.py",
+    "tests/module_interface.py",
+    "tests/module_interface_render.py",
+    "tests/module_qualification.py",
+    "tests/module_record_context.py",
+    "tests/module_records.py",
+    "tests/script_sources.py",
+    "tests/shared_fixtures.py",
+    "tests/slow_machine.py",
+    "tests/test_secondary_receipt_consumers_keep_authority.py"
+  ],
+  "ownership": {
+    "files": [
+      "docs/modules/compile-pipeline-tests-secondary-receipt-consumers-keep-authority-context.json",
+      "docs/modules/compile-pipeline-tests-secondary-receipt-consumers-keep-authority.md",
+      "tests/test_secondary_receipt_consumers_keep_authority.py"
+    ]
+  },
+  "qualified_dependencies": [
+    {
+      "provider": "scripts/compile_pipeline.py",
+      "names": [
+        "MarkdownCoordinator",
+        "UnsupportedCompileReceiptVersion",
+        "compile_source_identity",
+        "current_source_digests",
+        "daily_is_compiled"
+      ],
+      "contract_sha256": "42e0b55ca45437efdfd530e597414fa33d6bc9fd5a205702000c772dab41fa3f",
+      "integration_tests": [
+        "tests/test_secondary_receipt_consumers_keep_authority.py"
+      ]
+    },
+    {
+      "provider": "scripts/compile_receipts.py",
+      "names": [
+        "SourceSnapshot",
+        "compile_receipt_path",
+        "read_compile_receipt_v3",
+        "receipt_predicate"
+      ],
+      "contract_sha256": "6275427b8aaf4f7eca7f8ff146a1992c259a342d182e73d90de557a19bf9f4b5",
+      "integration_tests": [
+        "tests/test_secondary_receipt_consumers_keep_authority.py"
+      ]
+    },
+    {
+      "provider": "scripts/evidence_resolver.py",
+      "names": [
+        "EvidenceResolver"
+      ],
+      "contract_sha256": "7a2b1b64ac5ceb634f09f7bb276f120132db5ff7ddbac14fe3fe3bb3d9948b13",
+      "integration_tests": [
+        "tests/test_secondary_receipt_consumers_keep_authority.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/compile_pipeline_apply.py",
+      "names": [
+        "apply_compile_plan",
+        "clear_compile_source_failures"
+      ],
+      "contract_sha256": "e56c2b25e94fa5711e5e58527ef78b98bbba7bf5a23c2925c2da93bfa0078808",
+      "integration_tests": [
+        "tests/test_secondary_receipt_consumers_keep_authority.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/compile_pipeline_batches.py",
+      "names": [
+        "pack_compile_batches"
+      ],
+      "contract_sha256": "42879fb77545b262126891bf818efcf8a9307f66323329e8e70bef806a53fc39",
+      "integration_tests": [
+        "tests/test_secondary_receipt_consumers_keep_authority.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/compile_pipeline_operations.py",
+      "names": [
+        "evidence_binding"
+      ],
+      "contract_sha256": "7d363eccf21492d36766bfdc846671ad7ba13010984612692d96ffff50753537",
+      "integration_tests": [
+        "tests/test_secondary_receipt_consumers_keep_authority.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/compile_pipeline_receipts.py",
+      "names": [
+        "context_receipt_path",
+        "read_snapshot_receipt",
+        "v4_source_descriptor"
+      ],
+      "contract_sha256": "fac997afe810d7acb97154ef12705489f03fe9a5a40ff8c725574bcc35189456",
+      "integration_tests": [
+        "tests/test_secondary_receipt_consumers_keep_authority.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/compile_pipeline_selection.py",
+      "names": [
+        "discard_unusable_receipts",
+        "receipt_owners",
+        "repair_compile_mirror",
+        "update_state_under_clock"
+      ],
+      "contract_sha256": "8913f40255510cbb8e98f1e8a0ce71d6eb816056f4d337f4d387593a0b7c9132",
+      "integration_tests": [
+        "tests/test_secondary_receipt_consumers_keep_authority.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/compile_pipeline_sources.py",
+      "names": [
+        "CompileInputs",
+        "daily_parts",
+        "snapshot_compile_inputs"
+      ],
+      "contract_sha256": "4f74141a82213527fee294e44f37228879f500f3b72f95a16e5128d2a32a04f8",
+      "integration_tests": [
+        "tests/test_secondary_receipt_consumers_keep_authority.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/generation_catalog_store.py",
+      "names": [
+        "GenerationCatalog"
+      ],
+      "contract_sha256": "b18194ebe04bf988b4474379fcb5243516550d43b745a00eaed1453f7844c983",
+      "integration_tests": [
+        "tests/test_a_blocked_task_has_a_way_back.py",
+        "tests/test_a_build_in_flight_is_not_an_orphan.py",
+        "tests/test_a_capacity_refusal_does_not_corrupt_a_generation.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/model_choice.py",
+      "names": [
+        "using_root"
+      ],
+      "contract_sha256": "d45f2655cb61963e77617d1dfd7d617b134ad77cc770b59b335d0856e5d65019",
+      "integration_tests": [
+        "tests/test_secondary_receipt_consumers_keep_authority.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/queue_store.py",
+      "names": [
+        "source_failure_commit_active"
+      ],
+      "contract_sha256": "7b18cc99115a797bbfeea3b86cf9777edce69d52758ecdee31b22debba4e69e9",
+      "integration_tests": [
+        "tests/test_secondary_receipt_consumers_keep_authority.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/runtime_roots.py",
+      "names": [
+        "vault_root"
+      ],
+      "contract_sha256": "35ea768c9fd09097366a2ded61783ec66ac8997f3f02255c744c8443405a706b",
+      "integration_tests": [
+        "tests/test_a_continuation_keeps_its_original_entry.py",
+        "tests/test_a_prompt_checkpoint_does_not_outwait_its_host.py",
+        "tests/test_a_session_marker_survives_a_busy_writer.py"
+      ]
+    },
+    {
+      "provider": "scripts/markdown_transaction.py",
+      "names": [
+        "MarkdownCoordinator"
+      ],
+      "contract_sha256": "5033973391b97bc338d02eed2a773ad25883e89b8325a9ccc726cd9e537f58ee",
+      "integration_tests": [
+        "tests/test_secondary_receipt_consumers_keep_authority.py"
+      ]
+    },
+    {
+      "provider": "scripts/maybe_compile.py",
+      "names": [
+        "has_pending_work"
+      ],
+      "contract_sha256": "2daf353b3e3a5130a03393b68452f121511668d42d91dde0b9c4995065ba0762",
+      "integration_tests": [
+        "tests/test_a_readme_beside_the_daily_logs_is_not_pending_work.py",
+        "tests/test_a_spawned_compile_knows_its_lock.py",
+        "tests/test_context_receipts_survive_all_consumers.py"
+      ]
+    },
+    {
+      "provider": "scripts/memory_state.py",
+      "names": [
+        "state_file",
+        "state_lock"
+      ],
+      "contract_sha256": "d06d508e3de7a2b3d16a14e3697e26663c6405abcd0f3dc3c9fb18a934ed0c1f",
+      "integration_tests": [
+        "tests/test_a_corrupt_state_is_not_replaced_by_an_empty_one.py",
+        "tests/test_a_discarded_receipt_reopens_its_day.py",
+        "tests/test_a_lock_is_released_even_while_somebody_is_reading_it.py"
+      ]
+    },
+    {
+      "provider": "scripts/queue_core.py",
+      "names": [
+        "MemoryQueue",
+        "active_or_legacy_memory_queue",
+        "initialize_queue_v3_candidate"
+      ],
+      "contract_sha256": "90edc256e0645902c962c6bbaf58f642fa3b299a050e00bebeccccaa27a49fc3",
+      "integration_tests": [
+        "tests/test_secondary_receipt_consumers_keep_authority.py"
+      ]
+    },
+    {
+      "provider": "scripts/reliable_memory.py",
+      "names": [
+        "canonical_json_bytes",
+        "sha256_bytes",
+        "validate_state_root"
+      ],
+      "contract_sha256": "4243e32fa6ecab88fca1a2d2b3214c0a36944fc23129138102dfaebf6d99457f",
+      "integration_tests": [
+        "tests/test_secondary_receipt_consumers_keep_authority.py"
+      ]
+    },
+    {
+      "provider": "scripts/repository_scope.py",
+      "names": [
+        "sanitized_git_environment"
+      ],
+      "contract_sha256": "fd550ae20761afad50b37fa3a71044a162485b0e4d4b3e2af9b5b22e143c2bec",
+      "integration_tests": [
+        "tests/test_secondary_receipt_consumers_keep_authority.py"
+      ]
+    }
+  ]
+}

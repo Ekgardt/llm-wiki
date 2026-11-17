@@ -1,0 +1,255 @@
+{
+  "encoding": "o200k_base",
+  "max_tokens": 100000,
+  "serialization": "exact-duplicates/v1",
+  "files": [
+    "AGENTS.md",
+    "CLAUDE.md",
+    "docs/AGENTS.md",
+    "docs/STRUCTURE.md",
+    "docs/modules/context-bundle.md",
+    "docs/modules/context-records.md",
+    "docs/modules/context-tooling.md",
+    "docs/modules/model-choice.md",
+    "docs/modules/path-coverage-context.json",
+    "docs/modules/path-coverage.md",
+    "docs/modules/product-structure.md",
+    "docs/modules/project-governance.md",
+    "docs/modules/test-support.md",
+    "rules/development-laws.md",
+    "scripts/__init__.py",
+    "scripts/llm_wiki/__init__.py",
+    "scripts/llm_wiki/context_bundle.py",
+    "scripts/path_coverage.py",
+    "tests/__init__.py",
+    "tests/conftest.py",
+    "tests/module_context.py",
+    "tests/module_context_paths.py",
+    "tests/module_interface.py",
+    "tests/module_interface_render.py",
+    "tests/module_qualification.py",
+    "tests/module_record_context.py",
+    "tests/module_records.py",
+    "tests/shared_fixtures.py",
+    "tests/slow_machine.py",
+    "tests/test_coverage_reads_only_inside_the_repository.py",
+    "tests/test_path_coverage.py",
+    "tests/test_query_surface.py"
+  ],
+  "ownership": {
+    "files": [
+      "docs/modules/path-coverage-context.json",
+      "docs/modules/path-coverage.md",
+      "scripts/path_coverage.py",
+      "tests/test_coverage_reads_only_inside_the_repository.py",
+      "tests/test_path_coverage.py",
+      "tests/test_query_surface.py"
+    ]
+  },
+  "qualified_dependencies": [
+    {
+      "provider": "scripts/code_graph.py",
+      "names": [
+        "find_callees",
+        "find_callers",
+        "parser_attempt"
+      ],
+      "contract_sha256": "6e5b05ef3e17bfd0b0c871424124b5066aeb223979601f19860988627febe425",
+      "integration_tests": [
+        "tests/test_a_code_root_named_knowledge_is_code.py",
+        "tests/test_a_cut_says_what_it_left_out.py",
+        "tests/test_a_dead_code_claim_names_what_it_checked.py"
+      ]
+    },
+    {
+      "provider": "scripts/evidence_graph.py",
+      "names": [
+        "like_escaped",
+        "search_patterns"
+      ],
+      "contract_sha256": "fb5298f74a9ad8be4b05c71fdbdc540a185feb46f811de958082c38ea6fbc7cd",
+      "integration_tests": [
+        "tests/test_query_surface.py"
+      ]
+    },
+    {
+      "provider": "scripts/evidence_reader_cache.py",
+      "names": [
+        "clear"
+      ],
+      "contract_sha256": "cdd812311d91649d0430a6cedc6c4fa018d9844fc1220a6ce945244f4bb67409",
+      "integration_tests": [
+        "tests/test_query_surface.py"
+      ]
+    },
+    {
+      "provider": "scripts/impact_analysis.py",
+      "names": [
+        "analyze_impact"
+      ],
+      "contract_sha256": "6d6eb433f9617c4695b3065fd27897a7a0fe1c050296394fe2439a06d11cc4df",
+      "integration_tests": [
+        "tests/test_a_line_ending_is_not_an_edit.py",
+        "tests/test_an_impact_answer_outlives_its_note_scan.py",
+        "tests/test_an_impact_diff_can_be_stopped.py"
+      ]
+    },
+    {
+      "provider": "scripts/impact_symbols.py",
+      "names": [
+        "affected_symbols"
+      ],
+      "contract_sha256": "3895d430b6b1297c2e38a773647bca1e43a3285b0706a34e6f098806c464d3fc",
+      "integration_tests": [
+        "tests/test_query_surface.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/code_graph_generation.py",
+      "names": [
+        "active_evidence_graph"
+      ],
+      "contract_sha256": "49598833360a300e73e5863fd3409c620342c60e343522739605345e5da2931b",
+      "integration_tests": [
+        "tests/test_coverage_reads_only_inside_the_repository.py",
+        "tests/test_path_coverage.py",
+        "tests/test_query_surface.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/code_graph_parse.py",
+      "names": [
+        "GRAMMAR_LOADERS",
+        "parser_attempt"
+      ],
+      "contract_sha256": "a0349f8d49f54095f2ea4b0c1a79dd2983a4ff4b41857b03e0f90a25608552a7",
+      "integration_tests": [
+        "tests/test_coverage_reads_only_inside_the_repository.py",
+        "tests/test_path_coverage.py",
+        "tests/test_query_surface.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/generation_catalog_store.py",
+      "names": [
+        "GenerationCatalog"
+      ],
+      "contract_sha256": "b18194ebe04bf988b4474379fcb5243516550d43b745a00eaed1453f7844c983",
+      "integration_tests": [
+        "tests/test_a_blocked_task_has_a_way_back.py",
+        "tests/test_a_build_in_flight_is_not_an_orphan.py",
+        "tests/test_a_capacity_refusal_does_not_corrupt_a_generation.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/model_choice.py",
+      "names": [
+        "using_root"
+      ],
+      "contract_sha256": "d45f2655cb61963e77617d1dfd7d617b134ad77cc770b59b335d0856e5d65019",
+      "integration_tests": [
+        "tests/test_coverage_reads_only_inside_the_repository.py",
+        "tests/test_path_coverage.py",
+        "tests/test_query_surface.py"
+      ]
+    },
+    {
+      "provider": "scripts/lsp_security.py",
+      "names": [
+        "PathContainmentError",
+        "read_repository_source_bytes",
+        "resolve_repository_source"
+      ],
+      "contract_sha256": "49704939000d2202d80e916d40b8b0f0533d3314ed82421e88ea4339be733893",
+      "integration_tests": [
+        "tests/test_coverage_reads_only_inside_the_repository.py",
+        "tests/test_path_coverage.py",
+        "tests/test_query_surface.py"
+      ]
+    },
+    {
+      "provider": "scripts/mcp_server.py",
+      "names": [
+        "TOOL_INPUT_SCHEMAS",
+        "tool_get_architecture",
+        "validate_architecture_arguments",
+        "validate_tool_arguments"
+      ],
+      "contract_sha256": "d1b03ff19101c39f3fd751286c769cd2938c209413bd601f666b0dc944679e2e",
+      "integration_tests": [
+        "tests/test_coverage_reads_only_inside_the_repository.py",
+        "tests/test_query_surface.py"
+      ]
+    },
+    {
+      "provider": "scripts/python_parse.py",
+      "names": [
+        "PARSE_FAILURES",
+        "parse_python"
+      ],
+      "contract_sha256": "ef4af434da26f18a73b508e9dd372f0201bdcb0381b18b9321ddb5ac64e7ee38",
+      "integration_tests": [
+        "tests/test_coverage_reads_only_inside_the_repository.py",
+        "tests/test_path_coverage.py",
+        "tests/test_query_surface.py"
+      ]
+    },
+    {
+      "provider": "scripts/reliable_memory.py",
+      "names": [
+        "validate_state_root"
+      ],
+      "contract_sha256": "8680515cd873056a7c8a36e0057d91f2f83f23c48841263697676ff91f7ff964",
+      "integration_tests": [
+        "tests/test_coverage_reads_only_inside_the_repository.py",
+        "tests/test_path_coverage.py",
+        "tests/test_query_surface.py"
+      ]
+    },
+    {
+      "provider": "scripts/repository_indexing.py",
+      "names": [
+        "index_repository"
+      ],
+      "contract_sha256": "3cd1d101518c65bea40b7c4cf2b6d1851d5cb57ce4389ee40ae23f3ef01d210f",
+      "integration_tests": [
+        "tests/test_query_surface.py"
+      ]
+    },
+    {
+      "provider": "scripts/repository_scope.py",
+      "names": [
+        "resolve_repository_scope",
+        "sanitized_git_environment"
+      ],
+      "contract_sha256": "983dd096d99bafff98ca0aaa2cd722477333e30eed4bfa9297d1830c635e8d90",
+      "integration_tests": [
+        "tests/test_coverage_reads_only_inside_the_repository.py",
+        "tests/test_path_coverage.py",
+        "tests/test_query_surface.py"
+      ]
+    },
+    {
+      "provider": "scripts/symbol_search.py",
+      "names": [
+        "search_symbols"
+      ],
+      "contract_sha256": "eecd0dc30e646784fb3994cc124b9034f30faa322331083dcc08c5edc298c3a7",
+      "integration_tests": [
+        "tests/test_query_surface.py"
+      ]
+    },
+    {
+      "provider": "scripts/symbol_snippet.py",
+      "names": [
+        "definition_sites",
+        "exact_block",
+        "snippet_for_symbol"
+      ],
+      "contract_sha256": "3cdc13e47edb964a35736f2dd86153549ca52ec0dd4beea708fdbb21a74493f8",
+      "integration_tests": [
+        "tests/test_query_surface.py"
+      ]
+    }
+  ]
+}

@@ -9,12 +9,12 @@ from code_navigation import NavigationStatus
 
 
 def test_every_navigation_status_names_its_freshness() -> None:
-    named = {status.value: mcp_server._navigation_freshness(status.value) for status in NavigationStatus}
+    named = {status.value: mcp_server.navigation_freshness(status.value) for status in NavigationStatus}
 
-    assert (set(named) <= set(mcp_server._NAVIGATION_FRESHNESS), named["unsupported"], named["ok"]) == (
+    assert (set(named) <= set(mcp_server.NAVIGATION_FRESHNESS), named["unsupported"], named["ok"]) == (
         True, "missing", "fresh"
     )
 
 
 def test_an_unknown_status_is_not_assumed_fresh() -> None:
-    assert mcp_server._navigation_freshness("something-new") == "unknown"
+    assert mcp_server.navigation_freshness("something-new") == "unknown"

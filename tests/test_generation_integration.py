@@ -16,9 +16,11 @@ SCRIPTS = Path(__file__).resolve().parent.parent / "scripts"
 if str(SCRIPTS) not in sys.path:
     sys.path.insert(0, str(SCRIPTS))
 
+import generation_fts_validation  # noqa: E402
+import generation_search  # noqa: E402
 import search_memory  # noqa: E402
 from corpus_snapshot import collect_corpus  # noqa: E402
-from generation_catalog import GenerationCatalog  # noqa: E402
+from llm_wiki.generation_catalog_store import GenerationCatalog  # noqa: E402
 from reliable_memory import canonical_json_bytes  # noqa: E402
 
 MODEL_ID = "deterministic/integration"
@@ -74,7 +76,7 @@ def _write_snapshot_vault(tmp_path: Path) -> tuple[Path, Path]:
 def _build_generation(snapshot, catalog: GenerationCatalog, generation_id: str):
     generation = catalog.generations_path / generation_id
     generation.mkdir()
-    descriptors = [search_memory.build_generation_fts(snapshot, generation)]
+    descriptors = [generation_search.build_generation_fts(snapshot, generation)]
     descriptors.extend(
         search_memory.build_generation_numpy_vectors(
             snapshot,
@@ -90,8 +92,8 @@ def _build_generation(snapshot, catalog: GenerationCatalog, generation_id: str):
         "schema_version": "corpus-generation/v1",
         "collector_version": snapshot.collector_version,
         "extractor_version": snapshot.extractor_version,
-        "tokenizer_version": search_memory.GENERATION_TOKENIZER_VERSION,
-        "tokenizer_config_sha256": search_memory.GENERATION_TOKENIZER_CONFIG_SHA256,
+        "tokenizer_version": generation_fts_validation.GENERATION_TOKENIZER_VERSION,
+        "tokenizer_config_sha256": generation_fts_validation.GENERATION_TOKENIZER_CONFIG_SHA256,
         "embedding_model_id": MODEL_ID,
         "embedding_model_revision": MODEL_REVISION,
         "vector_dimensions": VECTOR_DIMENSIONS,

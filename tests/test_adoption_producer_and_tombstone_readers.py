@@ -24,15 +24,17 @@ from __future__ import annotations
 
 import json
 import time
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
-import doctor
 import pytest
 from installed_memory_repair import (
+    repair_installed_vault,
+)
+from llm_wiki import doctor_queue, doctor_transactions
+from llm_wiki.adoption_admission import (
     ReliabilityV3ValidationError,
     adopted_database_path,
-    repair_installed_vault,
     require_reliability_v3_adopted,
 )
 
@@ -67,7 +69,7 @@ def _adopted(tmp_path: Path) -> tuple[Path, Path]:
 
 
 def _now() -> datetime:
-    return datetime.now(timezone.utc)
+    return datetime.now(UTC)
 
 
 def test_a_changed_producer_does_not_invalidate_an_adopted_vault(tmp_path):
@@ -113,7 +115,7 @@ def test_the_resolver_keeps_the_legacy_path_when_there_is_no_tombstone(tmp_path)
 def test_doctor_does_not_call_an_adopted_queue_unreadable(tmp_path):
     _root, state_root = _adopted(tmp_path)
 
-    result = doctor._queue_check(state_root, _now(), time.monotonic() + 60)
+    result = doctor_queue.queue_check(state_root, _now(), time.monotonic() + 60)
 
     assert "queue_state_unreadable" not in json.dumps(result)
 
@@ -121,6 +123,6 @@ def test_doctor_does_not_call_an_adopted_queue_unreadable(tmp_path):
 def test_doctor_does_not_call_adopted_transactions_unreadable(tmp_path):
     _root, state_root = _adopted(tmp_path)
 
-    result = doctor._transaction_check(state_root, _now())
+    result = doctor_transactions.transaction_check(state_root, _now())
 
     assert "transaction_state_unreadable" not in json.dumps(result)

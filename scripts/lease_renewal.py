@@ -11,18 +11,14 @@ See `docs/research/2026-09-14-a-busy-database-is-not-a-lost-lease.md` and
 """
 from __future__ import annotations
 
-import sqlite3
 import threading
 import time
 from collections.abc import Callable
 
+from llm_wiki.sqlite_deadlines import busy_database
+
 # A failed renewal is retried this many times faster than the renewal interval.
 RETRY_DIVISOR = 5
-
-
-def busy_database(error: BaseException) -> bool:
-    """A locked or busy SQLite database: the renewal may succeed if tried again."""
-    return isinstance(error, sqlite3.OperationalError)
 
 
 def _attempt(renew: Callable[[], object]) -> BaseException | None:

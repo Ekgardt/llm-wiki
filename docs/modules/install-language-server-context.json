@@ -1,0 +1,232 @@
+{
+  "encoding": "o200k_base",
+  "max_tokens": 100000,
+  "serialization": "exact-duplicates/v1",
+  "files": [
+    "AGENTS.md",
+    "CLAUDE.md",
+    "docs/AGENTS.md",
+    "docs/STRUCTURE.md",
+    "docs/modules/context-bundle.md",
+    "docs/modules/context-records.md",
+    "docs/modules/context-tooling.md",
+    "docs/modules/formats.md",
+    "docs/modules/install-language-server-context.json",
+    "docs/modules/install-language-server.md",
+    "docs/modules/model-choice.md",
+    "docs/modules/product-structure.md",
+    "docs/modules/project-governance.md",
+    "docs/modules/test-support.md",
+    "rules/development-laws.md",
+    "scripts/__init__.py",
+    "scripts/install_language_server.py",
+    "scripts/llm_wiki/__init__.py",
+    "scripts/llm_wiki/context_bundle.py",
+    "scripts/llm_wiki/formats/__init__.py",
+    "tests/__init__.py",
+    "tests/conftest.py",
+    "tests/module_context.py",
+    "tests/module_context_paths.py",
+    "tests/module_interface.py",
+    "tests/module_interface_render.py",
+    "tests/module_qualification.py",
+    "tests/module_record_context.py",
+    "tests/module_records.py",
+    "tests/shared_fixtures.py",
+    "tests/slow_machine.py",
+    "tests/test_a_download_that_resets_is_tried_again.py",
+    "tests/test_a_pinned_zip_is_unpacked_as_a_zip.py",
+    "tests/test_a_platform_without_a_pin_is_refused_by_name.py",
+    "tests/test_a_toolchain_is_proven_before_it_is_published.py"
+  ],
+  "ownership": {
+    "files": [
+      "docs/modules/install-language-server-context.json",
+      "docs/modules/install-language-server.md",
+      "scripts/install_language_server.py",
+      "tests/test_a_download_that_resets_is_tried_again.py",
+      "tests/test_a_pinned_zip_is_unpacked_as_a_zip.py",
+      "tests/test_a_platform_without_a_pin_is_refused_by_name.py",
+      "tests/test_a_toolchain_is_proven_before_it_is_published.py"
+    ]
+  },
+  "qualified_dependencies": [
+    {
+      "provider": "scripts/bounded_io.py",
+      "names": [
+        "IO_CHUNK_BYTES",
+        "read_stable_bytes"
+      ],
+      "contract_sha256": "43c131fcb7b9242688fe0d5d5a520a4903c10d718e8f3f92e3aee1750bbad0f4",
+      "integration_tests": [
+        "tests/test_a_download_that_resets_is_tried_again.py",
+        "tests/test_a_pinned_zip_is_unpacked_as_a_zip.py",
+        "tests/test_a_platform_without_a_pin_is_refused_by_name.py",
+        "tests/test_a_toolchain_is_proven_before_it_is_published.py"
+      ]
+    },
+    {
+      "provider": "scripts/go_source_build.py",
+      "names": [
+        "SourceBuildError",
+        "build_source_server"
+      ],
+      "contract_sha256": "2e8ef3316e15463240b0efb7dab35f81a5567508fc3fb011ec86ad24e16bd388",
+      "integration_tests": [
+        "tests/test_a_download_that_resets_is_tried_again.py",
+        "tests/test_a_pinned_zip_is_unpacked_as_a_zip.py",
+        "tests/test_a_platform_without_a_pin_is_refused_by_name.py",
+        "tests/test_a_toolchain_is_proven_before_it_is_published.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/formats/canonical.py",
+      "names": [
+        "canonical_json_bytes"
+      ],
+      "contract_sha256": "679597eaf19bb4eef12b405f35978a452a06007dd565b01d3f0d04a4f1116c49",
+      "integration_tests": [
+        "tests/test_a_download_that_resets_is_tried_again.py",
+        "tests/test_a_pinned_zip_is_unpacked_as_a_zip.py",
+        "tests/test_a_platform_without_a_pin_is_refused_by_name.py",
+        "tests/test_a_toolchain_is_proven_before_it_is_published.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/generation_catalog_store.py",
+      "names": [
+        "GenerationCatalog"
+      ],
+      "contract_sha256": "b18194ebe04bf988b4474379fcb5243516550d43b745a00eaed1453f7844c983",
+      "integration_tests": [
+        "tests/test_a_blocked_task_has_a_way_back.py",
+        "tests/test_a_build_in_flight_is_not_an_orphan.py",
+        "tests/test_a_capacity_refusal_does_not_corrupt_a_generation.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/model_choice.py",
+      "names": [
+        "using_root"
+      ],
+      "contract_sha256": "d45f2655cb61963e77617d1dfd7d617b134ad77cc770b59b335d0856e5d65019",
+      "integration_tests": [
+        "tests/test_a_block_opens_one_entry.py",
+        "tests/test_a_blocked_task_has_a_way_back.py",
+        "tests/test_a_build_in_flight_is_not_an_orphan.py"
+      ]
+    },
+    {
+      "provider": "scripts/lsp_identity.py",
+      "names": [
+        "INSTALL_MANIFEST_NAME",
+        "ManifestError",
+        "build_install_manifest",
+        "validate_install_manifest"
+      ],
+      "contract_sha256": "cb18702fc2c7fc630971d9b9abc682d2bef61aa337e300027a991892bc962e12",
+      "integration_tests": [
+        "tests/test_a_toolchain_is_proven_before_it_is_published.py"
+      ]
+    },
+    {
+      "provider": "scripts/lsp_paths.py",
+      "names": [
+        "PYRIGHT_VERSION"
+      ],
+      "contract_sha256": "6e5eeb38b8bb41dd0e8c45cbd21a0bf6a39836decc6956b0b690994b1c528d33",
+      "integration_tests": [
+        "tests/test_a_platform_without_a_pin_is_refused_by_name.py"
+      ]
+    },
+    {
+      "provider": "scripts/lsp_profiles.py",
+      "names": [
+        "GO_ARTIFACTS",
+        "GO_VERSION",
+        "PYRIGHT_VERSION",
+        "REGISTRY"
+      ],
+      "contract_sha256": "80dc92863e96bb37593017c0c29b92144f6c748d3a62785229ea5f9490f7555f",
+      "integration_tests": [
+        "tests/test_a_platform_without_a_pin_is_refused_by_name.py",
+        "tests/test_a_toolchain_is_proven_before_it_is_published.py"
+      ]
+    },
+    {
+      "provider": "scripts/lsp_server_profile.py",
+      "names": [
+        "LanguageServerProfile",
+        "RuntimeOption",
+        "ServerComponent"
+      ],
+      "contract_sha256": "005a15d1fdf1abf3f7d7bcbbf5439510a0b4574b8a3be7ba66c62db7b6dfe794",
+      "integration_tests": [
+        "tests/test_a_download_that_resets_is_tried_again.py",
+        "tests/test_a_pinned_zip_is_unpacked_as_a_zip.py",
+        "tests/test_a_platform_without_a_pin_is_refused_by_name.py",
+        "tests/test_a_toolchain_is_proven_before_it_is_published.py"
+      ]
+    },
+    {
+      "provider": "scripts/operational_ownership.py",
+      "names": [
+        "OperationalOwnershipError",
+        "ProcessIdentity",
+        "current_process_identity",
+        "process_identity_state"
+      ],
+      "contract_sha256": "4d48230c514d9819dd89979286313319d144790d7fad1a1f2dc5757d56e2721d",
+      "integration_tests": [
+        "tests/test_a_download_that_resets_is_tried_again.py",
+        "tests/test_a_pinned_zip_is_unpacked_as_a_zip.py",
+        "tests/test_a_platform_without_a_pin_is_refused_by_name.py",
+        "tests/test_a_toolchain_is_proven_before_it_is_published.py"
+      ]
+    },
+    {
+      "provider": "scripts/pinned_download.py",
+      "names": [
+        "MAX_COMPRESSED_BYTES",
+        "MAX_DECOMPRESSED_BYTES",
+        "MAX_MEMBERS",
+        "MAX_MEMBER_BYTES",
+        "MAX_PATH_COMPONENTS",
+        "PinnedDownloadError",
+        "download_pinned",
+        "retry_transient",
+        "time"
+      ],
+      "contract_sha256": "4353fb21bbbfcfaf286d66b1b7e012b458cd07276a13fe732bb676d7a2666c56",
+      "integration_tests": [
+        "tests/test_a_download_that_resets_is_tried_again.py"
+      ]
+    },
+    {
+      "provider": "scripts/reliable_memory.py",
+      "names": [
+        "validate_state_root"
+      ],
+      "contract_sha256": "8680515cd873056a7c8a36e0057d91f2f83f23c48841263697676ff91f7ff964",
+      "integration_tests": [
+        "tests/test_a_download_that_resets_is_tried_again.py",
+        "tests/test_a_pinned_zip_is_unpacked_as_a_zip.py",
+        "tests/test_a_platform_without_a_pin_is_refused_by_name.py",
+        "tests/test_a_toolchain_is_proven_before_it_is_published.py"
+      ]
+    },
+    {
+      "provider": "scripts/repository_scope.py",
+      "names": [
+        "sanitized_git_environment"
+      ],
+      "contract_sha256": "fd550ae20761afad50b37fa3a71044a162485b0e4d4b3e2af9b5b22e143c2bec",
+      "integration_tests": [
+        "tests/test_a_download_that_resets_is_tried_again.py",
+        "tests/test_a_pinned_zip_is_unpacked_as_a_zip.py",
+        "tests/test_a_platform_without_a_pin_is_refused_by_name.py",
+        "tests/test_a_toolchain_is_proven_before_it_is_published.py"
+      ]
+    }
+  ]
+}

@@ -4,6 +4,7 @@ import concurrent.futures
 import hashlib
 import importlib
 import inspect
+import multiprocessing
 import os
 import sqlite3
 import subprocess
@@ -13,8 +14,11 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from llm_wiki import runtime_roots
 
+from tests.markdown_coordinator_parts import patch_coordinator
 from tests.slow_machine import LONG_TIMEOUT
+from tests.sqlite_errors import busy_database_error, locked_table_error
 
 ROOT = Path(__file__).resolve().parent.parent
 SCRIPTS = ROOT / "scripts"
@@ -37,7 +41,7 @@ TASK14_BEHAVIORAL_ENTRYPOINTS = {
     "scripts/access_tracking.py:_flush_page",
     "scripts/archive_stale.py:_committed_archive",
     "scripts/archive_stale.py:_committed_restore",
-    "scripts/blackboard.py:_append_jsonl",
+    "scripts/blackboard.py:append_jsonl",
     "scripts/bootstrap_project.py:bootstrap",
     "scripts/build_guardrails.py:main",
     "scripts/build_context.py:_write_project_context",
@@ -49,9 +53,8 @@ TASK14_BEHAVIORAL_ENTRYPOINTS = {
     "scripts/query_memory.py:file_back",
     "scripts/rebuild_memory_index.py:main",
     "scripts/reflection.py:reflect_page",
-    "scripts/session_end_project_tag.py:_append_entry",
+    "scripts/session_end_project_tag.py:append_entry",
     "scripts/session_start_project_state.py:_create_project_state",
-    "scripts/user_prompt_capture.py:_append_prompt_tag",
 }
 
 TASK14_READ_TRANSFORM_WRITE_ENTRYPOINTS = {
@@ -114,6 +117,12 @@ def _bounded_workers(requested: int) -> int:
     return max(2, min(requested, os.cpu_count() or requested))
 
 
+def _require_safe_worker_context() -> None:
+    if multiprocessing.parent_process() is None:
+        return
+    assert multiprocessing.get_start_method() != "fork"
+
+
 def _same_operation_worker(
     api: str,
     target: str,
@@ -122,6 +131,7 @@ def _same_operation_worker(
     vault: str,
     state: str,
 ) -> str:
+    _require_safe_worker_context()
     os.environ["LLM_WIKI_ROOT"] = vault
     os.environ["LLM_WIKI_STATE_ROOT"] = state
     import markdown_transaction
@@ -137,6 +147,7 @@ def _same_operation_worker(
 
 
 def _distinct_append_worker(target: str, index: int, vault: str, state: str) -> str:
+    _require_safe_worker_context()
     os.environ["LLM_WIKI_ROOT"] = vault
     os.environ["LLM_WIKI_STATE_ROOT"] = state
     import markdown_transaction
@@ -235,9 +246,8 @@ def _drive_access_tracking(d: _Drive) -> None:
     page = vault / "knowledge/notes/page.md"
     page.write_text("---\ntype: concept\n---\n# Page\n", encoding="utf-8")
     database = d.tmp_path / "state/cache/evidence-graph/telemetry.sqlite3"
-    monkeypatch.setattr(module, "KNOWLEDGE_DIR", page.parent)
     monkeypatch.setattr(module, "mutate_knowledge", d.boundary)
-    monkeypatch.setattr(retrieval_telemetry, "TELEMETRY_DB", database)
+    monkeypatch.setenv("LLM_WIKI_STATE_ROOT", str(d.tmp_path / "state"))
     retrieval_telemetry.record_events(
         [retrieval_telemetry.make_event(
             event_kind="page_read",
@@ -261,9 +271,7 @@ def _drive_archive_stale(d: _Drive) -> None:
     page = vault / "knowledge/notes/page.md"
     body = f"---\ntype: debugging\nstatus: archived\n---\n# Page\n{d.secret}\n"
     page.write_text(body, encoding="utf-8")
-    monkeypatch.setattr(module, "ROOT", vault)
-    monkeypatch.setattr(module, "KNOWLEDGE", page.parent)
-    monkeypatch.setattr(module, "ARCHIVE_ROOT", page.parent / "archive")
+    monkeypatch.setenv("LLM_WIKI_ROOT", str(vault))
     monkeypatch.setattr(module, "mutate_knowledge", d.boundary)
     archived = page.parent / "archive/2026/page.md"
     if d.entrypoint.endswith(":_committed_restore"):
@@ -282,9 +290,8 @@ def _drive_blackboard(d: _Drive) -> None:
 
 def _drive_bootstrap_project(d: _Drive) -> None:
     module, monkeypatch, vault, secret = d.module, d.monkeypatch, d.vault, d.secret
-    monkeypatch.setattr(module, "ROOT", vault)
-    monkeypatch.setattr(module, "PROJECTS_DIR", vault / "knowledge/projects")
-    monkeypatch.setattr(module, "_compute_slug", lambda cwd: "demo")
+    monkeypatch.setenv("LLM_WIKI_ROOT", str(vault))
+    monkeypatch.setattr(module, "compute_slug", lambda cwd: "demo")
     monkeypatch.setattr(module, "_extract_git_timeline", lambda cwd: [])
     monkeypatch.setattr(module, "_extract_readme_summary", lambda cwd: secret)
     monkeypatch.setattr(module, "_extract_tech_stack", lambda cwd: [])
@@ -303,18 +310,14 @@ def _drive_build_guardrails(d: _Drive) -> None:
     )
     target = vault / "knowledge/guardrails.md"
     target.write_bytes(b"old\n")
-    monkeypatch.setattr(module, "ROOT", vault)
-    monkeypatch.setattr(module, "KNOWLEDGE", page.parent)
-    monkeypatch.setattr(module, "GUARDRAILS_FILE", target)
+    monkeypatch.setenv("LLM_WIKI_ROOT", str(vault))
     monkeypatch.setattr(module, "mutate_knowledge", d.boundary, raising=False)
     monkeypatch.setattr(sys, "argv", ["build_guardrails.py", "--apply"])
     d.function()
 
 
 def _drive_build_context(d: _Drive) -> None:
-    module, monkeypatch, vault, secret = d.module, d.monkeypatch, d.vault, d.secret
-    monkeypatch.setattr(module, "ROOT", vault)
-    monkeypatch.setattr(module, "PROJECTS_DIR", vault / "knowledge/projects")
+    module, monkeypatch, secret = d.module, d.monkeypatch, d.secret
     monkeypatch.setattr(module, "build_context", lambda *args: secret)
     monkeypatch.setattr(module, "mutate_knowledge", d.boundary)
     monkeypatch.setattr(sys, "argv", ["build_context.py", "demo", "--write"])
@@ -332,7 +335,6 @@ def _drive_daily_log_append(d: _Drive) -> None:
 
 
 def _drive_flush_memory(d: _Drive) -> None:
-    d.monkeypatch.setattr(d.module, "DAILY_DIR", d.vault / "knowledge/daily")
     d.monkeypatch.setattr("daily_log_append.locked_append", d.boundary)
     d.function("2026-07-15", "safe", operation_id="event-1")
 
@@ -340,16 +342,13 @@ def _drive_flush_memory(d: _Drive) -> None:
 def _drive_migrate_to_okf(d: _Drive) -> None:
     page = d.vault / "knowledge/notes/page.md"
     page.write_text("# Page\n", encoding="utf-8")
-    d.monkeypatch.setattr(d.module, "ROOT", d.vault)
     d.monkeypatch.setattr(d.module, "mutate_knowledge", d.boundary)
     d.function(page, "safe", "0" * 64)
 
 
 def _drive_query_memory(d: _Drive) -> None:
     module, monkeypatch, vault, secret = d.module, d.monkeypatch, d.vault, d.secret
-    monkeypatch.setattr(module, "ROOT", vault)
-    monkeypatch.setattr(module, "QA_DIR", vault / "knowledge/notes")
-    monkeypatch.setattr(module, "LOG", vault / "knowledge/log.md")
+    monkeypatch.setenv("LLM_WIKI_ROOT", str(vault))
     monkeypatch.setattr(module, "mutate_knowledge", d.boundary)
     monkeypatch.setattr("markdown_transaction.append_knowledge", d.boundary)
     if d.function_name == "file_back":
@@ -359,9 +358,7 @@ def _drive_query_memory(d: _Drive) -> None:
 
 
 def _drive_rebuild_memory_index(d: _Drive) -> None:
-    module, monkeypatch, vault = d.module, d.monkeypatch, d.vault
-    monkeypatch.setattr(module, "out", vault / "knowledge/index.md")
-    monkeypatch.setattr(module, "ROOT", vault)
+    module, monkeypatch = d.module, d.monkeypatch
     monkeypatch.setattr(module, "build_index_bytes", lambda root, **kwargs: b"safe")
     monkeypatch.setattr(module, "mutate_knowledge", d.boundary)
     d.function()
@@ -374,7 +371,7 @@ def _drive_reflection(d: _Drive) -> None:
         "---\ntype: concept\n---\n# Page\n\n## Update (2026-01-01)\na\n## Update (2026-01-02)\nb\n",
         encoding="utf-8",
     )
-    monkeypatch.setattr(module, "ROOT", vault)
+    monkeypatch.setenv("LLM_WIKI_ROOT", str(vault))
     # A rewrite shorter than a page is refused since 2026-09-17, so the fake is page-sized.
     rewrite = f"# Page\n\n{secret}\n\n" + "The merged narrative keeps every stated fact. " * 8
     monkeypatch.setattr("llm_client.call_llm", lambda *args, **kwargs: rewrite)
@@ -402,11 +399,6 @@ def _drive_session_start_project_state(d: _Drive) -> None:
     d.function(vault, projects_dir, project, "demo", projects_dir / "demo" / "state.md")
 
 
-def _drive_user_prompt_capture(d: _Drive) -> None:
-    d.monkeypatch.setattr("daily_log_append.append_daily", d.boundary)
-    d.function("demo", "s1", d.secret, "event-1")
-
-
 # One driver per writer module: the dispatch used to be a 24-branch chain.
 _WRITER_DRIVERS = {
     "access_tracking": _drive_access_tracking,
@@ -423,7 +415,6 @@ _WRITER_DRIVERS = {
     "reflection": _drive_reflection,
     "session_end_project_tag": _drive_session_end_project_tag,
     "session_start_project_state": _drive_session_start_project_state,
-    "user_prompt_capture": _drive_user_prompt_capture,
 }
 
 # These writers legitimately hand the boundary content read from disk, so the
@@ -484,375 +475,40 @@ def test_task14_actual_entrypoint_delegates_without_git(entrypoint, tmp_path, mo
     _assert_boundary_use(entrypoint, module_name, calls, secret)
 
 
-def test_scanner_keeps_runtime_writes_outside_boundary():
-    from check_knowledge_writers import scan_source
-
-    source = 'Path("cache/access.jsonl").write_text("x")\n'
-    assert scan_source(Path("scripts/example.py"), source) == []
 
 
-@pytest.mark.parametrize(
-    ("source", "api"),
-    [
-        ('p = ROOT / "knowledge" / "notes" / "x.md"\np.open("w")\n', "open"),
-        ('p = ROOT / "knowledge" / "notes" / "x.md"\np.write_text("x")\n', "write_text"),
-        ('p = ROOT / "knowledge" / "notes" / "x.md"\np.touch()\n', "touch"),
-        ('p = ROOT / "knowledge" / "notes" / "x.md"\np.unlink()\n', "unlink"),
-        ('p = ROOT / "knowledge" / "notes"\np.mkdir()\n', "mkdir"),
-        ('dst = ROOT / "knowledge" / "notes" / "x.md"\nos.replace("tmp", dst)\n', "replace"),
-        ('dst = ROOT / "knowledge" / "notes" / "x.md"\nos.rename("tmp", dst)\n', "rename"),
-        ('dst = ROOT / "knowledge" / "notes" / "x.md"\nshutil.move("tmp", dst)\n', "move"),
-    ],
-)
-def test_python_scanner_resolves_write_destinations(source, api):
-    from check_knowledge_writers import scan_source
-
-    findings = scan_source(Path("scripts/probe.py"), source)
-    assert [(item.api, item.approved) for item in findings] == [(api, False)]
 
 
-def test_python_scanner_recognizes_feedback_and_boundary_calls():
-    from check_knowledge_writers import scan_source
-
-    source = (
-        "from markdown_transaction import mutate_knowledge\n"
-        'p = ROOT / "knowledge" / "feedback" / "abcdef123456.json"\n'
-        'mutate_knowledge("event", {p: b"x"})\n'
-    )
-    findings = scan_source(Path("scripts/probe.py"), source)
-    assert [(item.api, item.approved) for item in findings] == [("mutate_knowledge", True)]
 
 
-def test_python_scanner_detects_direct_guardrails_atomic_write():
-    from check_knowledge_writers import scan_source
-
-    source = (
-        "from memory_state import atomic_write\n"
-        'target = ROOT / "knowledge" / "guardrails.md"\n'
-        'atomic_write(target, "unsafe")\n'
-    )
-
-    findings = scan_source(Path("scripts/probe.py"), source)
-
-    assert [(item.api, item.approved) for item in findings] == [("atomic_write", False)]
 
 
-def test_python_scanner_recognizes_checked_markdown_publication_boundary():
-    from check_knowledge_writers import scan_source
-
-    source = """
-def _apply_windows_operation(staged, destination):
-    durable_publish_file(
-        staged,
-        destination,
-        replace=True,
-        expected_sha256="0" * 64,
-        max_bytes=1024,
-    )
-"""
-
-    findings = scan_source(Path("scripts/markdown_transaction.py"), source)
-
-    assert [(item.api, item.approved) for item in findings] == [("durable_publish_file", True)]
 
 
-def test_python_scanner_traces_parameter_sink_alias_and_path_alias():
-    from check_knowledge_writers import scan_source
-
-    source = """
-from pathlib import Path as P
-ROOT_DIR = P("knowledge")
-def raw_write(destination):
-    destination.write_text("x")
-writer = raw_write
-target = ROOT_DIR / "notes" / "x.md"
-writer(target)
-"""
-    findings = scan_source(Path("scripts/probe.py"), source)
-    assert [(item.api, item.approved, item.function) for item in findings] == [
-        ("raw_write", False, "<module>")
-    ]
 
 
-def test_python_scanner_traces_method_path_parameter_to_callsite():
-    from check_knowledge_writers import scan_source
-
-    source = """
-from pathlib import Path
-class Writer:
-    def save(self, destination):
-        destination.write_bytes(b"x")
-target = Path("knowledge/notes/x.md")
-Writer().save(target)
-"""
-    findings = scan_source(Path("scripts/probe.py"), source)
-    assert [(item.api, item.approved, item.function) for item in findings] == [
-        ("save", False, "<module>")
-    ]
 
 
-@pytest.mark.parametrize(
-    ("source", "approved"),
-    [
-        (
-            "from scripts.markdown_transaction import mutate_knowledge as mutate\n"
-            'p = Path("knowledge/notes/x.md")\nmutate("id", {p: b"x"})\n',
-            True,
-        ),
-        (
-            "def mutate_knowledge(operation_id, changes):\n    return None\n"
-            'p = Path("knowledge/notes/x.md")\nmutate_knowledge("id", {p: b"x"})\n',
-            False,
-        ),
-    ],
-)
-def test_python_scanner_proves_canonical_boundary_binding(source, approved):
-    from check_knowledge_writers import scan_source
-
-    findings = scan_source(Path("scripts/probe.py"), source)
-    assert [(item.api, item.approved) for item in findings] == [
-        ("mutate_knowledge" if not approved else "mutate", approved)
-    ]
 
 
-def test_python_scanner_tracks_canonical_module_and_function_aliases():
-    from check_knowledge_writers import scan_source
-
-    source = """
-import scripts.markdown_transaction as transactions
-from pathlib import Path as P
-safe_mutate = transactions.mutate_knowledge
-target = P("knowledge") / "notes" / "x.md"
-safe_mutate("id", {target: b"x"})
-"""
-    findings = scan_source(Path("scripts/probe.py"), source)
-    assert [(item.api, item.approved) for item in findings] == [("safe_mutate", True)]
 
 
-@pytest.mark.parametrize(
-    "source",
-    [
-        """
-p = Path("cache/x")
-if enabled:
-    p = Path("knowledge/notes/x.md")
-else:
-    p = Path("cache/y")
-p.write_text("x")
-""",
-        """
-p = Path("cache/x")
-for candidate in candidates:
-    if candidate:
-        p = Path("knowledge/notes/x.md")
-p.write_text("x")
-""",
-        """
-p = Path("cache/x")
-while pending:
-    p = Path("knowledge/notes/x.md")
-p.write_text("x")
-""",
-        """
-p = Path("cache/x")
-try:
-    p = Path("knowledge/notes/x.md")
-except OSError:
-    p = Path("cache/y")
-finally:
-    p.write_text("x")
-""",
-        """
-p = Path("cache/x")
-try:
-    p = Path("knowledge/notes/x.md")
-    risky()
-    p = Path("cache/y")
-except OSError:
-    pass
-finally:
-    p.write_text("x")
-""",
-        """
-p = Path("cache/x")
-match kind:
-    case "note":
-        p = Path("knowledge/notes/x.md")
-    case _:
-        p = Path("cache/y")
-writer = lambda: p.write_text("x")
-[writer() for _ in range(1)]
-""",
-    ],
-)
-def test_python_scanner_preserves_covered_paths_across_control_flow(source):
-    from check_knowledge_writers import scan_source
-
-    findings = scan_source(Path("scripts/probe.py"), source)
-    assert [(item.api, item.approved) for item in findings] == [("write_text", False)]
 
 
-def test_python_scanner_analyzes_nested_helper_definitions():
-    from check_knowledge_writers import scan_source
-
-    source = """
-def outer(destination):
-    def helper(path):
-        with path.open("w") as stream:
-            stream.write("x")
-    helper(destination)
-outer(Path("knowledge/notes/x.md"))
-"""
-    findings = scan_source(Path("scripts/probe.py"), source)
-    assert [(item.api, item.approved, item.function) for item in findings] == [
-        ("outer", False, "<module>")
-    ]
 
 
-def test_python_scanner_merges_function_aliases_across_branches():
-    from check_knowledge_writers import scan_source
-
-    source = """
-def raw(path):
-    path.write_text("x")
-def harmless(path):
-    return path
-if enabled:
-    writer = raw
-else:
-    writer = harmless
-writer(Path("knowledge/notes/x.md"))
-"""
-    findings = scan_source(Path("scripts/probe.py"), source)
-    assert [(item.api, item.approved) for item in findings] == [("writer", False)]
 
 
-def test_python_scanner_drops_path_taint_after_exhaustive_safe_reassignment():
-    from check_knowledge_writers import scan_source
-
-    source = """
-p = Path("knowledge/notes/x.md")
-if enabled:
-    p = Path("cache/x")
-else:
-    p = Path("logs/x")
-p.write_text("x")
-"""
-    assert scan_source(Path("scripts/probe.py"), source) == []
 
 
-def test_python_scanner_drops_alias_taint_after_exhaustive_safe_reassignment():
-    from check_knowledge_writers import scan_source
-
-    source = """
-def raw(path):
-    path.write_text("x")
-def harmless(path):
-    return path
-writer = raw
-if enabled:
-    writer = harmless
-else:
-    writer = harmless
-writer(Path("knowledge/notes/x.md"))
-"""
-    assert scan_source(Path("scripts/probe.py"), source) == []
 
 
-def test_python_scanner_analyzes_definition_time_expressions():
-    from check_knowledge_writers import scan_source
-
-    source = """
-def sink(path):
-    path.write_text("x")
-target = Path("knowledge/notes/x.md")
-@sink(target)
-def decorated(
-    annotated: sink(target),
-    defaulted=sink(target),
-    *, keyword=sink(target),
-) -> sink(target):
-    pass
-@sink(target)
-class Defined(
-    sink(target),
-    metaclass=sink(target),
-):
-    pass
-"""
-    findings = scan_source(Path("scripts/probe.py"), source)
-    assert [(item.api, item.approved) for item in findings] == [
-        ("sink", False),
-    ] * 8
 
 
-@pytest.mark.parametrize(
-    ("suffix", "source", "expected_api"),
-    [
-        (
-            ".js",
-            'const p = root + "/knowledge/notes/x.md";\nfs.writeFileSync(p, data);\n',
-            "writeFileSync",
-        ),
-        (
-            ".ps1",
-            '$p = Join-Path $root "knowledge/notes/x.md"\nSet-Content -Path $p -Value $x\n',
-            "Set-Content",
-        ),
-        (".sh", 'p="$root/knowledge/notes/x.md"\nprintf "%s" "$x" > "$p"\n', ">"),
-    ],
-)
-def test_non_python_scanner_resolves_variable_write_destinations(suffix, source, expected_api):
-    from check_knowledge_writers import scan_source
-
-    findings = scan_source(Path(f"scripts/probe{suffix}"), source)
-    assert [(item.api, item.approved) for item in findings] == [(expected_api, False)]
 
 
-@pytest.mark.parametrize(
-    ("suffix", "source"),
-    [
-        (
-            ".js",
-            '// fs.writeFileSync("knowledge/notes/x.md", x)\nconst s = "writeFile knowledge/notes/x.md";\n',
-        ),
-        (".ps1", '# Set-Content knowledge/notes/x.md\n$s = "Set-Content knowledge/notes/x.md"\n'),
-        (".sh", '# echo x > knowledge/notes/x.md\ns="echo x > knowledge/notes/x.md"\n'),
-    ],
-)
-def test_non_python_scanner_ignores_comments_and_strings(suffix, source):
-    from check_knowledge_writers import scan_source
-
-    assert scan_source(Path(f"scripts/probe{suffix}"), source) == []
 
 
-@pytest.mark.parametrize(
-    ("suffix", "source", "api"),
-    [
-        (
-            ".js",
-            'const target = root +\n  "/knowledge/notes/x.md";\n'
-            "fs.writeFileSync(\n  target,\n  data\n);\n",
-            "writeFileSync",
-        ),
-        (
-            ".ps1",
-            '$target = Join-Path `\n  $root `\n  "knowledge/notes/x.md"\n'
-            "Set-Content `\n  -Path $target `\n  -Value $data\n",
-            "Set-Content",
-        ),
-        (
-            ".sh",
-            'target="$root/knowledge/notes/x.md"\nprintf "%s" \\\n  "$data" \\\n  > "$target"\n',
-            ">",
-        ),
-    ],
-)
-def test_non_python_scanner_parses_multiline_constructs(suffix, source, api):
-    from check_knowledge_writers import scan_source
-
-    findings = scan_source(Path(f"scripts/probe{suffix}"), source)
-    assert [(item.api, item.approved) for item in findings] == [(api, False)]
 
 
 def test_append_knowledge_is_idempotent_and_records_expected_hash(tmp_path, monkeypatch):
@@ -905,13 +561,12 @@ def test_locked_append_and_blackboard_use_fresh_occurrences_by_default(tmp_path,
     vault, state = _vault(tmp_path)
     monkeypatch.setenv("LLM_WIKI_ROOT", str(vault))
     monkeypatch.setenv("LLM_WIKI_STATE_ROOT", str(state))
-    monkeypatch.setattr(blackboard, "PROJECTS_DIR", vault / "knowledge" / "projects")
     daily = vault / "knowledge" / "daily" / "2026-07-15.md"
     daily_log_append.locked_append(daily, "same")
     daily_log_append.locked_append(daily, "same")
     events = vault / "knowledge" / "projects" / "demo" / ".blackboard" / "signals.jsonl"
-    blackboard._append_jsonl(events, {"message": "same"})
-    blackboard._append_jsonl(events, {"message": "same"})
+    blackboard.append_jsonl(events, {"message": "same"})
+    blackboard.append_jsonl(events, {"message": "same"})
     assert daily.read_text(encoding="utf-8").count("same") == 2
     assert events.read_text(encoding="utf-8").count('"message": "same"') == 2
 
@@ -949,9 +604,15 @@ def test_concurrent_daily_and_project_jsonl_appends_never_interleave(tmp_path, m
         assert jsonl_text.count(f'{{"id":{index}}}\n') == 1
 
 
+def _process_executor(*, max_workers: int):
+    return concurrent.futures.ProcessPoolExecutor(
+        max_workers=max_workers, mp_context=multiprocessing.get_context("spawn"),
+    )
+
+
 _EXECUTOR_CLASSES = {
     "thread": concurrent.futures.ThreadPoolExecutor,
-    "process": concurrent.futures.ProcessPoolExecutor,
+    "process": _process_executor,
 }
 
 
@@ -1008,7 +669,7 @@ def test_concurrent_identical_append_converges_once_during_distinct_event_churn(
     target = vault / "knowledge" / "daily" / "mixed-stress.md"
     operation_id = "mixed-stress:same"
 
-    with concurrent.futures.ProcessPoolExecutor(max_workers=_bounded_workers(8)) as executor:
+    with _process_executor(max_workers=_bounded_workers(8)) as executor:
         futures = _mixed_append_futures(executor, target, vault, state)
         assert [future.result(timeout=LONG_TIMEOUT) for future in futures] == ["committed"] * 18
 
@@ -1045,11 +706,7 @@ def test_distinct_events_survive_repeated_writer_contention(tmp_path, monkeypatc
     monkeypatch.setenv("LLM_WIKI_ROOT", str(vault))
     monkeypatch.setenv("LLM_WIKI_STATE_ROOT", str(state))
     target = vault / "knowledge" / "daily" / "stress.md"
-    executor_class = (
-        concurrent.futures.ThreadPoolExecutor
-        if executor_type == "thread"
-        else concurrent.futures.ProcessPoolExecutor
-    )
+    executor_class = _EXECUTOR_CLASSES[executor_type]
 
     with executor_class(max_workers=_bounded_workers(6)) as executor:
         futures = [
@@ -1072,8 +729,8 @@ def test_distinct_events_survive_repeated_writer_contention(tmp_path, monkeypatc
 @pytest.mark.parametrize(
     "contention",
     [
-        sqlite3.OperationalError("database is busy"),
-        sqlite3.OperationalError("database is locked"),
+        busy_database_error(),
+        locked_table_error(),
         PermissionError(32, "sharing violation"),
     ],
 )
@@ -1087,7 +744,7 @@ def test_public_mutation_retries_initial_recovery_contention_without_dropping_ev
     monkeypatch.setenv("LLM_WIKI_STATE_ROOT", str(state))
     # Short enough to keep the retry quick, long enough that the mutation
     # itself fits inside the derived recovery deadline on a slow runner.
-    monkeypatch.setattr(markdown_transaction, "_WRITER_WAIT_SECONDS", 15.0)
+    patch_coordinator(monkeypatch, 'WRITER_WAIT_SECONDS', 15.0)
     target = vault / "knowledge" / "notes" / f"{api}.md"
     real_recover = markdown_transaction.MarkdownCoordinator.recover
     attempts = 0
@@ -1113,7 +770,7 @@ def test_public_mutation_retries_initial_recovery_contention_without_dropping_ev
 def _conflict_migration(vault, monkeypatch):
     import migrate_to_okf as module
 
-    monkeypatch.setattr(module, "ROOT", vault)
+    monkeypatch.setenv("LLM_WIKI_ROOT", str(vault))
     source = vault / "knowledge/notes/page.md"
     source.write_text("# Original\n", encoding="utf-8")
     monkeypatch.setattr(
@@ -1126,7 +783,7 @@ def _conflict_migration(vault, monkeypatch):
 def _conflict_reflection(vault, monkeypatch):
     import reflection as module
 
-    monkeypatch.setattr(module, "ROOT", vault)
+    monkeypatch.setenv("LLM_WIKI_ROOT", str(vault))
     source = vault / "knowledge/notes/page.md"
     source.write_text(
         "---\ntype: concept\n---\n# Original\n\n"
@@ -1257,14 +914,12 @@ def test_rebuild_index_retries_tree_race_with_fresh_snapshot(tmp_path, monkeypat
     _write_concept(notes / "primary.md", "Primary", "old summary")
     if race == "delete":
         _write_concept(notes / "victim.md", "Victim", "delete me")
-    monkeypatch.setattr(rebuild_memory_index, "ROOT", vault)
-    monkeypatch.setattr(rebuild_memory_index, "out", vault / "knowledge/index.md")
     racing_mutate = _mutate_after_one_race(markdown_transaction.mutate_knowledge, inject, notes)
 
     monkeypatch.setattr(rebuild_memory_index, "mutate_knowledge", racing_mutate)
     assert rebuild_memory_index.main() == 0
 
-    index = rebuild_memory_index.out.read_text(encoding="utf-8")
+    index = runtime_roots.index_file().read_text(encoding="utf-8")
     assert _texts_found(index, present) == list(present)
     assert _texts_found(index, absent) == []
 
@@ -1284,14 +939,12 @@ def test_rebuild_index_repairs_committed_index_drift_with_new_transaction(
         "---\ntype: concept\n---\n# Page\n\nOne-sentence summary: durable summary\n",
         encoding="utf-8",
     )
-    monkeypatch.setattr(rebuild_memory_index, "ROOT", vault)
-    monkeypatch.setattr(rebuild_memory_index, "out", vault / "knowledge/index.md")
     assert rebuild_memory_index.main() == 0
-    expected = rebuild_memory_index.out.read_bytes()
-    _INDEX_DRIFTS[drift](rebuild_memory_index.out)
+    expected = runtime_roots.index_file().read_bytes()
+    _INDEX_DRIFTS[drift](runtime_roots.index_file())
 
     assert rebuild_memory_index.main() == 0
-    assert rebuild_memory_index.out.read_bytes() == expected
+    assert runtime_roots.index_file().read_bytes() == expected
     coordinator = markdown_transaction.MarkdownCoordinator(vault, state)
     operation_ids = _rebuild_index_operation_ids(coordinator)
     assert (len(operation_ids), len(set(operation_ids))) == (2, 2)
@@ -1521,30 +1174,9 @@ def test_append_rejects_oversize_block_and_prospective_target(tmp_path, monkeypa
     monkeypatch.setenv("LLM_WIKI_ROOT", str(vault))
     monkeypatch.setenv("LLM_WIKI_STATE_ROOT", str(state))
     path = vault / "knowledge" / "daily" / "2026-07-15.md"
-    monkeypatch.setattr(markdown_transaction, "MAX_KNOWLEDGE_TARGET_BYTES", 8)
+    patch_coordinator(monkeypatch, 'MAX_KNOWLEDGE_TARGET_BYTES', 8)
     with pytest.raises(ValueError, match="size"):
         markdown_transaction.append_knowledge(None, path, b"123456789")
     path.write_bytes(b"123456")
     with pytest.raises(ValueError, match="size"):
         markdown_transaction.append_knowledge(None, path, b"789")
-
-
-def test_archive_exception_is_function_and_operation_scoped():
-    from check_knowledge_writers import scan_source
-
-    source = """
-def _build_bag_contents():
-    hidden_build = archive_root / ".bag-building"
-    (hidden_build / "bagit.txt").write_bytes(data)
-def _publish_build():
-    hidden_build.replace(final_bag)
-def _bad_flat_write():
-    flat = ROOT / "knowledge" / "daily" / "2026-01-01.md"
-    flat.write_bytes(data)
-"""
-    findings = scan_source(Path("scripts/archive_daily.py"), source)
-    assert [(item.api, item.approved) for item in findings] == [
-        ("write_bytes", True),
-        ("replace", True),
-        ("write_bytes", False),
-    ]

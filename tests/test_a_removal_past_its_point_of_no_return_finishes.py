@@ -16,17 +16,18 @@ for directory in (SCRIPTS, TESTS):
     if str(directory) not in sys.path:
         sys.path.insert(0, str(directory))
 
-from test_prune_generations import _catalog, _chain, _footprint  # noqa: E402
+from tests.generation_catalog_helpers import _catalog  # noqa: E402
+from tests.prune_generations_helpers import _chain, _footprint  # noqa: E402
 
 
 def test_a_cancel_that_arrives_after_the_tree_is_gone_does_not_undo_the_rows(tmp_path, monkeypatch):
-    import generation_catalog
+
 
     catalog = _catalog(tmp_path)
     _chain(catalog, ["gen-1", "gen-2", "gen-3"])
     removed: list[str] = []
     real_rmtree = shutil.rmtree
-    monkeypatch.setattr(generation_catalog.shutil, "rmtree", lambda path: removed.append(str(path)) or real_rmtree(path))
+    monkeypatch.setattr(shutil, "rmtree", lambda path: removed.append(str(path)) or real_rmtree(path))
 
     catalog.discard_superseded("gen-1", cancelled=lambda: bool(removed))
 
@@ -42,4 +43,4 @@ def test_a_discard_whose_commit_was_lost_is_completed_by_the_next_prune(tmp_path
 
     lines = prune_generations.prune_generations(state_root=catalog.state_root, apply=True)
 
-    assert (_footprint(catalog, "gen-1"), prune_generations._report(lines)) == ((False, 0, 0), 0)
+    assert (_footprint(catalog, "gen-1"), prune_generations.report(lines)) == ((False, 0, 0), 0)

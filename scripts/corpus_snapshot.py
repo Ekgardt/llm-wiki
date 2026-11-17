@@ -4,16 +4,19 @@ from __future__ import annotations
 import contextlib
 import hashlib
 import json
+import math
+import operator
 import os
 import re
 import stat
 import time
 import unicodedata
-from bisect import bisect_left
-from collections.abc import Callable, Iterable, Mapping
-from dataclasses import dataclass
-from datetime import date, datetime, timezone
+from bisect import bisect_left, bisect_right
+from collections.abc import Callable, Iterable, Mapping, Sequence
+from dataclasses import dataclass, replace
+from datetime import UTC, date, datetime
 from datetime import time as datetime_time
+from functools import partial
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any
 
@@ -24,24 +27,36 @@ from bounded_io import (
     read_stable_bytes,
 )
 from code_languages import language_for_path
+from llm_wiki.corpus_membership_policy import (
+    APPROVED_CODE_ROOTS as APPROVED_CODE_ROOTS,
+)
+from llm_wiki.corpus_membership_policy import (
+    ARCHIVE_DIRECTORIES as ARCHIVE_DIRECTORIES,
+)
+from llm_wiki.corpus_membership_policy import (
+    GENERATED_DIRECTORIES as GENERATED_DIRECTORIES,
+)
+from llm_wiki.corpus_membership_policy import (
+    PROJECT_FILES as PROJECT_FILES,
+)
+from llm_wiki.corpus_membership_policy import (
+    VAULT_CODE_ROOTS as VAULT_CODE_ROOTS,
+)
+from llm_wiki.corpus_membership_policy import (
+    VAULT_SKIP_DIRECTORIES as VAULT_SKIP_DIRECTORIES,
+)
+from llm_wiki.evidence_reference import MAX_DAILY_BYTES
+from llm_wiki.extractor_versions import CORPUS_EXTRACTOR_VERSION
+from llm_wiki.markdown_fences import closing_fence, opening_fence
 from page_status import is_retired
+from settings import MAX_CORPUS_INSPECTED_ENTRIES as MAX_CORPUS_INSPECTED_ENTRIES
 from settings import raise_hint, setting_value
 from vault_editorial import EDITORIAL_NAMES
 
 COLLECTOR_VERSION = "corpus-collector/v1"
-# The name of the rule that cuts a source into chunks. Change where anything is cut
-# and this moves with it: deep validation, the doctor and the nightly all ask whether a
-# generation was made by today's rule by reading this string. v4 (2026-09-17) names the
-# 2026-09-16 rule — a user turn begins its own chunk — which had shipped under v3.
-# `tests/test_a_chunker_that_changes_changes_its_version.py` holds the pin. See
-# `docs/research/2026-09-17-a-chunker-that-changes-changes-its-version.md`.
-EXTRACTOR_VERSION = "markdown-heading-extractor/v4"
+EXTRACTOR_VERSION = CORPUS_EXTRACTOR_VERSION
 
-MAX_CORPUS_FILE_BYTES = MAX_KNOWLEDGE_PAGE_BYTES
-# Directory entries one corpus collection may inspect before it refuses, a bound on a
-# walk over a tree the user controls. Basis unknown: value predates measurement; the
-# live vault holds about 1 185 entries (2026-09-27). Review when a vault nears it.
-MAX_CORPUS_INSPECTED_ENTRIES = 50_000
+MAX_CORPUS_FILE_BYTES = max(MAX_KNOWLEDGE_PAGE_BYTES, MAX_DAILY_BYTES)
 # Directories one corpus collection walks; the live knowledge tree has 76 (2026-09-27). A vault-
 # size bound like `corpus.max_files`; review when it becomes a setting.
 MAX_CORPUS_DIRECTORIES = 5_000
@@ -52,47 +67,17 @@ MAX_CORPUS_DEPTH = 16
 # bound like `corpus.max_files`. Basis unknown: value predates measurement; review when doctor
 # warns on corpus size.
 MAX_CORPUS_HEADINGS = 100_000
-# Chunks held in memory for one generation build; the FTS writer holds the same count
-# (`search_memory.MAX_GENERATION_FTS_CHUNKS`). A vault-size bound. Basis unknown: value predates
-# measurement; review when doctor warns on corpus size.
+# Per-source chunk admission remains unchanged. The complete corpus is streamed;
+# numerical basis for this inherited per-source bound remains under audit.
 MAX_CORPUS_CHUNKS = 100_000
 # Default wall-clock budget for one corpus collection (`collect_corpus`).
 DEFAULT_DEADLINE_SECONDS = 30.0
 
-# The claim pages of a project. The journal — one checkpoint event per line, the
-# event log no claim reader consults — is kept on disk, consolidated nightly and
-# greppable, but not indexed: on the live vault of 2026-09-23 it was 94 % of the
-# generation's bytes and most of the reranker's time. See
-# `docs/research/2026-09-23-the-corpus-is-the-claim-pages-and-a-project-is-a-project.md`.
-PROJECT_FILES = frozenset({"state.md", "context.md"})
-# What counts as a code-shaped path (provenance, repository policies). Not
-# what the vault's own generation indexes: that is `VAULT_CODE_ROOTS`.
-APPROVED_CODE_ROOTS = frozenset(
-    {"benchmark", "docs", "integrations", "rules", "scripts", "skills", "tests"}
-)
-# The vault's generation holds memory — `knowledge/` — and nothing of the
-# checkout's own code or documents (issue #29.2: 92 % of an installed vault's
-# chunks were this product's tests and docs, outranking the user's pages).
-# Code is indexed per repository through `repository_index`, the checkout
-# included when its owner asks. One tuple, read by the builder, the freshness
-# probe and the grounded-answer snapshot, so the three cannot disagree.
-VAULT_CODE_ROOTS: tuple[str, ...] = ()
-ARCHIVE_DIRECTORIES = frozenset({"archive", ".archive", "_archive"})
-# `__pycache__` holds generated bytecode, never a source, and every repository
-# that has run Python once has one under its code roots. This is a fact about
-# repositories, so it travels to every one of them.
-GENERATED_DIRECTORIES = frozenset({"__pycache__"})
-# These three are *this vault's* nouns, not facts about repositories: `gaps` is
-# an OKF page type, `_template` is a project scaffold, `raw-sources` is a
-# knowledge directory. Applying them inside another repository's code would
-# lose a directory of that name with no refusal and no line in the receipt --
-# the silence of NEW-67 and NEW-135. So they prune only the walks that read
-# this vault's knowledge tree. See the 2026-08-29 note.
-VAULT_SKIP_DIRECTORIES = frozenset({"_template", "gaps", "raw-sources"})
+# Preserve the public annotation while the immutable value has one policy owner.
+VAULT_CODE_ROOTS: tuple[str, ...]
 _HEADING = re.compile(
     rb"(?m)^[ \t]{0,3}(#{1,6})(?:[ \t]+([^\r\n]*?)|[ \t]*)(?:\r?\n|$)"
 )
-_FENCE = re.compile(rb"^[ ]{0,3}(`{3,}|~{3,})([^\r\n]*)$")
 _CLOSING_HASHES = re.compile(r"[ \t]+#+[ \t]*$")
 _CYRILLIC = re.compile(r"[\u0400-\u04ff]")
 _HAN = re.compile(r"[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]")
@@ -134,6 +119,20 @@ def _is_link_entry(info: os.stat_result, *, symlink: bool) -> bool:
 
 class CorpusChanged(RuntimeError):
     """Live corpus membership or content differs from a captured snapshot."""
+
+
+class CorpusCancelled(TimeoutError):
+    """The caller cancelled collection, independently of source changes."""
+
+
+class CorpusCapacityExceeded(ValueError):
+    """A configured resource budget refused a complete live-corpus snapshot."""
+
+    def __init__(self, setting: str, limit: int, observed: int, message: str) -> None:
+        self.setting = setting
+        self.limit = limit
+        self.observed = observed
+        super().__init__(message)
 
 
 @dataclass(frozen=True, slots=True)
@@ -218,7 +217,7 @@ class SnapshotPolicy:
 @dataclass(frozen=True, slots=True)
 class CorpusSnapshot:
     sources: tuple[CapturedSource, ...]
-    chunks: tuple[RetrievalChunk, ...]
+    chunks: Sequence[RetrievalChunk]
     corpus_sha256: str
     policy: SnapshotPolicy
     collector_version: str = COLLECTOR_VERSION
@@ -227,6 +226,11 @@ class CorpusSnapshot:
     # repository: a link, a file past the size bound, a name that is not UTF-8
     # (audit 2026-09-26 A-8). Named so a caller can say the graph is partial.
     skipped: tuple[str, ...] = ()
+    # Admission observations, not persisted authority or filtered source totals.
+    # Manually constructed/narrowed snapshots have no discovery measurement.
+    inspected_entries: int | None = None
+    discovered_sources: int | None = None
+    discovered_bytes: int | None = None
 
     @property
     def source_hashes(self) -> tuple[tuple[str, str], ...]:
@@ -237,7 +241,164 @@ class CorpusSnapshot:
 
 
 @dataclass(frozen=True, slots=True)
-class _Candidate:
+class _ChunkPlan:
+    source: CapturedSource
+    searchable_start: int
+    heading_enabled: bool
+    count: int
+    extractor_version: str = EXTRACTOR_VERSION
+
+
+@dataclass(frozen=True, slots=True, eq=False)
+class CapturedChunks(Sequence[RetrievalChunk]):
+    """Immutable source-backed sequence; no chunk corpus or collection clock is held."""
+    plans: tuple[_ChunkPlan, ...]
+    ends: tuple[int, ...]
+
+    def for_source_paths(self, paths):
+        selected = frozenset(paths)
+        return _captured_chunks(
+            plan for plan in self.plans
+            if plan.source.record.relative_path in selected
+        )
+
+    def __len__(self):
+        return self.ends[-1]
+
+    def __getitem__(self, index):
+        if isinstance(index, slice):
+            return _ChunkSlice(self, range(len(self))[index])
+        return self.chunk_at(index)
+
+    def __iter__(self):
+        return self.iter_chunks()
+
+    def __eq__(self, other):
+        return _chunk_values_equal(self, other)
+
+    def chunk_at(self, index, *, deadline=None, cancelled=None):
+        position = _chunk_index(index, len(self))
+        source_index = bisect_right(self.ends, position) - 1
+        rows = self._source_chunks(source_index, deadline, cancelled)
+        return rows[position - self.ends[source_index]]
+
+    def _source_chunks(self, index, deadline, cancelled):
+        _check_processing_stop(deadline, cancelled)
+        plan = self.plans[index]
+        source = plan.source
+        rows = chunks(source.record, source.metadata, source.content,
+                       plan.searchable_start, heading_enabled=plan.heading_enabled,
+                       extractor_version=plan.extractor_version,
+                       deadline=deadline, cancelled=cancelled)
+        _require_chunk_count(rows, plan.count)
+        _check_processing_stop(deadline, cancelled)
+        return rows
+
+    def iter_chunks(self, *, deadline=None, cancelled=None):
+        _check_processing_stop(deadline, cancelled)
+        for index in range(len(self.plans)):
+            rows = self._source_chunks(index, deadline, cancelled)
+            yield from _checked_chunks(rows, deadline, cancelled)
+            del rows
+
+    def _iter_positions(self, positions, deadline, cancelled):
+        _check_processing_stop(deadline, cancelled)
+        current, rows = -1, ()
+        for position in positions:
+            source_index = bisect_right(self.ends, position) - 1
+            if source_index != current:
+                rows = ()
+                rows = self._source_chunks(source_index, deadline, cancelled)
+                current = source_index
+            _check_processing_stop(deadline, cancelled)
+            yield rows[position - self.ends[source_index]]
+
+
+@dataclass(frozen=True, slots=True, eq=False)
+class _ChunkSlice(Sequence[RetrievalChunk]):
+    chunks: CapturedChunks
+    positions: range
+
+    def __len__(self):
+        return len(self.positions)
+
+    def __getitem__(self, index):
+        if isinstance(index, slice):
+            return _ChunkSlice(self.chunks, self.positions[index])
+        return self.chunks[self.positions[index]]
+
+    def __iter__(self):
+        return self.iter_chunks()
+
+    def __eq__(self, other):
+        return _chunk_values_equal(self, other)
+
+    def iter_chunks(self, *, deadline=None, cancelled=None):
+        return self.chunks._iter_positions(self.positions, deadline, cancelled)
+
+
+def _chunk_index(index, size):
+    position = operator.index(index)
+    if position < 0:
+        position += size
+    if not 0 <= position < size:
+        raise IndexError("corpus chunk index out of range")
+    return position
+
+
+def _chunk_values_equal(left, right):
+    if not isinstance(right, Sequence):
+        return NotImplemented
+    if len(left) != len(right):
+        return False
+    return all(a == b for a, b in zip(left, right))
+
+
+def _require_chunk_count(rows, expected):
+    if len(rows) != expected:
+        raise ValueError("captured source chunk count changed")
+
+
+def _checked_chunks(chunks, deadline, cancelled):
+    _check_processing_stop(deadline, cancelled)
+    for chunk in chunks:
+        _check_processing_stop(deadline, cancelled)
+        yield chunk
+
+
+def iter_snapshot_chunks(snapshot, *, deadline=None, cancelled=None):
+    """Use this caller's clock, including before source materialization."""
+    iterate = getattr(snapshot.chunks, "iter_chunks", None)
+    if iterate is None:
+        return _checked_chunks(snapshot.chunks, deadline, cancelled)
+    return iterate(deadline=deadline, cancelled=cancelled)
+
+
+def select_snapshot_chunks(snapshot, paths):
+    """Select source plans without expanding a production chunk sequence."""
+    select = getattr(snapshot.chunks, "for_source_paths", None)
+    if select is not None:
+        return select(paths)
+    selected = frozenset(paths)
+    return tuple(chunk for chunk in snapshot.chunks if chunk.source_path in selected)
+
+
+def _pinned_chunk_plan(source, searchable_start, heading_enabled, count):
+    """Public descriptor aliases cannot change already captured chunk fields."""
+    pinned = CapturedSource(replace(source.record), replace(source.metadata), source.content)
+    return _ChunkPlan(pinned, searchable_start, heading_enabled, count)
+
+
+def _captured_chunks(plans):
+    plans = tuple(plans)
+    ends = [0]
+    for plan in plans:
+        ends.append(ends[-1] + plan.count)
+    return CapturedChunks(plans, tuple(ends))
+
+
+@dataclass(frozen=True, slots=True)
+class Candidate:
     path: Path
     relative: str
     kind: str
@@ -255,6 +416,8 @@ class _PathIdentity:
     size: int
     ctime_ns: int
     attributes: int
+    uid: int
+    gid: int
 
 
 def _sha256(content: bytes) -> str:
@@ -463,13 +626,20 @@ def _positive_limit(value: object, name: str, *, allow_zero: bool = False) -> in
 def _require_monotonic(deadline: object) -> float:
     if isinstance(deadline, bool) or not isinstance(deadline, (int, float)):
         raise ValueError("deadline must be a monotonic timestamp")
-    return float(deadline)
+    return _finite_deadline_value(deadline)
+
+
+def _finite_deadline_value(value: int | float) -> float:
+    converted = float(value)
+    if not math.isfinite(converted):
+        raise ValueError("corpus collection requires a finite deadline")
+    return converted
 
 
 def _require_seconds(value: object) -> float:
     if isinstance(value, bool) or not isinstance(value, (int, float)) or value < 0:
         raise ValueError("deadline_seconds must be non-negative")
-    return float(value)
+    return _finite_deadline_value(value)
 
 
 def _deadline_value(deadline: float | None, deadline_seconds: float | None) -> float:
@@ -490,7 +660,7 @@ def _check_processing_stop(
     deadline: float | None, cancelled: Callable[[], bool] | None
 ) -> None:
     if bool(cancelled and cancelled()):
-        raise TimeoutError("corpus collection cancelled")
+        raise CorpusCancelled("corpus collection cancelled")
     if deadline is not None:
         _check_deadline(deadline)
 
@@ -627,36 +797,46 @@ def _safe_info(path: Path) -> os.stat_result:
 _SEAL_ATTRIBUTES = 0x10 | 0x400  # FILE_ATTRIBUTE_DIRECTORY, _REPARSE_POINT
 
 
-def _identity(path: Path, info: os.stat_result) -> _PathIdentity:
+def identity(path: Path, info: os.stat_result) -> _PathIdentity:
+    size, ctime_ns = _identity_content_fields(info)
     return _PathIdentity(
         path=path,
         device=info.st_dev,
         inode=info.st_ino,
         mode=info.st_mode,
-        size=info.st_size,
-        ctime_ns=info.st_ctime_ns,
+        size=size,
+        ctime_ns=ctime_ns,
+        uid=getattr(info, "st_uid", 0),
+        gid=getattr(info, "st_gid", 0),
         attributes=(getattr(info, "st_file_attributes", 0) or 0) & _SEAL_ATTRIBUTES,
     )
 
 
-def _seal_path(
+def _identity_content_fields(info: os.stat_result) -> tuple[int, int]:
+    """Directory entries may change without replacing the directory itself."""
+    if stat.S_ISDIR(info.st_mode):
+        return 0, 0
+    return info.st_size, info.st_ctime_ns
+
+
+def seal_path(
     vault: Path,
     path: Path,
     *,
     target_directory: bool,
     max_components: int,
 ) -> tuple[_PathIdentity, ...]:
-    seal = _build_path_seal(
+    seal = build_path_seal(
         vault,
         path,
         target_directory=target_directory,
         max_components=max_components,
     )
-    _verify_seal(seal, changed_error=PermissionError)
+    verify_seal(seal, changed_error=PermissionError)
     return seal
 
 
-def _seal_source_file(
+def seal_source_file(
     vault: Path, path: Path, max_components: int
 ) -> tuple[_PathIdentity, ...]:
     """The seal of one source read by path: its ancestors, then the file itself.
@@ -666,17 +846,17 @@ def _seal_source_file(
     calls `CorpusChanged`, so this one does too. Research:
     `docs/research/2026-09-17-five-failures-only-the-other-systems-showed.md`.
     """
-    seal = _build_path_seal(
+    seal = build_path_seal(
         vault, path, target_directory=False, max_components=max_components
     )
-    _verify_seal(seal[:-1], changed_error=PermissionError)
+    verify_seal(seal[:-1], changed_error=PermissionError)
     _require_source_as_sealed(seal[-1])
     return seal
 
 
 def _require_source_as_sealed(expected: _PathIdentity) -> None:
     try:
-        current = _identity(expected.path, _safe_info(expected.path))
+        current = identity(expected.path, _safe_info(expected.path))
     except FileNotFoundError as exc:
         raise CorpusChanged(f"corpus source vanished: {expected.path.name}") from exc
     if current != expected:
@@ -731,10 +911,10 @@ def _sealed_component(
         allow_regular=is_target and not target_directory,
     )
     _require_inside(component, vault)
-    return _identity(component, info)
+    return identity(component, info)
 
 
-def _build_path_seal(
+def build_path_seal(
     vault: Path,
     path: Path,
     *,
@@ -764,19 +944,19 @@ def _open_sealed_posix_path(
     target_directory: bool,
     max_components: int,
 ) -> tuple[tuple[_PathIdentity, ...], int]:
-    seal = _build_path_seal(
+    seal = build_path_seal(
         vault,
         path,
         target_directory=target_directory,
         max_components=max_components,
     )
-    descriptor = _open_descriptor_chain(seal, changed_error=PermissionError)
+    descriptor = open_descriptor_chain(seal, changed_error=PermissionError)
     return seal, descriptor
 
 
 def _identity_delta(expected: _PathIdentity, current: _PathIdentity) -> str:
     """Name the fields that moved, so the refusal can be acted on."""
-    fields = ("device", "inode", "mode", "size", "ctime_ns", "attributes")
+    fields = ("device", "inode", "mode", "size", "ctime_ns", "attributes", "uid", "gid")
     changed = [
         f"{name}: {getattr(expected, name)} -> {getattr(current, name)}"
         for name in fields
@@ -785,12 +965,12 @@ def _identity_delta(expected: _PathIdentity, current: _PathIdentity) -> str:
     return ", ".join(changed) or "identical fields"
 
 
-def _verify_seal(
+def verify_seal(
     seal: tuple[_PathIdentity, ...], *, changed_error: type[Exception] = CorpusChanged
 ) -> None:
     for expected in seal:
         try:
-            current = _identity(expected.path, _safe_info(expected.path))
+            current = identity(expected.path, _safe_info(expected.path))
         except (OSError, PermissionError) as exc:
             raise changed_error(f"corpus ancestor changed: {expected.path}") from exc
         if current != expected:
@@ -805,7 +985,7 @@ def _verify_descriptor_chain(
 ) -> None:
     if os.name != "posix" or not seal:
         return
-    descriptor = _open_descriptor_chain(seal, changed_error=changed_error)
+    descriptor = open_descriptor_chain(seal, changed_error=changed_error)
     os.close(descriptor)
 
 
@@ -815,9 +995,9 @@ def _child_descriptor_flags(expected: _PathIdentity, flags: int) -> int:
     return flags
 
 
-def _open_sealed_root(expected: _PathIdentity, flags: int, changed_error) -> int:
+def open_sealed_root(expected: _PathIdentity, flags: int, changed_error) -> int:
     descriptor = os.open(expected.path, flags | getattr(os, "O_DIRECTORY", 0))
-    if _identity(expected.path, os.fstat(descriptor)) != expected:
+    if identity(expected.path, os.fstat(descriptor)) != expected:
         os.close(descriptor)
         raise changed_error(f"corpus ancestor changed: {expected.path}")
     return descriptor
@@ -831,19 +1011,19 @@ def _descend(descriptor: int, expected: _PathIdentity, flags: int, changed_error
         )
     finally:
         os.close(descriptor)
-    if _identity(expected.path, os.fstat(child)) != expected:
+    if identity(expected.path, os.fstat(child)) != expected:
         os.close(child)
         raise changed_error(f"corpus ancestor changed: {expected.path}")
     return child
 
 
-def _open_descriptor_chain(
+def open_descriptor_chain(
     seal: tuple[_PathIdentity, ...], *, changed_error: type[Exception]
 ) -> int:
     flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
     descriptor = -1
     try:
-        descriptor = _open_sealed_root(seal[0], flags, changed_error)
+        descriptor = open_sealed_root(seal[0], flags, changed_error)
         for expected in seal[1:]:
             handed, descriptor = descriptor, -1
             descriptor = _descend(handed, expected, flags, changed_error)
@@ -901,7 +1081,7 @@ def _require_bounded_size(size: int, max_bytes: int) -> None:
         raise ValueError(f"corpus source exceeds {max_bytes} bytes")
 
 
-def _read_chunks(descriptor: int, max_bytes: int) -> bytes:
+def read_chunks(descriptor: int, max_bytes: int) -> bytes:
     chunks: list[bytes] = []
     remaining = max_bytes + 1
     while remaining:
@@ -913,12 +1093,12 @@ def _read_chunks(descriptor: int, max_bytes: int) -> bytes:
     return b"".join(chunks)
 
 
-def _read_bounded_descriptor(descriptor: int, max_bytes: int) -> bytes:
+def read_bounded_descriptor(descriptor: int, max_bytes: int) -> bytes:
     before = os.fstat(descriptor)
     if not stat.S_ISREG(before.st_mode):
         raise PermissionError("corpus source descriptor must be a regular file")
     _require_bounded_size(before.st_size, max_bytes)
-    content = _read_chunks(descriptor, max_bytes)
+    content = read_chunks(descriptor, max_bytes)
     _require_bounded_size(len(content), max_bytes)
     if not _same_opened_object(before, os.fstat(descriptor)):
         raise CorpusChanged("corpus source changed during descriptor read")
@@ -940,7 +1120,7 @@ def _opened_listed_entry(name: str, descriptor: int, *, directory: bool) -> int:
         raise CorpusChanged(f"corpus entry vanished before open: {name}") from exc
 
 
-class _Discovery:
+class Discovery:
     def __init__(
         self,
         vault: Path,
@@ -969,7 +1149,7 @@ class _Discovery:
         self.entries = 0
         self.directories = 0
         self.total_bytes = 0
-        self.candidates: dict[str, _Candidate] = {}
+        self.candidates: dict[str, Candidate] = {}
 
     def add(self, path: Path, kind: str, project: str | None = None) -> None:
         _check_deadline(self.deadline)
@@ -981,12 +1161,12 @@ class _Discovery:
                 max_components=self.max_depth + 3,
             )
             try:
-                content = _read_bounded_descriptor(descriptor, self.max_file_bytes)
+                content = read_bounded_descriptor(descriptor, self.max_file_bytes)
             finally:
                 os.close(descriptor)
             self._store(path, kind, project, (), content)
             return
-        seal = _seal_source_file(self.vault, path, self.max_depth + 3)
+        seal = seal_source_file(self.vault, path, self.max_depth + 3)
         self._store(path, kind, project, seal, None)
 
     def _store(
@@ -1003,9 +1183,12 @@ class _Discovery:
             return
         self._require_unseen(relative)
         self._count_bytes(content)
-        self.candidates[relative] = _Candidate(path, relative, kind, project, seal, content)
+        self.candidates[relative] = Candidate(path, relative, kind, project, seal, content)
         if len(self.candidates) > self.max_files:
-            raise ValueError(f"corpus file limit exceeded; {raise_hint('corpus.max_files')}")
+            raise CorpusCapacityExceeded(
+                "corpus.max_files", self.max_files, len(self.candidates),
+                f"corpus file limit exceeded; {raise_hint('corpus.max_files')}",
+            )
 
     def _require_unseen(self, relative: str) -> None:
         if relative in self.candidates:
@@ -1016,10 +1199,13 @@ class _Discovery:
             return
         self.total_bytes += len(content)
         if self.total_bytes > self.max_total_bytes:
-            raise ValueError(f"corpus total byte limit exceeded; {raise_hint('corpus.max_total_bytes')}")
+            raise CorpusCapacityExceeded(
+                "corpus.max_total_bytes", self.max_total_bytes, self.total_bytes,
+                f"corpus total byte limit exceeded; {raise_hint('corpus.max_total_bytes')}",
+            )
 
     def walk(self, root: Path, kind: str) -> None:
-        if not root.exists():
+        if root.relative_to(self.vault).as_posix() in self.pruned_directories or not root.exists():
             return
         if os.name == "posix":
             self._walk_posix(root, kind)
@@ -1027,7 +1213,7 @@ class _Discovery:
         self._walk_windows(root, kind)
 
     def _directory_seal(self, path: Path) -> tuple[_PathIdentity, ...]:
-        return _seal_path(
+        return seal_path(
             self.vault,
             path,
             target_directory=True,
@@ -1044,7 +1230,11 @@ class _Discovery:
     def _count_entry(self) -> None:
         self.entries += 1
         if self.entries > self.max_entries:
-            raise ValueError("corpus traversal entry limit exceeded")
+            raise CorpusCapacityExceeded(
+                "corpus.max_files", self.max_entries, self.entries,
+                "corpus traversal entry limit exceeded; review explicit max_entries "
+                "and " + raise_hint("corpus.max_files")
+            )
 
     def _directory_excluded(self, name: str, kind: str) -> bool:
         """`kind == "code"` means somebody's source tree, so vault nouns do not apply."""
@@ -1121,10 +1311,10 @@ class _Discovery:
         kind: str,
     ) -> list:
         _check_deadline(self.deadline)
-        _verify_seal(current_seal)
+        verify_seal(current_seal)
         self._count_directory(depth)
         entries = self._windows_entries(current)
-        _verify_seal(current_seal)
+        verify_seal(current_seal)
         children = [
             child
             for child in (
@@ -1133,7 +1323,7 @@ class _Discovery:
             )
             if child is not None
         ]
-        _verify_seal(current_seal)
+        verify_seal(current_seal)
         return children
 
     def _windows_entry(self, root: Path, entry: os.DirEntry, depth: int, kind: str):
@@ -1292,7 +1482,7 @@ class _Discovery:
         try:
             if not _same_opened_object(info, os.fstat(source)):
                 raise CorpusChanged("corpus source changed before descriptor open")
-            content = _read_bounded_descriptor(source, self.max_file_bytes)
+            content = read_bounded_descriptor(source, self.max_file_bytes)
         finally:
             os.close(source)
         self._store(path, kind, self._project_of(path, root, kind), (), content)
@@ -1303,25 +1493,65 @@ class _Discovery:
             return path.suffix.casefold() == ".md" and path.name not in EDITORIAL_NAMES
         if kind == "project":
             return path.name in PROJECT_FILES
-        return True
+        return kind != "session" or _is_breadcrumb_head(path)
 
 
-def _walk_knowledge(discovery: _Discovery, vault: Path) -> None:
+def _walk_knowledge(discovery: Discovery, vault: Path) -> None:
     discovery.walk(vault / "knowledge/notes", "note")
     discovery.walk(vault / "knowledge/projects", "project")
-    # Session records are deliberately NOT collected. They are kept verbatim on
-    # disk, they are read by the nightly consolidation, and they are greppable —
-    # but they are not part of the retrieval corpus, because measurement says
-    # they take it over: importing 236 past sessions (about 10 MB of the same
-    # conversations the pages were compiled from) moved the vault stand from
-    # hit@5 0.7 to 0.0, and neither a below-neutral trust weight nor ordering
-    # compiled pages first brought it back past 0.4 — by then the decision page
-    # was no longer in the candidate pool at all.
-    #
-    # What would make them safe to index is a second tier consulted when the
-    # compiled pages do not answer, or a per-source quota in the pool. Neither is
-    # built, so the honest state is: kept, not indexed. See MEM-01 in
-    # docs/DEVELOPER-AUDIT-STATUS-2026-08-18.md.
+    # Ordinary sessions remain excluded: their import displaced claim pages in
+    # the measured vault stand. Only integrity-bound breadcrumb sources enter.
+    _walk_breadcrumbs(discovery, vault)
+
+
+def _is_breadcrumb_head(path: Path) -> bool:
+    from breadcrumb_evidence import is_breadcrumb_document
+
+    return path.name.endswith(".breadcrumb.md") and is_breadcrumb_document(path)
+
+
+def _breadcrumb_logical_path(relative: str) -> str:
+    from breadcrumb_evidence import archived_source_path
+
+    path = PurePosixPath(relative)
+    logical = "knowledge/raw/sessions/" + "/".join(path.parts[-2:])
+    if relative not in {logical, archived_source_path(logical)}:
+        raise ValueError("breadcrumb source has no canonical corpus location")
+    return logical
+
+
+def _breadcrumb_corpus_read(discovery: Discovery, relative: str, archived: bool) -> bytes:
+    from breadcrumb_evidence import archived_source_path
+
+    _check_deadline(discovery.deadline)
+    physical = archived_source_path(relative) if archived else relative
+    if physical not in discovery.candidates:
+        discovery.add(discovery.vault / physical, "session")
+    return candidate_bytes(discovery.candidates[physical], discovery.max_file_bytes, "breadcrumb corpus source")
+
+
+def follow_breadcrumb(discovery: Discovery, head: Candidate) -> None:
+    from breadcrumb_evidence import restore_source
+    from breadcrumb_protocol import RECORD_PARSING, RecordParsing, using_record_parsing
+
+    logical = _breadcrumb_logical_path(head.relative)
+    archived = logical != head.relative
+
+    def read(relative: str) -> bytes:
+        return _breadcrumb_corpus_read(discovery, relative, archived)
+
+    active = partial(_check_deadline, discovery.deadline)
+    parsing = RECORD_PARSING.get() or RecordParsing(active=active)
+    with using_record_parsing(parsing):
+        restore_source(logical, read)
+    _check_deadline(discovery.deadline)
+
+
+def _walk_breadcrumbs(discovery: Discovery, vault: Path) -> None:
+    discovery.walk(vault / "knowledge/raw/sessions", "session")
+    heads = tuple(item for item in discovery.candidates.values() if item.kind == "session")
+    for head in heads:
+        follow_breadcrumb(discovery, head)
 
 
 def is_memory_path(relative_path: str, code_roots: Iterable[str] = ()) -> bool:
@@ -1338,7 +1568,7 @@ def is_memory_path(relative_path: str, code_roots: Iterable[str] = ()) -> bool:
     return not any(path.is_relative_to(PurePosixPath(root)) for root in code_roots)
 
 
-def _walk_memory(discovery: _Discovery, vault: Path, policy: SnapshotPolicy) -> None:
+def _walk_memory(discovery: Discovery, vault: Path, policy: SnapshotPolicy) -> None:
     """The knowledge tree belongs to the memory generation, not to the code one.
 
     One checkout carries two generations — memory, which the active pointer names, and
@@ -1360,14 +1590,14 @@ def _existing_path(vault: Path, relative: str) -> Path:
 
 
 def _add_daily_paths(
-    discovery: _Discovery, vault: Path, policy: SnapshotPolicy, deadline: float
+    discovery: Discovery, vault: Path, policy: SnapshotPolicy, deadline: float
 ) -> None:
     for relative in policy.daily_paths:
         _check_deadline(deadline)
         discovery.add(_existing_path(vault, relative), "daily")
 
 
-def _add_code_root(discovery: _Discovery, path: Path, relative: str) -> None:
+def _add_code_root(discovery: Discovery, path: Path, relative: str) -> None:
     info = _safe_info(path)
     if stat.S_ISDIR(info.st_mode):
         discovery.walk(path, "code")
@@ -1378,17 +1608,17 @@ def _add_code_root(discovery: _Discovery, path: Path, relative: str) -> None:
 
 
 def _add_code_roots(
-    discovery: _Discovery, vault: Path, policy: SnapshotPolicy, deadline: float
+    discovery: Discovery, vault: Path, policy: SnapshotPolicy, deadline: float
 ) -> None:
     for relative in policy.code_roots:
         _check_deadline(deadline)
         _add_code_root(discovery, _existing_path(vault, relative), relative)
 
 
-def _discover(
+def discover(
     vault: Path, policy: SnapshotPolicy, deadline: float, pruned: frozenset[str] = frozenset()
-) -> _Discovery:
-    discovery = _Discovery(
+) -> Discovery:
+    discovery = Discovery(
         vault,
         max_files=policy.max_files,
         max_entries=policy.max_entries,
@@ -1406,7 +1636,7 @@ def _discover(
     return discovery
 
 
-def _discovered(discovery: _Discovery) -> tuple[_Candidate, ...]:
+def _discovered(discovery: Discovery) -> tuple[Candidate, ...]:
     return tuple(discovery.candidates[key] for key in sorted(discovery.candidates))
 
 
@@ -1483,9 +1713,19 @@ class Frontmatter:
     problem: str | None = None
 
 
-def _frontmatter_mapping(raw: bytes) -> tuple[dict[str, Any], str | None]:
+def _safe_frontmatter_yaml(text: str):
+    loader = getattr(yaml, "CSafeLoader", None)
+    if loader is None:
+        return yaml.safe_load(text)
     try:
-        value = yaml.safe_load(raw.decode("utf-8", errors="strict"))
+        return yaml.load(text, Loader=loader)
+    except yaml.YAMLError:
+        return yaml.safe_load(text)
+
+
+def frontmatter_mapping(raw: bytes) -> tuple[dict[str, Any], str | None]:
+    try:
+        value = _safe_frontmatter_yaml(raw.decode("utf-8", errors="strict"))
     except (UnicodeDecodeError, yaml.YAMLError) as exc:
         return {}, f"frontmatter is not valid YAML ({type(exc).__name__})"
     if value is None:
@@ -1509,11 +1749,11 @@ def read_frontmatter(
     closing = _frontmatter_close(content, lines, deadline, cancelled)
     if closing is None:
         return Frontmatter({}, 0, "unterminated YAML frontmatter")
-    mapping, problem = _frontmatter_mapping(content[first[1] : closing[0]])
+    mapping, problem = frontmatter_mapping(content[first[1] : closing[0]])
     return Frontmatter(mapping, closing[1], problem)
 
 
-def _frontmatter(
+def split_frontmatter(
     content: bytes,
     *,
     deadline: float | None = None,
@@ -1550,7 +1790,7 @@ def _memory_kind(relative: str) -> str | None:
 def _collectable_place(relative: str, kind: str) -> bool:
     parts = PurePosixPath(relative).parts
     pruned = any(_pruned_directory_name(part, include_archives=False) for part in parts[2:-1])
-    return not pruned and _storable_source_path(relative) and _Discovery._eligible(Path(relative), kind)
+    return not pruned and _storable_source_path(relative) and Discovery._eligible(Path(relative), kind)
 
 
 def _collectable_content(path: Path, relative: str, kind: str) -> bool:
@@ -1561,15 +1801,15 @@ def _collectable_content(path: Path, relative: str, kind: str) -> bool:
     if not _decodes_as_utf8(content):
         return False
     project = PurePosixPath(relative).parts[2] if kind == "project" else None
-    frontmatter, _start = _frontmatter(content)
-    metadata = _metadata(frontmatter, _Candidate(path, relative, kind, project, ()))
+    frontmatter, _start = split_frontmatter(content)
+    metadata = _metadata(frontmatter, Candidate(path, relative, kind, project, ()))
     return not is_retired(metadata.status)
 
 
 def _utc_text(value: datetime) -> str:
     if value.tzinfo is None:
-        value = value.replace(tzinfo=timezone.utc)
-    return value.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+        value = value.replace(tzinfo=UTC)
+    return value.astimezone(UTC).isoformat().replace("+00:00", "Z")
 
 
 def _dated_metadata_text(value: date | datetime) -> str:
@@ -1608,7 +1848,7 @@ _DEFAULT_SOURCE_TYPES = {
 _PROSE_SUFFIXES = frozenset({".md", ".markdown", ".rst", ".txt"})
 
 
-def _default_source_type(candidate: _Candidate) -> str:
+def _default_source_type(candidate: Candidate) -> str:
     if candidate.kind == "project":
         return _project_source_type(candidate)
     if candidate.kind == "code" and candidate.path.suffix.casefold() in _PROSE_SUFFIXES:
@@ -1616,7 +1856,7 @@ def _default_source_type(candidate: _Candidate) -> str:
     return _DEFAULT_SOURCE_TYPES[candidate.kind]
 
 
-def _project_source_type(candidate: _Candidate) -> str:
+def _project_source_type(candidate: Candidate) -> str:
     if candidate.path.name == "state.md":
         return "project-state"
     return "project-context"
@@ -1714,22 +1954,29 @@ def _metadata_language(frontmatter: Mapping[str, object]) -> str | None:
 _DAILY_DATE = re.compile(r"(\d{4}-\d{2}-\d{2})\.md$")
 
 
-def _dated_by_name(candidate: _Candidate) -> str | None:
-    """A daily entry's date is the one in its file name — the one certain date about it.
+def _breadcrumb_date(candidate: Candidate) -> str | None:
+    from breadcrumb_evidence import is_breadcrumb_document
 
-    Since 2026-09-09 that date is its `valid_from`, so the index's own
-    since/as-of window reaches daily entries and a question's dates can bound
-    a search. See `docs/research/2026-09-08-the-calendar-does-the-arithmetic.md`.
-    """
+    if not is_breadcrumb_document(candidate.path):
+        return None
+    return date.fromisoformat(PurePosixPath(candidate.relative).parent.name).isoformat()
+
+
+def _daily_date(relative: str) -> str | None:
+    match = _DAILY_DATE.search(relative)
+    return match.group(1) if match is not None else None
+
+
+def _dated_by_name(candidate: Candidate) -> str | None:
+    """Daily names and verified breadcrumb directories bind occurrence days."""
+    if candidate.kind == "session":
+        return _breadcrumb_date(candidate)
     if candidate.kind != "daily":
         return None
-    match = _DAILY_DATE.search(candidate.relative)
-    if match is None:
-        return None
-    return match.group(1)
+    return _daily_date(candidate.relative)
 
 
-def _metadata(frontmatter: Mapping[str, object], candidate: _Candidate) -> SourceMetadata:
+def _metadata(frontmatter: Mapping[str, object], candidate: Candidate) -> SourceMetadata:
     validity = _validity_mapping(frontmatter)
     return SourceMetadata(
         type=_metadata_value(frontmatter.get("type")) or _default_source_type(candidate),
@@ -1748,8 +1995,6 @@ def _metadata(frontmatter: Mapping[str, object], candidate: _Candidate) -> Sourc
 
 def _parsed_iso(text: str) -> datetime:
     normalized = text.strip()
-    if normalized.endswith("Z"):
-        normalized = normalized[:-1] + "+00:00"
     try:
         return datetime.fromisoformat(normalized)
     except ValueError:
@@ -1775,8 +2020,8 @@ def _as_datetime(value: str | date | datetime | None) -> datetime | None:
         return None
     result = _naive_datetime(value)
     if result.tzinfo is None:
-        result = result.replace(tzinfo=timezone.utc)
-    return result.astimezone(timezone.utc)
+        result = result.replace(tzinfo=UTC)
+    return result.astimezone(UTC)
 
 
 def _readable_bound(value: str | None) -> datetime | None:
@@ -1844,32 +2089,13 @@ def _infer_language(text: str) -> str | None:
     return "en" if _latin_only(latin, cyrillic, han) else None
 
 
-def _classify_language(*, explicit: str | None, path: Path, text: str) -> str | None:
+def classify_language(*, explicit: str | None, path: Path, text: str) -> str | None:
     return explicit or language_for_path(path) or _infer_language(text)
 
 
 def _clean_heading(raw: bytes | None) -> str:
     title = (raw or b"").decode("utf-8", errors="strict").strip()
     return _CLOSING_HASHES.sub("", title)
-
-
-def _closing_fence(body: bytes, character: bytes, length: int) -> bool:
-    pattern = (
-        rb"[ ]{0,3}"
-        + re.escape(character)
-        + rb"{" + str(length).encode("ascii") + rb",}[ \t]*"
-    )
-    return re.fullmatch(pattern, body) is not None
-
-
-def _opening_fence(body: bytes):
-    """The fence that opens a block, or None — a backtick in the info string is not one."""
-    opening = _FENCE.fullmatch(body)
-    if opening is None:
-        return None
-    if opening.group(1).startswith(b"`") and b"`" in opening.group(2):
-        return None
-    return opening
 
 
 class _HeadingScan:
@@ -1885,7 +2111,7 @@ class _HeadingScan:
         if self.character is not None:
             self._maybe_close(body)
             return
-        opening = _opening_fence(body)
+        opening = opening_fence(body)
         if opening is not None:
             self.character = opening.group(1)[:1]
             self.length = len(opening.group(1))
@@ -1893,7 +2119,7 @@ class _HeadingScan:
         self._maybe_heading(content, offset, end)
 
     def _maybe_close(self, body: bytes) -> None:
-        if _closing_fence(body, self.character, self.length):
+        if closing_fence(body, self.character, self.length):
             self.character = None
             self.length = 0
 
@@ -1906,7 +2132,7 @@ class _HeadingScan:
         self.headings.append(heading)
 
 
-def _markdown_headings(
+def markdown_headings(
     content: bytes,
     start: int,
     *,
@@ -1929,7 +2155,7 @@ def _headings_when_enabled(
 ) -> list[re.Match[bytes]]:
     if not heading_enabled:
         return []
-    return _markdown_headings(
+    return markdown_headings(
         content, searchable_start, deadline=deadline, cancelled=cancelled
     )
 
@@ -1987,7 +2213,7 @@ def _append_heading_span(
 MAX_SPAN_BYTES = 4096
 
 
-def _character_boundary(content: bytes, index: int) -> int:
+def character_boundary(content: bytes, index: int) -> int:
     """The largest index at or below `index` that begins a UTF-8 character.
 
     A continuation byte is `10xxxxxx`, and a character is at most four bytes,
@@ -2021,7 +2247,7 @@ def _paragraph_cut(content: bytes, start: int, ceiling: int) -> int:
         cut = window.rfind(marker)
         if cut > 0:
             return start + cut + len(marker)
-    return _character_boundary(content, ceiling)
+    return character_boundary(content, ceiling)
 
 
 # A rendered conversation starts every turn with one of these markers at the
@@ -2109,12 +2335,56 @@ def _round_spans(content: bytes, span: tuple) -> list[tuple[int, int, tuple[str,
     return rounds
 
 
-def _split_span(content: bytes, span: tuple) -> list[tuple[int, int, tuple[str, ...]]]:
+def split_span(content: bytes, span: tuple, *, native_frames: bool = False) -> list[tuple[int, int, tuple[str, ...]]]:
     """One span as rounds, then as bounded pieces, each keeping its heading ancestry."""
     pieces: list[tuple[int, int, tuple[str, ...]]] = []
-    for round_span in _round_spans(content, span):
-        pieces.extend(_bounded_pieces(content, round_span))
+    for section, atomic in _source_sections(content, span, native_frames):
+        pieces.extend([section] if atomic else _ordinary_pieces(content, section))
     return pieces
+
+
+def _source_sections(content: bytes, span: tuple, native_frames: bool) -> list:
+    return _native_sections(content, span) if native_frames else [(span, False)]
+
+
+def _native_source_path(source_path: str) -> bool:
+    return source_path.startswith("knowledge/daily/") or (
+        source_path.startswith("knowledge/raw/sessions/") and source_path.endswith(".breadcrumb-part.md"))
+
+
+def _ordinary_pieces(content: bytes, span: tuple) -> list:
+    return [piece for round_span in _round_spans(content, span)
+            for piece in _bounded_pieces(content, round_span)]
+
+
+def _native_sections(content: bytes, span: tuple) -> list:
+    from event_envelope import native_frame_heading, native_physical_user_text
+
+    start, end, ancestry = span
+    if not native_frame_heading(ancestry) or not _native_container(content, span):
+        return [(span, False)]
+    result = []
+    cursor = start
+    for line in content[start:end].splitlines(keepends=True):
+        following = cursor + len(line)
+        if native_physical_user_text(line.decode("utf-8"), ancestry, allow_fragment=True) is not None:
+            result.extend([((start, cursor, ancestry), False), ((cursor, following, ancestry), True)])
+            start = following
+        cursor = following
+    result.append(((start, end, ancestry), False))
+    return result
+
+
+def _native_container(content: bytes, span: tuple) -> bool:
+    start, end, ancestry = span
+    if ancestry[-1] == "Integrity record":
+        return True
+    prefix = b"\n<!-- llm-wiki-operation:"
+    suffix = b" -->\n"
+    marker_length = len(prefix) + 64 + len(suffix)
+    marker = content[max(0, start - marker_length):start]
+    return bool(re.fullmatch(rb'\n<!-- llm-wiki-operation:[0-9a-f]{64} -->\n', marker)
+                and b"[Complete captured event](../raw/sessions/" in content[start:end])
 
 
 def _bounded_pieces(content: bytes, span: tuple) -> list[tuple[int, int, tuple[str, ...]]]:
@@ -2131,22 +2401,28 @@ def _bounded_pieces(content: bytes, span: tuple) -> list[tuple[int, int, tuple[s
     return pieces
 
 
-def _bounded_spans(content: bytes, spans: list) -> list:
+def _bounded_spans(content: bytes, spans: list, *, native_frames: bool = False) -> list:
     bounded: list[tuple[int, int, tuple[str, ...]]] = []
     for span in spans:
-        bounded.extend(_split_span(content, span))
+        bounded.extend(split_span(content, span, native_frames=native_frames))
     if len(bounded) > MAX_CORPUS_CHUNKS:
         raise ValueError("corpus chunk row ceiling exceeded")
-    return bounded
+    # A boundary may leave only whitespace; that is source content, not evidence.
+    # Match the reader's Unicode text invariant without changing retained bytes.
+    return [
+        span for span in bounded
+        if content[span[0]:span[1]].decode("utf-8", errors="strict").strip()
+    ]
 
 
-def _retrieval_spans(
+def retrieval_spans(
     content: bytes,
     searchable_start: int,
     *,
     heading_enabled: bool,
     deadline: float | None,
     cancelled: Callable[[], bool] | None,
+    native_frames: bool = False,
 ) -> tuple[tuple[int, int, tuple[str, ...]], ...]:
     headings = _headings_when_enabled(
         content, searchable_start, heading_enabled, deadline, cancelled
@@ -2162,7 +2438,7 @@ def _retrieval_spans(
         _append_heading_span(
             spans, content, heading, _heading_end(headings, index, content), ancestry
         )
-    return tuple(_bounded_spans(content, spans))
+    return tuple(_bounded_spans(content, spans, native_frames=native_frames))
 
 
 def _markdown_head(
@@ -2176,7 +2452,7 @@ def _markdown_head(
     content.decode("utf-8", errors="strict")
     if not is_markdown:
         return False, 0, {}
-    frontmatter, searchable_start = _frontmatter(
+    frontmatter, searchable_start = split_frontmatter(
         content, deadline=deadline, cancelled=cancelled
     )
     return True, searchable_start, frontmatter
@@ -2197,10 +2473,11 @@ def canonical_retrieval_spans(
     is_markdown, searchable_start, _frontmatter_value = _markdown_head(
         source_path, content, deadline, cancelled
     )
-    return _retrieval_spans(
+    return retrieval_spans(
         content,
         searchable_start,
         heading_enabled=is_markdown,
+        native_frames=_native_source_path(source_path),
         deadline=deadline,
         cancelled=cancelled,
     )
@@ -2212,7 +2489,7 @@ def canonical_retrieval_spans(
 # single cost left in it (measured 2026-09-12). The newline offsets are a fact
 # about the source; taken once, each chunk's line is a binary search. The
 # numbers produced are identical, which the existing chunk tests hold.
-def _newline_offsets(content: bytes) -> tuple[int, ...]:
+def newline_offsets(content: bytes) -> tuple[int, ...]:
     offsets: list[int] = []
     position = content.find(b"\n")
     while position >= 0:
@@ -2221,12 +2498,12 @@ def _newline_offsets(content: bytes) -> tuple[int, ...]:
     return tuple(offsets)
 
 
-def _line_at(offsets: tuple[int, ...], index: int) -> int:
+def line_at(offsets: tuple[int, ...], index: int) -> int:
     """The 1-based line the byte at `index` starts on."""
     return bisect_left(offsets, index) + 1
 
 
-def _chunks(
+def chunks(
     source: SourceRecord,
     metadata: SourceMetadata,
     content: bytes,
@@ -2238,11 +2515,12 @@ def _chunks(
     cancelled: Callable[[], bool] | None = None,
 ) -> tuple[RetrievalChunk, ...]:
     result = []
-    offsets = _newline_offsets(content)
-    spans = _retrieval_spans(
+    offsets = newline_offsets(content)
+    spans = retrieval_spans(
         content,
         searchable_start,
         heading_enabled=heading_enabled,
+        native_frames=_native_source_path(source.relative_path),
         deadline=deadline,
         cancelled=cancelled,
     )
@@ -2268,8 +2546,8 @@ def _chunks(
                 heading_ancestry=heading_ancestry,
                 byte_start=start,
                 byte_end=end,
-                line_start=_line_at(offsets, start),
-                line_end=_line_at(offsets, end),
+                line_start=line_at(offsets, start),
+                line_end=line_at(offsets, end),
                 text=text,
                 source_sha256=source.sha256,
                 span_sha256=span_hash,
@@ -2308,6 +2586,14 @@ def _source_kind(path: PurePosixPath) -> tuple[str, str | None]:
     return "code", None
 
 
+def _captured_source_kind(path: PurePosixPath, code_roots: tuple[str, ...]):
+    """The sealed collection policy determines whether a path is code."""
+    normalized = tuple(_code_root(root, code_roots) for root in code_roots)
+    if any(path.is_relative_to(PurePosixPath(root)) for root in normalized):
+        return "code", None
+    return _source_kind(path)
+
+
 def _require_canonical_source(
     source_id: str,
     source_path: str,
@@ -2329,10 +2615,10 @@ def _canonical_source_record(
     *,
     is_markdown: bool,
     metadata: SourceMetadata,
-    candidate: _Candidate,
+    candidate: Candidate,
     searchable_start: int,
 ) -> SourceRecord:
-    language = _classify_language(
+    language = classify_language(
         explicit=metadata.language,
         path=candidate.path,
         text=content[searchable_start:].decode("utf-8", errors="strict"),
@@ -2348,24 +2634,19 @@ def _canonical_source_record(
     )
 
 
-def canonical_retrieval_chunks(
-    *,
-    source_id: str,
-    source_path: str,
-    source_sha256: str,
-    content: bytes,
-    extractor_version: str = EXTRACTOR_VERSION,
-    deadline: float | None = None,
-    cancelled: Callable[[], bool] | None = None,
-) -> tuple[RetrievalChunk, ...]:
-    """Reconstruct every canonical chunk field from authoritative source bytes."""
+def _canonical_captured_head(
+    source_id: str, source_path: str, source_sha256: str, content: bytes,
+    deadline: float | None, cancelled: Callable[[], bool] | None,
+    code_roots: tuple[str, ...],
+) -> tuple[CapturedSource, int, bool]:
+    """Metadata comes from the captured Markdown, never from index metadata."""
     path = PurePosixPath(source_path)
     _require_canonical_source(source_id, source_path, path, content, source_sha256)
-    kind, project = _source_kind(path)
+    kind, project = _captured_source_kind(path, code_roots)
     is_markdown, searchable_start, frontmatter = _markdown_head(
         source_path, content, deadline, cancelled
     )
-    candidate = _Candidate(Path(*path.parts), source_path, kind, project, ())
+    candidate = Candidate(Path(*path.parts), source_path, kind, project, ())
     metadata = _metadata(frontmatter, candidate)
     source = _canonical_source_record(
         source_id,
@@ -2377,10 +2658,40 @@ def canonical_retrieval_chunks(
         candidate=candidate,
         searchable_start=searchable_start,
     )
-    return _chunks(
-        source,
-        metadata,
-        content,
+    return CapturedSource(source, metadata, content), searchable_start, is_markdown
+
+
+def canonical_captured_source(
+    *, source_id: str, source_path: str, source_sha256: str, content: bytes,
+    deadline: float | None = None, cancelled: Callable[[], bool] | None = None,
+    code_roots: tuple[str, ...] = (),
+) -> CapturedSource:
+    """Reconstruct source metadata from its exact hash-verified captured bytes."""
+    captured, _start, _markdown = _canonical_captured_head(
+        source_id, source_path, source_sha256, content, deadline, cancelled, code_roots
+    )
+    return captured
+
+
+def canonical_retrieval_chunks(
+    *,
+    source_id: str,
+    source_path: str,
+    source_sha256: str,
+    content: bytes,
+    extractor_version: str = EXTRACTOR_VERSION,
+    deadline: float | None = None,
+    cancelled: Callable[[], bool] | None = None,
+    code_roots: tuple[str, ...] = (),
+) -> tuple[RetrievalChunk, ...]:
+    """Reconstruct every canonical chunk field from authoritative source bytes."""
+    captured, searchable_start, is_markdown = _canonical_captured_head(
+        source_id, source_path, source_sha256, content, deadline, cancelled, code_roots
+    )
+    return chunks(
+        captured.record,
+        captured.metadata,
+        captured.content,
         searchable_start,
         heading_enabled=is_markdown,
         extractor_version=extractor_version,
@@ -2432,7 +2743,7 @@ def _as_of_text(as_of: str | date | datetime | None) -> str | None:
     return parsed.isoformat().replace("+00:00", "Z")
 
 
-def _policy(
+def policy(
     *,
     daily_paths: Iterable[str | Path],
     code_roots: Iterable[str | Path],
@@ -2473,16 +2784,20 @@ def _policy(
     )
 
 
-def _candidate_content(candidate: _Candidate, policy: SnapshotPolicy, label: str) -> bytes:
+def _candidate_content(candidate: Candidate, policy: SnapshotPolicy, label: str) -> bytes:
+    return candidate_bytes(candidate, policy.max_file_bytes, label)
+
+
+def candidate_bytes(candidate: Candidate, max_bytes: int, label: str) -> bytes:
     if candidate.content is not None:
         return candidate.content
-    _verify_seal(candidate.seal)
-    content = _sealed_source_bytes(candidate.path, policy.max_file_bytes, label)
-    _verify_seal(candidate.seal)
+    verify_seal(candidate.seal)
+    content = sealed_source_bytes(candidate.path, max_bytes, label)
+    verify_seal(candidate.seal)
     return content
 
 
-def _sealed_source_bytes(path: Path, max_bytes: int, label: str) -> bytes:
+def sealed_source_bytes(path: Path, max_bytes: int, label: str) -> bytes:
     """A source read by path, where a file being written is a changed corpus.
 
     This is the reader where directory descriptors are not available. The
@@ -2499,14 +2814,14 @@ def _sealed_source_bytes(path: Path, max_bytes: int, label: str) -> bytes:
 
 
 def _captured_record(
-    candidate: _Candidate,
+    candidate: Candidate,
     content: bytes,
     metadata: SourceMetadata,
     is_markdown: bool,
     searchable_start: int,
     digest: str,
 ) -> SourceRecord:
-    language = _classify_language(
+    language = classify_language(
         explicit=metadata.language,
         path=candidate.path,
         text=content[searchable_start:].decode("utf-8", errors="strict"),
@@ -2522,7 +2837,7 @@ def _captured_record(
     )
 
 
-class _Capture:
+class Capture:
     """Accumulates captured sources and their chunks under the policy limits."""
 
     def __init__(
@@ -2535,14 +2850,14 @@ class _Capture:
         self.deadline = deadline
         self.cancelled = cancelled
         self.captured: list[CapturedSource] = []
-        self.chunks: list[RetrievalChunk] = []
+        self.plans: list[_ChunkPlan] = []
         self.hashes: dict[str, str] = {}
         self.total = 0
         # Code files left out because their bytes are not UTF-8: named with the
         # walk's own skips, never silent (audit 2026-09-26 B-13).
         self.unreadable: list[str] = []
 
-    def add(self, candidate: _Candidate) -> None:
+    def add(self, candidate: Candidate) -> None:
         content = _candidate_content(candidate, self.policy, "corpus source")
         self._count_bytes(len(content))
         is_markdown = candidate.path.suffix.casefold() == ".md"
@@ -2556,23 +2871,26 @@ class _Capture:
         if readable and _included(metadata, self.policy):
             self._store(candidate, content, metadata, is_markdown, searchable_start, digest)
 
-    def _note_unreadable(self, candidate: _Candidate, readable: bool) -> None:
+    def _note_unreadable(self, candidate: Candidate, readable: bool) -> None:
         if candidate.kind == "code" and not readable:
             self.unreadable.append(candidate.relative)
 
     def _head(self, content: bytes, is_markdown: bool) -> tuple[dict[str, Any], int]:
         if not is_markdown:
             return {}, 0
-        return _frontmatter(content, deadline=self.deadline, cancelled=self.cancelled)
+        return split_frontmatter(content, deadline=self.deadline, cancelled=self.cancelled)
 
     def _count_bytes(self, size: int) -> None:
         self.total += size
         if self.total > self.policy.max_total_bytes:
-            raise ValueError(f"corpus total byte limit exceeded; {raise_hint('corpus.max_total_bytes')}")
+            raise CorpusCapacityExceeded(
+                "corpus.max_total_bytes", self.policy.max_total_bytes, self.total,
+                f"corpus total byte limit exceeded; {raise_hint('corpus.max_total_bytes')}",
+            )
 
     def _store(
         self,
-        candidate: _Candidate,
+        candidate: Candidate,
         content: bytes,
         metadata: SourceMetadata,
         is_markdown: bool,
@@ -2582,8 +2900,9 @@ class _Capture:
         record = _captured_record(
             candidate, content, metadata, is_markdown, searchable_start, digest
         )
-        self.captured.append(CapturedSource(record, metadata, content))
-        source_chunks = _chunks(
+        captured = CapturedSource(record, metadata, content)
+        self.captured.append(captured)
+        source_chunks = chunks(
             record,
             metadata,
             content,
@@ -2592,13 +2911,53 @@ class _Capture:
             deadline=self.deadline,
             cancelled=self.cancelled,
         )
-        if len(self.chunks) + len(source_chunks) > MAX_CORPUS_CHUNKS:
-            raise ValueError("corpus chunk row ceiling exceeded")
-        self.chunks.extend(source_chunks)
+        self.plans.append(_pinned_chunk_plan(captured, searchable_start, is_markdown, len(source_chunks)))
 
+
+
+
+def read_current_source(
+    vault: Path, record: SourceRecord, *, deadline: float | None = None,
+) -> bytes:
+    """Re-read one selected source through the collector's safe file boundary.
+
+    Its captured size is the byte bound: a larger replacement cannot have the
+    same bytes. The ancestor count is the exact selected path, not a new cap.
+    """
+    _check_processing_stop(deadline, None)
+    root = Path(vault).resolve(strict=True)
+    relative = PurePosixPath(record.relative_path)
+    normalized = unicodedata.normalize("NFC", relative.as_posix())
+    if not _valid_source_path(record.relative_path, relative, normalized):
+        raise ValueError("selected source path is not normalized relative POSIX")
+    path = root.joinpath(*relative.parts)
+    content = _read_current_source(root, path, record.size, len(relative.parts))
+    _check_processing_stop(deadline, None)
+    return content
+
+
+def _read_current_source(root, path, size, components):
+    if os.name == "posix":
+        return _read_current_posix_source(root, path, size, components)
+    seal = seal_source_file(root, path, components)
+    content = sealed_source_bytes(path, size, "selected current source")
+    verify_seal(seal)
+    return content
+
+
+def _read_current_posix_source(root, path, size, components):
+    seal, descriptor = _open_sealed_posix_path(
+        root, path, target_directory=False, max_components=components
+    )
+    try:
+        content = read_bounded_descriptor(descriptor, size)
+        verify_seal(seal)
+        return content
+    finally:
+        os.close(descriptor)
 
 def _require_stable_membership(
-    candidates: tuple[_Candidate, ...], current: tuple[_Candidate, ...]
+    candidates: tuple[Candidate, ...], current: tuple[Candidate, ...]
 ) -> None:
     if tuple(item.relative for item in candidates) != tuple(
         item.relative for item in current
@@ -2607,7 +2966,7 @@ def _require_stable_membership(
 
 
 def _require_stable_content(
-    current: tuple[_Candidate, ...],
+    current: tuple[Candidate, ...],
     policy: SnapshotPolicy,
     hashes: dict[str, str],
     deadline: float,
@@ -2621,21 +2980,21 @@ def _require_stable_content(
             )
 
 
-def _capture(
+def capture(
     vault: Path,
     policy: SnapshotPolicy,
     deadline: float,
     cancelled: Callable[[], bool] | None,
     pruned: frozenset[str] = frozenset(),
 ) -> CorpusSnapshot:
-    discovery = _discover(vault, policy, deadline, pruned)
+    discovery = discover(vault, policy, deadline, pruned)
     candidates = _discovered(discovery)
-    capture = _Capture(policy, deadline, cancelled)
+    capture = Capture(policy, deadline, cancelled)
     for candidate in candidates:
         _check_deadline(deadline)
         capture.add(candidate)
     _check_deadline(deadline)
-    current = _discovered(_discover(vault, policy, deadline, pruned))
+    current = _discovered(discover(vault, policy, deadline, pruned))
     _require_stable_membership(candidates, current)
     _require_stable_content(current, policy, capture.hashes, deadline)
     corpus_hash = canonical_source_manifest_sha256(
@@ -2643,10 +3002,13 @@ def _capture(
     )
     return CorpusSnapshot(
         tuple(capture.captured),
-        tuple(capture.chunks),
+        _captured_chunks(capture.plans),
         corpus_hash,
         policy,
         skipped=(*discovery.skipped, *capture.unreadable),
+        inspected_entries=discovery.entries,
+        discovered_sources=len(candidates),
+        discovered_bytes=capture.total,
     )
 
 
@@ -2661,13 +3023,10 @@ def _capture(
 # 2026-08-30, leaving no active generation and retrieval on its lexical leg
 # alone. Nothing about the fence changed; the vault outgrew it.
 #
-# Snapshot isolation, in every MVCC engine, means a consistent view from the
-# point a transaction started — not a world that holds still until it commits.
-# So: take another pass. Fail only if the vault never holds still for one.
-MAX_CAPTURE_PASSES = 4
-
-
-def _captured_after_retries(
+# Markdown files have no MVCC snapshot. Every retry must establish the same
+# complete membership and content proof again. The caller's finite monotonic
+# deadline and cancellation bound that work; an arbitrary pass count does not.
+def captured_after_retries(
     root: Path,
     policy: SnapshotPolicy,
     deadline: float,
@@ -2676,13 +3035,22 @@ def _captured_after_retries(
 ) -> CorpusSnapshot:
     """One capture that describes a real instant, retried while the vault moves."""
     last: CorpusChanged | None = None
-    for _ in range(MAX_CAPTURE_PASSES):
-        _check_processing_stop(deadline, cancelled)
+    while True:
         try:
-            return _capture(root, policy, deadline, cancelled, pruned)
-        except CorpusChanged as exc:
-            last = exc
-    raise CorpusChanged(f"corpus never held still for one pass: {last}")
+            _check_processing_stop(deadline, cancelled)
+            return capture(root, policy, deadline, cancelled, pruned)
+        except CorpusChanged as changed:
+            last = changed
+        except CorpusCancelled:
+            raise
+        except TimeoutError as stopped:
+            _raise_capture_retry_timeout(stopped, last)
+
+
+def _raise_capture_retry_timeout(stopped: TimeoutError, last: CorpusChanged | None) -> None:
+    if last is None:
+        raise stopped
+    raise CorpusChanged(f"corpus never held still before its deadline: {last}") from stopped
 
 
 def _or_setting(given: int | None, name: str, vault: Path) -> int:
@@ -2701,7 +3069,7 @@ def collect_corpus(
     max_files: int | None = None,
     max_file_bytes: int = MAX_CORPUS_FILE_BYTES,
     max_total_bytes: int | None = None,
-    max_entries: int = MAX_CORPUS_INSPECTED_ENTRIES,
+    max_entries: int | None = None,
     max_directories: int = MAX_CORPUS_DIRECTORIES,
     max_depth: int = MAX_CORPUS_DEPTH,
     deadline: float | None = None,
@@ -2715,11 +3083,15 @@ def collect_corpus(
     `pruned_directories` are vault-relative POSIX paths the walk never enters: a
     repository's git-ignored directories at any depth. They are not policy; the
     membership they leave out is what the caller asked not to read.
+    Unless explicitly supplied, the discovery entry budget uses the existing
+    corpus.max_files setting, including entries that are not accepted sources.
+    A supplied deadline or duration must be finite so moving sources cannot
+    turn collection into unbounded retry work.
     """
     root = Path(vault).resolve(strict=True)
     if not stat.S_ISDIR(_safe_info(root).st_mode):
         raise ValueError("vault must be a regular directory")
-    selected_policy = _policy(
+    selected_policy = policy(
         daily_paths=daily_paths,
         code_roots=code_roots,
         approved_code_roots=approved_code_roots,
@@ -2728,7 +3100,7 @@ def collect_corpus(
         max_files=_or_setting(max_files, "corpus.max_files", root),
         max_file_bytes=max_file_bytes,
         max_total_bytes=_or_setting(max_total_bytes, "corpus.max_total_bytes", root),
-        max_entries=max_entries,
+        max_entries=_or_setting(max_entries, "corpus.max_files", root),
         max_directories=max_directories,
         max_depth=max_depth,
     )
@@ -2741,7 +3113,7 @@ def collect_corpus(
         gate = contextlib.nullcontext()
     with gate:
         _check_processing_stop(selected_deadline, cancelled)
-        return _captured_after_retries(
+        return captured_after_retries(
             root, selected_policy, selected_deadline, cancelled, frozenset(pruned_directories)
         )
 

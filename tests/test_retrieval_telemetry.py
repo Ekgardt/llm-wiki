@@ -6,32 +6,17 @@ import os
 import sqlite3
 import subprocess
 import sys
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
 
+from tests.retrieval_telemetry_helpers import _event
 from tests.slow_machine import SHORT_TIMEOUT
 
 SCRIPTS = Path(__file__).resolve().parent.parent / "scripts"
 if str(SCRIPTS) not in sys.path:
     sys.path.insert(0, str(SCRIPTS))
-
-
-def _event(**overrides):
-    import retrieval_telemetry
-
-    values = {
-        "event_kind": "impression",
-        "query": "private query",
-        "retrieval_mode": "bm25",
-        "candidate_id": "page",
-        "rank": 1,
-        "generation": "legacy",
-        "source_tool": "test",
-    }
-    values.update(overrides)
-    return retrieval_telemetry.make_event(**values)
 
 
 def test_event_contract_is_immutable_and_hashes_query_without_retaining_it():
@@ -155,7 +140,7 @@ def test_compaction_is_oldest_first_and_bounded(tmp_path):
     import retrieval_telemetry
 
     database = tmp_path / "state/cache/evidence-graph/telemetry.sqlite3"
-    now = datetime(2026, 7, 17, tzinfo=timezone.utc)
+    now = datetime(2026, 7, 17, tzinfo=UTC)
     events = []
     for age in (120, 110, 100, 10, 5, 1):
         events.append(

@@ -14,6 +14,8 @@ from pathlib import Path
 
 import pytest
 
+from tests.compile_paths import compile_pipeline_binds
+
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 
 
@@ -49,19 +51,11 @@ def fake_vault(tmp_path, monkeypatch):
 
     # Write index and log.
     (knowledge / "index.md").write_text("# Knowledge Index\n", encoding="utf-8")
-    (knowledge / "log.md").write_text("# Session Memory Log\n", encoding="utf-8")
+    (knowledge / "log.local.md").write_text("# Session Memory Log\n", encoding="utf-8")
 
     # Patch ROOT in compile_memory.
-    import compile_memory
-    import memory_state
 
-    monkeypatch.setattr(memory_state, "ROOT", tmp_path)
-    monkeypatch.setattr(compile_memory, "ROOT", tmp_path)
-    monkeypatch.setattr(compile_memory, "MEMORY", knowledge)
-    monkeypatch.setattr(compile_memory, "DAILY_DIR", knowledge / "daily")
-    monkeypatch.setattr(compile_memory, "KNOWLEDGE", knowledge / "notes")
-    monkeypatch.setattr(compile_memory, "INDEX", knowledge / "index.md")
-    monkeypatch.setattr(compile_memory, "LOG", knowledge / "log.md")
+    monkeypatch.setenv("LLM_WIKI_ROOT", str(tmp_path))
 
     return tmp_path
 
@@ -110,21 +104,19 @@ class TestCompileWithFakeProvider:
         assert result == test_response
 
     def test_legacy_critique_entry_point_is_removed(self):
-        import compile_memory
 
-        assert not hasattr(compile_memory, "_critique_plan")
+        assert not compile_pipeline_binds("critique_plan")
 
     def test_compiled_page_uses_content_addressed_evidence_reference(
         self, fake_vault, monkeypatch
     ):
-        import compile_memory
+        from llm_wiki import compile_pipeline_apply, compile_pipeline_sources
         from markdown_transaction import MarkdownCoordinator
         from reliable_memory import canonical_json_bytes, sha256_bytes
 
         daily = fake_vault / "knowledge/daily/2026-07-12.md"
         agents = fake_vault / "AGENTS.md"
         agents.write_text("contract\n", encoding="utf-8")
-        monkeypatch.setattr(compile_memory, "AGENTS", agents)
         quote = b"We decided to use JWT for authentication instead of sessions."
         operation = {
             "action": "create",
@@ -142,7 +134,7 @@ class TestCompileWithFakeProvider:
             }],
             "related": [],
         }
-        inputs = compile_memory.snapshot_compile_inputs([daily])
+        inputs = compile_pipeline_sources.snapshot_compile_inputs([daily])
         plan = {
             "schema_version": "compile-plan/v2",
             "operations": [{
@@ -152,7 +144,7 @@ class TestCompileWithFakeProvider:
             }],
         }
         state_root = Path(os.environ["LLM_WIKI_STATE_ROOT"])
-        compile_memory.apply_compile_plan(
+        compile_pipeline_apply.apply_compile_plan(
             inputs,
             plan,
             action_key="d" * 64,
@@ -216,22 +208,6 @@ class TestSignificanceBudget:
         from impact_analysis import apply_significance_budget
         assert apply_significance_budget([]) == []
 
-def test_a_daily_that_does_not_fit_leaves_a_trace(tmp_path, monkeypatch) -> None:
-    """Refusing the pass is the contract; refusing it silently was not."""
-    import compile_memory
-
-    recorded: list[tuple[str, str]] = []
-    monkeypatch.setattr(
-        compile_memory,
-        "_record_oversized_daily",
-        lambda path: recorded.append(("skipped", path)),
-    )
-
-    compile_memory._record_oversized_daily("knowledge/daily/2026-08-21.md")
-
-    assert recorded == [("skipped", "knowledge/daily/2026-08-21.md")]
-
-
 def test_compile_only_reads_canonical_daily_logs() -> None:
     """The directory ships a README, and it is not a day."""
     import memory_state
@@ -249,10 +225,10 @@ def _daily_bytes(entries: int, filler: int) -> bytes:
 
 def test_a_day_inside_the_budget_is_one_part_covering_the_whole_file() -> None:
     """Splitting is for the exception; an ordinary day must be untouched."""
-    import compile_memory
+    from llm_wiki import compile_pipeline_sources
 
     content = _daily_bytes(3, 40)
-    parts = compile_memory._daily_parts("knowledge/daily/2026-08-21.md", content)
+    parts = compile_pipeline_sources.daily_parts("knowledge/daily/2026-08-21.md", content)
 
     assert len(parts) == 1
     assert parts[0].content == content
@@ -274,24 +250,25 @@ def _is_a_real_span(content: bytes, part) -> bool:
 
 def test_a_long_day_splits_at_entry_boundaries_and_covers_every_byte() -> None:
     """Every part has to be a real span of the file, and together all of it."""
-    import compile_memory
+    import compile_pipeline
+    from llm_wiki import compile_pipeline_sources
 
     content = _daily_bytes(60, 2048)
-    parts = compile_memory._daily_parts("knowledge/daily/2026-08-21.md", content)
+    parts = compile_pipeline_sources.daily_parts("knowledge/daily/2026-08-21.md", content)
     starts = list(map(attrgetter("byte_start"), parts))
     ends = list(map(attrgetter("byte_end"), parts))
 
-    assert len(content) > compile_memory.MAX_DAILY_PART_BYTES
+    assert len(content) > compile_pipeline.MAX_DAILY_PART_BYTES
     assert (len(parts) > 1, starts[0]) == (True, 0)
     assert ends == [*starts[1:], len(content)]
     assert all(map(partial(_starts_an_entry, content), starts[1:]))
 
 
 def test_the_parts_of_a_long_day_are_real_spans_with_distinct_keys() -> None:
-    import compile_memory
+    from llm_wiki import compile_pipeline_sources
 
     content = _daily_bytes(60, 2048)
-    parts = compile_memory._daily_parts("knowledge/daily/2026-08-21.md", content)
+    parts = compile_pipeline_sources.daily_parts("knowledge/daily/2026-08-21.md", content)
 
     assert all(map(partial(_is_a_real_span, content), parts))
     assert len(set(map(attrgetter("part_key"), parts))) == len(parts)
@@ -299,20 +276,28 @@ def test_the_parts_of_a_long_day_are_real_spans_with_distinct_keys() -> None:
 
 def test_a_part_that_already_committed_is_not_offered_again() -> None:
     """A run interrupted halfway resumes from the parts it already wrote."""
-    import compile_memory
+    import compile_pipeline
+    from llm_wiki import compile_pipeline_sources
 
     content = _daily_bytes(60, 2048)
     path = "knowledge/daily/2026-08-21.md"
-    everything = compile_memory._daily_parts(path, content)
+    everything = compile_pipeline_sources.daily_parts(path, content)
     done = {everything[0].sha256}
 
-    remaining = compile_memory._daily_parts(
+    remaining = compile_pipeline_sources.daily_parts(
         path, content, lambda _path, digest: digest in done
     )
 
     assert len(remaining) == len(everything) - 1
     assert everything[0].sha256 not in {part.sha256 for part in remaining}
-    assert not compile_memory.daily_is_compiled(
+    assert not compile_pipeline.daily_is_compiled(
         path, content, lambda _path, digest: digest in done
     )
-    assert compile_memory.daily_is_compiled(path, content, lambda _path, _digest: True)
+    assert compile_pipeline.daily_is_compiled(path, content, lambda _path, _digest: True)
+def test_daily_selection_public_imports_keep_the_owned_objects():
+    import memory_state
+    from llm_wiki import daily_log_selection
+
+    assert memory_state.daily_logs is daily_log_selection.daily_logs
+    assert memory_state.closed_daily_logs is daily_log_selection.closed_daily_logs
+    assert memory_state.DAILY_LOG_NAME is daily_log_selection.DAILY_LOG_NAME

@@ -6,5 +6,11 @@ runtime writes and reads `knowledge/log.local.md`, which `.gitignore` denies. Se
 """
 from __future__ import annotations
 
+from pathlib import Path
+
 LOG_RELATIVE = "knowledge/log.local.md"
 LOG_NAME = "log.local.md"
+
+
+def vault_log_path(vault: Path) -> Path:
+    return vault / LOG_RELATIVE

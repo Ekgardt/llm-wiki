@@ -10,9 +10,70 @@ from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 from typing import NamedTuple
 
-from install_control import InstallControlError, ManagedResource, file_resource
+from codex_hook_identity import OUR_CODEX_COMMANDS as OUR_CODEX_COMMANDS
+from codex_hook_identity import OUR_CODEX_SCRIPTS
+from install_state import (
+    InstallControlError,
+    ManagedResource,
+    file_resource,
+)
 from integration_config_backup import publish_configuration
-from reliable_memory import canonical_json_bytes, fsync_directory
+from llm_wiki.formats.canonical import canonical_json_bytes
+from llm_wiki.integration_launch_values import (
+    CODEX_BOOTSTRAP_BODY as CODEX_BOOTSTRAP_BODY,
+)
+from llm_wiki.integration_launch_values import (
+    PROVIDER_ENV_KEYS as PROVIDER_ENV_KEYS,
+)
+from llm_wiki.integration_launch_values import (
+    UNPERSISTED_PROVIDERS as UNPERSISTED_PROVIDERS,
+)
+from llm_wiki.integration_launch_values import (
+    codex_command_launch as codex_command_launch,
+)
+from llm_wiki.integration_launch_values import (
+    codex_command_words as codex_command_words,
+)
+from llm_wiki.integration_launch_values import (
+    codex_launch_bundle as codex_launch_bundle,
+)
+from llm_wiki.integration_launch_values import (
+    codex_parsed_launch as codex_parsed_launch,
+)
+from llm_wiki.integration_launch_values import (
+    codex_provider_bootstrap as codex_provider_bootstrap,
+)
+from llm_wiki.integration_launch_values import (
+    codex_provider_from_payload as codex_provider_from_payload,
+)
+from llm_wiki.integration_launch_values import (
+    codex_provider_payload as codex_provider_payload,
+)
+from llm_wiki.integration_launch_values import (
+    codex_target_bundle as codex_target_bundle,
+)
+from llm_wiki.integration_launch_values import (
+    codex_windows_argument as codex_windows_argument,
+)
+from llm_wiki.integration_launch_values import (
+    codex_windows_command as codex_windows_command,
+)
+from llm_wiki.integration_launch_values import (
+    codex_windows_word as codex_windows_word,
+)
+from llm_wiki.integration_launch_values import (
+    codex_windows_words as codex_windows_words,
+)
+from llm_wiki.integration_launch_values import (
+    require_codex_hook_tail as require_codex_hook_tail,
+)
+from llm_wiki.integration_launch_values import (
+    require_codex_provider_bundle as require_codex_provider_bundle,
+)
+from llm_wiki.integration_launch_values import (
+    require_persistable_provider as require_persistable_provider,
+)
+from reliable_memory import fsync_directory
 
 # A host settings file read and rewritten whole; 2 MiB is the writer's bound, shared with
 # installer_config and doctor (docs/research/2026-09-23-one-limit-one-place.md).
@@ -363,8 +424,6 @@ def opencode_plugin_resource(root: Path, destination: Path) -> ManagedResource:
     left the plugin behind, still pointing at a vault that no longer existed,
     and a rollback could not put back what was there before.
     """
-    from installer_config import plugin_with_embedded_root
-
     root = _absolute_destination(root)
     source = root / "scripts" / "llm-wiki-memory-opencode.js"
     desired = plugin_with_embedded_root(_plugin_source_bytes(source), root)
@@ -388,7 +447,7 @@ def opencode_plugin_resource(root: Path, destination: Path) -> ManagedResource:
 # uninstall left our hooks in place, still launching a vault that was gone.
 
 
-class _HookFamily(NamedTuple):
+class HookFamily(NamedTuple):
     """One host's hook configuration: how to recognise our handlers, and our env."""
 
     name: str
@@ -396,7 +455,6 @@ class _HookFamily(NamedTuple):
     env_keys: tuple[str, ...] = ()
 
 
-CLAUDE_ENV_KEYS = ("LLM_WIKI_ROOT", "LLM_WIKI_STATE_ROOT", "MEMORY_LLM_PROVIDER", "MEMORY_CLAUDE_MODEL")
 # Everything that shapes a provider call at install time, persisted wherever the
 # code runs unattended: the hooks' env block and the scheduler units. Issue #22:
 # an install run with MEMORY_LLM_PROVIDER=claude left the nightly unit to
@@ -410,38 +468,37 @@ CLAUDE_ENV_KEYS = ("LLM_WIKI_ROOT", "LLM_WIKI_STATE_ROOT", "MEMORY_LLM_PROVIDER"
 # written into a unit file or a settings file is a secret on disk and in every
 # backup of the vault. An unattended run that needs one reads it from the
 # operator's own environment.
-PROVIDER_ENV_KEYS = (
-    "MEMORY_LLM_PROVIDER",
-    "MEMORY_CLAUDE_MODEL",
-    "MEMORY_CODEX_MODEL",
-    "MEMORY_CODEX_REASONING",
-    "MEMORY_LLM_MODEL",
-    "MEMORY_LLM_BASE_URL",
-    "OLLAMA_NO_CLOUD",
-)
 
+
+CLAUDE_ENV_KEYS = ("LLM_WIKI_ROOT", "LLM_WIKI_STATE_ROOT", *PROVIDER_ENV_KEYS)
 
 # The test provider is never persisted: it exists so a suite can run without
 # a backend, and a hook that inherited it would answer every capture with a
 # canned string.
-_UNPERSISTED_PROVIDERS = frozenset({"fake"})
 
 
-def provider_environment() -> dict[str, str]:
+def provider_environment(root: Path | None = None) -> dict[str, str]:
     """The provider variables set in the installing process, verbatim."""
     import os
 
     found = {key: os.environ.get(key, "").strip() for key in PROVIDER_ENV_KEYS}
-    if found.get("MEMORY_LLM_PROVIDER", "").casefold() in _UNPERSISTED_PROVIDERS:
+    if found.get("MEMORY_LLM_PROVIDER", "").casefold() in UNPERSISTED_PROVIDERS:
         return {}
-    return {key: value for key, value in found.items() if value}
+    return _provider_projection(found, root)
 
 
-def _family_error(family: _HookFamily, suffix: str) -> InstallControlError:
+def _provider_projection(found, root):
+    from model_selection import MODEL_ENV_KEYS, current
+
+    excluded = MODEL_ENV_KEYS if current(root) is not None else frozenset()
+    return {key: value for key, value in found.items() if value and key not in excluded}
+
+
+def _family_error(family: HookFamily, suffix: str) -> InstallControlError:
     return InstallControlError(f"integration_{family.name}_{suffix}")
 
 
-def _family_hooks(config: Mapping[str, object], family: _HookFamily) -> dict[str, list]:
+def _family_hooks(config: Mapping[str, object], family: HookFamily) -> dict[str, list]:
     hooks = config.get("hooks", {})
     if not isinstance(hooks, dict):
         raise _family_error(family, "settings_invalid")
@@ -459,7 +516,7 @@ def _block_hooks(block: object) -> list[object]:
     return hooks
 
 
-def _block_ownership(block: object, family: _HookFamily) -> str:
+def _block_ownership(block: object, family: HookFamily) -> str:
     """`ours`, `theirs`, or `mixed` — a mixed block has no single owner."""
     handlers = _block_hooks(block)
     ours = [handler for handler in handlers if family.handler_is_ours(handler)]
@@ -470,7 +527,7 @@ def _block_ownership(block: object, family: _HookFamily) -> str:
     return "mixed"
 
 
-def _owned_blocks(blocks: Sequence[object], family: _HookFamily) -> list[object]:
+def _owned_blocks(blocks: Sequence[object], family: HookFamily) -> list[object]:
     states = [_block_ownership(block, family) for block in blocks]
     if "mixed" in states:
         # One block carrying our handler next to the user's own is ambiguous:
@@ -479,7 +536,7 @@ def _owned_blocks(blocks: Sequence[object], family: _HookFamily) -> list[object]
     return [block for block, state in zip(blocks, states) if state == "ours"]
 
 
-def _owned_hooks(config: Mapping[str, object], family: _HookFamily) -> dict[str, list]:
+def _owned_hooks(config: Mapping[str, object], family: HookFamily) -> dict[str, list]:
     owned: dict[str, list] = {}
     for event, blocks in _family_hooks(config, family).items():
         ours = _owned_blocks(blocks, family)
@@ -488,14 +545,14 @@ def _owned_hooks(config: Mapping[str, object], family: _HookFamily) -> dict[str,
     return owned
 
 
-def _owned_env(config: Mapping[str, object], family: _HookFamily) -> dict[str, str]:
+def _owned_env(config: Mapping[str, object], family: HookFamily) -> dict[str, str]:
     env = config.get("env", {})
     if not isinstance(env, dict):
         raise _family_error(family, "settings_invalid")
     return {key: str(env[key]) for key in family.env_keys if key in env}
 
 
-def _family_projection(config: Mapping[str, object], family: _HookFamily) -> bytes | None:
+def _family_projection(config: Mapping[str, object], family: HookFamily) -> bytes | None:
     owned = {"env": _owned_env(config, family), "hooks": _owned_hooks(config, family)}
     if not owned["env"] and not owned["hooks"]:
         return None
@@ -503,7 +560,7 @@ def _family_projection(config: Mapping[str, object], family: _HookFamily) -> byt
 
 
 def _family_projection_any(
-    config: Mapping[str, object], candidates: Sequence[bytes], family: _HookFamily
+    config: Mapping[str, object], candidates: Sequence[bytes], family: HookFamily
 ) -> bytes | None:
     """The projection is derived from our own markers, so it is unique."""
     current = _family_projection(config, family)
@@ -513,12 +570,12 @@ def _family_projection_any(
 
 
 def _family_desired(
-    template: Mapping[str, object], env: Mapping[str, str], family: _HookFamily
+    template: Mapping[str, object], env: Mapping[str, str], family: HookFamily
 ) -> bytes:
     return canonical_json_bytes({"env": dict(env), "hooks": _family_hooks(template, family)})
 
 
-def _without_owned_blocks(config: Mapping[str, object], family: _HookFamily) -> dict[str, list]:
+def _without_owned_blocks(config: Mapping[str, object], family: HookFamily) -> dict[str, list]:
     remaining: dict[str, list] = {}
     for event, blocks in _family_hooks(config, family).items():
         kept = [block for block in blocks if _block_ownership(block, family) != "ours"]
@@ -565,7 +622,7 @@ def _merged_defaults(config: dict[str, object], template: Mapping[str, object]) 
             config[key] = template[key]
 
 
-def _env_applied(config: dict[str, object], env: Mapping[str, str], family: _HookFamily) -> None:
+def _env_applied(config: dict[str, object], env: Mapping[str, str], family: HookFamily) -> None:
     current = config.get("env")
     values = dict(current) if isinstance(current, dict) else {}
     for key in family.env_keys:
@@ -578,7 +635,7 @@ def _env_applied(config: dict[str, object], env: Mapping[str, str], family: _Hoo
 
 
 def _hooks_applied(
-    config: dict[str, object], added: Mapping[str, Sequence[object]], family: _HookFamily
+    config: dict[str, object], added: Mapping[str, Sequence[object]], family: HookFamily
 ) -> None:
     hooks = _without_owned_blocks(config, family)
     for event, blocks in added.items():
@@ -590,7 +647,7 @@ def _hooks_applied(
 
 
 def _replacement_parts(
-    replacement: bytes | None, family: _HookFamily
+    replacement: bytes | None, family: HookFamily
 ) -> tuple[dict[str, str], dict[str, list]]:
     if replacement is None:
         return {}, {}
@@ -604,7 +661,7 @@ def _require_family_expected(
     config: Mapping[str, object],
     expected: bytes | None,
     replacement: bytes | None,
-    family: _HookFamily,
+    family: HookFamily,
 ) -> None:
     current = _family_projection(config, family)
     if expected is not None:
@@ -638,7 +695,7 @@ def _write_family_projection(
     expected: bytes | None,
     replacement: bytes | None,
     metadata: Mapping[str, object],
-    family: _HookFamily,
+    family: HookFamily,
     finish: Callable[[dict[str, object], bytes | None], None],
 ) -> None:
     config, original = _read_config(path)
@@ -657,7 +714,7 @@ def _write_family(
     path: Path,
     replacement: bytes | None,
     metadata: Mapping[str, object],
-    family: _HookFamily,
+    family: HookFamily,
     finish: Callable[[dict[str, object], bytes | None], None],
 ) -> None:
     config, _original = _read_config(path)
@@ -667,12 +724,36 @@ def _write_family(
     _write_family_projection(path, current, replacement, metadata, family, finish)
 
 
-def _hook_family_resource(
+# The env keys that say which installation a hook block serves.
+_INSTALLATION_KEYS = ("LLM_WIKI_ROOT", "LLM_WIKI_STATE_ROOT")
+
+
+def _installation_env(projection: bytes) -> dict[str, object]:
+    env = _decode_object(projection).get("env")
+    return env if isinstance(env, dict) else {}
+
+
+def _names_this_installation(current: bytes, desired: bytes) -> bool:
+    """Our blocks from any release are ours; a block serving another vault is not.
+
+    The projection holds only blocks whose every command carries our marker (a
+    mixed block is refused before this) and our env keys, so an older release's
+    hooks are an earlier version of our own file, replaced on update as a package
+    replaces its unmodified conffile. Only roots naming another installation make
+    the owner ambiguous. See
+    `docs/research/2026-09-28-an-update-replaces-what-it-owns.md`.
+    """
+    have, want = _installation_env(current), _installation_env(desired)
+    return (all(have.get(key, want.get(key)) == want.get(key) for key in _INSTALLATION_KEYS)
+            and _codex_projection_matches(current, desired))
+
+
+def hook_family_resource(
     *,
     resource_id: str,
     kind: str,
     path: Path,
-    family: _HookFamily,
+    family: HookFamily,
     desired: bytes,
     config_existed: bool,
     finish: Callable[[dict[str, object], bytes | None], None],
@@ -685,7 +766,7 @@ def _hook_family_resource(
         desired=desired,
         read_owned=lambda: _family_projection(_read_config(path)[0], family),
         write_owned=lambda value: _write_family(path, value, metadata, family, finish),
-        recognizes=lambda current: current == desired,
+        recognizes=lambda current: _names_this_installation(current, desired),
         read_projections=lambda candidates: _family_projection_any(
             _read_config(path)[0], candidates, family
         ),
@@ -708,7 +789,7 @@ def _hook_family_resource(
 # (`merge_claude_settings.RETIRED_ALLOW`).
 
 
-def _claude_command_is_ours(handler: object) -> bool:
+def claude_command_is_ours(handler: object) -> bool:
     from merge_claude_settings import OUR_SCRIPT_MARKERS
 
     if not isinstance(handler, dict):
@@ -717,10 +798,10 @@ def _claude_command_is_ours(handler: object) -> bool:
     return any(marker in command for marker in OUR_SCRIPT_MARKERS)
 
 
-CLAUDE_FAMILY = _HookFamily("claude", _claude_command_is_ours, CLAUDE_ENV_KEYS)
+CLAUDE_FAMILY = HookFamily("claude", claude_command_is_ours, CLAUDE_ENV_KEYS)
 
 
-def _claude_finish(template: Mapping[str, object]):
+def claude_finish(template: Mapping[str, object]):
     def finish(config: dict[str, object], replacement: bytes | None) -> None:
         if replacement is None:
             return
@@ -748,16 +829,16 @@ def claude_settings_resource(
     env = {
         "LLM_WIKI_ROOT": str(_absolute_destination(vault_root)),
         "LLM_WIKI_STATE_ROOT": str(_absolute_destination(state_root)),
-        **provider_environment(),
+        **provider_environment(vault_root),
     }
-    return _hook_family_resource(
+    return hook_family_resource(
         resource_id="claude-user-settings",
         kind="claude_settings_fragment",
         path=path,
         family=CLAUDE_FAMILY,
         desired=_family_desired(template, env, CLAUDE_FAMILY),
         config_existed=path.exists() if config_existed is None else config_existed,
-        finish=_claude_finish(template),
+        finish=claude_finish(template),
     )
 
 
@@ -770,22 +851,166 @@ def claude_settings_template(root: Path) -> dict[str, object]:
     return template
 
 
+# The payload is nonsecret quoting transport, never a global Codex preference.
+
+
+def codex_launch_args(root: Path, script: str, tail: Sequence[str],
+                      bundle: Mapping[str, str] | None = None, *, relative_target: bool = False) -> list[str]:
+    root = root.resolve()
+    target = root / "scripts" / script
+    if script not in (*OUR_CODEX_SCRIPTS, "mcp_server.py"):
+        raise ValueError("invalid installed Codex target")
+    installed = provider_environment(root) if bundle is None else bundle
+    return ["run", "--locked", "--no-sync", "--directory", str(root), "python", "-c",
+            codex_provider_bootstrap(), codex_provider_payload(installed),
+            f"scripts/{script}" if relative_target else str(target), *tail]
+
+
+def _codex_template_arguments(command: str, root: Path) -> list[str]:
+    import shlex
+
+    return [item.replace('$LLM_WIKI_ROOT', str(root)).replace('%LLM_WIKI_ROOT%', str(root))
+            for item in shlex.split(command)]
+
+
+def _codex_template_launch(command: str, root: Path, bundle: Mapping[str, str]) -> list[str]:
+    args = _codex_template_arguments(command, root)
+    index = args.index("python")
+    target = Path(args[index + 1])
+    return [args[0], *codex_launch_args(root, target.name, args[index + 2:], bundle)]
+
+
+def _codex_handler_render(handler: Mapping[str, object], root: Path,
+                          bundle: Mapping[str, str]) -> dict[str, object]:
+    import shlex
+
+    command = handler.get("command")
+    if not isinstance(command, str) or not _codex_handler_is_ours(handler):
+        return dict(handler)
+    args = _codex_template_launch(command, root, bundle)
+    return dict(handler, command=shlex.join(args), commandWindows=codex_windows_command(args))
+
+
+def codex_rendered_template(root: Path, template: Mapping[str, object],
+                            bundle: Mapping[str, str]) -> dict[str, object]:
+    rendered = json.loads(json.dumps(template))
+    for groups in _family_hooks(rendered, CODEX_FAMILY).values():
+        for group in groups:
+            group["hooks"] = [_codex_handler_render(handler, root, bundle)
+                              for handler in _block_hooks(group)]
+    return rendered
+
+
+def _codex_resource_template(template: Mapping[str, object], root: Path | None,
+                             bundle: Mapping[str, str]) -> Mapping[str, object]:
+    if root is not None:
+        return codex_rendered_template(root, template, bundle)
+    if not bundle:
+        return template
+    return codex_rendered_template(_codex_template_root(template), template, bundle)
+
+
+def _codex_template_root(template: Mapping[str, object]) -> Path:
+    import shlex
+
+    roots = set()
+    for groups in _family_hooks(template, CODEX_FAMILY).values():
+        for group in groups:
+            roots.update(_codex_handler_roots(_block_hooks(group), shlex.split))
+    if len(roots) != 1:
+        raise ValueError("installed Codex root is ambiguous")
+    return Path(roots.pop())
+
+
+def _codex_handler_roots(handlers: Sequence[object], split: Callable) -> set[str]:
+    roots = set()
+    for handler in handlers:
+        command = handler.get("command", "")
+        args = split(command)
+        if "--directory" in args:
+            roots.add(args[args.index("--directory") + 1])
+    return roots
+
+
+def _codex_projection_roots(projection: bytes) -> set[Path]:
+    roots = set()
+    for groups in _family_hooks(_decode_object(projection), CODEX_FAMILY).values():
+        for group in groups:
+            roots.update(_codex_block_roots(_block_hooks(group)))
+    return roots
+
+
+def _codex_block_roots(handlers: Sequence[object]) -> set[Path]:
+    roots = set()
+    for handler in handlers:
+        command = handler.get("command", "")
+        if "exec(__import__" in command:
+            roots.add(codex_command_launch(command)[0])
+    return roots
+
+
+def _codex_projection_matches(current: bytes, desired: bytes) -> bool:
+    have, want = _codex_projection_roots(current), _codex_projection_roots(desired)
+    return not have or have == want
+
+
+def codex_projection_bundle(projection: bytes, root: Path) -> dict[str, str]:
+    bundles = []
+    for groups in _family_hooks(_decode_object(projection), CODEX_FAMILY).values():
+        for group in groups:
+            bundles.extend(_codex_block_bundles(_block_hooks(group), root))
+    return _required_uniform_codex_bundle(bundles)
+
+
+def _required_uniform_codex_bundle(bundles: Sequence[dict[str, str]]) -> dict[str, str]:
+    if not bundles:
+        raise ValueError("installed Codex provider bundle is absent")
+    if any(bundle != bundles[0] for bundle in bundles):
+        raise ValueError("installed Codex provider bundle is ambiguous")
+    return bundles[0]
+
+
+def _codex_block_bundles(handlers: Sequence[object], root: Path) -> list[dict[str, str]]:
+    return [_codex_paired_command_bundle(handler, root) for handler in handlers]
+
+
+def _codex_paired_command_bundle(handler: Mapping[str, object], root: Path) -> dict[str, str]:
+    import shlex
+
+    command = handler.get("command")
+    bundle = _codex_matching_command_bundle(command, root)
+    if handler.get("commandWindows") != codex_windows_command(shlex.split(command)):
+        raise ValueError("installed Codex platform commands disagree")
+    return bundle
+
+
+def _codex_matching_command_bundle(command: object, root: Path) -> dict[str, str]:
+    if not isinstance(command, str):
+        raise ValueError("installed Codex command is absent")
+    actual, bundle = codex_command_launch(command)
+    if actual != root.resolve():
+        raise ValueError("installed Codex command belongs to another vault")
+    return bundle
+
 # --- Codex hooks --------------------------------------------------------------
 #
-# Codex owns no environment: its handlers reach the vault through the profile
-# fragment the same transaction writes. Whether the hooks may be written at all
+# Codex has no owned top-level environment fragment. The installed provider bundle
+# travels atomically in each owned command, and any explicit host provider key wins.
+# Whether the hooks may be written at all
 # is a separate question — inline hooks in `config.toml` can disable, duplicate,
 # or contradict the file ones — and that check stays where it is, in
 # `codex_memory`, ahead of the install.
 
 
 def _codex_handler_is_ours(handler: object) -> bool:
-    from codex_memory import _is_llm_wiki_hook
+    from codex_hook_identity import (
+        is_llm_wiki_hook,
+    )
 
-    return _is_llm_wiki_hook(handler)
+    return is_llm_wiki_hook(handler)
 
 
-CODEX_FAMILY = _HookFamily("codex", _codex_handler_is_ours)
+CODEX_FAMILY = HookFamily("codex", _codex_handler_is_ours)
 
 
 def _no_finish(_config: dict[str, object], _replacement: bytes | None) -> None:
@@ -796,16 +1021,19 @@ def codex_hooks_resource(
     destination: Path,
     template: Mapping[str, object],
     *,
+    root: Path | None = None,
+    provider_bundle: Mapping[str, str] | None = None,
     config_existed: bool | None = None,
 ) -> ManagedResource:
     """Own exactly the Codex hook blocks whose handlers are all ours."""
     path = _absolute_destination(destination)
-    return _hook_family_resource(
+    return hook_family_resource(
         resource_id="codex-user-hooks",
         kind="codex_hooks_fragment",
         path=path,
         family=CODEX_FAMILY,
-        desired=_family_desired(template, {}, CODEX_FAMILY),
+        desired=_family_desired(_codex_resource_template(template, root,
+            provider_environment(root) if provider_bundle is None else provider_bundle), {}, CODEX_FAMILY),
         config_existed=path.exists() if config_existed is None else config_existed,
         finish=_no_finish,
     )
@@ -875,3 +1103,26 @@ def retired_antigravity_hooks_resource(home: Path) -> ManagedResource:
         _read_antigravity_projections,
         _write_antigravity_projection,
     )
+
+
+EMBEDDED_ROOT_MARKER = "// llm-wiki:embedded-root"
+
+
+def plugin_with_embedded_root(source_text: str, vault_root: Path) -> str:
+    """Bake the vault root into the plugin the installer publishes.
+
+    OpenCode started from a desktop launcher inherits no shell environment, so
+    a plugin that only reads `LLM_WIKI_ROOT` captured nothing and said so only
+    on a console nobody reads.
+    """
+    lines = source_text.splitlines(keepends=True)
+    marked = [
+        index
+        for index, line in enumerate(lines)
+        if line.rstrip("\r\n").endswith(EMBEDDED_ROOT_MARKER)
+    ]
+    if len(marked) != 1:
+        raise ValueError("OpenCode plugin source has no single embedded-root marker")
+    value = json.dumps(str(vault_root))
+    lines[marked[0]] = f"const _EMBEDDED_ROOT = {value}; {EMBEDDED_ROOT_MARKER}\n"
+    return "".join(lines)

@@ -12,6 +12,7 @@ import sys
 from pathlib import Path
 
 import pytest
+from llm_wiki import runtime_roots
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 
@@ -33,14 +34,13 @@ def linked_state_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 def test_the_coordinator_resolves_its_state_root(linked_state_root: Path) -> None:
     import markdown_transaction
 
-    coordinator = markdown_transaction._default_coordinator()
+    coordinator = markdown_transaction.default_coordinator()
     assert coordinator.state_root == linked_state_root
 
 
 def test_the_queue_resolves_its_state_root(linked_state_root: Path) -> None:
-    import memory_queue
 
-    assert memory_queue._state_root() == linked_state_root
+    assert runtime_roots.state_root() == linked_state_root
 
 
 def test_the_blackboard_agrees_with_the_coordinator(linked_state_root: Path) -> None:
@@ -48,7 +48,7 @@ def test_the_blackboard_agrees_with_the_coordinator(linked_state_root: Path) -> 
     import markdown_transaction
 
     blackboard_root = Path(os.environ["LLM_WIKI_STATE_ROOT"]).resolve()
-    assert markdown_transaction._default_coordinator().state_root == blackboard_root
+    assert markdown_transaction.default_coordinator().state_root == blackboard_root
 
 
 def test_a_relative_state_root_is_made_absolute(
@@ -63,10 +63,9 @@ def test_a_relative_state_root_is_made_absolute(
     monkeypatch.setenv("LLM_WIKI_STATE_ROOT", "state")
 
     import markdown_transaction
-    import memory_queue
 
-    assert markdown_transaction._default_coordinator().state_root == state.resolve()
-    assert memory_queue._state_root() == state.resolve()
+    assert markdown_transaction.default_coordinator().state_root == state.resolve()
+    assert runtime_roots.state_root() == state.resolve()
 
 
 def test_the_state_file_is_kept_inside_the_bound_its_readers_use(tmp_path, monkeypatch):
@@ -82,7 +81,7 @@ def test_the_state_file_is_kept_inside_the_bound_its_readers_use(tmp_path, monke
     dropped = memory_state.trim_state_to_budget(state)
 
     assert dropped > 0
-    assert memory_state._state_bytes(state) <= 4096
+    assert memory_state.state_bytes(state) <= 4096
     assert state["last_compile_status"] == "ok", "only growth maps may be evicted"
 
 

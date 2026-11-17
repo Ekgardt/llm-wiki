@@ -8,14 +8,14 @@ The suite is the **full regression suite**. Highlights:
 
 | Test file | Guards against |
 |---|---|
-| `test_slug.py` | Slug collision resolution + strict `_slug_owns_dir` ownership (state.md without `- Project root:` must NOT be claimed). Base slug sanitization, Cyrillic preservation, git owner-repo fallback, hash-suffix last resort, idempotency. |
+| `test_slug.py` | Slug collision resolution + strict `slug_owns_dir` ownership (state.md without `- Project root:` must NOT be claimed). Base slug sanitization, Cyrillic preservation, git owner-repo fallback, hash-suffix last resort, idempotency. |
 | `test_compile_failure.py` | The `silent data loss` class bug where a failed LLM compile would still write `compiled_daily_hashes`. Monkey-patches `run_compile` to simulate failure, asserts hashes unchanged, exit=1, `last_compile_status=error`, `knowledge/log.md` untouched. |
 | `test_audit_runtime_contracts.py` | Post-audit regression guards: module-level `import re` in compile_memory (contradiction path), `subprocess` import in query_memory, flush_memory delegates to `maybe_compile.spawn_compile_if_idle` (PID lock). |
 | `test_audit_fixes.py` | e2e compile with `MEMORY_LLM_PROVIDER=fake` end-to-end against a tmp vault; pinned `LLM_WIKI_ROOT` in settings.json hooks; no title-case duplicate notes after three-zone rename. |
 | `test_context_noise.py` | Technical noise (`Trigger:`, `Transcript:`, `Project root:`, session-id UUIDs) stripped from SessionStart-injected context; useful signal preserved; ≤4KB cap. |
 | `test_slugify.py` | Unicode-safe slugify for Cyrillic questions; punct-only / emoji-only inputs get deterministic hash suffix instead of colliding. |
 | `test_session_end_skip.py` | SessionEnd hook skips vault cwd (delegates to project-level hook) and skips $HOME (not a project); writes tagged entry for normal non-vault cwd. |
-| `test_capture_hooks.py` | Exit-0 invariants on capture hooks, MIN_PROMPT_CHARS / SIGNIFICANT_TOOLS filters, vault-internal skip, rate-limit window. |
+| `test_capture_hooks.py` | Durable prompt/tool ingress, complete redacted occurrences, replay, short meaningful actions, publication failure and prompt counters. |
 | `test_flush_classification.py` | FLUSH_MAJOR/MINOR/OK classification + tier gating of `maybe_trigger_compile`. |
 | `test_graph_neighbors.py` | Triple-RRF fusion weights + graph-neighbor boost resolution. |
 | `test_guardrails.py` | Correction/preference collection, project filter, dedup, formatting. |
@@ -31,7 +31,13 @@ The suite is the **full regression suite**. Highlights:
 | `test_reranker.py` | Cross-encoder reranker: graceful degradation, rerank logic, sigmoid stability, search_memory integration. |
 | `test_access_tracking.py` | Access tracking: record, stats, Ebbinghaus decay score, frontmatter flush, batch threshold. |
 | `test_reflection.py` | A-MEM reflection: candidate finding (pages with >=2 updates), threshold, skip conditions, dry-run. |
-| `test_mcp_server.py` | MCP server: 12 task-shaped tools including doctor, resources, uniform response envelopes, async handling, and graceful degradation. |
+| `test_mcp_server_tool_definitions.py` | MCP server: the 12 task-shaped tools, their schemas and bounds. |
+| `test_mcp_server_helpers.py` | MCP server helpers: search, context, decisions, pages and code answers. |
+| `test_mcp_server_tool_calls.py` | MCP tool calls: validation, deadlines, uniform response envelopes and graceful degradation. |
+| `test_mcp_server_resources.py` | MCP resources, SDK callback compatibility and the stdio server lifecycle. |
+| `test_mcp_server_precise_requests.py` | Precise architecture requests and the single navigation manager. |
+| `test_mcp_server_navigation_adapters.py` | Navigation adapters: contained, hash-bound, redacted, bounded evidence. |
+| `test_mcp_server_warmup_and_queries.py` | Warm-up in the health answer; long queries reach retrieval whole. |
 | `test_event_envelope.py` | Versioned lifecycle event envelope validation and redaction. |
 | `test_integration_injection.py` | Thin host adapters normalize events through `integration_adapter.py`. |
 | `test_doctor.py` | Local health checks, degraded-only summaries, time budgets, and safe idempotent repairs. |
@@ -43,7 +49,14 @@ The suite is the **full regression suite**. Highlights:
 | `test_memory_state_permissions.py` | Windows sharing violations retry while ACL permission failures fail fast. |
 | `test_scheduled_nightly.py` | Nightly catchup lease completion/failure state and retry release. |
 | `test_impact_analysis.py` | LINK Layer: symbol extraction, stale wiki page finding, confidence levels, advisory formatting. |
-| `test_pyright_session.py` | Repository-scoped Pyright startup/readiness, exact read-only capabilities, document probes, semantic normalization, call hierarchy, diagnostics/progress, restart replay, and bounded lifecycle state. |
+| `test_pyright_session.py` | Pyright session public contract, qualified identity, and the verified launch guard. |
+| `test_pyright_session_startup.py` | Pyright startup: exact command and configuration, capped deadlines, retained cleanup owners, and interruptions. |
+| `test_pyright_session_documents.py` | Document probes and query readiness, stable source reads, lock contention, and open-document bounds. |
+| `test_pyright_session_queries.py` | Exact read-only capabilities, location/symbol/hover normalization, and call hierarchy. |
+| `test_pyright_session_diagnostics.py` | Pushed diagnostics currency, filtering and budgets, and bounded progress. |
+| `test_pyright_session_lifecycle.py` | Restart replay, readiness fences, constructor and annotation contracts, and close. |
+| `test_pyright_session_synchronize.py` | Workspace synchronization: revisions, did-change/close/watched events, and recovery. |
+| `test_pyright_session_manager.py` | Session manager keys, reuse, LRU eviction, capacity, lock deadlines, and close-all. |
 | `test_workspace_revision.py` | Bounded content revisions, Git/private-index equivalence, race fences, cancellation, and bounded pre/post inventory-proof reuse. |
 | `test_code_navigation.py` | Freshness-proven normalized facade, structural fallback, exact source citations, deterministic statuses, and bounded parsed-source caching. |
 | `test_code_navigation_benchmark.py` | Deterministic meaningful 100 KLOC fixture, closed schemas/gates, correctness, freshness, ownership, recovery, latency, and RSS evidence. |

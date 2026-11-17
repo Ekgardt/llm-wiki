@@ -1,7 +1,7 @@
 """Under a budget, a repeat of a page goes before the only span from another.
 
 Measured on this vault 2026-08-30 by the compiler's own trace: a median of two
-of twelve retrieved spans survive `_fitted_selection`. Questions answerable
+of twelve retrieved spans survive `fitted_selection`. Questions answerable
 from one session are fine — those are the categories that work. A multi-session
 question needs facts from two sessions and a temporal one a date from one and a
 fact from another, and with two slots, spending both on the same page answers
@@ -53,7 +53,7 @@ def test_two_entries_of_one_page_are_not_repeats_of_each_other() -> None:
     """Two sessions of one day live in one file and are both kept."""
     kept = [_Chunk("s1", "D", ("day", "session one")), _Chunk("s2", "D", ("day", "session two")), _Chunk("b1", "B")]
 
-    query_memory._shed_one(kept)
+    query_memory.shed_one(kept)
 
     assert [chunk.id for chunk in kept] == ["s1", "s2"]
 
@@ -66,14 +66,14 @@ def test_a_sibling_retrieval_never_chose_goes_before_a_retrieved_repeat() -> Non
         _Chunk("b1", "B"),
     ]
 
-    query_memory._shed_one(kept, frozenset({"a1", "a3", "b1"}))
+    query_memory.shed_one(kept, frozenset({"a1", "a3", "b1"}))
 
     assert [chunk.id for chunk in kept] == ["a1", "a3", "b1"]
 
 
 def _shed_until(kept: list, remaining: int) -> list:
     while len(kept) > remaining:
-        query_memory._shed_one(kept)
+        query_memory.shed_one(kept)
     return kept
 
 
@@ -90,7 +90,7 @@ def test_the_repeat_dropped_is_the_last_one() -> None:
     """Within the rule the ranking still decides which repeat goes."""
     kept = _chunks(("a1", "A"), ("a2", "A"), ("a3", "A"))
 
-    query_memory._shed_one(kept)
+    query_memory.shed_one(kept)
 
     assert [chunk.id for chunk in kept] == ["a1", "a2"]
 
@@ -99,7 +99,7 @@ def test_with_no_repeat_it_is_tail_shedding_exactly_as_before() -> None:
     """The old behaviour is preserved wherever the new rule does not apply."""
     kept = _chunks(("a1", "A"), ("b1", "B"), ("c1", "C"))
 
-    query_memory._shed_one(kept)
+    query_memory.shed_one(kept)
 
     assert [chunk.id for chunk in kept] == ["a1", "b1"]
 
@@ -124,7 +124,7 @@ def test_the_highest_ranked_span_is_never_the_first_to_go() -> None:
 def test_one_span_is_left_alone() -> None:
     kept = _chunks(("a1", "A"))
 
-    query_memory._shed_one(kept)
+    query_memory.shed_one(kept)
 
     assert kept == []
 
@@ -132,10 +132,10 @@ def test_one_span_is_left_alone() -> None:
 def test_the_redundant_index_finds_the_last_repeat() -> None:
     kept = _chunks(("a1", "A"), ("b1", "B"), ("a2", "A"), ("b2", "B"))
 
-    assert query_memory._redundant_index(kept) == 3
+    assert query_memory.redundant_index(kept) == 3
 
 
 def test_no_repeat_has_no_redundant_index() -> None:
     kept = _chunks(("a1", "A"), ("b1", "B"))
 
-    assert query_memory._redundant_index(kept) is None
+    assert query_memory.redundant_index(kept) is None

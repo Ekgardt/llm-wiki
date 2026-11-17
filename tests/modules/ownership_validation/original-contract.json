@@ -1,0 +1,113 @@
+{
+  "process": {
+    "value": "None"
+  },
+  "process-type": {
+    "error": "TypeError",
+    "message": "process must be a ProcessIdentity"
+  },
+  "pid-zero": {
+    "error": "ValueError",
+    "message": "process pid must be a positive integer"
+  },
+  "pid-bool": {
+    "error": "ValueError",
+    "message": "process pid must be a positive integer"
+  },
+  "start-empty": {
+    "error": "ValueError",
+    "message": "process start identity must be a non-empty string"
+  },
+  "text": {
+    "value": "'\u00e9'"
+  },
+  "text-byte-bound": {
+    "error": "ValueError",
+    "message": "field exceeds its bound"
+  },
+  "text-empty": {
+    "error": "ValueError",
+    "message": "field must be a non-empty string"
+  },
+  "text-nul": {
+    "error": "ValueError",
+    "message": "field exceeds its bound"
+  },
+  "text-surrogate": {
+    "error": "ValueError",
+    "message": "field must be valid UTF-8"
+  },
+  "role": {
+    "value": "'compile'"
+  },
+  "role-unknown": {
+    "error": "ValueError",
+    "message": "role is not one of the closed ownership roles"
+  },
+  "role-type": {
+    "error": "ValueError",
+    "message": "role is not one of the closed ownership roles"
+  },
+  "identity": {
+    "value": "{'file_id': '2', 'mtime_ns': 123, 'platform': 'posix', 'size': 8, 'volume': '1'}"
+  },
+  "identity-type": {
+    "error": "TypeError",
+    "message": "marker file_identity must be a RuntimeFileIdentity"
+  },
+  "identity-negative-size": {
+    "error": "ValueError",
+    "message": "marker file identity has invalid metadata"
+  },
+  "identity-bool-size": {
+    "error": "ValueError",
+    "message": "marker file identity has invalid metadata"
+  },
+  "identity-large": {
+    "error": "ValueError",
+    "message": "marker file identity has invalid metadata"
+  },
+  "identity-negative-time": {
+    "error": "ValueError",
+    "message": "marker file identity has invalid metadata"
+  },
+  "marker-json": {
+    "value": "b'{\"file_identity\":{\"file_id\":\"2\",\"mtime_ns\":123,\"platform\":\"posix\",\"size\":8,\"volume\":\"1\"},\"pid\":42}'"
+  },
+  "marker-required": {
+    "error": "ValueError",
+    "message": "compile ownership requires marker identity"
+  },
+  "marker-forbidden": {
+    "error": "ValueError",
+    "message": "capture ownership does not accept marker identity"
+  },
+  "marker-present": {
+    "value": "None"
+  },
+  "marker-absent": {
+    "value": "None"
+  },
+  "marker-path": {
+    "value": "'run/marker.json'"
+  },
+  "marker-wrong-pid": {
+    "error": "ValueError",
+    "message": "marker pid does not match the owner process"
+  },
+  "marker-escape": {
+    "error": "ValueError",
+    "message": "path must be normalized and relative"
+  },
+  "marker-digest": {
+    "error": "ValueError",
+    "message": "marker sha256 must be lowercase 64-hex"
+  },
+  "marker-bounded-json": {
+    "value": "b'{\"file_identity\":{\"file_id\":\"2\",\"mtime_ns\":123,\"platform\":\"posix\",\"size\":8,\"volume\":\"1\"},\"pid\":42}'"
+  },
+  "marker-changed": {
+    "error": "OperationalOwnershipError",
+    "message": "marker_identity_invalid"
+  }
+}

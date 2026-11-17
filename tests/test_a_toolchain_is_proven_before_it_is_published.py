@@ -15,8 +15,8 @@ import pytest
 from install_language_server import (
     INSTALL_MANIFEST_NAME,
     InstallError,
-    _prove_toolchain,
-    _validated_existing_install,
+    prove_toolchain,
+    validated_existing_install,
 )
 from lsp_identity import build_install_manifest
 
@@ -47,7 +47,7 @@ def _existing_install(root: Path) -> None:
 def test_a_toolchain_that_runs_is_published(tmp_path) -> None:
     _toolchain(tmp_path)
 
-    _prove_toolchain(RUST, tmp_path, deadline=float("inf"))
+    prove_toolchain(RUST, tmp_path, deadline=float("inf"))
 
 
 @posix_only
@@ -55,18 +55,18 @@ def test_a_toolchain_that_does_not_run_is_refused(tmp_path) -> None:
     _toolchain(tmp_path, exit_code=1)
 
     with pytest.raises(InstallError):
-        _prove_toolchain(RUST, tmp_path, deadline=float("inf"))
+        prove_toolchain(RUST, tmp_path, deadline=float("inf"))
 
 
 @posix_only
 def test_a_rerun_refuses_an_install_whose_toolchain_is_gone(tmp_path) -> None:
     _existing_install(tmp_path)
     _toolchain(tmp_path)
-    kept = _validated_existing_install(RUST, tmp_path)
+    kept = validated_existing_install(RUST, tmp_path)
     (tmp_path / RUST.toolchain_probes[0][0]).unlink()
 
     with pytest.raises(InstallError):
-        _validated_existing_install(RUST, tmp_path)
+        validated_existing_install(RUST, tmp_path)
     assert kept == tmp_path
 
 

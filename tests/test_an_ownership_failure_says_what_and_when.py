@@ -18,31 +18,32 @@ BENCHMARK_ROOT = Path(__file__).resolve().parent.parent / "benchmark"
 if str(BENCHMARK_ROOT) not in sys.path:
     sys.path.insert(0, str(BENCHMARK_ROOT))
 
-import run_code_navigation as runner  # noqa: E402
-from run_code_navigation import _FixtureRun, _RealNavigationRuntime  # noqa: E402
+import navigation_benchmark_ownership as ownership  # noqa: E402
+from navigation_benchmark_ownership import _RealNavigationRuntime  # noqa: E402
+from run_code_navigation import _FixtureRun  # noqa: E402
 
 
 def _code_of(action) -> str:
-    with pytest.raises(runner._OwnershipProbeError) as caught:
+    with pytest.raises(ownership._OwnershipProbeError) as caught:
         action()
-    return runner._unmeasured_reason(caught.value)
+    return ownership._unmeasured_reason(caught.value)
 
 
 def test_each_bare_failure_has_its_own_code() -> None:
     codes = [
-        _code_of(lambda: runner._require_single_terminal([], False)),
-        _code_of(lambda: runner._require_single_terminal([], True)),
-        _code_of(lambda: runner._check_probe_error(ValueError("late"), "timeout")),
+        _code_of(lambda: ownership._require_single_terminal([], False)),
+        _code_of(lambda: ownership._require_single_terminal([], True)),
+        _code_of(lambda: ownership._check_probe_error(ValueError("late"), "timeout")),
     ]
 
     assert codes == ["not_sent", "no_single_terminal", "wrong_terminal:ValueError"]
 
 
 def test_the_message_carries_the_cause_the_duration_and_the_clock() -> None:
-    error = runner._OwnershipProbeError("wrong_terminal", "ownership probe reached the wrong terminal")
+    error = ownership._OwnershipProbeError("wrong_terminal", "ownership probe reached the wrong terminal")
     error.__cause__ = ValueError("answered")
 
-    message = runner._unmeasured_message(error, 0.0625)
+    message = ownership._unmeasured_message(error, 0.0625)
 
     assert message.startswith("ownership probe reached the wrong terminal: answered (after 62.5 ms; monotonic resolution ")
 
@@ -65,7 +66,7 @@ def _failing_reset(deadline: float) -> int:
 
 def test_a_failed_recovery_is_reported_with_the_scenario() -> None:
     run = object.__new__(_FixtureRun)
-    run.runtime = _runtime(runner._OwnershipProbeError("not_sent", "ownership probe request was not sent"), _failing_reset)
+    run.runtime = _runtime(ownership._OwnershipProbeError("not_sent", "ownership probe request was not sent"), _failing_reset)
     run.runtime._ownership_outcome("timeout", time.monotonic() + 60)
     run.errors = []
     run.ownership = {"timeout": {"available": False, "orphan_count": None}}
@@ -93,10 +94,27 @@ def _is_suppress(node: ast.AST) -> bool:
     return isinstance(node, ast.Attribute) and node.attr == "suppress"
 
 
-def test_no_ownership_failure_is_a_bare_runtime_error_or_swallowed() -> None:
-    nodes = list(ast.walk(ast.parse((BENCHMARK_ROOT / "run_code_navigation.py").read_text(encoding="utf-8"))))
+def _runner_sources() -> list[Path]:
+    return [BENCHMARK_ROOT / "run_code_navigation.py", *sorted(BENCHMARK_ROOT.glob("navigation_benchmark_*.py"))]
 
-    bare = [node.lineno for node in nodes if _is_bare_probe_error(node)]
-    swallowed = [node.lineno for node in nodes if _is_suppress(node)]
+
+def _runner_nodes() -> list[tuple[str, ast.AST]]:
+    return [
+        (source.name, node)
+        for source in _runner_sources()
+        for node in ast.walk(ast.parse(source.read_text(encoding="utf-8")))
+    ]
+
+
+def test_the_scan_reads_the_runner_and_every_part_it_was_split_into() -> None:
+    names = set(source.name for source in _runner_sources())
+    assert set(["run_code_navigation.py", "navigation_benchmark_ownership.py"]) <= names
+
+
+def test_no_ownership_failure_is_a_bare_runtime_error_or_swallowed() -> None:
+    nodes = _runner_nodes()
+
+    bare = [(name, node.lineno) for name, node in nodes if _is_bare_probe_error(node)]
+    swallowed = [(name, node.lineno) for name, node in nodes if _is_suppress(node)]
 
     assert (bare, swallowed) == ([], [])

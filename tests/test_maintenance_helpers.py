@@ -18,8 +18,8 @@ import pytest
 
 @pytest.fixture
 def artifacts(tmp_path, monkeypatch):
-    directory = tmp_path / "maintenance"
-    monkeypatch.setattr(maintenance_helpers, "ARTIFACT_DIR", directory)
+    directory = tmp_path / "logs" / "maintenance"
+    monkeypatch.setenv("LLM_WIKI_STATE_ROOT", str(tmp_path))
     return directory
 
 
@@ -159,8 +159,7 @@ def test_prune_reports_tolerates_a_missing_directory(tmp_path):
 def test_prune_maintenance_output_covers_reports_and_artifacts(tmp_path, monkeypatch):
     reports = tmp_path / "logs"
     artifacts = reports / "maintenance"
-    monkeypatch.setattr(maintenance_helpers, "REPORTS_DIR", reports)
-    monkeypatch.setattr(maintenance_helpers, "ARTIFACT_DIR", artifacts)
+    monkeypatch.setenv("LLM_WIKI_STATE_ROOT", str(tmp_path))
     _report(reports, "nightly-old.md", age_days=60)
     _report(reports, "weekly-old.md", age_days=60)
     _report(reports, "lint-old.md", age_days=60)

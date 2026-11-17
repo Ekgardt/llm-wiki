@@ -58,7 +58,7 @@ def test_an_answer_without_its_list_gets_the_ids_its_claims_carry():
         {"text": "It costs $300.", "citation_ids": ["E2"]},
     ]
 
-    validated = query_memory._validated_answer_document(
+    validated = query_memory.validated_answer_document(
         _document(status="answered", claims=claims)
     )
 
@@ -72,4 +72,4 @@ def test_a_list_that_was_given_is_left_for_the_gates():
         citations=[{"citation_id": "E9"}],
     )
 
-    assert query_memory._validated_answer_document(given)["citations"] == [{"citation_id": "E9"}]
+    assert query_memory.validated_answer_document(given)["citations"] == [{"citation_id": "E9"}]

@@ -1,7 +1,7 @@
 # LLM Wiki
 
 [![Tests](https://github.com/Ekgardt/llm-wiki/actions/workflows/tests.yml/badge.svg)](https://github.com/Ekgardt/llm-wiki/actions/workflows/tests.yml)
-[![Python](https://img.shields.io/badge/python-3.10%2B-blue.svg)](https://www.python.org)
+[![Python](https://img.shields.io/badge/python-3.14-blue.svg)](https://www.python.org)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Version](https://img.shields.io/badge/version-5.0.0-blue.svg)](CHANGELOG.md)
 
@@ -51,7 +51,7 @@ Claude Code、Codex 和 OpenCode 在会话结束时都会忘掉一切。LLM Wiki
 
 ### 前提条件
 
-- Python 3.10+ 和 git
+- Python 3.14 和 git。安装程序会明确选择此 Python 系列；可通过 `uv python install 3.14` 安装。
 - [uv](https://docs.astral.sh/uv/) 恰好 0.12.3——两个安装程序都会拒绝其他版本
 - 你已在使用的代理：Claude Code、Codex 或 OpenCode
 - Node 22——仅在需要精确的 TypeScript 或 Python 导航时（见下文）
@@ -99,11 +99,11 @@ uv run python scripts/search_memory.py "auth"
 
 ### 依赖配置
 
-MCP 属于 production 基线；`mcp-server` 保留为 compatibility alias。安装程序会替你完成；
-手动执行：
+MCP 属于 production 基线；`mcp-server` 保留为 compatibility alias。安装程序会安装全部组件（`full` 扩展：向量检索、reranker、代码索引）以及用于 Python 的
+Pyright；在 Linux 上 torch 取自 PyTorch 的 CPU 构建。手动执行：
 
 ```bash
-uv sync --locked --no-default-groups
+uv sync --locked --no-default-groups --inexact --extra full
 uv run --locked --no-sync python scripts/install_smoke.py --deadline-seconds 120
 uv run --locked --no-sync python scripts/repair_installed_memory.py --check --json
 ```
@@ -113,11 +113,25 @@ uv run --locked --no-sync python scripts/repair_installed_memory.py --check --js
 当前的数据库格式；若知识库中已有工作，会先请你确认没有代理在运行。它从不删除知识
 或 `run/`。
 
-可选扩展会叠加到已安装的内容上，并保留你已选择的部分：
+模型只在 `llm-wiki.toml` 中保存一次，手动调用、hooks、MCP 和定时维护共用
+这一设置，安装程序也使用同一选择命令。目录中的条目只是候选项；保存前会通过
+当前订阅完成一次简短请求，以验证所选模型。
 
 ```bash
-uv sync --locked --no-default-groups --inexact --extra hybrid      # 向量 + reranker
-uv sync --locked --no-default-groups --inexact --extra code-graph  # 代码索引
+uv run python scripts/choose_model.py show
+uv run python scripts/choose_model.py list --provider codex
+uv run python scripts/choose_model.py set codex/gpt-6.1-sol --reasoning medium
+```
+
+使用 `select` 打开交互菜单。验证失败不会改变原有选择。保存的选择优先于旧的
+模型和提供方环境变量副本；连接地址和 DLP 规则仍单独配置。升级到此配置格式时，
+先停止旧的后台任务。标准 MCP 会在没有未完成调用的下一次请求时自动更新工作进程；
+不使用 supervisor 的客户端需要重启。
+
+其他语言的代码导航按需安装，每种语言一条命令：
+
+```bash
+uv run --locked --no-sync python scripts/install_language_server.py --profile typescript     # 或 gopls、rust-analyzer
 ```
 
 贡献者安装开发依赖组并运行完整回归套件：

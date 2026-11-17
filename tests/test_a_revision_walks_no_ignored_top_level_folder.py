@@ -12,7 +12,7 @@ from pathlib import Path
 import workspace_revision
 from repository_scope import resolve_repository_scope
 
-from tests.test_repository_index import _repository
+from tests.repository_index_helpers import _repository
 
 
 def test_an_ignored_dependency_tree_does_not_reach_the_ceiling(tmp_path: Path, monkeypatch) -> None:

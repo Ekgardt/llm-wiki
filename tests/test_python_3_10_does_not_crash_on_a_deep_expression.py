@@ -4,6 +4,7 @@ docs/research/2026-09-26-python-3-10-does-not-crash-on-a-deep-expression.md
 """
 from __future__ import annotations
 
+import ast
 import subprocess
 import sys
 from pathlib import Path
@@ -51,8 +52,9 @@ def test_a_long_data_literal_is_still_parsed() -> None:
 def test_a_flat_table_of_signed_numbers_is_parsed() -> None:
     """Audit 2026-09-26 C-3: many one-level items are not one deep chain."""
     sys.path.insert(0, str(SCRIPTS))
-    from python_parse import _longest_operator_chain
+    from python_parse import parse_python
 
     table = ("TABLE = [" + ", ".join(f"-{index}" for index in range(4000)) + "]\n").encode()
 
-    assert _longest_operator_chain(table) == 1
+    tree = parse_python(table)
+    assert ast.literal_eval(tree.body[0].value) == [-index for index in range(4000)]

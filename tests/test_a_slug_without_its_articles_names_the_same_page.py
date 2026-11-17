@@ -7,8 +7,14 @@ snapshot matched slugs exactly, so it would have created a near-duplicate. See
 
 from __future__ import annotations
 
-import compile_memory
-from compile_memory import CompileInputs, TargetSnapshot, _with_snapshot_actions
+from llm_wiki import compile_pipeline_operations
+from llm_wiki.compile_pipeline_operations import (
+    with_snapshot_actions,
+)
+from llm_wiki.compile_pipeline_sources import (
+    CompileInputs,
+    TargetSnapshot,
+)
 
 
 def _page(slug: str, status: str = "active") -> TargetSnapshot:
@@ -25,7 +31,7 @@ def _create(slug: str) -> dict[str, object]:
 
 
 def _decided(operations: list[dict[str, object]], *pages: TargetSnapshot) -> list[tuple[object, object]]:
-    kept = _with_snapshot_actions(operations, _inputs(*pages))
+    kept = with_snapshot_actions(operations, _inputs(*pages))
     return [(operation["slug"], operation["action"]) for operation in kept]
 
 
@@ -66,8 +72,8 @@ def test_the_page_it_names_is_still_refused_when_retired() -> None:
 
 
 def test_a_slug_of_only_articles_keys_to_itself() -> None:
-    assert compile_memory._slug_key("the") == "the"
-    assert compile_memory._slug_key("a-the-an") == "a-the-an"
+    assert compile_pipeline_operations.slug_key("the") == "the"
+    assert compile_pipeline_operations.slug_key("a-the-an") == "a-the-an"
 
 
 def test_a_plural_slug_updates_the_singular_page() -> None:
@@ -79,7 +85,7 @@ def test_a_plural_slug_updates_the_singular_page() -> None:
 
 
 def test_a_word_that_only_ends_in_s_is_not_a_plural() -> None:
-    assert compile_memory._slug_key("class-status-analysis") == "class-status-analysis"
+    assert compile_pipeline_operations.slug_key("class-status-analysis") == "class-status-analysis"
 
 
 def test_a_retired_duplicate_leaves_its_live_sibling_the_only_match() -> None:

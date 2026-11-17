@@ -1,0 +1,233 @@
+{
+  "encoding": "o200k_base",
+  "max_tokens": 100000,
+  "serialization": "exact-duplicates/v1",
+  "files": [
+    "AGENTS.md",
+    "CLAUDE.md",
+    "docs/AGENTS.md",
+    "docs/STRUCTURE.md",
+    "docs/modules/context-bundle.md",
+    "docs/modules/context-records.md",
+    "docs/modules/context-tooling.md",
+    "docs/modules/formats.md",
+    "docs/modules/markdown-coordinator-base-context.json",
+    "docs/modules/markdown-coordinator-base.md",
+    "docs/modules/model-choice.md",
+    "docs/modules/product-structure.md",
+    "docs/modules/project-governance.md",
+    "docs/modules/test-support.md",
+    "rules/development-laws.md",
+    "scripts/__init__.py",
+    "scripts/llm_wiki/__init__.py",
+    "scripts/llm_wiki/context_bundle.py",
+    "scripts/llm_wiki/formats/__init__.py",
+    "scripts/llm_wiki/markdown_coordinator_base.py",
+    "tests/__init__.py",
+    "tests/conftest.py",
+    "tests/module_context.py",
+    "tests/module_context_paths.py",
+    "tests/module_interface.py",
+    "tests/module_interface_render.py",
+    "tests/module_qualification.py",
+    "tests/module_record_context.py",
+    "tests/module_records.py",
+    "tests/shared_fixtures.py",
+    "tests/slow_machine.py"
+  ],
+  "ownership": {
+    "files": [
+      "docs/modules/markdown-coordinator-base-context.json",
+      "docs/modules/markdown-coordinator-base.md",
+      "scripts/llm_wiki/markdown_coordinator_base.py"
+    ]
+  },
+  "qualified_dependencies": [
+    {
+      "provider": "scripts/iso_time.py",
+      "names": [
+        "utc_text"
+      ],
+      "contract_sha256": "b7151d094646f6efb0895d5e32f0237918a40d0f8e12b5eb0af3e60484d51a03",
+      "integration_tests": [
+        "tests/test_an_append_keeps_only_what_it_added.py",
+        "tests/test_sql_schema_names_are_identifiers.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/coordinator_schema.py",
+      "names": [
+        "COORDINATOR_V3_CONTRACT"
+      ],
+      "contract_sha256": "a24f426a93b0c2fc14ebad8491cf73b0399a2940fe46c7c03c07cd830ebd56d7",
+      "integration_tests": [
+        "tests/test_an_append_keeps_only_what_it_added.py",
+        "tests/test_sql_schema_names_are_identifiers.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/coordinator_validation.py",
+      "names": [
+        "require_coordinator_v3_openable",
+        "validate_coordinator_v3_database"
+      ],
+      "contract_sha256": "dd53ba559319604c38bf98bb18846b2f935fd8996804c02d2f885c92bfa6d3bf",
+      "integration_tests": [
+        "tests/test_an_append_keeps_only_what_it_added.py",
+        "tests/test_sql_schema_names_are_identifiers.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/formats/canonical.py",
+      "names": [
+        "sha256_bytes"
+      ],
+      "contract_sha256": "7d34a853c5a6f1be8b00805b2e865ac2a5ca5a6fe3ca141de97ebda61d2a85cf",
+      "integration_tests": [
+        "tests/test_an_append_keeps_only_what_it_added.py",
+        "tests/test_sql_schema_names_are_identifiers.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/generation_catalog_store.py",
+      "names": [
+        "GenerationCatalog"
+      ],
+      "contract_sha256": "b18194ebe04bf988b4474379fcb5243516550d43b745a00eaed1453f7844c983",
+      "integration_tests": [
+        "tests/test_a_blocked_task_has_a_way_back.py",
+        "tests/test_a_build_in_flight_is_not_an_orphan.py",
+        "tests/test_a_capacity_refusal_does_not_corrupt_a_generation.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/markdown_records.py",
+      "names": [
+        "IntentFence"
+      ],
+      "contract_sha256": "303482be380503ba3899c7ffd3d4b4a1bd26a4a17ac90648d4612ebae42e823e",
+      "integration_tests": [
+        "tests/test_an_append_keeps_only_what_it_added.py",
+        "tests/test_sql_schema_names_are_identifiers.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/markdown_store.py",
+      "names": [
+        "now",
+        "utc_now"
+      ],
+      "contract_sha256": "22c1a90e7004c8169c16ac55be1739923f2e5be46f0131a302a080fb5f28bf7a",
+      "integration_tests": [
+        "tests/test_an_append_keeps_only_what_it_added.py",
+        "tests/test_sql_schema_names_are_identifiers.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/model_choice.py",
+      "names": [
+        "using_root"
+      ],
+      "contract_sha256": "d45f2655cb61963e77617d1dfd7d617b134ad77cc770b59b335d0856e5d65019",
+      "integration_tests": [
+        "tests/test_a_block_opens_one_entry.py",
+        "tests/test_a_blocked_task_has_a_way_back.py",
+        "tests/test_a_build_in_flight_is_not_an_orphan.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/queue_contracts.py",
+      "names": [
+        "CaptureTaskBinding"
+      ],
+      "contract_sha256": "3e2b3384ee8c27fd6b526095bdc8267509fd466767c368dead6d6b4a47e9eda5",
+      "integration_tests": [
+        "tests/test_an_append_keeps_only_what_it_added.py",
+        "tests/test_sql_schema_names_are_identifiers.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/reliability_defaults.py",
+      "names": [
+        "DEFAULTS"
+      ],
+      "contract_sha256": "f37296a83c15073e42a6cc8b86b88c2d19c548ac19a4ef6d0ca2f7af925c90c8",
+      "integration_tests": [
+        "tests/test_an_append_keeps_only_what_it_added.py",
+        "tests/test_sql_schema_names_are_identifiers.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/sqlite_contracts.py",
+      "names": [
+        "quote_sqlite_identifier"
+      ],
+      "contract_sha256": "67a3026718f88a309241d1a95b575b922809f72c59aebd2c504b7675b433cf63",
+      "integration_tests": [
+        "tests/test_an_append_keeps_only_what_it_added.py",
+        "tests/test_sql_schema_names_are_identifiers.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/sqlite_deadlines.py",
+      "names": [
+        "operational_deadline_active",
+        "refresh_operational_deadline"
+      ],
+      "contract_sha256": "0e24bc3194f79287b74b0a784d52ec2c3adb35a870d55c9f6b960a32468e01bd",
+      "integration_tests": [
+        "tests/test_an_append_keeps_only_what_it_added.py",
+        "tests/test_sql_schema_names_are_identifiers.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/sqlite_transactions.py",
+      "names": [
+        "begin_immediate"
+      ],
+      "contract_sha256": "fb9ecde177ce133dd8e6e34a67214ca0c051a02d758e8611dac84b568d955373",
+      "integration_tests": [
+        "tests/test_an_append_keeps_only_what_it_added.py",
+        "tests/test_sql_schema_names_are_identifiers.py"
+      ]
+    },
+    {
+      "provider": "scripts/operational_ownership.py",
+      "names": [
+        "OwnerLease",
+        "OwnershipRegistry"
+      ],
+      "contract_sha256": "1406b96db39b50e37477c67031734de53ca0c2aa328a477581f3ed63ec3aa06d",
+      "integration_tests": [
+        "tests/test_a_backup_image_carries_what_git_does_not.py",
+        "tests/test_a_backup_snapshots_what_hooks_write.py",
+        "tests/test_a_backup_takes_what_any_installed_vault_holds.py"
+      ]
+    },
+    {
+      "provider": "scripts/reliable_memory.py",
+      "names": [
+        "open_operational_db",
+        "set_owner_only",
+        "validate_state_root"
+      ],
+      "contract_sha256": "f4a29886c69e6658a9337621fafd4e160e82aa8e3ed2ce2c4dc27751dc6ad005",
+      "integration_tests": [
+        "tests/test_an_append_keeps_only_what_it_added.py",
+        "tests/test_sql_schema_names_are_identifiers.py"
+      ]
+    },
+    {
+      "provider": "scripts/repository_scope.py",
+      "names": [
+        "sanitized_git_environment"
+      ],
+      "contract_sha256": "fd550ae20761afad50b37fa3a71044a162485b0e4d4b3e2af9b5b22e143c2bec",
+      "integration_tests": [
+        "tests/modules/cleanup_worktrees/test_git_refusal.py",
+        "tests/test_a_blocked_task_has_a_way_back.py",
+        "tests/test_a_build_in_flight_is_not_an_orphan.py"
+      ]
+    }
+  ]
+}

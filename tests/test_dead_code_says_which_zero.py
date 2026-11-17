@@ -43,13 +43,13 @@ def _node(name: str) -> dict:
 @pytest.fixture(autouse=True)
 def _fixed_location(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
-        code_graph, "_stored_location", lambda *_a: ("scripts/thing.py", 7)
+        "llm_wiki.code_graph_dead_code.stored_location", lambda *_a: ("scripts/thing.py", 7)
     )
 
 
 def _reasons(names: object, symbols: list[str]) -> list[str | None]:
     graph = _Graph(names)
-    built = code_graph._stored_dead_candidates(
+    built = code_graph.stored_dead_candidates(
         graph, [_node(name) for name in symbols], Path("/repo")
     )
     found = {item["name"]: item["reason"] for item in built}

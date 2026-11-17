@@ -8,35 +8,34 @@ from __future__ import annotations
 import argparse
 import json
 import sys
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
+
+from tests.compile_paths import point_compile_path
 
 SCRIPTS_DIR = Path(__file__).resolve().parent.parent / "scripts"
 if str(SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_DIR))
 
 import build_guardrails  # noqa: E402
-import compile_memory  # noqa: E402
-import doctor  # noqa: E402
-import integration_adapter  # noqa: E402
+import project_checkpoint  # noqa: E402
 import retire_lsp_evidence  # noqa: E402
 import scheduled_nightly  # noqa: E402
 import session_start_context  # noqa: E402
+from llm_wiki import compile_pipeline_selection, doctor_generation  # noqa: E402
 
-from tests.test_doctor import _write_lsp_failure, _write_lsp_owner  # noqa: E402
+from tests.doctor_helpers import _write_lsp_failure, _write_lsp_owner  # noqa: E402
 
 
 def _own_state(tmp_path: Path, monkeypatch) -> Path:
     import memory_state
 
-    monkeypatch.setattr(memory_state, "STATE_DIR", tmp_path / "run")
-    monkeypatch.setattr(memory_state, "STATE_FILE", tmp_path / "run" / "state.json")
-    monkeypatch.setattr(memory_state, "LOCK_FILE", tmp_path / "run" / "state.json.lock")
+    monkeypatch.setenv("LLM_WIKI_STATE_ROOT", str(tmp_path))
     monkeypatch.setattr(scheduled_nightly, "update_state", memory_state.update_state)
     memory_state.save_state({"last_nightly_status": "success", "last_nightly_date": "2026-09-17"})
-    return memory_state.STATE_FILE
+    return memory_state.state_file()
 
 
 # ---------------------------------------------------------------- A2 ----
@@ -69,7 +68,7 @@ def test_a_pass_that_cannot_take_its_fence_records_the_failure(tmp_path, monkeyp
 
 def test_the_state_bound_admits_what_the_writer_can_produce() -> None:
     """40 pending items per project over 91 projects made 354 KiB on 2026-09-23."""
-    assert doctor.MAX_STATE_BYTES >= 4 * 1024 * 1024
+    assert doctor_generation.MAX_STATE_BYTES >= 4 * 1024 * 1024
 
 
 # ---------------------------------------------------------------- B3 ----
@@ -80,8 +79,8 @@ def test_the_state_bound_admits_what_the_writer_can_produce() -> None:
 
 def test_pending_checkpoint_events_older_than_thirty_days_are_dropped_and_noted(monkeypatch) -> None:
     noted: list[tuple[str, int]] = []
-    monkeypatch.setattr(integration_adapter, "_note_expired_events", lambda slug, n: noted.append((slug, n)))
-    now = datetime.now(timezone.utc)
+    monkeypatch.setattr(project_checkpoint, "note_expired_events", lambda slug, n: noted.append((slug, n)))
+    now = datetime.now(UTC)
     old = (now - timedelta(days=45)).isoformat()
     young = (now - timedelta(days=2)).isoformat()
     pending = {
@@ -90,7 +89,7 @@ def test_pending_checkpoint_events_older_than_thirty_days_are_dropped_and_noted(
         "fresh": [{"event_id": "d", "occurred_at": young}],
     }
 
-    integration_adapter._expire_pending_events(pending)
+    project_checkpoint.expire_pending_events(pending)
 
     assert (sorted(pending), [i["event_id"] for i in pending["mixed"]], sorted(noted)) == (
         ["fresh", "mixed"],
@@ -103,14 +102,14 @@ def test_pending_checkpoint_events_older_than_thirty_days_are_dropped_and_noted(
 
 
 def test_daily_logs_are_counted_at_the_top_level_only(tmp_path, monkeypatch) -> None:
-    daily = tmp_path / "daily"
+    daily = tmp_path / "knowledge" / "daily"
     (daily / "receipts").mkdir(parents=True)
     (daily / "2026-09-14.md").write_text("# log\n", encoding="utf-8")
     (daily / "README.md").write_text("# readme\n", encoding="utf-8")
     (daily / "receipts" / "v3-abc.md").write_text("# receipt\n", encoding="utf-8")
-    monkeypatch.setattr(session_start_context, "DAILY_DIR", daily)
+    monkeypatch.setenv("LLM_WIKI_ROOT", str(tmp_path))
 
-    assert session_start_context._count_daily_logs() == 1
+    assert session_start_context.count_daily_logs() == 1
 
 
 def test_a_wrapped_one_sentence_summary_is_joined_and_stops_at_the_paragraph() -> None:
@@ -118,7 +117,7 @@ def test_a_wrapped_one_sentence_summary_is_joined_and_stops_at_the_paragraph() -
         "# Title\n\nOne-sentence summary: a daily log larger than the compile input budget should be\n"
         "split at entry boundaries and compiled as parts,\nrather than skipped.\n\n## Next\n- bullet\n"
     )
-    assert build_guardrails._summary_of(content) == (
+    assert build_guardrails.summary_of(content) == (
         "a daily log larger than the compile input budget should be split at entry "
         "boundaries and compiled as parts, rather than skipped."
     )
@@ -126,16 +125,16 @@ def test_a_wrapped_one_sentence_summary_is_joined_and_stops_at_the_paragraph() -
 
 def test_a_dry_run_moves_no_clock(monkeypatch) -> None:
     calls: list[str] = []
-    monkeypatch.setattr(compile_memory, "_mark_started", lambda trigger: calls.append("started"))
-    monkeypatch.setattr(compile_memory, "_mark_finished", lambda *a, **k: calls.append("finished"))
+    point_compile_path(monkeypatch, "_mark_started", lambda trigger: calls.append("started"))
+    point_compile_path(monkeypatch, "mark_finished", lambda *a, **k: calls.append("finished"))
     dry = argparse.Namespace(dry_run=True, trigger="manual")
     wet = argparse.Namespace(dry_run=False, trigger="manual")
 
-    compile_memory._mark_started_unless_dry(dry)
-    compile_memory._mark_ok_unless_dry(dry)
-    compile_memory._mark_error_unless_dry(dry, RuntimeError("x"))
-    compile_memory._mark_started_unless_dry(wet)
-    compile_memory._mark_ok_unless_dry(wet)
+    compile_pipeline_selection.mark_started_unless_dry(dry)
+    compile_pipeline_selection.mark_ok_unless_dry(dry)
+    compile_pipeline_selection.mark_error_unless_dry(dry, RuntimeError("x"))
+    compile_pipeline_selection.mark_started_unless_dry(wet)
+    compile_pipeline_selection.mark_ok_unless_dry(wet)
 
     assert calls == ["started", "finished"]
 
@@ -144,18 +143,27 @@ def test_a_dry_run_moves_no_clock(monkeypatch) -> None:
 
 
 def _failure_root(state_root: Path, index: int, age_days: float, now: datetime) -> Path:
+    from tests.a_dead_owner_root_is_swept_when_the_next_server_starts_helpers import (
+        finished_process,
+    )
+
+    pid, identity = finished_process()
     nonce = f"{index:032x}"
     started = now - timedelta(days=age_days, minutes=1)
     owner = _write_lsp_owner(
-        state_root, owner_nonce=nonce, generation_nonce="f" * 32, started_at=started, owner_pid=999_999
+        state_root, owner_nonce=nonce, generation_nonce="f" * 32, started_at=started, owner_pid=pid
     )
-    _write_lsp_failure(owner, owner_nonce=nonce, generation_nonce="f" * 32, timestamp=now - timedelta(days=age_days), server_pid=999_999)
+    owner_path = owner / "owner.json"
+    record = json.loads(owner_path.read_text(encoding='utf-8'))
+    record["owner_start_identity"] = identity
+    owner_path.write_text(json.dumps(record, sort_keys=True, separators=(",", ":")))
+    _write_lsp_failure(owner, owner_nonce=nonce, generation_nonce="f" * 32, timestamp=now - timedelta(days=age_days), server_pid=pid)
     return owner
 
 
 def test_old_failure_roots_beyond_the_newest_twenty_are_retired(tmp_path) -> None:
     state_root = tmp_path / "state"
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     roots = [_failure_root(state_root, index, 30.0 - index * 0.1, now) for index in range(25)]
     young = _failure_root(state_root, 99, 1.0, now)
 
@@ -166,7 +174,7 @@ def test_old_failure_roots_beyond_the_newest_twenty_are_retired(tmp_path) -> Non
 
 def test_young_evidence_is_kept_even_beyond_twenty(tmp_path) -> None:
     state_root = tmp_path / "state"
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     roots = [_failure_root(state_root, index, 2.0, now) for index in range(25)]
 
     assert (retire_lsp_evidence.retire(state_root, now), all(r.exists() for r in roots)) == (0, True)
@@ -183,13 +191,13 @@ def test_consolidation_gives_its_provider_the_compile_ceiling(monkeypatch) -> No
     seen: list[int | None] = []
 
     def fake_call(prompt, system_prompt, max_tokens=0):
-        seen.append(llm_client._CALL_CEILING.get())
+        seen.append(llm_client.CALL_CEILING.get())
         return "ok"
 
     monkeypatch.setattr(llm_client, "call_llm", fake_call)
 
     ceiling = settings.setting_value("provider.draft_ceiling_seconds")
-    assert (episode_consolidation._call_provider("records"), seen) == ("ok", [ceiling])
+    assert (episode_consolidation.call_provider("records"), seen) == ("ok", [ceiling])
 
 
 # ---------------------------------------------------------------- D2 ----
@@ -200,7 +208,7 @@ def test_a_pre_era_pyright_receipt_is_retired_and_the_release_installs_fresh(tmp
     from install_pyright import install_pyright
     from reliable_memory import canonical_json_bytes
 
-    from tests.test_install_pyright import _artifact, _root
+    from tests.install_pyright_helpers import _artifact, _root
 
     state_root = tmp_path / "state"
     artifact = _artifact(tmp_path, monkeypatch)
@@ -209,7 +217,7 @@ def test_a_pre_era_pyright_receipt_is_retired_and_the_release_installs_fresh(tmp
     manifest = root / "install-manifest.json"
     receipt = json.loads(manifest.read_text(encoding="utf-8"))
     receipt.pop("executed_tree_sha256")
-    assert set(receipt) == pyright_profile._MANIFEST_KEYS_BEFORE_TREE_DIGEST
+    assert set(receipt) == pyright_profile.MANIFEST_KEYS_BEFORE_TREE_DIGEST
     manifest.write_bytes(canonical_json_bytes(receipt))
 
     result = install_pyright(state_root=state_root, artifact=artifact.path)
@@ -225,7 +233,7 @@ def test_a_directory_under_dist_does_not_invalidate_a_valid_install(tmp_path, mo
 
     from install_pyright import install_pyright
 
-    from tests.code_kernel_helpers import (
+    from tests.pyright_install_artifacts import (
         PyrightTarEntry,
         _default_pyright_entries,
         create_pyright_install_artifact,

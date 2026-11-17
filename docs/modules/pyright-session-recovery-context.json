@@ -1,0 +1,180 @@
+{
+  "encoding": "o200k_base",
+  "max_tokens": 100000,
+  "serialization": "exact-duplicates/v1",
+  "files": [
+    "AGENTS.md",
+    "CLAUDE.md",
+    "docs/AGENTS.md",
+    "docs/STRUCTURE.md",
+    "docs/modules/context-bundle.md",
+    "docs/modules/context-records.md",
+    "docs/modules/context-tooling.md",
+    "docs/modules/model-choice.md",
+    "docs/modules/product-structure.md",
+    "docs/modules/project-governance.md",
+    "docs/modules/pyright-session-recovery-context.json",
+    "docs/modules/pyright-session-recovery.md",
+    "docs/modules/test-support.md",
+    "rules/development-laws.md",
+    "scripts/__init__.py",
+    "scripts/llm_wiki/__init__.py",
+    "scripts/llm_wiki/context_bundle.py",
+    "scripts/llm_wiki/pyright_session_recovery.py",
+    "tests/__init__.py",
+    "tests/conftest.py",
+    "tests/module_context.py",
+    "tests/module_context_paths.py",
+    "tests/module_interface.py",
+    "tests/module_interface_render.py",
+    "tests/module_qualification.py",
+    "tests/module_record_context.py",
+    "tests/module_records.py",
+    "tests/shared_fixtures.py",
+    "tests/slow_machine.py"
+  ],
+  "ownership": {
+    "files": [
+      "docs/modules/pyright-session-recovery-context.json",
+      "docs/modules/pyright-session-recovery.md",
+      "scripts/llm_wiki/pyright_session_recovery.py"
+    ]
+  },
+  "qualified_dependencies": [
+    {
+      "provider": "scripts/interruption.py",
+      "names": [
+        "interruption_in_chain",
+        "raise_collected_errors"
+      ],
+      "contract_sha256": "701abf6550a947e30078448537b87cec61b4fa35f114498630cd75441b074895",
+      "integration_tests": [
+        "tests/modules/interruption/test_errors.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/generation_catalog_store.py",
+      "names": [
+        "GenerationCatalog"
+      ],
+      "contract_sha256": "b18194ebe04bf988b4474379fcb5243516550d43b745a00eaed1453f7844c983",
+      "integration_tests": [
+        "tests/test_a_blocked_task_has_a_way_back.py",
+        "tests/test_a_build_in_flight_is_not_an_orphan.py",
+        "tests/test_a_capacity_refusal_does_not_corrupt_a_generation.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/model_choice.py",
+      "names": [
+        "using_root"
+      ],
+      "contract_sha256": "d45f2655cb61963e77617d1dfd7d617b134ad77cc770b59b335d0856e5d65019",
+      "integration_tests": [
+        "tests/test_central_model_selection.py",
+        "tests/test_compile_execution_inventory.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/pyright_session_diagnostics.py",
+      "names": [
+        "drop_superseded_diagnostics"
+      ],
+      "contract_sha256": "c80df1d1b8d72a4f3f950ac03cee389111f717d442c165c96cbbd02355fd539d",
+      "integration_tests": [
+        "tests/test_pyright_session_diagnostics.py",
+        "tests/test_pyright_session_synchronize.py",
+        "tests/test_the_last_cuts_say_what_they_left_out.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/pyright_session_documents.py",
+      "names": [
+        "SyncPlan",
+        "without_wire_uri"
+      ],
+      "contract_sha256": "b61da43e64f58977940c9e7dbe38d68894e808f848481dc635a115bcc6094f8f",
+      "integration_tests": [
+        "tests/test_pyright_session_documents.py",
+        "tests/test_pyright_session_synchronize.py",
+        "tests/test_the_open_documents_make_room_for_the_next_file.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/pyright_session_values.py",
+      "names": [
+        "DiagnosticSnapshot",
+        "OpenDocument",
+        "validated_deadline"
+      ],
+      "contract_sha256": "69458472957944748e75721e20a6667be95b398bf9c727a148b51569ae9af9ae",
+      "integration_tests": [
+        "tests/test_a_document_is_opened_in_its_own_language.py",
+        "tests/test_code_navigation.py",
+        "tests/test_code_navigation_benchmark.py"
+      ]
+    },
+    {
+      "provider": "scripts/lsp_positions.py",
+      "names": [
+        "path_to_file_uri"
+      ],
+      "contract_sha256": "a04d4bfcbed49dd630f5f2b75ef337ccad532dafef980571cf5e2c59e20eb8f7",
+      "integration_tests": [
+        "tests/test_a_position_names_its_units.py",
+        "tests/test_code_navigation.py",
+        "tests/test_code_navigation_benchmark.py"
+      ]
+    },
+    {
+      "provider": "scripts/lsp_process.py",
+      "names": [
+        "LspProcess",
+        "ProcessState"
+      ],
+      "contract_sha256": "d0659bb09e58f95c71a9cb944cb009342a15d23b8c4aaa826120a974180d3165",
+      "integration_tests": [
+        "tests/test_a_dead_owner_root_is_swept_when_the_next_server_starts.py",
+        "tests/test_a_failed_server_is_started_again.py",
+        "tests/test_a_failed_server_leaves_its_redacted_last_words.py"
+      ]
+    },
+    {
+      "provider": "scripts/reliable_memory.py",
+      "names": [
+        "validate_state_root"
+      ],
+      "contract_sha256": "8680515cd873056a7c8a36e0057d91f2f83f23c48841263697676ff91f7ff964",
+      "integration_tests": [
+        "tests/test_a_backup_image_carries_what_git_does_not.py",
+        "tests/test_a_changed_task_setting_reaches_an_installed_machine.py",
+        "tests/test_a_committed_source_resolves_an_older_compile_plan.py"
+      ]
+    },
+    {
+      "provider": "scripts/repository_scope.py",
+      "names": [
+        "sanitized_git_environment"
+      ],
+      "contract_sha256": "fd550ae20761afad50b37fa3a71044a162485b0e4d4b3e2af9b5b22e143c2bec",
+      "integration_tests": [
+        "tests/test_a_code_generation_is_not_abandoned.py",
+        "tests/test_a_directory_link_inside_the_checkout_does_not_refuse_the_revision.py",
+        "tests/test_a_document_is_opened_in_its_own_language.py"
+      ]
+    },
+    {
+      "provider": "scripts/workspace_revision.py",
+      "names": [
+        "WorkspaceDelta",
+        "WorkspaceRevision"
+      ],
+      "contract_sha256": "3de65d03d837104a338621bf77d90db3e34bd2f5960f5bda1442e9bdfc98ab92",
+      "integration_tests": [
+        "tests/test_a_cloned_checkout_keeps_the_private_read.py",
+        "tests/test_a_directory_link_inside_the_checkout_does_not_refuse_the_revision.py",
+        "tests/test_a_failed_git_status_is_a_navigation_degradation.py"
+      ]
+    }
+  ]
+}

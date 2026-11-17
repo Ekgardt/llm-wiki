@@ -29,7 +29,8 @@ from pathlib import Path
 
 import lsp_profiles
 import pytest
-from pyright_session import LspLocation, _location_key, _lsp_range
+from llm_wiki.pyright_session_ranges import location_key, lsp_range
+from llm_wiki.pyright_session_values import LspLocation
 
 from tests.slow_machine import SHORT_TIMEOUT
 
@@ -272,7 +273,7 @@ def _readable(entry: object) -> bool:
 
 
 def _one_location(entry: dict) -> LspLocation:
-    return LspLocation(uri=entry["uri"], range=_lsp_range(entry.get("range")))
+    return LspLocation(uri=entry["uri"], range=lsp_range(entry.get("range")))
 
 
 @pytest.fixture()
@@ -345,8 +346,8 @@ def _key_is_well_formed(key: tuple) -> bool:
 
 def _check_location_shape(location: LspLocation) -> None:
     assert isinstance(location, LspLocation)
-    assert location.range is not None, "range failed pyright_session._lsp_range"
-    assert _key_is_well_formed(_location_key(location))
+    assert location.range is not None, "range failed pyright_session.lsp_range"
+    assert _key_is_well_formed(location_key(location))
 
 
 @requires_artifact

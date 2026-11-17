@@ -9,9 +9,7 @@ import os
 
 import memory_state
 
-from tests.test_a_corrupt_state_is_not_replaced_by_an_empty_one import (
-    state_dir,  # noqa: F401 - fixture
-)
+from tests.a_corrupt_state_is_not_replaced_by_an_empty_one_helpers import state_dir  # noqa: F401
 
 
 def _set(key: str, value: object):

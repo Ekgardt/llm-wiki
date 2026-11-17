@@ -1,0 +1,226 @@
+{
+  "encoding": "o200k_base",
+  "max_tokens": 100000,
+  "serialization": "exact-duplicates/v1",
+  "files": [
+    "AGENTS.md",
+    "CLAUDE.md",
+    "docs/AGENTS.md",
+    "docs/STRUCTURE.md",
+    "docs/modules/capture-adoption-tests-the-nightly-finishes-what-a-publisher-left-half-way-helpers.md",
+    "docs/modules/capture-adoption.md",
+    "docs/modules/context-bundle.md",
+    "docs/modules/context-records.md",
+    "docs/modules/context-tooling.md",
+    "docs/modules/formats.md",
+    "docs/modules/model-choice.md",
+    "docs/modules/product-structure.md",
+    "docs/modules/project-checkpoint-tests-adopted-capture-vault.md",
+    "docs/modules/project-governance.md",
+    "docs/modules/reliable-memory-tests-a-publication-that-stopped-half-way-is-finished-helpers.md",
+    "docs/modules/reliable-memory-tests-capture-intent-adoption-helpers.md",
+    "docs/modules/test-support.md",
+    "docs/modules/test-the-nightly-finishes-what-a-publisher-left-half-way-context.json",
+    "docs/modules/test-the-nightly-finishes-what-a-publisher-left-half-way.md",
+    "rules/development-laws.md",
+    "scripts/__init__.py",
+    "scripts/capture_adoption.py",
+    "scripts/llm_wiki/__init__.py",
+    "scripts/llm_wiki/context_bundle.py",
+    "scripts/llm_wiki/formats/__init__.py",
+    "tests/__init__.py",
+    "tests/a_publication_that_stopped_half_way_is_finished_helpers.py",
+    "tests/adopted_capture_vault.py",
+    "tests/capture_intent_adoption_helpers.py",
+    "tests/conftest.py",
+    "tests/module_context.py",
+    "tests/module_context_paths.py",
+    "tests/module_interface.py",
+    "tests/module_interface_render.py",
+    "tests/module_qualification.py",
+    "tests/module_record_context.py",
+    "tests/module_records.py",
+    "tests/shared_fixtures.py",
+    "tests/slow_machine.py",
+    "tests/test_the_nightly_finishes_what_a_publisher_left_half_way.py",
+    "tests/the_nightly_finishes_what_a_publisher_left_half_way_helpers.py"
+  ],
+  "ownership": {
+    "files": [
+      "docs/modules/test-the-nightly-finishes-what-a-publisher-left-half-way-context.json",
+      "docs/modules/test-the-nightly-finishes-what-a-publisher-left-half-way.md",
+      "tests/test_the_nightly_finishes_what_a_publisher_left_half_way.py"
+    ]
+  },
+  "qualified_dependencies": [
+    {
+      "provider": "scripts/breadcrumb_storage.py",
+      "names": [
+        "recover_pending"
+      ],
+      "contract_sha256": "c2762fbc85935f2c9e4d15348b6d52faab7ab8d4de8b7a42e94be855e412d8db",
+      "integration_tests": [
+        "tests/test_the_nightly_finishes_what_a_publisher_left_half_way.py"
+      ]
+    },
+    {
+      "provider": "scripts/capture_diagnostics.py",
+      "names": [
+        "is_contention",
+        "record_capture_failure"
+      ],
+      "contract_sha256": "706fea17391be7a89d594fc71f17746194faadeeaf97d458ffd92f78f2dd59ae",
+      "integration_tests": [
+        "tests/test_the_nightly_finishes_what_a_publisher_left_half_way.py"
+      ]
+    },
+    {
+      "provider": "scripts/capture_handler_identity.py",
+      "names": [
+        "verified_capture_handler"
+      ],
+      "contract_sha256": "4aef29bc825c979508265e12eee0aae8e4703615b59abad9b7022e001beb98e3",
+      "integration_tests": [
+        "tests/test_the_nightly_finishes_what_a_publisher_left_half_way.py"
+      ]
+    },
+    {
+      "provider": "scripts/capture_publication.py",
+      "names": [
+        "capture_publication_fence",
+        "publish_capture_files_and_task"
+      ],
+      "contract_sha256": "adaa338b6a1f121d0d50b0d605a21425a71e6fcccaf4cd430b79dad366a74fc8",
+      "integration_tests": [
+        "tests/test_the_nightly_finishes_what_a_publisher_left_half_way.py"
+      ]
+    },
+    {
+      "provider": "scripts/installed_memory_repair.py",
+      "names": [
+        "repair_installed_vault"
+      ],
+      "contract_sha256": "6ab4497d3ed56413bc24ea5ae9e993acf118980056b046072877a80df4f52a18",
+      "integration_tests": [
+        "tests/test_the_nightly_finishes_what_a_publisher_left_half_way.py"
+      ]
+    },
+    {
+      "provider": "scripts/integration_adapter.py",
+      "names": [
+        "encoded_capture_record"
+      ],
+      "contract_sha256": "c1c73b27401a0eeada333af83348785cd87fa68f98653a85a69f8e83e1d64a31",
+      "integration_tests": [
+        "tests/test_a_capture_that_fails_says_so.py",
+        "tests/test_a_checkpoint_records_what_was_done.py",
+        "tests/test_a_claude_prompt_takes_the_ingest_path.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/formats/canonical.py",
+      "names": [
+        "sha256_bytes"
+      ],
+      "contract_sha256": "7d34a853c5a6f1be8b00805b2e865ac2a5ca5a6fe3ca141de97ebda61d2a85cf",
+      "integration_tests": [
+        "tests/test_the_nightly_finishes_what_a_publisher_left_half_way.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/generation_catalog_store.py",
+      "names": [
+        "GenerationCatalog"
+      ],
+      "contract_sha256": "b18194ebe04bf988b4474379fcb5243516550d43b745a00eaed1453f7844c983",
+      "integration_tests": [
+        "tests/test_a_blocked_task_has_a_way_back.py",
+        "tests/test_a_build_in_flight_is_not_an_orphan.py",
+        "tests/test_a_capacity_refusal_does_not_corrupt_a_generation.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/model_choice.py",
+      "names": [
+        "using_root"
+      ],
+      "contract_sha256": "d45f2655cb61963e77617d1dfd7d617b134ad77cc770b59b335d0856e5d65019",
+      "integration_tests": [
+        "tests/test_the_nightly_finishes_what_a_publisher_left_half_way.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/runtime_roots.py",
+      "names": [
+        "state_root",
+        "vault_root"
+      ],
+      "contract_sha256": "904b31835161d11b79ab937c4651d91dd6966bdaa1f33e93b9ea768f519d2d3b",
+      "integration_tests": [
+        "tests/test_a_continuation_keeps_its_original_entry.py",
+        "tests/test_a_prompt_checkpoint_does_not_outwait_its_host.py",
+        "tests/test_a_session_marker_survives_a_busy_writer.py"
+      ]
+    },
+    {
+      "provider": "scripts/markdown_transaction.py",
+      "names": [
+        "MarkdownCoordinator",
+        "active_markdown_coordinator",
+        "initialize_coordinator_v3_candidate"
+      ],
+      "contract_sha256": "6cfad5e4cc382b81261d28dd7d6893e666519b8f3404651dc8ad935f7189151b",
+      "integration_tests": [
+        "tests/test_a_backup_image_carries_what_git_does_not.py",
+        "tests/test_a_backup_snapshots_what_hooks_write.py",
+        "tests/test_a_backup_takes_what_any_installed_vault_holds.py"
+      ]
+    },
+    {
+      "provider": "scripts/memory_state.py",
+      "names": [
+        "MAX_CAPTURE_INTENT_BYTES"
+      ],
+      "contract_sha256": "28a8dc8034cfb4107c91dc81134dc922d4ff140125e47e22b1745919f042b083",
+      "integration_tests": [
+        "tests/test_the_nightly_finishes_what_a_publisher_left_half_way.py"
+      ]
+    },
+    {
+      "provider": "scripts/queue_core.py",
+      "names": [
+        "MemoryQueue",
+        "active_memory_queue",
+        "initialize_queue_v3_candidate"
+      ],
+      "contract_sha256": "a3a735c1dffaab034f9ed706f2eb2a2eb66ebfb3c245f38543e2cc70e8c82910",
+      "integration_tests": [
+        "tests/test_the_nightly_finishes_what_a_publisher_left_half_way.py"
+      ]
+    },
+    {
+      "provider": "scripts/reliable_memory.py",
+      "names": [
+        "canonical_json_bytes",
+        "publish_runtime_file",
+        "read_runtime_bytes",
+        "sha256_bytes",
+        "validate_state_root"
+      ],
+      "contract_sha256": "acc1777792d75ec12c9097cab9b52657e1ab6be31a0e120c5da8319915108f4c",
+      "integration_tests": [
+        "tests/test_the_nightly_finishes_what_a_publisher_left_half_way.py"
+      ]
+    },
+    {
+      "provider": "scripts/repository_scope.py",
+      "names": [
+        "sanitized_git_environment"
+      ],
+      "contract_sha256": "fd550ae20761afad50b37fa3a71044a162485b0e4d4b3e2af9b5b22e143c2bec",
+      "integration_tests": [
+        "tests/test_the_nightly_finishes_what_a_publisher_left_half_way.py"
+      ]
+    }
+  ]
+}

@@ -7,7 +7,7 @@ Both were found by the CODE-07 paired stand on 2026-08-29 and verified twice.
    produces no `CALLS` edge, so it looked uncalled. Measured on the active
    generation: 402 of 461 `zero_confirmed_incoming_calls` names are named
    somewhere in the same corpus. The tool refuted itself inside one run —
-   `_architecture_dependencies` was listed dead while sitting in
+   `architecture_dependencies` was listed dead while sitting in
    `_ARCHITECTURE_MODE_QUERIES`.
 
 2. `mode=dependencies` answered `[]` for everything, always. The `dependency`
@@ -32,7 +32,6 @@ if str(SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_DIR))
 
 import code_graph  # noqa: E402
-import value_references  # noqa: E402
 
 _SOURCE = b'''HANDLERS = {"run": _worker}
 BY_PLATFORM = {"Linux": "_by_name"}
@@ -172,10 +171,10 @@ def _graph_records() -> dict:
 @pytest.fixture
 def graph_directory(tmp_path, monkeypatch):
     """An activated generation whose stored bytes are `_SOURCE`."""
-    from generation_catalog import GenerationCatalog
+    from llm_wiki.generation_catalog_store import GenerationCatalog
     from repository_scope import resolve_repository_scope
 
-    from tests.test_evidence_graph_recovery import _publish
+    from tests.evidence_graph_recovery_helpers import _publish
 
     catalog = GenerationCatalog(tmp_path / "state")
     scope = resolve_repository_scope(tmp_path)
@@ -190,11 +189,10 @@ def graph_directory(tmp_path, monkeypatch):
     # An answer asked under a deadline forwards that bound to the catalog, so
     # this double takes the options instead of refusing the call.
     monkeypatch.setattr(
-        code_graph, "_generation_catalog", lambda directory, **_options: catalog
+        "llm_wiki.code_graph_generation.generation_catalog", lambda directory, **_options: catalog
     )
     monkeypatch.setattr(
-        code_graph,
-        "_workspace_call_graph",
+        "llm_wiki.code_graph_workspace.workspace_call_graph",
         lambda directory: (_ for _ in ()).throw(AssertionError("live scan used")),
     )
     return tmp_path
@@ -268,56 +266,12 @@ def test_the_architecture_symbol_mode_survives_a_leading_underscore(
     import mcp_server
 
     monkeypatch.setattr(
-        mcp_server,
-        "_validated_code_directory",
+        "llm_wiki.mcp_server_validation.validated_code_directory",
         lambda directory, deadline=None: (graph_directory, None),
     )
-    answer = mcp_server._get_architecture_mode(
+    answer = mcp_server.get_architecture_mode(
         str(graph_directory), mode="symbol", symbol="_worker"
     )
 
     assert "error" not in answer
     assert answer["architecture"]["callees"] != []
-
-
-def test_a_thread_target_counts_as_a_reference() -> None:
-    index = value_references.build_reference_index(
-        [("app.py", b"import threading\nthreading.Thread(target=_run)\n")]
-    )
-
-    assert index.names_a_value("_run") is True
-
-
-def test_a_visitor_method_is_dispatched_by_its_base_class() -> None:
-    source = b"import ast\n\n\nclass V(ast.NodeVisitor):\n    def visit_Call(self):\n        pass\n"
-    index = value_references.build_reference_index([("v.py", source)])
-
-    assert index.is_dispatched("v.py", "visit_Call", 5) is True
-
-
-def test_a_staticmethod_is_not_treated_as_handed_over() -> None:
-    source = b"class C:\n    @staticmethod\n    def helper():\n        pass\n"
-    index = value_references.build_reference_index([("c.py", source)])
-
-    assert index.is_dispatched("c.py", "helper", 3) is False
-
-
-def test_a_registering_decorator_hands_the_definition_over() -> None:
-    source = b"@server.route('/x')\ndef view():\n    pass\n"
-    index = value_references.build_reference_index([("r.py", source)])
-
-    assert index.is_dispatched("r.py", "view", 2) is True
-
-
-def test_a_source_that_will_not_parse_widens_rather_than_claims_nothing() -> None:
-    index = value_references.build_reference_index([("broken.py", b"def (:\n")])
-
-    assert (index.names_a_value("def"), index.lexical_sources) == (True, 1)
-
-
-def test_prose_that_merely_mentions_a_name_does_not_rescue_it() -> None:
-    index = value_references.build_reference_index(
-        [("d.py", b'"""Claim one task for the legacy mark_attempt facade."""\n')]
-    )
-
-    assert index.names_a_value("mark_attempt") is False

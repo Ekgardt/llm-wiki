@@ -1,0 +1,266 @@
+{
+  "capture_seal_digest": {
+    "name": "capture_seal_digest",
+    "arguments": {
+      "task_id": "6f7d7d612c384930a363bf5d08170053",
+      "consumer_kind": "terminal",
+      "consumer_id": "terminal:fixture",
+      "active_link_digest": "f0e0ad6a0d0b6e316d4853bb3f1318e8f18d99bff4e81b605e28344005e7d66e"
+    },
+    "expected": "68d356cf534ee544231512d510edc5d4125f44c8c723bce7ccff14bea3030d55"
+  },
+  "_capture_resolution_record-none": {
+    "name": "capture_resolution_record",
+    "arguments": {
+      "task_id": "6f7d7d612c384930a363bf5d08170053",
+      "supersedes_digest": "f0e0ad6a0d0b6e316d4853bb3f1318e8f18d99bff4e81b605e28344005e7d66e",
+      "observed": {
+        "link_digest": "f0e0ad6a0d0b6e316d4853bb3f1318e8f18d99bff4e81b605e28344005e7d66e",
+        "index_digest": "f0e0ad6a0d0b6e316d4853bb3f1318e8f18d99bff4e81b605e28344005e7d66e",
+        "intent_file_digest": "8888888888888888888888888888888888888888888888888888888888888888"
+      },
+      "selected_intent": null,
+      "actor": "posix-uid:1000",
+      "reason": "Attempt to supersede after consumption.",
+      "now": "2026-11-03T07:09:12.891840+00:00"
+    },
+    "expected": {
+      "schema_version": "capture-task-link-resolution/v1",
+      "task_id": "6f7d7d612c384930a363bf5d08170053",
+      "supersedes_digest": "f0e0ad6a0d0b6e316d4853bb3f1318e8f18d99bff4e81b605e28344005e7d66e",
+      "observed": {
+        "link_digest": "f0e0ad6a0d0b6e316d4853bb3f1318e8f18d99bff4e81b605e28344005e7d66e",
+        "index_digest": "f0e0ad6a0d0b6e316d4853bb3f1318e8f18d99bff4e81b605e28344005e7d66e",
+        "intent_file_digest": "8888888888888888888888888888888888888888888888888888888888888888"
+      },
+      "selected_intent": null,
+      "actor_identity": "posix-uid:1000",
+      "reason": "Attempt to supersede after consumption.",
+      "created_at": "2026-11-03T07:09:12.891840+00:00"
+    }
+  },
+  "corrupt_metadata": {
+    "name": "corrupt_metadata",
+    "arguments": {
+      "task_id": "../escape",
+      "row": {
+        "id": "../escape",
+        "kind": "query",
+        "handler_version": 1,
+        "payload_blob": "{\"payload\":\"corrupt\"}",
+        "input_hash": "0000000000000000000000000000000000000000000000000000000000000000",
+        "dedupe_key": null,
+        "state": "dead",
+        "priority": 0,
+        "created_at": "2026-08-12T12:00:00+00:00",
+        "updated_at": "2026-08-12T12:00:00+00:00",
+        "available_at": "2026-08-12T12:00:00+00:00",
+        "attempts": 0,
+        "last_attempt_at": null,
+        "lease_owner": null,
+        "lease_token": null,
+        "lease_expires_at": null,
+        "lease_heartbeat_at": null,
+        "attempt_started_at": null,
+        "error_code": "payload_hash_mismatch",
+        "blocked_capability": null,
+        "result_reference": null,
+        "result_sha256": null,
+        "result_operation_id": null,
+        "redrive_of": null,
+        "lineage_generation": 0
+      }
+    },
+    "expected": "{\"error_code\":\"payload_hash_mismatch\",\"handler_version\":1,\"input_hash\":\"0000000000000000000000000000000000000000000000000000000000000000\",\"kind\":\"query\",\"lineage_generation\":0,\"state\":\"dead\",\"task_id\":\"../escape\"}"
+  },
+  "corrupt_disposition_key": {
+    "name": "corrupt_disposition_key",
+    "arguments": {
+      "actor": "posix-uid:1000",
+      "history_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+      "metadata_sha256": "6746d363ace7240b27053f67162ff4516a3dae2f91a93b334b55835d551cdcb1",
+      "raw_sha256": "fca281367372ca95c9913e605a525119bb2282006a1dce78accfcec453f822dc",
+      "reason": "Retain corrupt evidence.",
+      "task_id": "../escape"
+    },
+    "expected": "7026eacf7cb0d6f9547b00d5aa9a7fb81e3c7fb0f52b77dae0f1cbe92da9f880"
+  },
+  "corrupt_manifest": {
+    "name": "corrupt_manifest",
+    "arguments": {
+      "operation": {
+        "operation_id": "corrupt-export:2222222222222222222222222222222222222222222222222222222222222222",
+        "task_id": "corrupt-parent",
+        "disposition_key": "2222222222222222222222222222222222222222222222222222222222222222",
+        "task_fence_token_digest": "3333333333333333333333333333333333333333333333333333333333333333",
+        "task_fence_epoch": 1,
+        "intent_fence_digest": null,
+        "raw_sha256": "fca281367372ca95c9913e605a525119bb2282006a1dce78accfcec453f822dc",
+        "history_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+        "metadata_sha256": "603fdb18149fe59871ee2242478d53455f0ff0ddd70fd919792814ee009f371d",
+        "lineage_generation": 2505,
+        "cursor_task_id": "child-2504",
+        "link_count": 2505,
+        "page_count": 3,
+        "rolling_root": "0459906d4e91bab776c74956a55c81da48d8506bcda6e768a285747cf7d52779",
+        "state": "manifested",
+        "actor_identity": "posix-uid:1000",
+        "reason": "Export bounded lineage.",
+        "created_at": "2026-11-03T07:09:16.827048+00:00",
+        "updated_at": "2026-11-03T07:09:21.767818+00:00"
+      },
+      "operation_id": "corrupt-export:2222222222222222222222222222222222222222222222222222222222222222",
+      "task_id": "corrupt-parent",
+      "disposition_key": "2222222222222222222222222222222222222222222222222222222222222222"
+    },
+    "expected": {
+      "schema_version": "corrupt-task-manifest/v1",
+      "operation_id": "corrupt-export:2222222222222222222222222222222222222222222222222222222222222222",
+      "task_id": "corrupt-parent",
+      "package_key": "2222222222222222222222222222222222222222222222222222222222222222",
+      "package_path": "run/queue-results/corrupt-2222222222222222222222222222222222222222222222222222222222222222",
+      "raw_sha256": "fca281367372ca95c9913e605a525119bb2282006a1dce78accfcec453f822dc",
+      "history_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+      "metadata_sha256": "603fdb18149fe59871ee2242478d53455f0ff0ddd70fd919792814ee009f371d",
+      "lineage_generation": 2505,
+      "link_count": 2505,
+      "page_count": 3,
+      "rolling_root": "0459906d4e91bab776c74956a55c81da48d8506bcda6e768a285747cf7d52779"
+    }
+  },
+  "corrupt_disposition_record": {
+    "name": "corrupt_disposition_record",
+    "arguments": {
+      "operation_id": "corrupt-export:4444444444444444444444444444444444444444444444444444444444444444",
+      "task_id": "776ccfa346b4494ca9c6658855ad53c4",
+      "disposition_key": "4444444444444444444444444444444444444444444444444444444444444444",
+      "manifest_sha256": "b206b76be85481113c43ef0a6a46ae80b075ce4b8e21a0b927d8424085394c49",
+      "active_link_digest": "1b2c968e32fa8a767d3ce2ff63111144f7b57b87bfde7d5d02b81dbdf18bc9c7",
+      "actor": "posix-uid:1000",
+      "reason": "Retain and disposition.",
+      "disposed_at": "2026-11-03T07:09:22.437019+00:00"
+    },
+    "expected": {
+      "schema_version": "corrupt-task-disposition/v1",
+      "operation_id": "corrupt-export:4444444444444444444444444444444444444444444444444444444444444444",
+      "task_id": "776ccfa346b4494ca9c6658855ad53c4",
+      "package_key": "4444444444444444444444444444444444444444444444444444444444444444",
+      "package_path": "run/queue-results/corrupt-4444444444444444444444444444444444444444444444444444444444444444",
+      "manifest_path": "run/queue-results/corrupt-4444444444444444444444444444444444444444444444444444444444444444/manifest.json",
+      "manifest_sha256": "b206b76be85481113c43ef0a6a46ae80b075ce4b8e21a0b927d8424085394c49",
+      "active_link_digest": "1b2c968e32fa8a767d3ce2ff63111144f7b57b87bfde7d5d02b81dbdf18bc9c7",
+      "actor_identity": "posix-uid:1000",
+      "reason": "Retain and disposition.",
+      "disposed_at": "2026-11-03T07:09:22.437019+00:00"
+    }
+  },
+  "require_identical_seal": {
+    "name": "require_identical_seal",
+    "arguments": {
+      "existing": {
+        "task_id": "776ccfa346b4494ca9c6658855ad53c4",
+        "active_digest": "1b2c968e32fa8a767d3ce2ff63111144f7b57b87bfde7d5d02b81dbdf18bc9c7",
+        "consumer_kind": "corrupt-disposition",
+        "consumer_id": "corrupt-export:4444444444444444444444444444444444444444444444444444444444444444",
+        "seal_digest": "62581c61a947672aaca41605d0263cdef79014b1c0a92cac4a82b1198d8f33fe",
+        "sealed_at": "2026-11-03T07:09:22.462865+00:00"
+      },
+      "consumer_kind": "corrupt-disposition",
+      "consumer_id": "corrupt-export:4444444444444444444444444444444444444444444444444444444444444444",
+      "active_link_digest": "1b2c968e32fa8a767d3ce2ff63111144f7b57b87bfde7d5d02b81dbdf18bc9c7",
+      "seal_digest": "62581c61a947672aaca41605d0263cdef79014b1c0a92cac4a82b1198d8f33fe"
+    },
+    "expected": null
+  },
+  "corrupt_records_match": {
+    "name": "corrupt_records_match",
+    "arguments": {
+      "manifest_bytes": "{\"history_sha256\":\"4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945\",\"lineage_generation\":0,\"link_count\":0,\"metadata_sha256\":\"25127979ddc827c3b8cb77eeab7ddefd2385b580694d97169dfc6b378031d2dd\",\"operation_id\":\"corrupt-export:5555555555555555555555555555555555555555555555555555555555555555\",\"package_key\":\"5555555555555555555555555555555555555555555555555555555555555555\",\"package_path\":\"run/queue-results/corrupt-5555555555555555555555555555555555555555555555555555555555555555\",\"page_count\":0,\"raw_sha256\":\"94c09080b629d72e04a6ae19317d3b38934fbb9c52bafe76e9986a26f4c544b5\",\"rolling_root\":\"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855\",\"schema_version\":\"corrupt-task-manifest/v1\",\"task_id\":\"8f737edf34604a8e9b07d348a038ddf4\"}",
+      "disposition_bytes": "{\"active_link_digest\":\"edeb535d2aebc478e378955d1acdf6911e5de90d4ecb5fc103d7ce2479055141\",\"actor_identity\":\"posix-uid:1000\",\"disposed_at\":\"2000-01-01T00:00:00.000000+00:00\",\"manifest_path\":\"run/queue-results/corrupt-5555555555555555555555555555555555555555555555555555555555555555/manifest.json\",\"manifest_sha256\":\"cdbf4f9a073542e7542aa467c37e6c9881da881bd153063d5ff2c26fa804d4b9\",\"operation_id\":\"corrupt-export:5555555555555555555555555555555555555555555555555555555555555555\",\"package_key\":\"5555555555555555555555555555555555555555555555555555555555555555\",\"package_path\":\"run/queue-results/corrupt-5555555555555555555555555555555555555555555555555555555555555555\",\"reason\":\"Retain and disposition.\",\"schema_version\":\"corrupt-task-disposition/v1\",\"task_id\":\"8f737edf34604a8e9b07d348a038ddf4\"}",
+      "manifest": {
+        "history_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+        "lineage_generation": 0,
+        "link_count": 0,
+        "metadata_sha256": "25127979ddc827c3b8cb77eeab7ddefd2385b580694d97169dfc6b378031d2dd",
+        "operation_id": "corrupt-export:5555555555555555555555555555555555555555555555555555555555555555",
+        "package_key": "5555555555555555555555555555555555555555555555555555555555555555",
+        "package_path": "run/queue-results/corrupt-5555555555555555555555555555555555555555555555555555555555555555",
+        "page_count": 0,
+        "raw_sha256": "94c09080b629d72e04a6ae19317d3b38934fbb9c52bafe76e9986a26f4c544b5",
+        "rolling_root": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "schema_version": "corrupt-task-manifest/v1",
+        "task_id": "8f737edf34604a8e9b07d348a038ddf4"
+      },
+      "record": {
+        "active_link_digest": "edeb535d2aebc478e378955d1acdf6911e5de90d4ecb5fc103d7ce2479055141",
+        "actor_identity": "posix-uid:1000",
+        "disposed_at": "2000-01-01T00:00:00.000000+00:00",
+        "manifest_path": "run/queue-results/corrupt-5555555555555555555555555555555555555555555555555555555555555555/manifest.json",
+        "manifest_sha256": "cdbf4f9a073542e7542aa467c37e6c9881da881bd153063d5ff2c26fa804d4b9",
+        "operation_id": "corrupt-export:5555555555555555555555555555555555555555555555555555555555555555",
+        "package_key": "5555555555555555555555555555555555555555555555555555555555555555",
+        "package_path": "run/queue-results/corrupt-5555555555555555555555555555555555555555555555555555555555555555",
+        "reason": "Retain and disposition.",
+        "schema_version": "corrupt-task-disposition/v1",
+        "task_id": "8f737edf34604a8e9b07d348a038ddf4"
+      },
+      "disposition": {
+        "task_id": "8f737edf34604a8e9b07d348a038ddf4",
+        "operation_id": "corrupt-export:5555555555555555555555555555555555555555555555555555555555555555",
+        "package_path": "run/queue-results/corrupt-5555555555555555555555555555555555555555555555555555555555555555",
+        "manifest_sha256": "cdbf4f9a073542e7542aa467c37e6c9881da881bd153063d5ff2c26fa804d4b9",
+        "disposition_sha256": "a38bb27a0f58ec148cd95d01158a98b78c8b4c0e1fe5c8921b98dd12ef93a592",
+        "active_link_digest": "edeb535d2aebc478e378955d1acdf6911e5de90d4ecb5fc103d7ce2479055141",
+        "disposed_at": "2000-01-01T00:00:00.000000+00:00",
+        "disposition_key": "5555555555555555555555555555555555555555555555555555555555555555",
+        "original_frozen_root": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "lineage_generation": 0
+      }
+    },
+    "expected": true
+  },
+  "purge_receipt_record": {
+    "name": "purge_receipt_record",
+    "arguments": {
+      "operation": {
+        "operation_id": "corrupt-purge:ecbffb29767da43fa8361cb158f2a96aebc25a090be8349c0be403e2ba89b6a5",
+        "task_id": "6dbbc3acdb294bba8720772a995e9d38",
+        "purge_token": "6666666666666666666666666666666666666666666666666666666666666666",
+        "expected_generation": 2,
+        "cursor_task_id": "blocked-child",
+        "page_count": 1,
+        "rolling_root": "a8cee3f04ab656e28a670253e52a107d451756cffea3291dad269dd7659da044",
+        "state": "purging",
+        "created_at": "2026-11-03T07:09:27.371814+00:00",
+        "updated_at": "2026-11-03T07:09:27.371814+00:00"
+      },
+      "disposition": {
+        "task_id": "6dbbc3acdb294bba8720772a995e9d38",
+        "operation_id": "corrupt-export:7777777777777777777777777777777777777777777777777777777777777777",
+        "package_path": "run/queue-results/corrupt-7777777777777777777777777777777777777777777777777777777777777777",
+        "manifest_sha256": "4b68ed1ebedcb999f5ed981f3e4a3e5c2141d05910097ffeb5b25443f6a80889",
+        "disposition_sha256": "6f06d478c71191de64d8ca1f3d70ef2a56ddd9b275ea21095b84ff629bc8165d",
+        "active_link_digest": "28106d10a42cc8e23a1d92677bbd20fa5bfc23d2ba4fea40c2a010de053caedb",
+        "disposed_at": "2000-01-01T00:00:00.000000+00:00",
+        "disposition_key": "7777777777777777777777777777777777777777777777777777777777777777",
+        "original_frozen_root": "d4f1b05f2c3ff80908e3f05af98b0dbce2096e4ac673863a73f8364a3c074871"
+      },
+      "operation_id": "corrupt-purge:ecbffb29767da43fa8361cb158f2a96aebc25a090be8349c0be403e2ba89b6a5",
+      "task_id": "6dbbc3acdb294bba8720772a995e9d38"
+    },
+    "expected": {
+      "schema_version": "corrupt-purge/v1",
+      "operation_id": "corrupt-purge:ecbffb29767da43fa8361cb158f2a96aebc25a090be8349c0be403e2ba89b6a5",
+      "task_id": "6dbbc3acdb294bba8720772a995e9d38",
+      "package_key": "7777777777777777777777777777777777777777777777777777777777777777",
+      "package_path": "run/queue-results/corrupt-7777777777777777777777777777777777777777777777777777777777777777",
+      "manifest_sha256": "4b68ed1ebedcb999f5ed981f3e4a3e5c2141d05910097ffeb5b25443f6a80889",
+      "disposition_sha256": "6f06d478c71191de64d8ca1f3d70ef2a56ddd9b275ea21095b84ff629bc8165d",
+      "original_frozen_root": "d4f1b05f2c3ff80908e3f05af98b0dbce2096e4ac673863a73f8364a3c074871",
+      "purge_page_count": 1,
+      "final_rolling_root": "a8cee3f04ab656e28a670253e52a107d451756cffea3291dad269dd7659da044",
+      "final_generation": 2,
+      "observed_incoming_link_count": 0
+    }
+  }
+}

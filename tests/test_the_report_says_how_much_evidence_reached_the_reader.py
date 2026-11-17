@@ -18,134 +18,15 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
+from tests.modules.longmemeval_coverage.fixtures import _EVIDENCE, _QUESTION
+from tests.modules.longmemeval_score.prompt_metrics_fixtures import _overall
+
 BENCHMARK_DIR = Path(__file__).resolve().parent.parent / "benchmark"
 if str(BENCHMARK_DIR) not in sys.path:
     sys.path.insert(0, str(BENCHMARK_DIR))
 
 import longmemeval_coverage  # noqa: E402
-import longmemeval_score  # noqa: E402
 import longmemeval_vault  # noqa: E402
-
-_EVIDENCE = "the user upgraded to the paid tier of the editing suite on a friday"
-_OTHER = "the user asked about which microphone to buy for a podcast"
-
-_QUESTION = {
-    "answer_session_ids": ["s1"],
-    "haystack_sessions": [
-        [
-            {"role": "user", "content": _EVIDENCE, "has_answer": True},
-            {"role": "user", "content": _OTHER},
-        ]
-    ],
-}
-
-
-def _row(category: str, **fields: object) -> dict:
-    return {
-        "category": category,
-        "question_type": category,
-        "gold": "the paid tier",
-        "hypothesis": "You moved to the paid tier.",
-        "status": "answered",
-        **fields,
-    }
-
-
-# A gold that is a span somebody said, and it reached the prompt.
-_SPAN_GOLD = _row(
-    "multi-session",
-    gold_in_prompt=True,
-    evidence_turns_labelled=1,
-    evidence_in_prompt=True,
-)
-
-# A gold that is a rubric: no prompt can contain it, so the gold signal is held
-# out — but the dataset's evidence turn still reached the reader and is counted.
-_RUBRIC_GOLD = _row(
-    "single-session-preference",
-    gold_in_prompt=False,
-    evidence_turns_labelled=1,
-    evidence_in_prompt=True,
-)
-
-# A span gold whose evidence never arrived: a real miss, and it must stay one.
-_MISSING_EVIDENCE = _row(
-    "temporal-reasoning",
-    gold_in_prompt=False,
-    evidence_turns_labelled=1,
-    evidence_in_prompt=False,
-)
-
-_ALL = [_SPAN_GOLD, _RUBRIC_GOLD, _MISSING_EVIDENCE]
-
-
-def _overall() -> dict:
-    return longmemeval_score.aggregate(_ALL)["overall"]
-
-
-def test_the_rubric_row_leaves_the_gold_text_denominator() -> None:
-    """Two of three questions have a gold a prompt could carry, and one did."""
-    overall = _overall()
-
-    assert (overall["gold_text_in_prompt"], overall["gold_text_applicable"]) == (1, 2)
-    assert (overall["gold_text_not_applicable"], overall["gold_text_in_prompt_share"]) == (1, 0.5)
-
-
-def test_the_evidence_figure_counts_every_type_including_the_rubric_one() -> None:
-    """The dataset labels the answer-carrying turns, so this is always defined."""
-    overall = _overall()
-
-    assert (overall["evidence_in_prompt"], overall["evidence_measured"]) == (2, 3)
-    assert overall["evidence_in_prompt_share"] == 0.6667
-
-
-def test_a_question_whose_evidence_never_arrived_is_still_a_miss() -> None:
-    """Holding out the undefined case must not soften the defined one."""
-    missed = longmemeval_score.aggregate([_MISSING_EVIDENCE])["temporal-reasoning"]
-
-    assert (missed["evidence_in_prompt"], missed["evidence_measured"]) == (0, 1)
-    assert missed["evidence_in_prompt_share"] == 0.0
-
-
-def test_a_run_that_never_recorded_the_evidence_reports_none_not_zero() -> None:
-    """Runs before 2026-09-18 have no such field, and absence is not a failure."""
-    old = longmemeval_score.aggregate([_row("multi-session", gold_in_prompt=True)])["multi-session"]
-
-    assert (old["evidence_measured"], old["evidence_in_prompt"]) == (0, 0)
-    assert old["evidence_in_prompt_share"] is None
-
-
-def test_a_question_that_never_reached_a_prompt_is_in_no_denominator() -> None:
-    """A harness failure built no prompt; counting it would invent a miss."""
-    failed = _row("multi-session", status="error", error_kind="harness_failure")
-    report = longmemeval_score.aggregate([_SPAN_GOLD, failed])["multi-session"]
-
-    assert (report["n"], report["scored"], report["gold_text_applicable"]) == (2, 1, 1)
-    assert report["gold_text_in_prompt_share"] == 1.0
-
-
-def test_an_abstentions_explanation_is_no_more_a_span_than_a_rubric_is() -> None:
-    """Its gold says why nothing can be answered; the run read 0 of 30 for that."""
-    row = _row("abstention", is_abstention=True, gold_in_prompt=False)
-    report = longmemeval_score.aggregate([row])["abstention"]
-
-    assert (report["gold_text_applicable"], report["gold_text_not_applicable"]) == (0, 1)
-    assert report["gold_text_in_prompt_share"] is None
-
-
-def test_the_evidence_turns_of_a_prompt_are_read_from_the_dataset_labels() -> None:
-    """The flagged turn is found in the prompt; the unflagged one is not asked about."""
-    seen = longmemeval_coverage.evidence_in_text(_QUESTION, f"context: {_EVIDENCE.upper()}")
-
-    assert (seen["turns_labelled"], seen["turns_in_text"]) == (1, 1)
-    assert seen["all_turns"] is True
-
-
-def test_a_prompt_without_the_evidence_turn_says_so() -> None:
-    absent = longmemeval_coverage.evidence_in_text(_QUESTION, f"context: {_OTHER}")
-
-    assert (absent["turns_labelled"], absent["turns_in_text"]) == (1, 0)
-    assert absent["all_turns"] is False
 
 
 def test_the_worker_records_both_signals_from_the_prompt_it_sent() -> None:
@@ -167,17 +48,6 @@ def test_a_second_provider_call_never_unsees_what_the_first_one_carried() -> Non
 
     assert metrics["evidence_in_prompt"] is True
     assert metrics["evidence_turns_in_prompt"] == 1
-
-
-def test_the_compiler_stage_has_its_own_name_and_its_own_counts() -> None:
-    """`evidence_requested`/`evidence_missed` is a different stage from retrieval."""
-    rows = [{"evidence_requested": 8, "evidence_missed": 2}, {"evidence_requested": 2}]
-
-    assert longmemeval_coverage.compile_evidence(rows) == {
-        "chunks_requested": 10,
-        "chunks_missed": 2,
-        "chunks_placed_share": 0.8,
-    }
 
 
 def test_the_printed_table_carries_both_figures_with_their_denominators() -> None:

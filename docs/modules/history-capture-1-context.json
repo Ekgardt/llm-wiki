@@ -1,0 +1,173 @@
+{
+  "encoding": "o200k_base",
+  "max_tokens": 100000,
+  "serialization": "exact-duplicates/v1",
+  "files": [
+    "AGENTS.md",
+    "CLAUDE.md",
+    "docs/AGENTS.md",
+    "docs/STRUCTURE.md",
+    "docs/modules/context-bundle.md",
+    "docs/modules/context-records.md",
+    "docs/modules/context-tooling.md",
+    "docs/modules/history-capture-1-context.json",
+    "docs/modules/history-capture-1.md",
+    "docs/modules/model-choice.md",
+    "docs/modules/product-structure.md",
+    "docs/modules/project-governance.md",
+    "docs/modules/test-support.md",
+    "docs/research/2026-08-25-when-a-session-record-leaves-the-hot-tree.md",
+    "docs/research/2026-09-09-capture-work-keeps-its-typed-handler.md",
+    "docs/research/2026-09-09-internal-codex-does-not-capture-itself.md",
+    "docs/research/2026-09-09-native-codex-hooks-and-handshake.md",
+    "docs/research/2026-09-10-a-lost-session-record-is-written-down.md",
+    "docs/research/2026-09-10-a-page-that-cannot-be-flushed-is-named.md",
+    "docs/research/2026-09-11-a-lost-fence-is-not-a-lost-capture.md",
+    "docs/research/2026-09-11-codex-leaves-breadcrumbs-too.md",
+    "docs/research/2026-09-14-a-capture-keeps-its-claim-while-it-asks.md",
+    "docs/research/2026-09-14-a-redriven-flush-appends-nothing-new.md",
+    "docs/research/2026-09-14-every-session-record-is-redacted.md",
+    "docs/research/2026-09-14-less-noise-at-session-start.md",
+    "docs/research/2026-09-14-one-day-for-a-session-record.md",
+    "docs/research/2026-09-17-a-content-test-does-not-race-the-hook-budget.md",
+    "docs/research/2026-09-17-a-transient-transcript-can-be-deleted-on-windows.md",
+    "docs/research/2026-09-17-every-hook-writer-gives-up-before-its-host-does.md",
+    "docs/research/2026-09-17-four-small-capture-corrections.md",
+    "docs/research/2026-09-17-the-session-start-advisory-prints-what-the-graph-proved.md",
+    "docs/research/2026-09-17-the-six-capture-corrections-the-first-round-left.md",
+    "docs/research/2026-09-17-the-twentieth-prompt-captures-the-session.md",
+    "docs/research/2026-09-17-the-two-hook-wrappers-nothing-calls-are-retired.md",
+    "docs/research/2026-09-18-a-published-record-is-let-go-before-it-is-flushed.md",
+    "docs/research/2026-09-24-a-long-session-in-the-vault-is-captured.md",
+    "docs/research/2026-09-25-a-claude-prompt-reaches-feedback-capture.md",
+    "docs/research/2026-09-25-a-dead-capture-gets-its-second-chance-after-a-fix.md",
+    "docs/research/2026-09-25-a-hook-stops-its-delegate-before-the-host-stops-it.md",
+    "docs/research/2026-09-25-a-tool-call-in-the-vault-is-captured.md",
+    "docs/research/2026-09-25-a-tool-failure-is-not-a-lost-capture.md",
+    "docs/research/2026-09-25-a-transient-transcript-never-outlives-its-event.md",
+    "docs/research/2026-09-25-the-flush-command-line-is-retired.md",
+    "docs/research/2026-09-26-a-hook-budget-is-one-sum.md",
+    "docs/research/2026-09-26-a-hook-error-is-timed-in-one-zone.md",
+    "docs/research/2026-09-26-a-redriven-capture-meets-no-leftovers.md",
+    "docs/research/2026-09-27-a-backup-snapshots-what-hooks-write.md",
+    "docs/research/2026-09-27-a-capture-that-fails-says-so.md",
+    "docs/research/2026-09-29-a-tool-breadcrumb-waits-in-the-background.md",
+    "docs/research/2026-09-29-hook-errors-protect-their-text.md",
+    "docs/research/2026-09-30-durable-capture-installation.md",
+    "docs/research/2026-09-30-health-observation-does-not-refuse-capture.md",
+    "docs/research/2026-10-02-a-generation-captures-under-its-writer-fence.md",
+    "docs/research/2026-10-02-a-growing-database-keeps-capture-admitted.md",
+    "rules/development-laws.md",
+    "scripts/__init__.py",
+    "scripts/llm_wiki/__init__.py",
+    "scripts/llm_wiki/context_bundle.py",
+    "tests/__init__.py",
+    "tests/conftest.py",
+    "tests/module_context.py",
+    "tests/module_context_paths.py",
+    "tests/module_interface.py",
+    "tests/module_interface_render.py",
+    "tests/module_qualification.py",
+    "tests/module_record_context.py",
+    "tests/module_records.py",
+    "tests/shared_fixtures.py",
+    "tests/slow_machine.py"
+  ],
+  "ownership": {
+    "files": [
+      "docs/modules/history-capture-1-context.json",
+      "docs/modules/history-capture-1.md",
+      "docs/research/2026-08-25-when-a-session-record-leaves-the-hot-tree.md",
+      "docs/research/2026-09-09-capture-work-keeps-its-typed-handler.md",
+      "docs/research/2026-09-09-internal-codex-does-not-capture-itself.md",
+      "docs/research/2026-09-09-native-codex-hooks-and-handshake.md",
+      "docs/research/2026-09-10-a-lost-session-record-is-written-down.md",
+      "docs/research/2026-09-10-a-page-that-cannot-be-flushed-is-named.md",
+      "docs/research/2026-09-11-a-lost-fence-is-not-a-lost-capture.md",
+      "docs/research/2026-09-11-codex-leaves-breadcrumbs-too.md",
+      "docs/research/2026-09-14-a-capture-keeps-its-claim-while-it-asks.md",
+      "docs/research/2026-09-14-a-redriven-flush-appends-nothing-new.md",
+      "docs/research/2026-09-14-every-session-record-is-redacted.md",
+      "docs/research/2026-09-14-less-noise-at-session-start.md",
+      "docs/research/2026-09-14-one-day-for-a-session-record.md",
+      "docs/research/2026-09-17-a-content-test-does-not-race-the-hook-budget.md",
+      "docs/research/2026-09-17-a-transient-transcript-can-be-deleted-on-windows.md",
+      "docs/research/2026-09-17-every-hook-writer-gives-up-before-its-host-does.md",
+      "docs/research/2026-09-17-four-small-capture-corrections.md",
+      "docs/research/2026-09-17-the-session-start-advisory-prints-what-the-graph-proved.md",
+      "docs/research/2026-09-17-the-six-capture-corrections-the-first-round-left.md",
+      "docs/research/2026-09-17-the-twentieth-prompt-captures-the-session.md",
+      "docs/research/2026-09-17-the-two-hook-wrappers-nothing-calls-are-retired.md",
+      "docs/research/2026-09-18-a-published-record-is-let-go-before-it-is-flushed.md",
+      "docs/research/2026-09-24-a-long-session-in-the-vault-is-captured.md",
+      "docs/research/2026-09-25-a-claude-prompt-reaches-feedback-capture.md",
+      "docs/research/2026-09-25-a-dead-capture-gets-its-second-chance-after-a-fix.md",
+      "docs/research/2026-09-25-a-hook-stops-its-delegate-before-the-host-stops-it.md",
+      "docs/research/2026-09-25-a-tool-call-in-the-vault-is-captured.md",
+      "docs/research/2026-09-25-a-tool-failure-is-not-a-lost-capture.md",
+      "docs/research/2026-09-25-a-transient-transcript-never-outlives-its-event.md",
+      "docs/research/2026-09-25-the-flush-command-line-is-retired.md",
+      "docs/research/2026-09-26-a-hook-budget-is-one-sum.md",
+      "docs/research/2026-09-26-a-hook-error-is-timed-in-one-zone.md",
+      "docs/research/2026-09-26-a-redriven-capture-meets-no-leftovers.md",
+      "docs/research/2026-09-27-a-backup-snapshots-what-hooks-write.md",
+      "docs/research/2026-09-27-a-capture-that-fails-says-so.md",
+      "docs/research/2026-09-29-a-tool-breadcrumb-waits-in-the-background.md",
+      "docs/research/2026-09-29-hook-errors-protect-their-text.md",
+      "docs/research/2026-09-30-durable-capture-installation.md",
+      "docs/research/2026-09-30-health-observation-does-not-refuse-capture.md",
+      "docs/research/2026-10-02-a-generation-captures-under-its-writer-fence.md",
+      "docs/research/2026-10-02-a-growing-database-keeps-capture-admitted.md"
+    ]
+  },
+  "qualified_dependencies": [
+    {
+      "provider": "scripts/llm_wiki/generation_catalog_store.py",
+      "names": [
+        "GenerationCatalog"
+      ],
+      "contract_sha256": "b18194ebe04bf988b4474379fcb5243516550d43b745a00eaed1453f7844c983",
+      "integration_tests": [
+        "tests/test_a_blocked_task_has_a_way_back.py",
+        "tests/test_a_build_in_flight_is_not_an_orphan.py",
+        "tests/test_a_capacity_refusal_does_not_corrupt_a_generation.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/model_choice.py",
+      "names": [
+        "using_root"
+      ],
+      "contract_sha256": "d45f2655cb61963e77617d1dfd7d617b134ad77cc770b59b335d0856e5d65019",
+      "integration_tests": [
+        "tests/test_a_block_opens_one_entry.py",
+        "tests/test_a_blocked_task_has_a_way_back.py",
+        "tests/test_a_build_in_flight_is_not_an_orphan.py"
+      ]
+    },
+    {
+      "provider": "scripts/reliable_memory.py",
+      "names": [
+        "validate_state_root"
+      ],
+      "contract_sha256": "8680515cd873056a7c8a36e0057d91f2f83f23c48841263697676ff91f7ff964",
+      "integration_tests": [
+        "tests/test_a_backup_image_carries_what_git_does_not.py",
+        "tests/test_a_backup_snapshots_what_hooks_write.py",
+        "tests/test_a_backup_takes_what_any_installed_vault_holds.py"
+      ]
+    },
+    {
+      "provider": "scripts/repository_scope.py",
+      "names": [
+        "sanitized_git_environment"
+      ],
+      "contract_sha256": "fd550ae20761afad50b37fa3a71044a162485b0e4d4b3e2af9b5b22e143c2bec",
+      "integration_tests": [
+        "tests/modules/cleanup_worktrees/test_git_refusal.py",
+        "tests/test_a_blocked_task_has_a_way_back.py",
+        "tests/test_a_build_in_flight_is_not_an_orphan.py"
+      ]
+    }
+  ]
+}

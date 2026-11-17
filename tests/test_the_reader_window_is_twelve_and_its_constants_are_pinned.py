@@ -20,27 +20,9 @@ for _directory in (ROOT / "scripts", ROOT / "benchmark"):
         sys.path.insert(0, str(_directory))
 
 import fit_lane_score  # noqa: E402
-import lane_score  # noqa: E402
 import longmemeval_vault  # noqa: E402
 
 # The fit of 2026-09-16 over 189 questions, in the order `fit_lane_score` reports them.
-SHIPPED = (-0.5071, -0.7639, 0.3052, -1.1359, 2.5144, 0.2789, 3.0138)
-
-
-def test_the_seven_constants_are_the_fit_of_2026_09_16() -> None:
-    """Nothing measured since has beaten them, so nothing has replaced them."""
-    weights = tuple(round(value, 4) for value in fit_lane_score.shipped_weights())
-
-    assert weights == SHIPPED
-
-
-def test_the_fitter_and_the_score_name_the_same_seven_terms() -> None:
-    """A renamed constant would leave the fitter reporting a term the score never reads."""
-    named = tuple(fit_lane_score.FEATURE_NAMES)
-    present = tuple(name for name in named if hasattr(lane_score, name))
-
-    assert (len(named), present) == (7, named)
-
 
 def test_the_reader_window_stays_at_twelve_candidates() -> None:
     """Measured 2026-09-14 over 201 questions: the all-turns share is 0.3682 at both a

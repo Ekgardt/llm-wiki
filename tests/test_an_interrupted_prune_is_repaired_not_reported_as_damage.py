@@ -6,16 +6,20 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import doctor
+from llm_wiki import doctor_transactions
 
-from tests.test_nothing_half_written_is_left_behind import _committed, _coordinator, _kill_a_prune
+from tests.nothing_half_written_is_left_behind_helpers import (
+    _committed,
+    _coordinator,
+    _kill_a_prune,
+)
 
 
 def test_doctor_does_not_call_a_staged_prune_unsafe(tmp_path: Path) -> None:
     coordinator = _coordinator(tmp_path)
     _kill_a_prune(coordinator, _committed(coordinator))
 
-    _identifiers, unsafe = doctor._transaction_artifacts(tmp_path / "state", float("inf"))
+    _identifiers, unsafe = doctor_transactions.transaction_artifacts(tmp_path / "state", float("inf"))
 
     assert unsafe is False
 

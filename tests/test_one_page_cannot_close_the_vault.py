@@ -13,7 +13,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 
-from tests.test_corpus_snapshot import write  # noqa: E402
+from tests.corpus_snapshot_helpers import write  # noqa: E402
 
 
 @pytest.fixture
@@ -75,9 +75,11 @@ def test_lint_names_every_page_and_what_was_dropped():
 
 def test_compile_cannot_write_a_character_yaml_refuses():
     import yaml
-    from compile_memory import _escape_yaml
+    from llm_wiki.compile_pipeline_claims import (
+        escape_yaml,
+    )
 
-    title = _escape_yaml("bell \x07 escape \x1b del \x7f end")
+    title = escape_yaml("bell \x07 escape \x1b del \x7f end")
 
     assert yaml.safe_load(f'title: "{title}"') == {"title": "bell  escape  del  end"}
 

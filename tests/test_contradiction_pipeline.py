@@ -9,62 +9,10 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 
-from claims import IndexedClaim, NormalizedClaim
+from claims import IndexedClaim
 from reliable_memory import canonical_json_bytes, sha256_bytes
 
-
-def claim(
-    value: object = "blue",
-    *,
-    claim_id: str = "new",
-    subject: str = "project",
-    relation: str = "has-state",
-    start: str | None = "2026-01-01",
-    end: str | None = None,
-    authority: str = "user",
-    confidence: str = "high",
-    lifecycle: str = "active",
-    qualifiers: list[dict[str, object]] | None = None,
-) -> NormalizedClaim:
-    typed = {"type": "string", "value": value}
-    semantic = {
-        "subject": subject,
-        "relation": relation,
-        "value": typed,
-        "qualifiers": qualifiers or [],
-        "validity": {"from": start, "to": end},
-    }
-    text = f"{subject} {relation} {value}"
-    evidence_hash = sha256_bytes(text.encode())
-    record = {
-        "schema_version": "claim/v1",
-        "id": claim_id,
-        "fingerprint": sha256_bytes(canonical_json_bytes(semantic)),
-        "text": text,
-        **semantic,
-        "observed_at": "2026-01-01T12:00:00Z",
-        "lifecycle": lifecycle,
-        "confidence": confidence,
-        "authority": authority,
-        "evidence": {
-            "reference": (
-                "daily:2026-01-01 sha256:" + "a" * 64
-                + " block:12:00:00 bytes:0-1"
-            ),
-            "sha256": evidence_hash,
-            "text": text,
-        },
-        "links": [],
-        "extractor_version": "test/v1",
-    }
-    return NormalizedClaim(record)
-
-
-def indexed(value: object = "red", **kwargs: object) -> IndexedClaim:
-    return IndexedClaim(
-        "knowledge/notes/existing.md",
-        claim(value, claim_id="existing", **kwargs),
-    )
+from tests.contradiction_pipeline_helpers import claim, indexed
 
 
 def test_equal_claim_is_deterministically_equivalent():
@@ -789,3 +737,33 @@ def test_assess_raw_runs_split_extract_verify_normalize_in_order():
 
     assert len(results) == 1
     assert pipeline.claim_pipeline.calls == ["split", "extract", "verify", "normalize"]
+
+
+@pytest.mark.parametrize("stop", ["expired", "cancelled"])
+def test_secondary_foreign_vault_refuses_stopped_scan(tmp_path, monkeypatch, stop):
+    import time
+
+    import generation_search
+    from contradiction_pipeline import default_secondary_search
+
+    def unexpected_collection(*args, **kwargs):
+        pytest.fail("stopped search began collecting pages")
+
+    monkeypatch.setattr(generation_search, "collect_pages", unexpected_collection)
+    deadline = {"expired": time.monotonic() - 1, "cancelled": time.monotonic() + 60}[stop]
+    with pytest.raises(TimeoutError, match="deadline|cancelled"):
+        default_secondary_search(tmp_path, "evidence", 5, deadline=deadline,
+                                 cancelled=lambda: stop == "cancelled")
+
+
+def test_secondary_foreign_scan_observes_cancellation_between_pages(tmp_path, monkeypatch):
+    import contradiction_pipeline as pipeline
+    import generation_search
+
+    pages = [tmp_path / "first.md", tmp_path / "second.md"]
+    read = []
+    monkeypatch.setattr(generation_search, "collect_pages", lambda *a, **kw: pages)
+    monkeypatch.setattr(pipeline, "secondary_search_hit", lambda page, *a: read.append(page))
+    with pytest.raises(TimeoutError, match="cancelled"):
+        pipeline.default_secondary_search(tmp_path, "evidence", 5, cancelled=lambda: bool(read))
+    assert read == pages[:1]

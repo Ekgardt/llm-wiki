@@ -421,3 +421,43 @@ this was shipped.
 - [Understanding Incremental Recompilation — sbt](https://www.scala-sbt.org/1.x/docs/Understanding-Recompilation.html)
 - [The "red-green" algorithm — Salsa](https://salsa-rs.github.io/salsa/reference/algorithm.html)
 - [What an invalidation fingerprint can mean](2026-08-29-what-an-invalidation-fingerprint-can-mean.md)
+
+## 2026-10-05: complete extraction and optional caller record budgets
+
+The real retained corpus contains 59,873 captured sources. Production knowledge
+extraction refused its default source budget of 50,000; the existing
+`extraction.max_sources` qualification override admits the measured input. It
+then refused a separate hidden total of 100,000 extracted records. A controlled
+50,001-page corpus reproduces the latter even when its caller explicitly allows
+100,002 records: `min(max_records, MAX_RECORDS)` silently overrides that caller.
+The project extractor imports and applies the same hidden ceiling.
+
+The compatible repair makes the existing Python `max_records` argument optional.
+`None` adds no implicit record count; a positive explicit budget still refuses
+overflow, and invalid budgets still refuse. Complete source universes, exact
+captured bytes, identity, schema, deadlines, cancellation and final graph
+validation stay in force. Extractor identity and persisted formats do not change;
+the existing output for previously admitted sources stays the same. Project
+journal admission bounds and the graph writer's per-table validation guard remain.
+Their numerical justification is not established by this repair.
+
+Research checked on 2026-10-05: [Python 3.10 iterators](https://docs.python.org/3.10/library/itertools.html),
+[OWASP denial-of-service guidance](https://cheatsheetseries.owasp.org/cheatsheets/Denial_of_Service_Cheat_Sheet.html),
+and [MITRE CWE-400](https://cwe.mitre.org/data/definitions/400.html).
+Iterators can reduce temporary allocations, but do not bound dictionaries retained
+for shared graph resolution. Resource amplification still needs measurement.
+Raising the hidden number, omitting raw sources, and writing empty graph tables
+are rejected. A larger streamed graph pipeline is required if the real retained
+record memory proves unsafe; removing this count alone is not proof of full
+generation readiness. Actual full graph extraction, all six table outputs, a
+known note's physical occurrence, registration and publication are required
+before the complete generation is qualified.
+
+Candidate qualification: the original new tests reported three failures and
+20 passing controls; after the repair, 75 related extraction, universe and
+incremental-builder tests pass. Actual changed callable complexity is at most
+four, with no branch-shape violations. One additional shared-corpus test still
+fails identically in the baseline because its fixture expects a file refusal
+after the now-shared discovery-entry budget refuses first; this is preserved
+and is not a graph-extractor regression. Full retained graph memory and complete
+publication remain to be qualified.

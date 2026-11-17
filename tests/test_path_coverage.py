@@ -17,11 +17,11 @@ def test_freshness_names_all_four_states(tmp_path: Path) -> None:
     (tmp_path / "present.py").write_text("x = 1\n", encoding="utf-8")
     deadline = time.monotonic() + 10
     scope = path_coverage.contained_scope(tmp_path, deadline)
-    current = path_coverage._current_sha(scope, "present.py", deadline)
-    assert path_coverage._freshness(current, current) == "fresh"
-    assert path_coverage._freshness("0" * 64, current) == "stale"
-    assert path_coverage._freshness(None, current) == "not_indexed"
-    assert path_coverage._freshness(current, None) == "missing_on_disk"
+    current = path_coverage.current_sha(scope, "present.py", deadline)
+    assert path_coverage.freshness(current, current) == "fresh"
+    assert path_coverage.freshness("0" * 64, current) == "stale"
+    assert path_coverage.freshness(None, current) == "not_indexed"
+    assert path_coverage.freshness(current, None) == "missing_on_disk"
 
 
 def test_an_overflowing_node_count_is_marked_inexact() -> None:
@@ -29,7 +29,7 @@ def test_an_overflowing_node_count_is_marked_inexact() -> None:
         def find_nodes(self, **_kwargs):
             raise ValueError("Evidence Graph query row ceiling exceeded")
 
-    counted = path_coverage._node_count(_CeilingGraph(), "any.py", 0.0)
+    counted = path_coverage.node_count(_CeilingGraph(), "any.py", 0.0)
     assert counted == {
         "nodes": path_coverage.NODE_CEILING,
         "nodes_exact": False,
@@ -53,7 +53,7 @@ def test_a_stored_source_and_its_parse_are_answered_from_the_generation(
         def find_nodes(self, **_kwargs):
             return [{}]
 
-    answer = path_coverage._coverage_answer(
+    answer = path_coverage.coverage_answer(
         _Graph(), tmp_path, "a.py", time.monotonic() + 10
     )
     expected = {"indexed": True, "freshness": "missing_on_disk", "nodes": 1}

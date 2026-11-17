@@ -1,0 +1,3 @@
+# `docs/research/2026-10-19-durable-compile-progress.md`, part 2 of 4
+
+This packet owns 27 consecutive history records of `docs/research/2026-10-19-durable-compile-progress.md`, from `history-2026-10-20-retained-batch-context-and-orphan-recovery` to `history-2026-10-20-resume-the-same-unfinished-foreground-request`, as listed in its manifest. The catalog `compile-progress-history-records.json` proves that the records rebuild the study byte for byte, and every load validates the whole source. A change to the study requires regenerating the catalog. No executable source or runtime state belongs here.

@@ -4,7 +4,6 @@ docs/research/2026-09-26-a-busy-release-is-retried-until-it-lands.md
 """
 from __future__ import annotations
 
-import sqlite3
 import sys
 import threading
 from pathlib import Path
@@ -15,13 +14,15 @@ for entry in (str(TESTS.parent / "scripts"), str(TESTS)):
         sys.path.insert(0, entry)
 
 import markdown_transaction  # noqa: E402
-from test_writer_gate_reclaims_a_dead_projection import (  # noqa: E402
+
+from tests.markdown_coordinator_parts import patch_coordinator  # noqa: E402
+from tests.slow_machine import LONG_TIMEOUT  # noqa: E402
+from tests.sqlite_errors import busy_database_error  # noqa: E402
+from tests.writer_gate_reclaims_a_dead_projection_helpers import (  # noqa: E402
     _candidate,
     _coordinator,
     _gate_rows,
 )
-
-from tests.slow_machine import LONG_TIMEOUT  # noqa: E402
 
 
 def _locked_once(monkeypatch) -> None:
@@ -31,7 +32,7 @@ def _locked_once(monkeypatch) -> None:
     def delete(database, owner):
         calls.append(owner)
         if len(calls) == 1:
-            raise sqlite3.OperationalError("database is locked")
+            raise busy_database_error()
         return real_delete(database, owner)
 
     monkeypatch.setattr(markdown_transaction.MarkdownCoordinator, "_delete_writer_projection", staticmethod(delete))
@@ -45,7 +46,7 @@ def _join_release_threads() -> None:
 
 def test_a_busy_release_lands_later_and_the_next_writer_enters(tmp_path, monkeypatch) -> None:
     coordinator = _coordinator(tmp_path)
-    monkeypatch.setattr(markdown_transaction, "_RELEASE_RETRY_DELAYS", (0.0, 0.0))
+    patch_coordinator(monkeypatch, 'RELEASE_RETRY_DELAYS', (0.0, 0.0))
     _locked_once(monkeypatch)
 
     with coordinator.writer_gate():

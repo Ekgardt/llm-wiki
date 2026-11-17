@@ -17,7 +17,7 @@ from enum import Enum
 _SQLITE_INT64_MAX = 2**63 - 1
 
 
-class Capability(str, Enum):
+class Capability(str, Enum):  # noqa: UP042 - preserve existing Enum string and format behavior
     DEFINITIONS = "definitions"
     REFERENCES = "references"
     CALLS = "calls"
@@ -27,13 +27,13 @@ class Capability(str, Enum):
     DIAGNOSTICS = "diagnostics"
 
 
-class PositionEncoding(str, Enum):
+class PositionEncoding(str, Enum):  # noqa: UP042 - preserve existing Enum string and format behavior
     UTF8 = "utf-8"
     UTF16 = "utf-16"
     UTF32 = "utf-32"
 
 
-class DiagnosticSeverity(str, Enum):
+class DiagnosticSeverity(str, Enum):  # noqa: UP042 - preserve existing Enum string and format behavior
     ERROR = "error"
     WARNING = "warning"
     INFORMATION = "information"

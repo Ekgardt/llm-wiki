@@ -1,0 +1,190 @@
+{
+  "encoding": "o200k_base",
+  "max_tokens": 100000,
+  "serialization": "exact-duplicates/v1",
+  "files": [
+    "AGENTS.md",
+    "CLAUDE.md",
+    "docs/AGENTS.md",
+    "docs/STRUCTURE.md",
+    "docs/modules/context-bundle.md",
+    "docs/modules/context-records.md",
+    "docs/modules/context-tooling.md",
+    "docs/modules/formats.md",
+    "docs/modules/model-choice.md",
+    "docs/modules/product-structure.md",
+    "docs/modules/project-governance.md",
+    "docs/modules/pyright-configuration.md",
+    "docs/modules/pyright-profile-tests-context.json",
+    "docs/modules/pyright-profile-tests.md",
+    "docs/modules/pyright-profile.md",
+    "docs/modules/test-support.md",
+    "rules/development-laws.md",
+    "scripts/__init__.py",
+    "scripts/llm_wiki/__init__.py",
+    "scripts/llm_wiki/context_bundle.py",
+    "scripts/llm_wiki/formats/__init__.py",
+    "scripts/llm_wiki/pyright_configuration.py",
+    "scripts/pyright_profile.py",
+    "tests/__init__.py",
+    "tests/conftest.py",
+    "tests/install_pyright_helpers.py",
+    "tests/module_context.py",
+    "tests/module_context_paths.py",
+    "tests/module_interface.py",
+    "tests/module_interface_render.py",
+    "tests/module_qualification.py",
+    "tests/module_record_context.py",
+    "tests/module_records.py",
+    "tests/pyright_install_artifacts.py",
+    "tests/pyright_profile_helpers.py",
+    "tests/shared_fixtures.py",
+    "tests/slow_machine.py"
+  ],
+  "ownership": {
+    "files": [
+      "docs/modules/pyright-profile-tests-context.json",
+      "docs/modules/pyright-profile-tests.md",
+      "tests/install_pyright_helpers.py",
+      "tests/pyright_install_artifacts.py",
+      "tests/pyright_profile_helpers.py"
+    ]
+  },
+  "qualified_dependencies": [
+    {
+      "provider": "scripts/bounded_io.py",
+      "names": [
+        "read_stable_bytes"
+      ],
+      "contract_sha256": "e570dc41e0fd70556ec6a4e887a3da194bcc13122684e515651b13dd19d7d5c1",
+      "integration_tests": [
+        "tests/test_every_pinned_download_retries_the_network.py",
+        "tests/test_install_pyright.py",
+        "tests/test_pyright_profile.py",
+        "tests/test_the_node_probe_is_asked_once_per_node.py",
+        "tests/test_the_rest_of_the_live_audit.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/formats/canonical.py",
+      "names": [
+        "canonical_json_bytes",
+        "sha256_bytes"
+      ],
+      "contract_sha256": "2e42a7aefcb66ac2515f6665a03feae34e6f7bad4807787a789ce031f9f3a9c1",
+      "integration_tests": [
+        "tests/test_every_pinned_download_retries_the_network.py",
+        "tests/test_install_pyright.py",
+        "tests/test_pyright_profile.py",
+        "tests/test_the_node_probe_is_asked_once_per_node.py",
+        "tests/test_the_rest_of_the_live_audit.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/generation_catalog_store.py",
+      "names": [
+        "GenerationCatalog"
+      ],
+      "contract_sha256": "b18194ebe04bf988b4474379fcb5243516550d43b745a00eaed1453f7844c983",
+      "integration_tests": [
+        "tests/test_a_build_in_flight_is_not_an_orphan.py",
+        "tests/test_a_code_generation_is_not_abandoned.py",
+        "tests/test_a_flow_walk_stops_when_its_caller_has.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/model_choice.py",
+      "names": [
+        "using_root"
+      ],
+      "contract_sha256": "d45f2655cb61963e77617d1dfd7d617b134ad77cc770b59b335d0856e5d65019",
+      "integration_tests": [
+        "tests/test_central_model_selection.py",
+        "tests/test_compile_execution_inventory.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/pyright_metadata_json.py",
+      "names": [
+        "CommentStripper",
+        "MetadataError",
+        "TrailingCommaPass",
+        "blank_unless_newline",
+        "normalize_jsonc",
+        "reject_duplicate_keys",
+        "reject_json_number",
+        "strict_json_object"
+      ],
+      "contract_sha256": "887197925c704da95261577b7c8b02cb76b2816f829bc8b2aeb64a1314f97910",
+      "integration_tests": [
+        "tests/test_every_pinned_download_retries_the_network.py",
+        "tests/test_install_pyright.py",
+        "tests/test_pyright_profile.py",
+        "tests/test_the_node_probe_is_asked_once_per_node.py",
+        "tests/test_the_rest_of_the_live_audit.py"
+      ]
+    },
+    {
+      "provider": "scripts/lsp_paths.py",
+      "names": [
+        "PYRIGHT_VERSION",
+        "managed_pyright_root"
+      ],
+      "contract_sha256": "e3ff6165b5db109cacb6632ca61624e4947a6e37c96dceefde56036ca2c9aca9",
+      "integration_tests": [
+        "tests/test_every_pinned_download_retries_the_network.py",
+        "tests/test_install_pyright.py",
+        "tests/test_pyright_profile.py",
+        "tests/test_the_node_probe_is_asked_once_per_node.py",
+        "tests/test_the_rest_of_the_live_audit.py"
+      ]
+    },
+    {
+      "provider": "scripts/lsp_process_tree.py",
+      "names": [
+        "ProcessTree",
+        "ProcessTreeSpawnError",
+        "close_windows_handle"
+      ],
+      "contract_sha256": "49d7b4be1b3e9d0b72a31bc1bcb2ee50b124086e48736a1b02b59c7905d060a8",
+      "integration_tests": [
+        "tests/test_every_pinned_download_retries_the_network.py",
+        "tests/test_install_pyright.py",
+        "tests/test_pyright_profile.py",
+        "tests/test_the_node_probe_is_asked_once_per_node.py",
+        "tests/test_the_rest_of_the_live_audit.py"
+      ]
+    },
+    {
+      "provider": "scripts/reliable_memory.py",
+      "names": [
+        "canonical_json_bytes",
+        "known_network_path",
+        "validate_state_root"
+      ],
+      "contract_sha256": "f335c13828e9dddcf477799a2d18fdf6d89f312d2c0fd5363ec3dbec6039c8b5",
+      "integration_tests": [
+        "tests/test_every_pinned_download_retries_the_network.py",
+        "tests/test_install_pyright.py",
+        "tests/test_pyright_profile.py",
+        "tests/test_the_node_probe_is_asked_once_per_node.py",
+        "tests/test_the_rest_of_the_live_audit.py"
+      ]
+    },
+    {
+      "provider": "scripts/repository_scope.py",
+      "names": [
+        "RepositoryScope",
+        "sanitized_git_environment"
+      ],
+      "contract_sha256": "326d40aac35c4481e07bbe2e6113f897bd139f95b4b8c69e1245517167ef96a6",
+      "integration_tests": [
+        "tests/test_every_pinned_download_retries_the_network.py",
+        "tests/test_install_pyright.py",
+        "tests/test_pyright_profile.py",
+        "tests/test_the_node_probe_is_asked_once_per_node.py",
+        "tests/test_the_rest_of_the_live_audit.py"
+      ]
+    }
+  ]
+}

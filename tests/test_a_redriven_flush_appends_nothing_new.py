@@ -18,17 +18,17 @@ PAYLOAD = {"prompt": "summarize", "system_prompt": "system", "day": "2026-07-14"
 
 def test_the_original_and_its_redrive_append_under_one_operation(tmp_path, monkeypatch):
     import daily_log_append
-    import flush_memory
     import llm_client
     import memory_queue
+    from llm_wiki import classification_protocol
 
     operations: list[str] = []
     monkeypatch.setenv("LLM_WIKI_ROOT", str(tmp_path))
     monkeypatch.setattr(llm_client, "call_llm", lambda *args, **kwargs: "major body")
-    monkeypatch.setattr(flush_memory, "_classify_response", lambda result: ("major", result))
+    monkeypatch.setattr(classification_protocol, "classify_response", lambda result: ("major", result))
     monkeypatch.setattr(daily_log_append, "locked_append_once", lambda path, block, operation: operations.append(operation) or True)
 
     for task_id in ("original", "redrive-copy"):
-        memory_queue._manual_processor({"id": task_id, "type": "flush", "payload": dict(PAYLOAD)})
+        memory_queue.manual_processor({"id": task_id, "type": "flush", "payload": dict(PAYLOAD)})
 
     assert (len(operations), len(set(operations))) == (2, 1)

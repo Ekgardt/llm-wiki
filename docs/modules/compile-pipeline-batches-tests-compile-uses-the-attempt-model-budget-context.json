@@ -1,0 +1,171 @@
+{
+  "encoding": "o200k_base",
+  "max_tokens": 100000,
+  "serialization": "exact-duplicates/v1",
+  "files": [
+    "AGENTS.md",
+    "CLAUDE.md",
+    "docs/AGENTS.md",
+    "docs/STRUCTURE.md",
+    "docs/modules/compile-paths.md",
+    "docs/modules/compile-pipeline-batches-tests-compile-uses-the-attempt-model-budget-context.json",
+    "docs/modules/compile-pipeline-batches-tests-compile-uses-the-attempt-model-budget-helpers.md",
+    "docs/modules/compile-pipeline-batches-tests-compile-uses-the-attempt-model-budget.md",
+    "docs/modules/compile-pipeline-sources-tests-compile-packing-counts-original-entry-metadata-helpers.md",
+    "docs/modules/context-bundle.md",
+    "docs/modules/context-records.md",
+    "docs/modules/context-tooling.md",
+    "docs/modules/model-choice.md",
+    "docs/modules/product-structure.md",
+    "docs/modules/project-governance.md",
+    "docs/modules/script-sources.md",
+    "docs/modules/test-support.md",
+    "rules/development-laws.md",
+    "scripts/__init__.py",
+    "scripts/llm_wiki/__init__.py",
+    "scripts/llm_wiki/context_bundle.py",
+    "tests/__init__.py",
+    "tests/compile_packing_counts_original_entry_metadata_helpers.py",
+    "tests/compile_paths.py",
+    "tests/compile_uses_the_attempt_model_budget_helpers.py",
+    "tests/conftest.py",
+    "tests/module_context.py",
+    "tests/module_context_paths.py",
+    "tests/module_interface.py",
+    "tests/module_interface_render.py",
+    "tests/module_qualification.py",
+    "tests/module_record_context.py",
+    "tests/module_records.py",
+    "tests/script_sources.py",
+    "tests/shared_fixtures.py",
+    "tests/slow_machine.py",
+    "tests/test_compile_uses_the_attempt_model_budget.py"
+  ],
+  "ownership": {
+    "files": [
+      "docs/modules/compile-pipeline-batches-tests-compile-uses-the-attempt-model-budget-context.json",
+      "docs/modules/compile-pipeline-batches-tests-compile-uses-the-attempt-model-budget.md",
+      "tests/test_compile_uses_the_attempt_model_budget.py"
+    ]
+  },
+  "qualified_dependencies": [
+    {
+      "provider": "scripts/compile_pipeline.py",
+      "names": [
+        "pack_for_run"
+      ],
+      "contract_sha256": "a70445350f672f726eaacd7fa7388261897cd8d3387cfe692b87a49af2396e88",
+      "integration_tests": [
+        "tests/test_compile_uses_the_attempt_model_budget.py"
+      ]
+    },
+    {
+      "provider": "scripts/compile_receipts.py",
+      "names": [
+        "SourceSnapshot"
+      ],
+      "contract_sha256": "02926d8c4ae579f35a373ac76b77bf41a7016f084df2b6a04a4afaeda23c25c1",
+      "integration_tests": [
+        "tests/test_compile_uses_the_attempt_model_budget.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_client.py",
+      "names": [
+        "provider_candidates",
+        "worst_case_call_seconds"
+      ],
+      "contract_sha256": "5973f5674562ac47440543d4753469c56b64dcbf49b507e4bfff05347f4e221f",
+      "integration_tests": [
+        "tests/test_compile_uses_the_attempt_model_budget.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/compile_pipeline_base.py",
+      "names": [
+        "compile_budget"
+      ],
+      "contract_sha256": "0ad321a6e320be2a17a443a51571ef93bab759c44ed13dcb13b9445aa06277e5",
+      "integration_tests": [
+        "tests/test_compile_uses_the_attempt_model_budget.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/compile_pipeline_batches.py",
+      "names": [
+        "compile_candidate_chain",
+        "pack_compile_batches",
+        "refresh_compile_batch"
+      ],
+      "contract_sha256": "1e5f5fd8bab7d3c9362d21f16d1ca70252ff2bc548db62757d77484763fb9af1",
+      "integration_tests": [
+        "tests/test_compile_uses_the_attempt_model_budget.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/compile_pipeline_prompts.py",
+      "names": [
+        "CompileAttempt",
+        "attempt_input_budget"
+      ],
+      "contract_sha256": "5f03aa207934925af52b22524cb7c245838c509ef1e91a251d6bf6f09acc8157",
+      "integration_tests": [
+        "tests/test_compile_uses_the_attempt_model_budget.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/compile_pipeline_sources.py",
+      "names": [
+        "CompileInputs",
+        "daily_parts"
+      ],
+      "contract_sha256": "8a111d023fd7cafc0e0ce83d4bb620dbd93e984625a711c3c61a29e46ec80d54",
+      "integration_tests": [
+        "tests/test_compile_uses_the_attempt_model_budget.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/generation_catalog_store.py",
+      "names": [
+        "GenerationCatalog"
+      ],
+      "contract_sha256": "b18194ebe04bf988b4474379fcb5243516550d43b745a00eaed1453f7844c983",
+      "integration_tests": [
+        "tests/test_a_blocked_task_has_a_way_back.py",
+        "tests/test_a_build_in_flight_is_not_an_orphan.py",
+        "tests/test_a_capacity_refusal_does_not_corrupt_a_generation.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/model_choice.py",
+      "names": [
+        "using_root"
+      ],
+      "contract_sha256": "d45f2655cb61963e77617d1dfd7d617b134ad77cc770b59b335d0856e5d65019",
+      "integration_tests": [
+        "tests/test_compile_uses_the_attempt_model_budget.py"
+      ]
+    },
+    {
+      "provider": "scripts/reliable_memory.py",
+      "names": [
+        "sha256_bytes",
+        "validate_state_root"
+      ],
+      "contract_sha256": "6a7b0b232a73f614931e67eb1d96c7b1a7655d4efe793da9d2bf61430fd1f4c6",
+      "integration_tests": [
+        "tests/test_compile_uses_the_attempt_model_budget.py"
+      ]
+    },
+    {
+      "provider": "scripts/repository_scope.py",
+      "names": [
+        "sanitized_git_environment"
+      ],
+      "contract_sha256": "fd550ae20761afad50b37fa3a71044a162485b0e4d4b3e2af9b5b22e143c2bec",
+      "integration_tests": [
+        "tests/test_compile_uses_the_attempt_model_budget.py"
+      ]
+    }
+  ]
+}

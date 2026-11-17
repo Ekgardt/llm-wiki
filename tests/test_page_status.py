@@ -4,14 +4,11 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
-import pytest
-
 SCRIPTS = Path(__file__).resolve().parents[1] / "scripts"
 if str(SCRIPTS) not in sys.path:
     sys.path.insert(0, str(SCRIPTS))
 
 from corpus_snapshot import collect_corpus  # noqa: E402
-from page_status import current_status_sql, is_retired  # noqa: E402
 
 
 def _page(body: str, **metadata: object) -> str:
@@ -24,25 +21,6 @@ def _write(path: Path, text: str) -> None:
     path.write_text(text, encoding="utf-8", newline="")
 
 
-@pytest.mark.parametrize(
-    ("status", "retired"),
-    [
-        ("active", False),
-        ("accepted", False),
-        ("preliminary", False),
-        ("proposed", False),
-        ("", False),
-        (None, False),
-        ("ACCEPTED", False),
-        ("superseded", True),
-        ("archived", True),
-        ("deprecated", True),
-        ("rejected", True),
-        ("`superseded`", True),
-    ],
-)
-def test_only_the_named_words_retire_a_page(status: object, retired: bool) -> None:
-    assert is_retired(status) is retired
 
 
 def test_an_accepted_decision_is_collected_and_a_superseded_one_is_not(tmp_path: Path) -> None:
@@ -64,10 +42,3 @@ def test_an_accepted_decision_is_collected_and_a_superseded_one_is_not(tmp_path:
 
     assert "knowledge/notes/in-force.md" in collected
     assert "knowledge/notes/replaced.md" not in collected
-
-
-def test_the_sql_rule_is_generated_from_the_same_set() -> None:
-    clause = current_status_sql()
-    assert "'superseded'" in clause and "'deprecated'" in clause
-    assert "'accepted'" not in clause
-    assert "NOT IN" in clause

@@ -28,7 +28,7 @@ def _registry(state_root: Path) -> ownership.OwnershipRegistry:
     (state_root / "run").mkdir(parents=True, exist_ok=True)
     candidate = state_root / "run" / "markdown-transactions-v3.candidate.sqlite3"
     markdown_transaction.initialize_coordinator_v3_candidate(candidate, source_v2=None)
-    markdown_transaction.MarkdownCoordinator._from_v3_candidate(  # noqa: SLF001
+    markdown_transaction.MarkdownCoordinator.from_v3_candidate(  # noqa: SLF001
         candidate, state_root=state_root
     )
     return ownership.OwnershipRegistry(state_root)

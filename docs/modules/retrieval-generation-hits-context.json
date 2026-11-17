@@ -1,0 +1,191 @@
+{
+  "encoding": "o200k_base",
+  "max_tokens": 100000,
+  "serialization": "exact-duplicates/v1",
+  "files": [
+    "AGENTS.md",
+    "CLAUDE.md",
+    "docs/AGENTS.md",
+    "docs/STRUCTURE.md",
+    "docs/modules/context-bundle.md",
+    "docs/modules/context-records.md",
+    "docs/modules/context-tooling.md",
+    "docs/modules/model-choice.md",
+    "docs/modules/product-structure.md",
+    "docs/modules/project-governance.md",
+    "docs/modules/retrieval-generation-hits-context.json",
+    "docs/modules/retrieval-generation-hits.md",
+    "docs/modules/test-support.md",
+    "rules/development-laws.md",
+    "scripts/__init__.py",
+    "scripts/llm_wiki/__init__.py",
+    "scripts/llm_wiki/context_bundle.py",
+    "scripts/llm_wiki/retrieval_generation_hits.py",
+    "tests/__init__.py",
+    "tests/conftest.py",
+    "tests/module_context.py",
+    "tests/module_context_paths.py",
+    "tests/module_interface.py",
+    "tests/module_interface_render.py",
+    "tests/module_qualification.py",
+    "tests/module_record_context.py",
+    "tests/module_records.py",
+    "tests/shared_fixtures.py",
+    "tests/slow_machine.py"
+  ],
+  "ownership": {
+    "files": [
+      "docs/modules/retrieval-generation-hits-context.json",
+      "docs/modules/retrieval-generation-hits.md",
+      "scripts/llm_wiki/retrieval_generation_hits.py"
+    ]
+  },
+  "qualified_dependencies": [
+    {
+      "provider": "scripts/generation_search.py",
+      "names": [
+        "generation_connection",
+        "generation_consumption_unchanged",
+        "generation_fts_search",
+        "generation_vectors_search"
+      ],
+      "contract_sha256": "4596598cb7af66a2d2aff6043f5e71d90cb48cfec39e56d43afb3429a1034bf9",
+      "integration_tests": [
+        "tests/test_a_fallback_names_its_cause.py",
+        "tests/test_a_hit_is_named_by_its_page.py",
+        "tests/test_a_journal_is_readable_by_every_reader.py"
+      ]
+    },
+    {
+      "provider": "scripts/graph_neighbors.py",
+      "names": [
+        "boost_graph_neighbors"
+      ],
+      "contract_sha256": "eeb34d237d5822d1b538b9df0fa8e0afda6b4fd1eb383ebda6bc9a1d08b1c259",
+      "integration_tests": [
+        "tests/test_graph_neighbors.py",
+        "tests/test_retrieval_review_round2.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/generation_catalog_store.py",
+      "names": [
+        "GenerationCatalog"
+      ],
+      "contract_sha256": "b18194ebe04bf988b4474379fcb5243516550d43b745a00eaed1453f7844c983",
+      "integration_tests": [
+        "tests/test_a_blocked_task_has_a_way_back.py",
+        "tests/test_a_build_in_flight_is_not_an_orphan.py",
+        "tests/test_a_capacity_refusal_does_not_corrupt_a_generation.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/model_choice.py",
+      "names": [
+        "using_root"
+      ],
+      "contract_sha256": "d45f2655cb61963e77617d1dfd7d617b134ad77cc770b59b335d0856e5d65019",
+      "integration_tests": [
+        "tests/test_central_model_selection.py",
+        "tests/test_compile_execution_inventory.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/retrieval_graph.py",
+      "names": [
+        "expand_evidence_graph",
+        "name_dropped"
+      ],
+      "contract_sha256": "8117d2d3bdfd025ae4ad3cea1bbdc5d1adca7bd9bcefcbe2604b625280463390",
+      "integration_tests": [
+        "tests/test_admission_prior_does_not_also_order_fusion_signals.py",
+        "tests/test_graph_retrieval.py",
+        "tests/test_retrieval_review_round2.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/retrieval_legacy.py",
+      "names": [
+        "backend_hit_from_legacy"
+      ],
+      "contract_sha256": "b3cf4d88127c53c686b6d3357dabb468c641ca888c63e98c45479de6a831feb1",
+      "integration_tests": [
+        "tests/test_a_blocked_task_has_a_way_back.py",
+        "tests/test_a_committed_source_resolves_an_older_compile_plan.py",
+        "tests/test_a_count_that_reached_the_edge_looks_again.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/retrieval_query.py",
+      "names": [
+        "BackendFn",
+        "CANDIDATE_FANOUT",
+        "GenerationSealChanged",
+        "MAX_CANDIDATE_POOL",
+        "MIN_CANDIDATE_POOL",
+        "QueryAnalysis",
+        "RetrievalResult",
+        "RetrievalTrace",
+        "first_present",
+        "normalize_profile",
+        "normalized_filename_stem",
+        "note_generation_degradation"
+      ],
+      "contract_sha256": "55560fce5de4336b605735f7fcfe0df933165c1da0b512f332c0ccc0e5f68351",
+      "integration_tests": [
+        "tests/test_retrieval_expiry_fixture_survives_preflight_scheduling.py",
+        "tests/test_retrieval_review_round2.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/retrieval_stages.py",
+      "names": [
+        "filtered_hits",
+        "require_unchanged_generation"
+      ],
+      "contract_sha256": "13e24c59a37824b2a30e08e7bc44da35b2ac15bf34e986339780b3ed25d7e657",
+      "integration_tests": [
+        "tests/test_a_blocked_task_has_a_way_back.py",
+        "tests/test_a_committed_source_resolves_an_older_compile_plan.py",
+        "tests/test_a_count_that_reached_the_edge_looks_again.py"
+      ]
+    },
+    {
+      "provider": "scripts/reliable_memory.py",
+      "names": [
+        "validate_state_root"
+      ],
+      "contract_sha256": "8680515cd873056a7c8a36e0057d91f2f83f23c48841263697676ff91f7ff964",
+      "integration_tests": [
+        "tests/test_a_backup_image_carries_what_git_does_not.py",
+        "tests/test_a_changed_task_setting_reaches_an_installed_machine.py",
+        "tests/test_a_committed_source_resolves_an_older_compile_plan.py"
+      ]
+    },
+    {
+      "provider": "scripts/repository_scope.py",
+      "names": [
+        "sanitized_git_environment"
+      ],
+      "contract_sha256": "fd550ae20761afad50b37fa3a71044a162485b0e4d4b3e2af9b5b22e143c2bec",
+      "integration_tests": [
+        "tests/test_a_code_generation_is_not_abandoned.py",
+        "tests/test_a_directory_link_inside_the_checkout_does_not_refuse_the_revision.py",
+        "tests/test_a_document_is_opened_in_its_own_language.py"
+      ]
+    },
+    {
+      "provider": "scripts/retrieval_telemetry.py",
+      "names": [
+        "best_effort_make_event",
+        "best_effort_record_events"
+      ],
+      "contract_sha256": "d1ff2704abc1924049f90916189f4675b62e6538f8a55c94aceb2eb72ffa3c21",
+      "integration_tests": [
+        "tests/test_a_dropped_telemetry_write_is_recorded.py",
+        "tests/test_access_tracking.py",
+        "tests/test_automatic_writer_integration.py"
+      ]
+    }
+  ]
+}

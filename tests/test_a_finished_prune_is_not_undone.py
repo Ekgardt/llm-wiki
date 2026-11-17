@@ -8,7 +8,11 @@ from __future__ import annotations
 import sqlite3
 from pathlib import Path
 
-from tests.test_nothing_half_written_is_left_behind import _committed, _coordinator, _kill_a_prune
+from tests.nothing_half_written_is_left_behind_helpers import (
+    _committed,
+    _coordinator,
+    _kill_a_prune,
+)
 
 
 def test_images_a_marked_row_disowned_are_removed_on_recovery(tmp_path: Path) -> None:

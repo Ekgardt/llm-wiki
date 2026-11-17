@@ -1,0 +1,191 @@
+{
+  "encoding": "o200k_base",
+  "max_tokens": 100000,
+  "serialization": "exact-duplicates/v1",
+  "files": [
+    "AGENTS.md",
+    "CLAUDE.md",
+    "docs/AGENTS.md",
+    "docs/STRUCTURE.md",
+    "docs/modules/context-bundle.md",
+    "docs/modules/context-records.md",
+    "docs/modules/context-tooling.md",
+    "docs/modules/formats.md",
+    "docs/modules/install-uninstall-rollback-context.json",
+    "docs/modules/install-uninstall-rollback.md",
+    "docs/modules/model-choice.md",
+    "docs/modules/product-structure.md",
+    "docs/modules/project-governance.md",
+    "docs/modules/test-support.md",
+    "rules/development-laws.md",
+    "scripts/__init__.py",
+    "scripts/llm_wiki/__init__.py",
+    "scripts/llm_wiki/context_bundle.py",
+    "scripts/llm_wiki/formats/__init__.py",
+    "scripts/llm_wiki/install_uninstall_rollback.py",
+    "tests/__init__.py",
+    "tests/conftest.py",
+    "tests/module_context.py",
+    "tests/module_context_paths.py",
+    "tests/module_interface.py",
+    "tests/module_interface_render.py",
+    "tests/module_qualification.py",
+    "tests/module_record_context.py",
+    "tests/module_records.py",
+    "tests/shared_fixtures.py",
+    "tests/slow_machine.py"
+  ],
+  "ownership": {
+    "files": [
+      "docs/modules/install-uninstall-rollback-context.json",
+      "docs/modules/install-uninstall-rollback.md",
+      "scripts/llm_wiki/install_uninstall_rollback.py"
+    ]
+  },
+  "qualified_dependencies": [
+    {
+      "provider": "scripts/install_state.py",
+      "names": [
+        "InstallControlError",
+        "MANIFEST_SCHEMA",
+        "ManagedResource",
+        "optional_install_record",
+        "read_install_record",
+        "read_state_bytes",
+        "sha256",
+        "transaction_resources",
+        "validate_v2_record_preimages"
+      ],
+      "contract_sha256": "a88cfdfb71c2abe43549fb2e56603da6ab6bb458390d9393d90d0e0b94963366",
+      "integration_tests": [
+        "tests/test_a_changed_file_is_named_and_can_be_taken_over.py",
+        "tests/test_a_changed_task_setting_reaches_an_installed_machine.py",
+        "tests/test_a_rerun_may_ask_for_fewer_things.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/formats/canonical.py",
+      "names": [
+        "canonical_json_bytes"
+      ],
+      "contract_sha256": "679597eaf19bb4eef12b405f35978a452a06007dd565b01d3f0d04a4f1116c49",
+      "integration_tests": [
+        "tests/modules/formats/test_primitives.py",
+        "tests/modules/formats/test_queue_payload.py",
+        "tests/modules/pyright_configuration/test_configuration.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/generation_catalog_store.py",
+      "names": [
+        "GenerationCatalog"
+      ],
+      "contract_sha256": "b18194ebe04bf988b4474379fcb5243516550d43b745a00eaed1453f7844c983",
+      "integration_tests": [
+        "tests/test_a_blocked_task_has_a_way_back.py",
+        "tests/test_a_build_in_flight_is_not_an_orphan.py",
+        "tests/test_a_capacity_refusal_does_not_corrupt_a_generation.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/install_records.py",
+      "names": [
+        "Identity",
+        "install_lock",
+        "optional_record",
+        "read_record",
+        "record_identity",
+        "records_by_identity",
+        "utc_now",
+        "write_record"
+      ],
+      "contract_sha256": "6af836647d85ca1c9ac430e93572b52a79870f11c5a0994a271a411769e44005",
+      "integration_tests": [
+        "tests/test_an_update_honors_explicit_resource_adoption.py",
+        "tests/test_lock_writes_are_complete.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/install_transactions.py",
+      "names": [
+        "record_failure",
+        "require_installed_resources",
+        "require_resource_request",
+        "rollback_install",
+        "set_transaction_state",
+        "validate_resources"
+      ],
+      "contract_sha256": "39c6d373c550f230fe26101f805db2fddf044b73428f56af226f014867d7332b",
+      "integration_tests": [
+        "tests/test_install_control.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/install_v2_mutation.py",
+      "names": [
+        "v2_mutate_resources"
+      ],
+      "contract_sha256": "32bbf94fd20d24bd40c67e3d5f8481133242636906654c12ec4517e468bd33ff",
+      "integration_tests": [
+        "tests/test_install_control.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/install_v2_transactions.py",
+      "names": [
+        "checkpoint_resources",
+        "complete_v2_publication",
+        "continue_v2_operation",
+        "ordered_transaction_resources",
+        "published_v2_target",
+        "require_active_resources",
+        "require_v2_base_manifest",
+        "v2_failed_operation",
+        "v2_rollback_mutations",
+        "validate_active_manifest"
+      ],
+      "contract_sha256": "bdb74448a05fa8e970175debd23be5d4bc0b586dc27ffbf9d0e233e8b89fd599",
+      "integration_tests": [
+        "tests/test_a_changed_task_setting_reaches_an_installed_machine.py",
+        "tests/test_a_rerun_may_ask_for_fewer_things.py",
+        "tests/test_a_rollback_undoes_only_what_it_did.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/model_choice.py",
+      "names": [
+        "using_root"
+      ],
+      "contract_sha256": "d45f2655cb61963e77617d1dfd7d617b134ad77cc770b59b335d0856e5d65019",
+      "integration_tests": [
+        "tests/test_central_model_selection.py",
+        "tests/test_compile_execution_inventory.py"
+      ]
+    },
+    {
+      "provider": "scripts/reliable_memory.py",
+      "names": [
+        "fsync_directory",
+        "validate_state_root"
+      ],
+      "contract_sha256": "4ca423e580b75523a9541bd503c48d108f01ee833d9a736ae136467148fd77e5",
+      "integration_tests": [
+        "tests/test_a_backup_image_carries_what_git_does_not.py",
+        "tests/test_a_changed_task_setting_reaches_an_installed_machine.py",
+        "tests/test_a_committed_source_resolves_an_older_compile_plan.py"
+      ]
+    },
+    {
+      "provider": "scripts/repository_scope.py",
+      "names": [
+        "sanitized_git_environment"
+      ],
+      "contract_sha256": "fd550ae20761afad50b37fa3a71044a162485b0e4d4b3e2af9b5b22e143c2bec",
+      "integration_tests": [
+        "tests/test_a_code_generation_is_not_abandoned.py",
+        "tests/test_a_directory_link_inside_the_checkout_does_not_refuse_the_revision.py",
+        "tests/test_a_document_is_opened_in_its_own_language.py"
+      ]
+    }
+  ]
+}

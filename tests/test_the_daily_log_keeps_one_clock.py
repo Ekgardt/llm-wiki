@@ -13,18 +13,17 @@ from pathlib import Path
 
 import pytest
 
-from tests.test_claims import raw_claim, source_bytes
+from tests.claims_helpers import raw_claim, source_bytes
 
 SCRIPTS = Path(__file__).resolve().parents[1] / "scripts"
 
-# Every function that stamps a daily heading, or picks the daily file's day.
+# Clock-reading writers. Breadcrumbs use the verified occurrence instant instead;
+# test_breadcrumb_decision and test_breadcrumb_worker cover delayed delivery.
 DAILY_CLOCK_READERS = (
-    ("post_tool_capture.py", "_append_tool_tag"),
-    ("user_prompt_capture.py", "_append_prompt_tag"),
-    ("mcp_server.py", "_log_decision"),
-    ("session_end_project_tag.py", "_tag_session"),
+    ("llm_wiki/mcp_server_vault.py", "log_decision"),
+    ("session_end_project_tag.py", "tag_project_payload"),
     ("memory_queue.py", "_manual_flush"),
-    ("flush_memory.py", "_capture_now"),
+    ("flush_memory.py", "capture_now"),
     ("daily_log_append.py", "append_daily"),
     ("episode_consolidation.py", "consolidate_day"),
     ("episode_consolidation.py", "_today_or"),
@@ -86,7 +85,7 @@ def test_an_instant_no_real_offset_explains_is_refused(pipeline) -> None:
 
 
 def test_the_compile_names_the_same_instant(kolkata) -> None:
-    from compile_memory import block_instant
+    from iso_time import block_instant
 
     assert block_instant("2026-01-02", "03:04:05") == "2026-01-01T21:34:05Z"
 
@@ -109,4 +108,4 @@ def _clock_calls(path: Path, name: str) -> set[str]:
 def test_every_daily_writer_reads_the_one_clock(module: str, function: str) -> None:
     calls = _clock_calls(SCRIPTS / module, function)
     assert "local_now" in calls
-    assert not calls & {"datetime.now", "_utc_now", "datetime.utcnow", "date.today"}
+    assert not calls & {"datetime.now", "utc_now", "_utc_now", "datetime.utcnow", "date.today"}

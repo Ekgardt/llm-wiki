@@ -1,0 +1,157 @@
+{
+  "encoding": "o200k_base",
+  "max_tokens": 100000,
+  "serialization": "exact-duplicates/v1",
+  "files": [
+    "AGENTS.md",
+    "CLAUDE.md",
+    "docs/AGENTS.md",
+    "docs/STRUCTURE.md",
+    "docs/modules/context-bundle.md",
+    "docs/modules/context-records.md",
+    "docs/modules/context-tooling.md",
+    "docs/modules/generation-fts-validation-tests-context.json",
+    "docs/modules/generation-fts-validation-tests.md",
+    "docs/modules/model-choice.md",
+    "docs/modules/product-structure.md",
+    "docs/modules/project-governance.md",
+    "docs/modules/test-support.md",
+    "rules/development-laws.md",
+    "scripts/__init__.py",
+    "scripts/llm_wiki/__init__.py",
+    "scripts/llm_wiki/context_bundle.py",
+    "tests/__init__.py",
+    "tests/conftest.py",
+    "tests/module_context.py",
+    "tests/module_context_paths.py",
+    "tests/module_interface.py",
+    "tests/module_interface_render.py",
+    "tests/module_qualification.py",
+    "tests/module_record_context.py",
+    "tests/module_records.py",
+    "tests/search_ranking_helpers.py",
+    "tests/shared_fixtures.py",
+    "tests/slow_machine.py"
+  ],
+  "ownership": {
+    "files": [
+      "docs/modules/generation-fts-validation-tests-context.json",
+      "docs/modules/generation-fts-validation-tests.md",
+      "tests/search_ranking_helpers.py"
+    ]
+  },
+  "qualified_dependencies": [
+    {
+      "provider": "scripts/corpus_snapshot.py",
+      "names": [
+        "collect_corpus"
+      ],
+      "contract_sha256": "7ea12368f51c070a84b0754260f0a82db5ac44b0395b95eabcb01e5053c9f0bb",
+      "integration_tests": [
+        "tests/test_breadcrumb_retrieval.py",
+        "tests/test_sealed_fts_query_reuses_the_verified_row_verdict.py",
+        "tests/test_search_ranking.py"
+      ]
+    },
+    {
+      "provider": "scripts/generation_fts_validation.py",
+      "names": [
+        "GENERATION_TOKENIZER_CONFIG_SHA256",
+        "GENERATION_TOKENIZER_VERSION"
+      ],
+      "contract_sha256": "41a5ba6fcba2b0852a5187a5c47402f077682f14e1f983941f7647502022a803",
+      "integration_tests": [
+        "tests/search_ranking_helpers.py",
+        "tests/test_a_verified_digest_is_remembered.py",
+        "tests/test_foreign_code_capture_keeps_its_context.py"
+      ]
+    },
+    {
+      "provider": "scripts/generation_search.py",
+      "names": [
+        "artifact_descriptor",
+        "build_generation_fts"
+      ],
+      "contract_sha256": "1dae85b66d280a79b4ce7e932c6096e6bcc6c1ce48d810367f4575fe8b94b07d",
+      "integration_tests": [
+        "tests/dense_admission_trust_weight_helpers.py",
+        "tests/search_ranking_helpers.py",
+        "tests/test_a_fallback_names_its_cause.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/generation_catalog_store.py",
+      "names": [
+        "GenerationCatalog"
+      ],
+      "contract_sha256": "b18194ebe04bf988b4474379fcb5243516550d43b745a00eaed1453f7844c983",
+      "integration_tests": [
+        "tests/test_a_build_in_flight_is_not_an_orphan.py",
+        "tests/test_a_code_generation_is_not_abandoned.py",
+        "tests/test_a_flow_walk_stops_when_its_caller_has.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/model_choice.py",
+      "names": [
+        "using_root"
+      ],
+      "contract_sha256": "d45f2655cb61963e77617d1dfd7d617b134ad77cc770b59b335d0856e5d65019",
+      "integration_tests": [
+        "tests/test_breadcrumb_retrieval.py",
+        "tests/test_sealed_fts_query_reuses_the_verified_row_verdict.py",
+        "tests/test_search_ranking.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/runtime_roots.py",
+      "names": [
+        "vault_root"
+      ],
+      "contract_sha256": "35ea768c9fd09097366a2ded61783ec66ac8997f3f02255c744c8443405a706b",
+      "integration_tests": [
+        "tests/test_a_continuation_keeps_its_original_entry.py",
+        "tests/test_a_prompt_checkpoint_does_not_outwait_its_host.py",
+        "tests/test_a_session_marker_survives_a_busy_writer.py"
+      ]
+    },
+    {
+      "provider": "scripts/reliable_memory.py",
+      "names": [
+        "canonical_json_bytes",
+        "validate_state_root"
+      ],
+      "contract_sha256": "7bba4b535d3f0a73445fece541c540939989b41456c9a79a67f82634748be36b",
+      "integration_tests": [
+        "tests/test_breadcrumb_retrieval.py",
+        "tests/test_sealed_fts_query_reuses_the_verified_row_verdict.py",
+        "tests/test_search_ranking.py"
+      ]
+    },
+    {
+      "provider": "scripts/repository_scope.py",
+      "names": [
+        "resolve_repository_scope",
+        "sanitized_git_environment"
+      ],
+      "contract_sha256": "983dd096d99bafff98ca0aaa2cd722477333e30eed4bfa9297d1830c635e8d90",
+      "integration_tests": [
+        "tests/test_breadcrumb_retrieval.py",
+        "tests/test_sealed_fts_query_reuses_the_verified_row_verdict.py",
+        "tests/test_search_ranking.py"
+      ]
+    },
+    {
+      "provider": "scripts/search_memory.py",
+      "names": [
+        "build_generation_numpy_vectors"
+      ],
+      "contract_sha256": "c4aa3c17bbc51151ad39e786c5a7b9f06c365629922c1fc5816eaca67c60d7f3",
+      "integration_tests": [
+        "tests/search_ranking_helpers.py",
+        "tests/test_a_question_finds_pages_without_a_generation.py",
+        "tests/test_a_row_that_carries_its_text_carries_no_cut_of_it.py"
+      ]
+    }
+  ]
+}

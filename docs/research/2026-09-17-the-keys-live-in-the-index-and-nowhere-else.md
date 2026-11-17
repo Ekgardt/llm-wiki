@@ -57,7 +57,10 @@ Files: `scripts/fact_keys.py`, `scripts/query_memory.py`, `benchmark/longmemeval
 - The stand keys the turns the way the nightly does (no encoder), so it measures the product.
 - The nightly step stays: it has a reader, a turn is keyed once, and its cost is bounded by
   the step budget.
-- A turn is asked at most three nights (`MAX_ATTEMPTS`). Attempts are counted in the store;
+- Historical policy, superseded by the 2026-10-03 retained-pending change after
+  installation: a turn was asked at most three nights (`MAX_ATTEMPTS`). See
+  [the replacement qualification](2026-10-03-an-unanswered-turn-remains-pending.md).
+  Attempts are counted in the store;
   turns never asked go first, and a turn that used up its attempts is left to be found by its
   own text, which the index always carries.
 - The tail of generations M4 — model-written text inside a sealed artifact — is not a broken

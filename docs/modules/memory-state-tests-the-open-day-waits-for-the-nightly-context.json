@@ -1,0 +1,244 @@
+{
+  "encoding": "o200k_base",
+  "max_tokens": 100000,
+  "serialization": "exact-duplicates/v1",
+  "files": [
+    "AGENTS.md",
+    "CLAUDE.md",
+    "docs/AGENTS.md",
+    "docs/STRUCTURE.md",
+    "docs/modules/compile-paths.md",
+    "docs/modules/context-bundle.md",
+    "docs/modules/context-records.md",
+    "docs/modules/context-tooling.md",
+    "docs/modules/installed-memory-repair-tests.md",
+    "docs/modules/memory-state-tests-the-open-day-waits-for-the-nightly-context.json",
+    "docs/modules/memory-state-tests-the-open-day-waits-for-the-nightly.md",
+    "docs/modules/model-choice.md",
+    "docs/modules/product-structure.md",
+    "docs/modules/project-governance.md",
+    "docs/modules/script-sources.md",
+    "docs/modules/test-support.md",
+    "rules/development-laws.md",
+    "scripts/__init__.py",
+    "scripts/llm_wiki/__init__.py",
+    "scripts/llm_wiki/context_bundle.py",
+    "tests/__init__.py",
+    "tests/adopted_vault.py",
+    "tests/compile_paths.py",
+    "tests/conftest.py",
+    "tests/forgotten_modules.py",
+    "tests/module_context.py",
+    "tests/module_context_paths.py",
+    "tests/module_interface.py",
+    "tests/module_interface_render.py",
+    "tests/module_qualification.py",
+    "tests/module_record_context.py",
+    "tests/module_records.py",
+    "tests/script_sources.py",
+    "tests/shared_fixtures.py",
+    "tests/slow_machine.py",
+    "tests/test_the_open_day_waits_for_the_nightly.py"
+  ],
+  "ownership": {
+    "files": [
+      "docs/modules/memory-state-tests-the-open-day-waits-for-the-nightly-context.json",
+      "docs/modules/memory-state-tests-the-open-day-waits-for-the-nightly.md",
+      "tests/test_the_open_day_waits_for_the_nightly.py"
+    ]
+  },
+  "qualified_dependencies": [
+    {
+      "provider": "scripts/answer_budget.py",
+      "names": [
+        "BYTES_PER_TOKEN"
+      ],
+      "contract_sha256": "ec68359e0380c4a54afc6f3e670e951f2bf83c105164af970a4ef63b4cf0bf36",
+      "integration_tests": [
+        "tests/test_the_open_day_waits_for_the_nightly.py"
+      ]
+    },
+    {
+      "provider": "scripts/installed_memory_repair.py",
+      "names": [
+        "repair_installed_vault"
+      ],
+      "contract_sha256": "6ab4497d3ed56413bc24ea5ae9e993acf118980056b046072877a80df4f52a18",
+      "integration_tests": [
+        "tests/test_the_open_day_waits_for_the_nightly.py"
+      ]
+    },
+    {
+      "provider": "scripts/integration_adapter.py",
+      "names": [
+        "run_session_start_maintenance"
+      ],
+      "contract_sha256": "f9833472ad8e9253207e0d36d4273862080b5397691d0fafece0a1472ce9c033",
+      "integration_tests": [
+        "tests/test_a_capture_that_fails_says_so.py",
+        "tests/test_a_checkpoint_records_what_was_done.py",
+        "tests/test_a_claude_prompt_takes_the_ingest_path.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/compile_pipeline_apply.py",
+      "names": [
+        "apply_compile_plan"
+      ],
+      "contract_sha256": "129ecd76764fbd203f197468ec01d03833729ef205c00c26dd60fb67025303bb",
+      "integration_tests": [
+        "tests/test_the_open_day_waits_for_the_nightly.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/compile_pipeline_batches.py",
+      "names": [
+        "pack_compile_batches"
+      ],
+      "contract_sha256": "42879fb77545b262126891bf818efcf8a9307f66323329e8e70bef806a53fc39",
+      "integration_tests": [
+        "tests/test_the_open_day_waits_for_the_nightly.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/compile_pipeline_receipts.py",
+      "names": [
+        "read_snapshot_receipt"
+      ],
+      "contract_sha256": "a5447e9a4167b9e71f8380cf2e2dbcf7affd97ac86b1f742cd1a108f28c62aa4",
+      "integration_tests": [
+        "tests/test_the_open_day_waits_for_the_nightly.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/compile_pipeline_selection.py",
+      "names": [
+        "offered_dailies"
+      ],
+      "contract_sha256": "0f3c6677dcb5a5ba5be480898a0c908d216a30cd057dc832ac1cec16de4dff60",
+      "integration_tests": [
+        "tests/test_the_open_day_waits_for_the_nightly.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/compile_pipeline_sources.py",
+      "names": [
+        "snapshot_compile_inputs"
+      ],
+      "contract_sha256": "bf02fc1c5e0236abe974c7bd9563649093ead7a0da80b24feef40a93b2a02969",
+      "integration_tests": [
+        "tests/test_the_open_day_waits_for_the_nightly.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/generation_catalog_store.py",
+      "names": [
+        "GenerationCatalog"
+      ],
+      "contract_sha256": "b18194ebe04bf988b4474379fcb5243516550d43b745a00eaed1453f7844c983",
+      "integration_tests": [
+        "tests/test_a_build_in_flight_is_not_an_orphan.py",
+        "tests/test_a_code_generation_is_not_abandoned.py",
+        "tests/test_a_flow_walk_stops_when_its_caller_has.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/integration_session_start.py",
+      "names": [
+        "run_maintenance_command",
+        "spawn_compile_if_idle"
+      ],
+      "contract_sha256": "7d8a45d7d1c6ff138751c11287dbeebbbb7876ecf6b8271da17f3779d1421ae8",
+      "integration_tests": [
+        "tests/test_a_capture_that_fails_says_so.py",
+        "tests/test_a_claude_prompt_takes_the_ingest_path.py",
+        "tests/test_a_missed_nightly_is_caught_up.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/model_choice.py",
+      "names": [
+        "using_root"
+      ],
+      "contract_sha256": "d45f2655cb61963e77617d1dfd7d617b134ad77cc770b59b335d0856e5d65019",
+      "integration_tests": [
+        "tests/test_the_open_day_waits_for_the_nightly.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/runtime_roots.py",
+      "names": [
+        "state_root"
+      ],
+      "contract_sha256": "41f0ec7fca196ea9f2d97a7e16a16a3c68c056e34e706069b24d85d3ea42640d",
+      "integration_tests": [
+        "tests/test_a_continuation_keeps_its_original_entry.py",
+        "tests/test_a_prompt_checkpoint_does_not_outwait_its_host.py",
+        "tests/test_a_session_marker_survives_a_busy_writer.py"
+      ]
+    },
+    {
+      "provider": "scripts/markdown_transaction.py",
+      "names": [
+        "active_markdown_coordinator"
+      ],
+      "contract_sha256": "3260e0919f0db38e974984faca8fa00d88642553366937a0604fa87f1be6898b",
+      "integration_tests": [
+        "tests/test_the_open_day_waits_for_the_nightly.py"
+      ]
+    },
+    {
+      "provider": "scripts/maybe_compile.py",
+      "names": [
+        "compile_command",
+        "has_pending_work"
+      ],
+      "contract_sha256": "b8f4cd86c2263fbdf3bc08cad4d718591921aa3fc21afd03c4c5ca7c68ca2b1a",
+      "integration_tests": [
+        "tests/test_the_open_day_waits_for_the_nightly.py"
+      ]
+    },
+    {
+      "provider": "scripts/memory_state.py",
+      "names": [
+        "closed_daily_logs",
+        "file_hash",
+        "update_state"
+      ],
+      "contract_sha256": "f7814a3ddbcda6235eb0098aa62c2bd0007434c2a7f16342b1c6d5b634f22202",
+      "integration_tests": [
+        "tests/test_the_open_day_waits_for_the_nightly.py"
+      ]
+    },
+    {
+      "provider": "scripts/reliable_memory.py",
+      "names": [
+        "validate_state_root"
+      ],
+      "contract_sha256": "8680515cd873056a7c8a36e0057d91f2f83f23c48841263697676ff91f7ff964",
+      "integration_tests": [
+        "tests/test_the_open_day_waits_for_the_nightly.py"
+      ]
+    },
+    {
+      "provider": "scripts/repository_scope.py",
+      "names": [
+        "sanitized_git_environment"
+      ],
+      "contract_sha256": "fd550ae20761afad50b37fa3a71044a162485b0e4d4b3e2af9b5b22e143c2bec",
+      "integration_tests": [
+        "tests/test_the_open_day_waits_for_the_nightly.py"
+      ]
+    },
+    {
+      "provider": "scripts/session_start_context.py",
+      "names": [
+        "maybe_spawn_nightly_catchup"
+      ],
+      "contract_sha256": "96d93a6e548019f28f04601159e6687e18009aad1ee73437f2cb5bb9d463fc67",
+      "integration_tests": [
+        "tests/test_the_open_day_waits_for_the_nightly.py"
+      ]
+    }
+  ]
+}

@@ -2,7 +2,7 @@
 
 Measured 2026-08-28: every daily log here carries `# Daily Session Memory —
 YYYY-MM-DD`, written by the single producer in `daily_log_append`, while
-`_DATE_RE` required the bare `# YYYY-MM-DD` — a shape never written in this
+`DATE_RE` required the bare `# YYYY-MM-DD` — a shape never written in this
 vault. The subsystem had therefore never run: zero ledgers, no
 `cache/claims.sqlite3`. Decision:
 `knowledge/notes/daily-heading-tolerant-reader-decision.md`.
@@ -17,11 +17,11 @@ SCRIPTS_DIR = Path(__file__).resolve().parent.parent / "scripts"
 if str(SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_DIR))
 
-from claims import _DATE_RE  # noqa: E402
+from claims import DATE_RE  # noqa: E402
 
 
 def _matched(heading: str) -> str | None:
-    match = _DATE_RE.match(heading)
+    match = DATE_RE.match(heading)
     return match.group(1) if match else None
 
 

@@ -10,12 +10,14 @@ import sys
 from pathlib import Path
 
 import pytest
+from llm_wiki import event_project, integration_session_start
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT / "scripts") not in sys.path:
     sys.path.insert(0, str(ROOT / "scripts"))
 
 import integration_adapter  # noqa: E402
+import project_checkpoint  # noqa: E402
 
 
 def test_a_new_event_does_not_widen_the_batch_a_failed_commit_left(monkeypatch):
@@ -38,17 +40,18 @@ def test_a_new_event_does_not_widen_the_batch_a_failed_commit_left(monkeypatch):
         def checkpoint(self, slug, event, owner):
             checkpoints.append(event["occurrence_id"])
 
-    monkeypatch.setattr(integration_adapter, "update_state", update)
-    monkeypatch.setattr(integration_adapter, "ProjectStore", Store)
-    monkeypatch.setattr(integration_adapter, "_project_context", lambda event: ("demo", ROOT))
+    monkeypatch.setattr(project_checkpoint, "update_state", update)
+    monkeypatch.setattr(integration_session_start, "ProjectStore", Store)
+    monkeypatch.setattr(project_checkpoint, "ProjectStore", Store)
+    monkeypatch.setattr(event_project, "project_context", lambda event: ("demo", ROOT))
     one = integration_adapter.normalize_event("codex", "session_end", {"session_id": "s1", "cwd": "C:/p", "event_id": "one"})
     two = integration_adapter.normalize_event("codex", "session_end", {"session_id": "s1", "cwd": "C:/p", "event_id": "two"})
 
     with pytest.raises(TimeoutError):
-        integration_adapter._observe_project_checkpoint(one)
-    integration_adapter._observe_project_checkpoint(two)
+        project_checkpoint.observe_project_checkpoint(one)
+    project_checkpoint.observe_project_checkpoint(two)
 
-    batch = integration_adapter._batch_occurrence_id
+    batch = project_checkpoint.batch_occurrence_id
     assert (checkpoints, state["project_checkpoint_pending"]["demo"]) == (
         [batch([one.event_id]), batch([one.event_id]), batch([two.event_id])],
         [],

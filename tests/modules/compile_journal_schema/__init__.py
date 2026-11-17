@@ -1,0 +1,1 @@
+"""Protected journal schema qualification."""

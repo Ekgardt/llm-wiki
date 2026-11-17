@@ -1,0 +1,157 @@
+{
+  "encoding": "o200k_base",
+  "max_tokens": 100000,
+  "serialization": "exact-duplicates/v1",
+  "files": [
+    "AGENTS.md",
+    "CLAUDE.md",
+    "docs/AGENTS.md",
+    "docs/STRUCTURE.md",
+    "docs/modules/context-bundle.md",
+    "docs/modules/context-records.md",
+    "docs/modules/context-tooling.md",
+    "docs/modules/formats.md",
+    "docs/modules/model-choice.md",
+    "docs/modules/product-structure.md",
+    "docs/modules/project-governance.md",
+    "docs/modules/queue-migration-plan-context.json",
+    "docs/modules/queue-migration-plan.md",
+    "docs/modules/test-support.md",
+    "docs/research/2026-11-03-queue-migration-plan-boundary.md",
+    "rules/development-laws.md",
+    "scripts/__init__.py",
+    "scripts/llm_wiki/__init__.py",
+    "scripts/llm_wiki/context_bundle.py",
+    "scripts/llm_wiki/formats/__init__.py",
+    "scripts/llm_wiki/queue_migration_plan.py",
+    "tests/__init__.py",
+    "tests/conftest.py",
+    "tests/module_context.py",
+    "tests/module_context_paths.py",
+    "tests/module_interface.py",
+    "tests/module_interface_render.py",
+    "tests/module_qualification.py",
+    "tests/module_record_context.py",
+    "tests/module_records.py",
+    "tests/modules/__init__.py",
+    "tests/shared_fixtures.py",
+    "tests/slow_machine.py"
+  ],
+  "directories": [
+    "tests/modules/queue_migration_plan"
+  ],
+  "ownership": {
+    "files": [
+      "docs/modules/queue-migration-plan-context.json",
+      "docs/modules/queue-migration-plan.md",
+      "docs/research/2026-11-03-queue-migration-plan-boundary.md",
+      "scripts/llm_wiki/queue_migration_plan.py"
+    ],
+    "directories": [
+      "tests/modules/queue_migration_plan"
+    ]
+  },
+  "qualified_dependencies": [
+    {
+      "provider": "scripts/llm_wiki/formats/canonical.py",
+      "names": [
+        "canonical_json_bytes",
+        "sha256_bytes"
+      ],
+      "contract_sha256": "2e42a7aefcb66ac2515f6665a03feae34e6f7bad4807787a789ce031f9f3a9c1",
+      "integration_tests": [
+        "tests/modules/breadcrumb_decision/test_wire.py",
+        "tests/modules/breadcrumb_documents/test_contract.py",
+        "tests/modules/breadcrumb_documents/test_rendering.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/formats/queue_payload.py",
+      "names": [
+        "MAX_QUEUE_PAYLOAD_BYTES",
+        "validate_payload_blob"
+      ],
+      "contract_sha256": "75d3904008845ad00ecc45a0f15cea2bed2ad397c9a33d4cf7a79fe3ae579ae4",
+      "integration_tests": [
+        "tests/modules/formats/test_queue_payload.py",
+        "tests/modules/queue_migration_plan/test_planning.py",
+        "tests/modules/queue_validation/test_capture_checks.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/generation_catalog_store.py",
+      "names": [
+        "GenerationCatalog"
+      ],
+      "contract_sha256": "b18194ebe04bf988b4474379fcb5243516550d43b745a00eaed1453f7844c983",
+      "integration_tests": [
+        "tests/test_a_blocked_task_has_a_way_back.py",
+        "tests/test_a_build_in_flight_is_not_an_orphan.py",
+        "tests/test_a_capacity_refusal_does_not_corrupt_a_generation.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/model_choice.py",
+      "names": [
+        "using_root"
+      ],
+      "contract_sha256": "d45f2655cb61963e77617d1dfd7d617b134ad77cc770b59b335d0856e5d65019",
+      "integration_tests": [
+        "tests/test_a_block_opens_one_entry.py",
+        "tests/test_a_blocked_task_has_a_way_back.py",
+        "tests/test_a_build_in_flight_is_not_an_orphan.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/queue_sources.py",
+      "names": [
+        "queue_v3_source_links"
+      ],
+      "contract_sha256": "ce17ccf8d71ea203d8eee5532f22ccc2b0a6b4f5e93e372ed2b47fd74956f20d",
+      "integration_tests": [
+        "tests/modules/queue_migration_plan/test_planning.py",
+        "tests/modules/queue_sources/test_sources.py",
+        "tests/test_a_blocked_task_has_a_way_back.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/sqlite_contracts.py",
+      "names": [
+        "MigrationStatement",
+        "OperationalDatabaseContractError",
+        "migration_error",
+        "quote_sqlite_identifier"
+      ],
+      "contract_sha256": "4e4f92beef4eee801dbae32653161dfc7f0f106a02bad5d30c46a41d90cd2629",
+      "integration_tests": [
+        "tests/modules/coordinator_invariants/test_integrity.py",
+        "tests/modules/coordinator_invariants/test_rows.py",
+        "tests/modules/coordinator_schema/test_contract.py"
+      ]
+    },
+    {
+      "provider": "scripts/reliable_memory.py",
+      "names": [
+        "validate_state_root"
+      ],
+      "contract_sha256": "8680515cd873056a7c8a36e0057d91f2f83f23c48841263697676ff91f7ff964",
+      "integration_tests": [
+        "tests/test_a_backup_image_carries_what_git_does_not.py",
+        "tests/test_a_backup_snapshots_what_hooks_write.py",
+        "tests/test_a_backup_takes_what_any_installed_vault_holds.py"
+      ]
+    },
+    {
+      "provider": "scripts/repository_scope.py",
+      "names": [
+        "sanitized_git_environment"
+      ],
+      "contract_sha256": "fd550ae20761afad50b37fa3a71044a162485b0e4d4b3e2af9b5b22e143c2bec",
+      "integration_tests": [
+        "tests/modules/cleanup_worktrees/test_git_refusal.py",
+        "tests/test_a_blocked_task_has_a_way_back.py",
+        "tests/test_a_build_in_flight_is_not_an_orphan.py"
+      ]
+    }
+  ]
+}

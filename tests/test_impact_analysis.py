@@ -13,34 +13,15 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 
 from impact_analysis import (  # noqa: E402
     ImpactLimits,
-    _textual_symbols,
     analyze_impact,
     collect_git_changes,
     find_stale_wiki_pages,
     format_for_advisory,
+    textual_symbols,
 )
 
+from tests.impact_analysis_helpers import _git, _Graph, _repository
 from tests.slow_machine import SHORT_TIMEOUT
-
-
-def _git(root: Path, *arguments: str) -> str:
-    result = subprocess.run(
-        ["git", *arguments], cwd=root, capture_output=True, text=True, check=True
-    )
-    return result.stdout.strip()
-
-
-def _repository(tmp_path: Path) -> Path:
-    root = tmp_path / "repository"
-    root.mkdir()
-    _git(root, "init")
-    _git(root, "config", "user.email", "impact@example.test")
-    _git(root, "config", "user.name", "Impact Test")
-    (root / "alpha.py").write_text("def alpha():\n    return 1\n", encoding="utf-8")
-    (root / "deleted.py").write_text("def removed():\n    return 1\n", encoding="utf-8")
-    _git(root, "add", ".")
-    _git(root, "commit", "-m", "initial")
-    return root
 
 
 def _verifications(calls: list[tuple]) -> list[tuple]:
@@ -169,13 +150,13 @@ class TestGitComparisons:
 
         root = _repository(tmp_path)
         calls = []
-        real_git = impact_analysis._git
+        real_git = impact_analysis.git
 
         def recording_git(root, arguments, **kwargs):
             calls.append(tuple(arguments))
             return real_git(root, arguments, **kwargs)
 
-        monkeypatch.setattr(impact_analysis, "_git", recording_git)
+        monkeypatch.setattr(impact_analysis, "git", recording_git)
         collect_git_changes(
             root,
             comparison="two-commits",
@@ -236,18 +217,6 @@ def _change_with_status(changes: list, status: str) -> dict:
     return next(item for item in changes if item["status"] == status)
 
 
-def _path_selected(node: dict, path) -> bool:
-    return path is None or node["metadata"].get("path") == path
-
-
-def _kind_selected(node: dict, kinds) -> bool:
-    return kinds is None or node["kind"] in kinds
-
-
-def _node_selected(node: dict, path, kinds) -> bool:
-    return _path_selected(node, path) and _kind_selected(node, kinds)
-
-
 def _node_ids(items: list) -> list:
     return sorted(item["node_id"] for item in items)
 
@@ -263,59 +232,6 @@ def _items_without_evidence(result: dict) -> list:
         for item in items
         if not item["evidence"]
     ]
-
-
-class _Graph:
-    generation_id = "generation-24"
-
-    def __init__(self):
-        self.nodes = {
-            "symbol": {"node_id": "symbol", "kind": "function", "identity_key": "alpha", "metadata": {"name": "alpha", "path": "alpha.py"}},
-            "caller": {"node_id": "caller", "kind": "function", "identity_key": "call_alpha", "metadata": {"name": "call_alpha", "path": "service.py"}},
-            "test": {"node_id": "test", "kind": "function", "identity_key": "test_alpha", "metadata": {"name": "test_alpha", "path": "tests/test_alpha.py"}},
-            "module": {"node_id": "module", "kind": "module", "identity_key": "alpha", "metadata": {"name": "alpha", "path": "alpha.py"}},
-            "importer": {"node_id": "importer", "kind": "module", "identity_key": "tests.test_import", "metadata": {"name": "tests.test_import", "path": "tests/test_import.py"}},
-            "decision": {"node_id": "decision", "kind": "decision", "identity_key": "knowledge/notes/alpha.md", "metadata": {"page_type": "decision"}},
-            "page": {"node_id": "page", "kind": "knowledge-page", "identity_key": "knowledge/notes/guide.md", "metadata": {}},
-            "checkpoint": {"node_id": "checkpoint", "kind": "checkpoint", "identity_key": "project:7", "metadata": {"sequence": 7}},
-            "project-file": {"node_id": "project-file", "kind": "file", "identity_key": "project:file-1", "metadata": {"value": "alpha.py"}},
-        }
-        self._edges = [
-            {"assertion_id": "defines", "source_node_id": "module", "target_node_id": "symbol", "edge_type": "DEFINES", "confidence": "high"},
-            {"assertion_id": "imports", "source_node_id": "importer", "target_node_id": "module", "edge_type": "IMPORTS", "confidence": "high"},
-            {"assertion_id": "call", "source_node_id": "caller", "target_node_id": "symbol", "edge_type": "CALLS", "confidence": "high"},
-            {"assertion_id": "test-call", "source_node_id": "test", "target_node_id": "symbol", "edge_type": "CALLS", "confidence": "high"},
-            {"assertion_id": "documents", "source_node_id": "decision", "target_node_id": "symbol", "edge_type": "REFERENCES_SYMBOL", "confidence": "high"},
-            {"assertion_id": "page-documents", "source_node_id": "page", "target_node_id": "symbol", "edge_type": "REFERENCES_SYMBOL", "confidence": "high"},
-            {"assertion_id": "checkpoint-file", "source_node_id": "checkpoint", "target_node_id": "project-file", "edge_type": "CHECKPOINT_CHANGED_FILE", "confidence": "high"},
-        ]
-
-    def find_nodes(self, *, path=None, kinds=None, **_options):
-        return [node for node in self.nodes.values() if _node_selected(node, path, kinds)]
-
-    # The bytes this generation indexed: the committed `alpha.py` of `_repository`.
-    indexed = {"alpha.py": b"def alpha():\n    return 1\n"}
-
-    def source_by_path(self, relative_path, **_options):
-        content = self.indexed.get(relative_path)
-        return None if content is None else {"relative_path": relative_path, "content": content}
-
-    def occurrences(self, node_id, **_options):
-        if node_id == "symbol":
-            return [{"relative_path": "alpha.py", "byte_start": 0, "byte_end": 29, "line_start": 1, "line_end": 2}]
-        return []
-
-    def edges(self, **_options):
-        return list(self._edges)
-
-    def node(self, node_id):
-        return self.nodes.get(node_id)
-
-    def evidence(self, *, assertion_id, **_options):
-        return [{"relative_path": "evidence/" + assertion_id, "line_start": 1, "line_end": 1}]
-
-    def close(self):
-        pass
 
 
 class TestGraphImpact:
@@ -362,14 +278,13 @@ class TestGraphImpact:
         assert result["changed_symbols"][0]["sides"] == ["old"]
 
     def test_missing_graph_is_unresolved_and_text_fallback_is_separate(self, tmp_path, monkeypatch):
-        import impact_analysis
 
         root = _repository(tmp_path)
         notes = root / "knowledge" / "notes"
         notes.mkdir(parents=True)
         (notes / "alpha.md").write_text("# Alpha\n\nUses alpha.\n", encoding="utf-8")
         (root / "alpha.py").write_text("def alpha():\n    return 20\n", encoding="utf-8")
-        monkeypatch.setattr(impact_analysis, "KNOWLEDGE_DIR", notes)
+        monkeypatch.setenv("LLM_WIKI_ROOT", str(root))
 
         result = analyze_impact(root=root, graph=None)
 
@@ -396,13 +311,13 @@ def test_mcp_exposes_impact_as_get_architecture_mode_without_a_thirteenth_tool(m
     import mcp_server
 
     expected = {"classification": "exact", "affected": {}}
-    monkeypatch.setattr(mcp_server, "_analyze_impact", lambda **kwargs: expected)
+    monkeypatch.setattr("llm_wiki.mcp_server_architecture.analyze_change_impact", lambda **kwargs: expected)
 
     schema = mcp_server.TOOL_INPUT_SCHEMAS["get_architecture"]
     assert ("mode" in schema["properties"], len(mcp_server.TOOL_INPUT_SCHEMAS)) == (True, 12)
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
-    response = json.loads(loop.run_until_complete(mcp_server._handle_tool_call(
+    response = json.loads(loop.run_until_complete(mcp_server.handle_tool_call(
         "get_architecture",
         {"directory": str(Path.cwd()), "mode": "impact", "comparison": "index-HEAD"},
     )))
@@ -425,7 +340,7 @@ def test_active_graph_rejects_shared_state_generation_for_another_repository(
 ):
     import impact_analysis
     from evidence_graph_builder import build_full_generation
-    from generation_catalog import GenerationCatalog
+    from llm_wiki.generation_catalog_store import GenerationCatalog
     from repository_scope import resolve_repository_scope
 
     repository_a = tmp_path / "first" / "same-name"
@@ -450,10 +365,10 @@ def test_active_graph_rejects_shared_state_generation_for_another_repository(
             else {}
         ),
     )
-    monkeypatch.setattr(impact_analysis, "ROOT", repository_b)
-    monkeypatch.setattr(impact_analysis, "STATE_ROOT", state)
+    monkeypatch.setenv("LLM_WIKI_ROOT", str(repository_b))
+    monkeypatch.setenv("LLM_WIKI_STATE_ROOT", str(state))
 
-    assert impact_analysis._active_graph(repository_b, time.monotonic() + 5) is None
+    assert impact_analysis.active_graph(repository_b, time.monotonic() + 5) is None
 
 
 def test_active_graph_uses_configured_shared_state_for_external_repository(
@@ -461,7 +376,7 @@ def test_active_graph_uses_configured_shared_state_for_external_repository(
 ):
     import impact_analysis
     from evidence_graph_builder import build_full_generation
-    from generation_catalog import GenerationCatalog
+    from llm_wiki.generation_catalog_store import GenerationCatalog
     from repository_scope import resolve_repository_scope
 
     repository = tmp_path / "external"
@@ -480,20 +395,23 @@ def test_active_graph_uses_configured_shared_state_for_external_repository(
         generation_id="external-generation",
         repository_scope=resolve_repository_scope(repository),
     )
-    monkeypatch.setattr(impact_analysis, "STATE_ROOT", state)
+    monkeypatch.setenv("LLM_WIKI_STATE_ROOT", str(state))
 
-    graph = impact_analysis._active_graph(repository, time.monotonic() + 5)
+    graph = impact_analysis.active_graph(repository, time.monotonic() + 5)
 
     assert graph is not None
     assert graph.generation_id == "external-generation"
     graph.close()
 
 
-@pytest.mark.parametrize("timeout_source", ["scope", "graph"])
+@pytest.mark.parametrize("timeout_source", ["scope", "code", "catalog", "graph"])
 def test_active_graph_propagates_deadline_timeout(tmp_path, monkeypatch, timeout_source):
+    from unittest.mock import Mock
+
     import evidence_graph
     import impact_analysis
     import repository_scope
+    from llm_wiki import generation_catalog_store
 
     root = tmp_path / "repository"
     root.mkdir()
@@ -501,21 +419,32 @@ def test_active_graph_propagates_deadline_timeout(tmp_path, monkeypatch, timeout
     catalog_path = state / "cache" / "evidence-graph" / "catalog.sqlite3"
     catalog_path.parent.mkdir(parents=True)
     catalog_path.touch()
-    monkeypatch.setattr(impact_analysis, "ROOT", root)
-    monkeypatch.setattr(impact_analysis, "STATE_ROOT", state)
-
-    def timed_out(*_args, **_kwargs):
-        raise TimeoutError("deadline exceeded")
-
-    if timeout_source == "scope":
-        monkeypatch.setattr(repository_scope, "resolve_repository_scope", timed_out)
-    else:
-        monkeypatch.setattr(
-            evidence_graph.EvidenceGraph, "open_active_for_repository", timed_out
-        )
-
-    with pytest.raises(TimeoutError, match="deadline exceeded"):
-        impact_analysis._active_graph(root, time.monotonic() + 5)
+    monkeypatch.setenv("LLM_WIKI_ROOT", str(root))
+    monkeypatch.setenv("LLM_WIKI_STATE_ROOT", str(state))
+    stages = {
+        "scope": Mock(return_value=object()),
+        "code": Mock(return_value=None),
+        "catalog": Mock(return_value=[]),
+        "graph": Mock(),
+    }
+    catalog = Mock(code_generations_for_repository=stages["catalog"])
+    monkeypatch.setattr(generation_catalog_store, "GenerationCatalog", Mock(return_value=catalog))
+    monkeypatch.setattr(repository_scope, "resolve_repository_scope", stages["scope"])
+    monkeypatch.setattr(evidence_graph.EvidenceGraph, "open_code_for_repository", stages["code"])
+    monkeypatch.setattr(evidence_graph.EvidenceGraph, "open_active_for_repository", stages["graph"])
+    failure = TimeoutError("deadline exceeded")
+    stages[timeout_source].side_effect = failure
+    # Routing, not elapsed wall time: real deadline enforcement has separate tests.
+    deadline = 123.0
+    with pytest.raises(TimeoutError, match="deadline exceeded") as caught:
+        impact_analysis.active_graph(root, deadline)
+    assert caught.value is failure
+    visited = list(stages).index(timeout_source) + 1
+    for stage in list(stages.values())[:visited]:
+        assert stage.call_count == 1
+        assert stage.call_args.kwargs["deadline"] == deadline
+    for stage in list(stages.values())[visited:]:
+        stage.assert_not_called()
 
 
 def test_public_analyze_impact_propagates_graph_open_timeout(tmp_path, monkeypatch):
@@ -526,7 +455,7 @@ def test_public_analyze_impact_propagates_graph_open_timeout(tmp_path, monkeypat
     def timed_out(*_args, **_kwargs):
         raise TimeoutError("graph deadline exceeded")
 
-    monkeypatch.setattr(impact_analysis, "_active_graph", timed_out)
+    monkeypatch.setattr(impact_analysis, "active_graph", timed_out)
 
     with pytest.raises(TimeoutError, match="graph deadline exceeded"):
         analyze_impact(root=root)
@@ -541,24 +470,26 @@ def test_public_analyze_impact_propagates_all_deadline_timeouts(
     root = _repository(tmp_path)
     (root / "alpha.py").write_text("def alpha():\n    return 2\n", encoding="utf-8")
 
-    if stage == "git":
-        monkeypatch.setattr(
-            impact_analysis,
-            "collect_git_changes",
-            lambda *_args, **_kwargs: (_ for _ in ()).throw(
-                TimeoutError("git deadline")
-            ),
-        )
-    elif stage == "graph":
-        graph = _Graph()
-        monkeypatch.setattr(
-            graph,
-            "evidence",
-            lambda **_kwargs: (_ for _ in ()).throw(
-                TimeoutError("evidence deadline")
-            ),
-        )
-    else:
+    def install_timeout():
+        if stage == "git":
+            monkeypatch.setattr(
+                impact_analysis,
+                "collect_git_changes",
+                lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                    TimeoutError("git deadline")
+                ),
+            )
+            return None
+        if stage == "graph":
+            graph = _Graph()
+            monkeypatch.setattr(
+                graph,
+                "evidence",
+                lambda **_kwargs: (_ for _ in ()).throw(
+                    TimeoutError("evidence deadline")
+                ),
+            )
+            return graph
         graph = None
 
         def text_timeout(_symbols, *, deadline=None, **_kwargs):
@@ -566,16 +497,19 @@ def test_public_analyze_impact_propagates_all_deadline_timeouts(
             raise TimeoutError("text deadline")
 
         monkeypatch.setattr(impact_analysis, "find_stale_wiki_pages", text_timeout)
+        return None
+
+    graph = install_timeout()
 
     with pytest.raises(TimeoutError, match="deadline"):
-        analyze_impact(root=root, graph=locals().get("graph"))
+        analyze_impact(root=root, graph=graph)
 
 
 def test_changed_ranges_rejects_expired_deadline():
     import impact_analysis
 
     with pytest.raises(TimeoutError, match="deadline"):
-        impact_analysis._changed_ranges(b"old\n", b"new\n", deadline=time.monotonic() - 1)
+        impact_analysis.changed_ranges(b"old\n", b"new\n", deadline=time.monotonic() - 1)
 
 
 def test_worktree_blob_rejects_file_identity_swap_before_descriptor_open(
@@ -603,7 +537,7 @@ def test_worktree_blob_rejects_file_identity_swap_before_descriptor_open(
     monkeypatch.setattr(bounded_io.os, "open", swapping_open)
 
     with pytest.raises(PermissionError, match="changed before open"):
-        impact_analysis._worktree_blob(root, "page.py", 1024)
+        impact_analysis.worktree_blob(root, "page.py", 1024)
 
     assert swapped is True
 
@@ -631,7 +565,7 @@ def test_changed_ranges_uses_linear_common_prefix_and_suffix():
     old = b"same\nold-a\nold-b\ntail\n"
     new = b"same\nnew-a\nnew-b\ntail\n"
 
-    ranges = impact_analysis._changed_ranges(old, new)
+    ranges = impact_analysis.changed_ranges(old, new)
 
     assert ranges == [
         {
@@ -667,13 +601,12 @@ def test_changed_ranges_uses_linear_common_prefix_and_suffix():
 def test_note_discovery_enforces_file_and_byte_bounds(
     tmp_path, monkeypatch, limit_name, limit_value, files, match
 ):
-    import impact_analysis
 
-    notes = tmp_path / "notes"
-    notes.mkdir()
+    notes = tmp_path / "knowledge" / "notes"
+    notes.mkdir(parents=True)
     for name, content in files.items():
         (notes / name).write_text(content, encoding="utf-8")
-    monkeypatch.setattr(impact_analysis, "KNOWLEDGE_DIR", notes)
+    monkeypatch.setenv("LLM_WIKI_ROOT", str(tmp_path))
     limits = ImpactLimits(**{limit_name: limit_value})
 
     with pytest.raises(ValueError, match=match):
@@ -681,22 +614,20 @@ def test_note_discovery_enforces_file_and_byte_bounds(
 
 
 def test_note_discovery_enforces_directory_bound(tmp_path, monkeypatch):
-    import impact_analysis
 
-    notes = tmp_path / "notes"
+    notes = tmp_path / "knowledge" / "notes"
     (notes / "a").mkdir(parents=True)
     (notes / "b").mkdir()
-    monkeypatch.setattr(impact_analysis, "KNOWLEDGE_DIR", notes)
+    monkeypatch.setenv("LLM_WIKI_ROOT", str(tmp_path))
 
     with pytest.raises(ValueError, match="directory ceiling"):
         find_stale_wiki_pages(["x"], limits=ImpactLimits(max_note_dirs=1))
 
 
 def test_note_discovery_ignores_symlinks(tmp_path, monkeypatch):
-    import impact_analysis
 
-    notes = tmp_path / "notes"
-    notes.mkdir()
+    notes = tmp_path / "knowledge" / "notes"
+    notes.mkdir(parents=True)
     outside = tmp_path / "outside.md"
     outside.write_text("secretSymbol", encoding="utf-8")
     link = notes / "linked.md"
@@ -704,18 +635,16 @@ def test_note_discovery_ignores_symlinks(tmp_path, monkeypatch):
         link.symlink_to(outside)
     except OSError:
         pytest.skip("symlink creation is unavailable")
-    monkeypatch.setattr(impact_analysis, "KNOWLEDGE_DIR", notes)
+    monkeypatch.setenv("LLM_WIKI_ROOT", str(tmp_path))
 
     assert find_stale_wiki_pages(["secretSymbol"]) == []
 
 
 def test_note_discovery_propagates_cancellation(tmp_path, monkeypatch):
-    import impact_analysis
-
-    notes = tmp_path / "notes"
-    notes.mkdir()
+    monkeypatch.setenv("LLM_WIKI_ROOT", str(tmp_path))
+    notes = tmp_path / "knowledge" / "notes"
+    notes.mkdir(parents=True)
     (notes / "page.md").write_text("needle", encoding="utf-8")
-    monkeypatch.setattr(impact_analysis, "KNOWLEDGE_DIR", notes)
 
     with pytest.raises(TimeoutError, match="cancelled"):
         find_stale_wiki_pages(["needle"], cancelled=lambda: True)
@@ -723,10 +652,9 @@ def test_note_discovery_propagates_cancellation(tmp_path, monkeypatch):
 
 def test_note_capture_rejects_same_size_replacement_before_open(tmp_path, monkeypatch):
     import bounded_io
-    import impact_analysis
 
-    notes = tmp_path / "notes"
-    notes.mkdir()
+    notes = tmp_path / "knowledge" / "notes"
+    notes.mkdir(parents=True)
     page = notes / "page.md"
     page.write_text("safe-symbol", encoding="utf-8")
     replacement = tmp_path / "replacement.md"
@@ -742,7 +670,7 @@ def test_note_capture_rejects_same_size_replacement_before_open(tmp_path, monkey
             os.replace(replacement, page)
         return real_open(path, flags, *args, **kwargs)
 
-    monkeypatch.setattr(impact_analysis, "KNOWLEDGE_DIR", notes)
+    monkeypatch.setenv("LLM_WIKI_ROOT", str(tmp_path))
     monkeypatch.setattr(bounded_io.os, "open", swapping_open)
 
     with pytest.raises(PermissionError, match="changed"):
@@ -754,7 +682,7 @@ def test_note_capture_rejects_same_size_replacement_before_open(tmp_path, monkey
 def test_note_capture_rejects_parent_identity_swap(tmp_path, monkeypatch):
     import impact_analysis
 
-    notes = tmp_path / "notes"
+    notes = tmp_path / "knowledge" / "notes"
     original = notes / "section"
     original.mkdir(parents=True)
     (original / "page.md").write_text("same-symbol", encoding="utf-8")
@@ -762,7 +690,7 @@ def test_note_capture_rejects_parent_identity_swap(tmp_path, monkeypatch):
     replacement.mkdir()
     (replacement / "page.md").write_text("same-symbol", encoding="utf-8")
     parked = tmp_path / "parked-section"
-    real_seal = impact_analysis._seal_path
+    real_seal = impact_analysis.seal_path
     swapped = False
 
     def swapping_seal(*args, **kwargs):
@@ -774,8 +702,8 @@ def test_note_capture_rejects_parent_identity_swap(tmp_path, monkeypatch):
             os.replace(replacement, original)
         return seal
 
-    monkeypatch.setattr(impact_analysis, "KNOWLEDGE_DIR", notes)
-    monkeypatch.setattr(impact_analysis, "_seal_path", swapping_seal)
+    monkeypatch.setenv("LLM_WIKI_ROOT", str(tmp_path))
+    monkeypatch.setattr(impact_analysis, "seal_path", swapping_seal)
 
     with pytest.raises(PermissionError, match="ancestor changed"):
         find_stale_wiki_pages(["same-symbol"])
@@ -787,17 +715,17 @@ class TestExtractSymbols:
     """The names the low-confidence textual fallback reads out of changed bytes."""
 
     def test_extract_from_python(self):
-        symbols = _textual_symbols(b"def hello():\n    pass\nclass World:\n    pass\n")
+        symbols = textual_symbols(b"def hello():\n    pass\nclass World:\n    pass\n")
         assert ("hello" in symbols, "World" in symbols) == (True, True)
 
     def test_extract_from_javascript(self):
-        assert "greet" in _textual_symbols(b"function greet() {}\n")
+        assert "greet" in textual_symbols(b"function greet() {}\n")
 
     def test_extract_from_empty_content(self):
-        assert _textual_symbols(None) == []
+        assert textual_symbols(None) == []
 
     def test_extract_deduplicates(self):
-        symbols = _textual_symbols(b"def foo():\n    foo()\n    foo()\n")
+        symbols = textual_symbols(b"def foo():\n    foo()\n    foo()\n")
         assert symbols.count("foo") == 1
 
 
@@ -806,10 +734,9 @@ class TestFindStaleWikiPages:
 
     def test_finds_page_mentioning_symbol(self, tmp_path, monkeypatch):
         """A wiki page that mentions a changed function should be found."""
-        import impact_analysis
 
-        notes = tmp_path / "notes"
-        notes.mkdir()
+        notes = tmp_path / "knowledge" / "notes"
+        notes.mkdir(parents=True)
         page = notes / "auth-decision.md"
         page.write_text(
             "---\ntype: decision\n---\n\n"
@@ -817,7 +744,7 @@ class TestFindStaleWikiPages:
             "We use verifyToken for auth.\n",
             encoding="utf-8",
         )
-        monkeypatch.setattr(impact_analysis, "KNOWLEDGE_DIR", notes)
+        monkeypatch.setenv("LLM_WIKI_ROOT", str(tmp_path))
 
         results = find_stale_wiki_pages(["verifyToken"])
         assert len(results) == 1
@@ -825,46 +752,43 @@ class TestFindStaleWikiPages:
         assert "verifyToken" in results[0]["matched_symbols"]
 
     def test_no_match_returns_empty(self, tmp_path, monkeypatch):
-        import impact_analysis
 
-        notes = tmp_path / "notes"
-        notes.mkdir()
+        notes = tmp_path / "knowledge" / "notes"
+        notes.mkdir(parents=True)
         page = notes / "unrelated.md"
         page.write_text("# Unrelated\n\nNothing about code.\n", encoding="utf-8")
-        monkeypatch.setattr(impact_analysis, "KNOWLEDGE_DIR", notes)
+        monkeypatch.setenv("LLM_WIKI_ROOT", str(tmp_path))
 
         results = find_stale_wiki_pages(["nonexistentSymbol"])
         assert results == []
 
     def test_skips_superseded(self, tmp_path, monkeypatch):
         """Superseded pages should not be flagged as stale."""
-        import impact_analysis
 
-        notes = tmp_path / "notes"
-        notes.mkdir()
+        notes = tmp_path / "knowledge" / "notes"
+        notes.mkdir(parents=True)
         page = notes / "old.md"
         page.write_text(
             "---\nstatus: superseded\n---\n\n"
             "# Old\n\nMentions verifyToken.\n",
             encoding="utf-8",
         )
-        monkeypatch.setattr(impact_analysis, "KNOWLEDGE_DIR", notes)
+        monkeypatch.setenv("LLM_WIKI_ROOT", str(tmp_path))
 
         results = find_stale_wiki_pages(["verifyToken"])
         assert len(results) == 0
 
     def test_confidence_levels(self, tmp_path, monkeypatch):
         """Multiple symbol matches → high confidence."""
-        import impact_analysis
 
-        notes = tmp_path / "notes"
-        notes.mkdir()
+        notes = tmp_path / "knowledge" / "notes"
+        notes.mkdir(parents=True)
         page = notes / "multi.md"
         page.write_text(
             "# Multi\n\nUses funcA, funcB, and funcC.\n",
             encoding="utf-8",
         )
-        monkeypatch.setattr(impact_analysis, "KNOWLEDGE_DIR", notes)
+        monkeypatch.setenv("LLM_WIKI_ROOT", str(tmp_path))
 
         results = find_stale_wiki_pages(["funcA", "funcB", "funcC"])
         assert len(results) == 1
@@ -872,13 +796,12 @@ class TestFindStaleWikiPages:
 
     def test_word_boundary_matching(self, tmp_path, monkeypatch):
         """Symbol 'auth' should not match 'authentication'."""
-        import impact_analysis
 
-        notes = tmp_path / "notes"
-        notes.mkdir()
+        notes = tmp_path / "knowledge" / "notes"
+        notes.mkdir(parents=True)
         page = notes / "page.md"
         page.write_text("# Page\n\nAbout authentication.\n", encoding="utf-8")
-        monkeypatch.setattr(impact_analysis, "KNOWLEDGE_DIR", notes)
+        monkeypatch.setenv("LLM_WIKI_ROOT", str(tmp_path))
 
         results = find_stale_wiki_pages(["auth"])
         # 'auth' as a word boundary should NOT match 'authentication'
@@ -938,8 +861,8 @@ def test_a_git_warning_on_stderr_is_not_a_diff_record(tmp_path):
     root = _autocrlf_checkout(tmp_path / "repository")
     warning = subprocess.run(["git", "diff", "--raw", "-z"], cwd=root, capture_output=True, check=True)
 
-    raw = impact_analysis._git(root, ["diff", "--raw", "-z"], deadline=time.monotonic() + SHORT_TIMEOUT, max_bytes=1 << 20)
-    records = impact_analysis._parse_raw_records(raw, "dirty")
+    raw = impact_analysis.git(root, ["diff", "--raw", "-z"], deadline=time.monotonic() + SHORT_TIMEOUT, max_bytes=1 << 20)
+    records = impact_analysis.parse_raw_records(raw, "dirty")
 
     assert b"LF will be replaced by CRLF" in warning.stderr
     assert [(r["status"], r["new_path"]) for r in records] == [("M", "pkg/core.py")]

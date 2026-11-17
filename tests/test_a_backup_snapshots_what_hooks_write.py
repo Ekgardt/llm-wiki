@@ -10,8 +10,8 @@ from pathlib import Path
 
 import pytest
 
+from tests.reliability_v3_adoption_helpers import _vault, build_adopted_reliability_v3
 from tests.slow_machine import SHORT_TIMEOUT
-from tests.test_reliability_v3_adoption import _vault, build_adopted_reliability_v3
 
 BEFORE = {"version": 1, "note": "before"}
 AFTER = {"version": 2, "note": "after"}
@@ -19,7 +19,7 @@ AFTER = {"version": 2, "note": "after"}
 
 def _hook_writes_during_copy(monkeypatch: pytest.MonkeyPatch, backup, trigger: Path, state_root: Path) -> None:
     """While the vault file is being copied, a hook rewrites state and files a new intent."""
-    copy_regular_file = backup._copy_regular_file
+    copy_regular_file = backup.copy_regular_file
 
     def copy_while_a_hook_writes(source: Path, destination: Path) -> None:
         copy_regular_file(source, destination)
@@ -29,7 +29,7 @@ def _hook_writes_during_copy(monkeypatch: pytest.MonkeyPatch, backup, trigger: P
             intents.mkdir(exist_ok=True)
             (intents / "late.json").write_text("{}", encoding="utf-8")
 
-    monkeypatch.setattr(backup, "_copy_regular_file", copy_while_a_hook_writes)
+    monkeypatch.setattr(backup, "copy_regular_file", copy_while_a_hook_writes)
 
 
 def test_a_state_write_during_the_copy_does_not_refuse_the_backup(tmp_path: Path, monkeypatch) -> None:

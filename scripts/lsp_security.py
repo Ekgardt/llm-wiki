@@ -22,6 +22,12 @@ from urllib.parse import unquote_to_bytes, urlsplit
 
 import windows_workspace
 from bounded_io import IO_CHUNK_BYTES
+from llm_wiki.lsp_credentials import redact_assignments as redact_assignments
+from llm_wiki.lsp_credentials import redact_private_key_blocks as redact_private_key_blocks
+from llm_wiki.lsp_credentials import redact_standalone_secrets as redact_standalone_secrets
+from llm_wiki.lsp_credentials import redact_url_userinfo as redact_url_userinfo
+from llm_wiki.lsp_text import is_control as is_control
+from llm_wiki.lsp_text import normalize_log_text as normalize_log_text
 from lsp_positions import file_uri_to_path, path_to_file_uri
 from repository_scope import RepositoryScope
 
@@ -30,7 +36,7 @@ from repository_scope import RepositoryScope
 # Past any of them the path is refused, never shortened.
 _MAX_RELATIVE_PATH = 4096
 _MAX_COMPONENTS = 256
-_MAX_COMPONENT_CHARACTERS = 255
+MAX_COMPONENT_CHARACTERS = 255
 _MAX_COMPONENT_BYTES = 255
 # A file URI from a server: 4096 bytes of path percent-encoded is up to 12 KiB; 16 KiB leaves
 # room for the scheme and authority and refuses anything longer as not a repository path.
@@ -42,12 +48,11 @@ _MAX_DIRECTORY_ENTRIES = 100_000
 # is ample; a larger input returns the oversized marker rather than risk an unredacted cut.
 # The path-token window is half of it. Values predate measurement.
 _MAX_REDACTION_RAW_BYTES = 256 * 1024
-_MAX_REDACTION_PATH_TOKEN = 128 * 1024
+MAX_REDACTION_PATH_TOKEN = 128 * 1024
 _OVERSIZED_REDACTION_MARKER = "<redacted: oversized LSP log>"
 _MALFORMED_PERCENT = re.compile(r"%(?![0-9A-Fa-f]{2})")
 _ENCODED_SEPARATOR = re.compile(r"%(?:2f|5c)", re.IGNORECASE)
 _WINDOWS_DRIVE_PATH = re.compile(r"^[A-Za-z]:/")
-_URL_AUTHORITY_TOKEN_BOUNDARIES = frozenset('"<>\\^`{|}')
 _WINDOWS_TOKEN_STRUCTURAL_TERMINATORS = frozenset('<>|?*"')
 _WINDOWS_LOG_TRAILING_PUNCTUATION = frozenset(".,;)]}")
 _WINDOWS_FORBIDDEN = '<>:"|?*'
@@ -65,26 +70,6 @@ _WINDOWS_RESERVED = frozenset(
         *(f"com{number}" for number in "¹²³"),
         *(f"lpt{number}" for number in "¹²³"),
     }
-)
-_CREDENTIAL_ASSIGNMENT = re.compile(
-    r"(?ai)(?<![a-z0-9_.-])(?P<quote>[\"']?)[a-z0-9_.-]*"
-    r"(?:api[_.-]?key|authorization|cookie|passwd|password|"
-    r"private[_.-]?key|secret|token)"
-    r"(?P=quote)\s*[:=]\s*"
-)
-# RFC 7468 section 2: a key is the base64 between a BEGIN and an END boundary line.
-_PRIVATE_KEY_BLOCK = re.compile(
-    r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----[\s\S]*?(?:-----END [A-Z0-9 ]*PRIVATE KEY-----|\Z)"
-)
-_PRIVATE_KEY_ORPHAN_END = re.compile(r"\A[\s\S]*?-----END [A-Z0-9 ]*PRIVATE KEY-----")
-_PRIVATE_KEY_MARKER = "<redacted private key>"
-# Secrets whose own shape names them, with no key written beside them.
-_STANDALONE_SECRET = re.compile(
-    r"(?ai)(?<![a-z0-9_.-])"
-    r"(?:(?P<scheme>bearer|basic)\s+[a-z0-9._~+/-]{8,}={0,2}"
-    r"|sk-[a-z0-9-]{16,}"
-    r"|gh[pousr]_[a-z0-9]{16,}"
-    r"|xox[abposr]-[a-z0-9-]{10,})"
 )
 
 
@@ -108,12 +93,12 @@ class _TraversalStep:
     directory: bool
 
 
-class _OwnedHandles:
+class OwnedHandles:
     def __init__(self, close: Callable[[int], None]) -> None:
         self._close = close
         self._values: list[int] = []
 
-    def __enter__(self) -> _OwnedHandles:
+    def __enter__(self) -> OwnedHandles:
         return self
 
     def own(self, value: int) -> int:
@@ -143,17 +128,10 @@ class _OwnedHandles:
         return False
 
 
-def _resolution_barrier() -> None:
+def resolution_barrier() -> None:
     return
 
 
-def _is_control(character: str) -> bool:
-    codepoint = ord(character)
-    return (
-        codepoint < 32
-        or 127 <= codepoint <= 159
-        or unicodedata.category(character) in {"Cf", "Zl", "Zp"}
-    )
 
 
 # (upper bound, UTF-8 bytes) in ascending order; lone surrogates have none.
@@ -180,7 +158,7 @@ def _fits_utf8_redaction_ceiling(value: str) -> bool:
 def _unnormalized_path_text(value: str) -> bool:
     if unicodedata.normalize("NFC", value) != value:
         return True
-    return any(_is_control(character) for character in value)
+    return any(is_control(character) for character in value)
 
 
 def _uncanonical_path_text(value: str) -> bool:
@@ -214,7 +192,7 @@ def _uncanonical_path_shape(value: str, parts: tuple[str, ...]) -> bool:
 
 
 def _oversized_component(component: str) -> bool:
-    if len(component) > _MAX_COMPONENT_CHARACTERS:
+    if len(component) > MAX_COMPONENT_CHARACTERS:
         return True
     return len(component.encode("utf-8")) > _MAX_COMPONENT_BYTES
 
@@ -274,7 +252,7 @@ def _require_canonical_bounded_text(value: str) -> None:
         raise PathContainmentError("repository source path exceeds its byte ceiling")
 
 
-def _validate_relative_path(value: object) -> tuple[str, tuple[str, ...]]:
+def validate_relative_path(value: object) -> tuple[str, tuple[str, ...]]:
     if not isinstance(value, str):
         raise TypeError("relative_path must be a string")
     _require_canonical_bounded_text(value)
@@ -287,7 +265,7 @@ def _validate_relative_path(value: object) -> tuple[str, tuple[str, ...]]:
 
 def validate_repository_relative_path(value: str) -> str:
     """Validate and return one canonical repository-relative path lexically."""
-    normalized, _parts = _validate_relative_path(value)
+    normalized, _parts = validate_relative_path(value)
     return normalized
 
 
@@ -340,7 +318,7 @@ def _assert_ancestry(root: Path, target: Path) -> None:
 
 def _open_posix_checkout(
     root: Path,
-    owned: _OwnedHandles,
+    owned: OwnedHandles,
 ) -> tuple[int, tuple[object, ...], tuple[_TraversalStep, ...]]:
     directory_flags = _posix_directory_flags()
     current = owned.own(os.open("/", directory_flags))
@@ -362,7 +340,7 @@ def _require_posix_root(descriptor: int, filesystem_root_identity: tuple[object,
         raise PathContainmentError("filesystem root changed during traversal")
 
 
-def _reopen_posix_step(owned: _OwnedHandles, current: int, step: _TraversalStep) -> int:
+def _reopen_posix_step(owned: OwnedHandles, current: int, step: _TraversalStep) -> int:
     flags = _posix_directory_flags() if step.directory else _posix_file_flags()
     opened = owned.own(os.open(step.name, flags, dir_fd=current))
     info = os.fstat(opened)
@@ -377,7 +355,7 @@ def _revalidate_posix(
     root_steps: tuple[_TraversalStep, ...],
     source_steps: tuple[_TraversalStep, ...],
 ) -> None:
-    with _OwnedHandles(os.close) as owned:
+    with OwnedHandles(os.close) as owned:
         current = owned.own(os.open("/", _posix_directory_flags()))
         _require_posix_root(current, filesystem_root_identity)
         for step in (*root_steps, *source_steps):
@@ -387,7 +365,7 @@ def _revalidate_posix(
 class _PosixWalk:
     """The state one no-follow walk threads through its components."""
 
-    def __init__(self, owned: _OwnedHandles, root_descriptor: int, must_exist: bool) -> None:
+    def __init__(self, owned: OwnedHandles, root_descriptor: int, must_exist: bool) -> None:
         self.owned = owned
         self.current = root_descriptor
         self.must_exist = must_exist
@@ -487,7 +465,7 @@ def _access_posix(
     root = Path(repository.checkout_root)
     if not root.is_absolute():
         raise PathContainmentError("repository checkout root is not local and absolute")
-    with _OwnedHandles(os.close) as owned:
+    with OwnedHandles(os.close) as owned:
         root_descriptor, filesystem_root_identity, root_steps = _open_posix_checkout(
             root, owned
         )
@@ -496,7 +474,7 @@ def _access_posix(
         walk = _PosixWalk(owned, root_descriptor, must_exist)
         walk.walk(parts)
 
-        _resolution_barrier()
+        resolution_barrier()
         step_tuple = tuple(walk.steps)
         _revalidate_posix(filesystem_root_identity, root_steps, step_tuple)
         _require_posix_still_missing(walk)
@@ -553,7 +531,7 @@ def _windows_entry(
 
 
 def _probe_windows_absence(
-    parent: int, component: str, owned: _OwnedHandles
+    parent: int, component: str, owned: OwnedHandles
 ) -> tuple[bool, list[OSError], int]:
     """(opened by some opener, the other errors, how many openers found nothing)."""
     opened = False
@@ -577,7 +555,7 @@ def _probe_windows_absence(
 def _prove_windows_component_missing(
     parent: int,
     component: str,
-    owned: _OwnedHandles,
+    owned: OwnedHandles,
 ) -> None:
     opened, failures, missing = _probe_windows_absence(parent, component, owned)
     if opened:
@@ -603,7 +581,7 @@ def _open_windows_step(
     component: str,
     *,
     directory: bool,
-    owned: _OwnedHandles,
+    owned: OwnedHandles,
 ) -> tuple[int, tuple[object, ...]]:
     expected_kind = "directory" if directory else "file"
     if entry.kind != expected_kind:
@@ -625,7 +603,7 @@ def _require_windows_file_step(entry: windows_workspace.WindowsEntry, step: _Tra
         raise PathContainmentError("Windows repository source changed during traversal")
 
 
-def _revalidate_windows_step(current: int, step: _TraversalStep, owned: _OwnedHandles) -> int:
+def _revalidate_windows_step(current: int, step: _TraversalStep, owned: OwnedHandles) -> int:
     """Re-check one recorded step; the directory handle to continue from."""
     entry = _windows_entry(current, step.name)
     if entry is None:
@@ -637,7 +615,7 @@ def _revalidate_windows_step(current: int, step: _TraversalStep, owned: _OwnedHa
 
 
 def _reopened_windows_directory(
-    current: int, entry: object, step: _TraversalStep, owned: _OwnedHandles
+    current: int, entry: object, step: _TraversalStep, owned: OwnedHandles
 ) -> int:
     opened, identity = _open_windows_step(
         current, entry, step.name, directory=True, owned=owned
@@ -651,7 +629,7 @@ def _revalidate_windows(
     root: Path,
     root_identity: tuple[object, ...],
     steps: tuple[_TraversalStep, ...],
-    owned: _OwnedHandles,
+    owned: OwnedHandles,
 ) -> None:
     current = owned.own(windows_workspace.open_directory_path(root))
     if _windows_identity(current, directory=True) != root_identity:
@@ -663,7 +641,7 @@ def _revalidate_windows(
 class _WindowsWalk:
     """The state one no-follow walk threads through its components."""
 
-    def __init__(self, owned: _OwnedHandles, root_handle: int, must_exist: bool) -> None:
+    def __init__(self, owned: OwnedHandles, root_handle: int, must_exist: bool) -> None:
         self.owned = owned
         self.current = root_handle
         self.must_exist = must_exist
@@ -713,7 +691,7 @@ def _windows_parent_probe(
     canonical_root: Path,
     root_identity: tuple[object, ...],
     steps: list[_TraversalStep],
-    owned: _OwnedHandles,
+    owned: OwnedHandles,
 ) -> tuple[Path, int]:
     """(canonical path, handle) of the nearest directory the walk proved exists."""
     existing = _existing_directory_steps(steps)
@@ -728,7 +706,7 @@ def _windows_parent_probe(
 
 
 def _windows_missing_path(
-    parent_probe: int, canonical_parent: Path, missing: tuple[str, ...], owned: _OwnedHandles
+    parent_probe: int, canonical_parent: Path, missing: tuple[str, ...], owned: OwnedHandles
 ) -> Path:
     if _windows_entry(parent_probe, missing[0]) is not None:
         raise PathContainmentError("repository source appeared during traversal")
@@ -747,7 +725,7 @@ def _windows_final_matches(
 
 
 def _windows_existing_path(
-    canonical_root: Path, parts: tuple[str, ...], walk: _WindowsWalk, owned: _OwnedHandles
+    canonical_root: Path, parts: tuple[str, ...], walk: _WindowsWalk, owned: OwnedHandles
 ) -> Path:
     absolute_path = canonical_root.joinpath(*parts).resolve(strict=True)
     _assert_ancestry(canonical_root, absolute_path)
@@ -774,7 +752,7 @@ def _require_windows_local_root(checkout_root: object) -> None:
 
 
 def _open_windows_checkout(
-    root: Path, owned: _OwnedHandles
+    root: Path, owned: OwnedHandles
 ) -> tuple[int, tuple[object, ...], Path]:
     """(root handle, its identity, the canonical root) after both open the same directory."""
     root_handle = owned.own(windows_workspace.open_directory_path(root))
@@ -792,7 +770,7 @@ def _windows_absolute_path(
     walk: _WindowsWalk,
     canonical_parent: Path,
     parent_probe: int,
-    owned: _OwnedHandles,
+    owned: OwnedHandles,
 ) -> Path:
     if walk.missing:
         return _windows_missing_path(parent_probe, canonical_parent, walk.missing, owned)
@@ -809,12 +787,12 @@ def _access_windows(
 ) -> tuple[RepositorySource, bytes | None]:
     root = Path(repository.checkout_root)
     _require_windows_local_root(repository.checkout_root)
-    with _OwnedHandles(windows_workspace.close_handle) as owned:
+    with OwnedHandles(windows_workspace.close_handle) as owned:
         root_handle, root_identity, canonical_root = _open_windows_checkout(root, owned)
         walk = _WindowsWalk(owned, root_handle, must_exist)
         walk.walk(parts)
 
-        _resolution_barrier()
+        resolution_barrier()
         step_tuple = tuple(walk.steps)
         _revalidate_windows(canonical_root, root_identity, step_tuple, owned)
         canonical_parent, parent_probe = _windows_parent_probe(
@@ -865,7 +843,7 @@ def resolve_repository_source(
     repository = _require_repository(repository)
     if not isinstance(must_exist, bool):
         raise TypeError("must_exist must be a boolean")
-    normalized, parts = _validate_relative_path(relative_path)
+    normalized, parts = validate_relative_path(relative_path)
     return _contained(
         lambda: _platform_access(
             repository, normalized, parts, must_exist=must_exist, reader=None
@@ -1001,7 +979,7 @@ def read_repository_source_bytes(
     repository = _require_repository(repository)
     _require_byte_ceiling(max_bytes)
     deadline = _validated_source_read_deadline(deadline)
-    normalized, parts = _validate_relative_path(relative_path)
+    normalized, parts = validate_relative_path(relative_path)
     _check_source_read_deadline(deadline)
     reader = _bounded_source_reader(max_bytes, deadline)
     _source, content = _contained(
@@ -1021,7 +999,7 @@ def _unsafe_uri_shape(uri: object) -> bool:
 
 
 def _outside_printable_ascii(character: str) -> bool:
-    return ord(character) > 127 or _is_control(character) or character.isspace()
+    return ord(character) > 127 or is_control(character) or character.isspace()
 
 
 def _unsafe_uri_characters(uri: str) -> bool:
@@ -1068,7 +1046,7 @@ def _unsafe_provider_path(path: str) -> bool:
 def _unsafe_provider_parts(parsed: object, authority: str, path: str) -> bool:
     if _unsafe_provider_scheme(parsed) or _unsafe_provider_authority(authority):
         return True
-    if any(_is_control(character) for character in authority + path):
+    if any(is_control(character) for character in authority + path):
         return True
     return _unsafe_provider_path(path)
 
@@ -1193,121 +1171,8 @@ def _normalized_provider_source(
     if pair is None:
         return None
     provider, root = pair
-    normalized, _parts = _validate_relative_path(provider.relative_to(root).as_posix())
+    normalized, _parts = validate_relative_path(provider.relative_to(root).as_posix())
     return resolve_repository_source(repository, normalized)
-
-
-def _quoted_value_end(value: str, value_start: int) -> int:
-    """The index after the closing quote (or the end of the text)."""
-    quote = value[value_start]
-    value_end = value_start + 1
-    escaped = False
-    while value_end < len(value):
-        character = value[value_end]
-        value_end += 1
-        if character == quote and not escaped:
-            break
-        escaped = character == "\\" and not escaped
-    return value_end
-
-
-def _line_value_end(value: str, value_end: int) -> int:
-    while value_end < len(value) and value[value_end] not in "\r\n":
-        value_end += 1
-    return value_end
-
-
-def _assignment_value_end(value: str, value_start: int) -> int:
-    if value_start < len(value) and value[value_start] in {'"', "'"}:
-        return _quoted_value_end(value, value_start)
-    return _line_value_end(value, value_start)
-
-
-def _redact_assignments(value: str) -> str:
-    pieces: list[str] = []
-    cursor = 0
-    for match in _CREDENTIAL_ASSIGNMENT.finditer(value):
-        if match.start() < cursor:
-            continue
-        pieces.append(value[cursor : match.end()])
-        pieces.append("<redacted>")
-        cursor = _assignment_value_end(value, match.end())
-    pieces.append(value[cursor:])
-    return "".join(pieces)
-
-
-def _standalone_replacement(match: re.Match[str]) -> str:
-    """Keep the scheme word that introduced the secret, never the secret."""
-    scheme = match.group("scheme")
-    if scheme is None:
-        return "<redacted>"
-    return f"{scheme} <redacted>"
-
-
-def _redact_standalone_secrets(value: str) -> str:
-    return _STANDALONE_SECRET.sub(_standalone_replacement, value)
-
-
-def _scheme_character(character: str) -> bool:
-    return character.isascii() and (
-        character.isalpha() or character.isdigit() or character in "+.-"
-    )
-
-
-def _scheme_start(value: str, scheme_end: int) -> int:
-    scheme_start = scheme_end
-    while scheme_start > 0 and _scheme_character(value[scheme_start - 1]):
-        scheme_start -= 1
-    return scheme_start
-
-
-def _is_scheme(value: str, scheme_start: int, scheme_end: int) -> bool:
-    if scheme_start >= scheme_end:
-        return False
-    return value[scheme_start].isascii() and value[scheme_start].isalpha()
-
-
-def _authority_terminator(character: str) -> bool:
-    if character in "/?#" or character in _URL_AUTHORITY_TOKEN_BOUNDARIES:
-        return True
-    return character.isspace() or _is_control(character)
-
-
-def _authority_end(value: str, authority_start: int) -> int:
-    authority_end = authority_start
-    while authority_end < len(value) and not _authority_terminator(value[authority_end]):
-        authority_end += 1
-    return authority_end
-
-
-def _userinfo_span(value: str, scheme_end: int) -> tuple[int, int] | None:
-    """(authority start, index of the last `@`) of a URL with userinfo, else None."""
-    if not _is_scheme(value, _scheme_start(value, scheme_end), scheme_end):
-        return None
-    authority_start = scheme_end + 3
-    userinfo_end = value.rfind("@", authority_start, _authority_end(value, authority_start))
-    if userinfo_end < authority_start:
-        return None
-    return authority_start, userinfo_end
-
-
-def _redact_url_userinfo(value: str) -> str:
-    pieces: list[str] = []
-    cursor = 0
-    search_start = 0
-    while True:
-        scheme_end = value.find("://", search_start)
-        if scheme_end < 0:
-            break
-        search_start = scheme_end + 3
-        span = _userinfo_span(value, scheme_end)
-        if span is None or span[0] < cursor:
-            continue
-        pieces.append(value[cursor : span[0]])
-        pieces.append("<redacted>@")
-        cursor = span[1] + 1
-    pieces.append(value[cursor:])
-    return "".join(pieces)
 
 
 def _localhost_uri_remainder(stripped: str, has_leading_separator: bool) -> str | None:
@@ -1345,9 +1210,9 @@ def _windows_drive_and_tail(candidate: str) -> tuple[str, str] | None:
 
 
 def _windows_component_is_valid(component: str) -> bool:
-    if len(component) > _MAX_COMPONENT_CHARACTERS:
+    if len(component) > MAX_COMPONENT_CHARACTERS:
         return False
-    return not any(character in '<>:"|?*' or _is_control(character) for character in component)
+    return not any(character in '<>:"|?*' or is_control(character) for character in component)
 
 
 def _kept_windows_component(component: str) -> str | None:
@@ -1477,8 +1342,8 @@ def _windows_candidate_inspection_characters(
         for component_aliases in aliases
     )
     return min(
-        _MAX_REDACTION_PATH_TOKEN,
-        _MAX_REDACTION_PATH_TOKEN // 2 + root_characters * 12,
+        MAX_REDACTION_PATH_TOKEN,
+        MAX_REDACTION_PATH_TOKEN // 2 + root_characters * 12,
     )
 
 
@@ -1510,7 +1375,7 @@ def _windows_extended_local_start(value: str, start: int) -> int | None:
 def _windows_hard_boundary(character: str) -> bool:
     if character in {"/", "\\", ":"} or character.isspace():
         return True
-    return _is_control(character) or character in _WINDOWS_TOKEN_STRUCTURAL_TERMINATORS
+    return is_control(character) or character in _WINDOWS_TOKEN_STRUCTURAL_TERMINATORS
 
 
 def _windows_boundary_character(character: str, quoted: bool) -> bool:
@@ -1529,7 +1394,7 @@ def _after_punctuation_is_boundary(value: str, punctuation_end: int) -> bool:
     if punctuation_end >= len(value):
         return True
     following = value[punctuation_end]
-    return following.isspace() or _is_control(following) or following == '"'
+    return following.isspace() or is_control(following) or following == '"'
 
 
 def _punctuation_boundary(value: str, index: int) -> bool:
@@ -1593,7 +1458,7 @@ def _absorb_trailing_dots_and_spaces(value: str, component_end: int) -> int:
 def _dots_may_end_here(following: str) -> bool:
     if not following or following in {"/", "\\", '"'}:
         return True
-    return following.isspace() or _is_control(following)
+    return following.isspace() or is_control(following)
 
 
 def _absorb_final_dots(value: str, component_end: int) -> int:
@@ -1804,7 +1669,7 @@ def _names_windows_drive(pair: tuple | None) -> bool:
 
 
 def _authority_character_is_invalid(character: str) -> bool:
-    return _is_control(character) or character.isspace()
+    return is_control(character) or character.isspace()
 
 
 def _read_authority(value: str, index: int, limit: int) -> tuple[list[str], int] | None:
@@ -1911,7 +1776,7 @@ def _windows_semantic_component_text(raw_component: str) -> str | None:
     return _trimmed_windows_component(raw_component.rstrip(" ."))
 
 
-def _windows_add_semantic_component(
+def windows_add_semantic_component(
     raw_component: str,
     components: list[str],
     root: tuple[str, tuple[frozenset[str], ...]],
@@ -1951,7 +1816,7 @@ def _windows_component_accepts_space(
 
 
 def _ends_native_component(character: str) -> bool:
-    return _is_control(character) or character in _WINDOWS_TOKEN_STRUCTURAL_TERMINATORS
+    return is_control(character) or character in _WINDOWS_TOKEN_STRUCTURAL_TERMINATORS
 
 
 def _native_component_separator(value: str, index: int, limit: int) -> int | None:
@@ -2016,7 +1881,7 @@ def _windows_terminator(
 
 
 def _windows_structural_terminator(character: str) -> bool:
-    return _is_control(character) or character in '<>:"|?*'
+    return is_control(character) or character in '<>:"|?*'
 
 
 class _WindowsRootScanner:
@@ -2096,7 +1961,7 @@ class _WindowsRootScanner:
         return self.disposable_component
 
     def _close_component(self, source_end: int, terminator: bool) -> object:
-        valid, matched = _windows_add_semantic_component(
+        valid, matched = windows_add_semantic_component(
             "".join(self.component), self.components, self.root, self.drive
         )
         if not valid:
@@ -2140,7 +2005,7 @@ class _WindowsRootScanner:
         return _KEEP_SCANNING
 
     def _finish(self) -> int | None:
-        valid, matched = _windows_add_semantic_component(
+        valid, matched = windows_add_semantic_component(
             "".join(self.component), self.components, self.root, self.drive
         )
         if valid and matched:
@@ -2148,7 +2013,7 @@ class _WindowsRootScanner:
         return None
 
 
-def _windows_semantic_root_match_end(
+def windows_semantic_root_match_end(
     value: str,
     start: int,
     root: tuple[str, tuple[frozenset[str], ...]],
@@ -2162,7 +2027,7 @@ def _windows_semantic_root_match_end(
 
 
 def _windows_end_always(character: str) -> bool:
-    return _is_control(character) or character in _WINDOWS_TOKEN_STRUCTURAL_TERMINATORS
+    return is_control(character) or character in _WINDOWS_TOKEN_STRUCTURAL_TERMINATORS
 
 
 def _windows_end_in_context(character: str, *, file_uri: bool, quoted: bool) -> bool:
@@ -2233,7 +2098,7 @@ def _windows_redaction_end(
     file_uri: bool,
     quoted: bool,
 ) -> int:
-    limit = min(len(value), start + _MAX_REDACTION_PATH_TOKEN)
+    limit = min(len(value), start + MAX_REDACTION_PATH_TOKEN)
     match_end = _windows_token_scan_end(value, root_end, limit, file_uri=file_uri, quoted=quoted)
     return _strip_log_punctuation(value, root_end, match_end)
 
@@ -2277,7 +2142,7 @@ def _windows_root_end(
         if root_end is not None:
             return root_end
     scan_start = start if native_start is None else native_start
-    return _windows_semantic_root_match_end(
+    return windows_semantic_root_match_end(
         value, scan_start, root, file_uri=file_uri, quoted=quoted
     )
 
@@ -2320,7 +2185,7 @@ def _redact_windows_path_tokens(value: str, path: Path, marker: str) -> str:
 
 
 def _posix_text_within_ceiling(raw: str, encoded: bytes) -> bool:
-    return len(raw) <= _MAX_REDACTION_PATH_TOKEN and len(encoded) <= _MAX_REDACTION_PATH_TOKEN
+    return len(raw) <= MAX_REDACTION_PATH_TOKEN and len(encoded) <= MAX_REDACTION_PATH_TOKEN
 
 
 def _posix_text_is_rooted(raw: str, encoded: bytes) -> bool:
@@ -2328,11 +2193,11 @@ def _posix_text_is_rooted(raw: str, encoded: bytes) -> bool:
         return False
     if not _posix_text_within_ceiling(raw, encoded):
         return False
-    return not any(_is_control(character) for character in raw)
+    return not any(is_control(character) for character in raw)
 
 
 def _posix_component_within_ceiling(component: str, component_bytes: bytes) -> bool:
-    if len(component) > _MAX_COMPONENT_CHARACTERS:
+    if len(component) > MAX_COMPONENT_CHARACTERS:
         return False
     return len(component_bytes) <= _MAX_COMPONENT_BYTES
 
@@ -2344,7 +2209,7 @@ def _posix_component_is_valid(component: str) -> bool:
         return False
     if not _posix_component_within_ceiling(component, component_bytes):
         return False
-    return not any(_is_control(character) or character == "/" for character in component)
+    return not any(is_control(character) or character == "/" for character in component)
 
 
 def _all_posix_components_valid(components: tuple[str, ...]) -> bool:
@@ -2386,8 +2251,8 @@ def _posix_candidate_inspection_characters(
 ) -> int:
     root_characters = len(root[0]) + len(root[1])
     return min(
-        _MAX_REDACTION_PATH_TOKEN,
-        _MAX_REDACTION_PATH_TOKEN // 2 + root_characters * 12,
+        MAX_REDACTION_PATH_TOKEN,
+        MAX_REDACTION_PATH_TOKEN // 2 + root_characters * 12,
     )
 
 
@@ -2408,7 +2273,7 @@ def _boundary_character_at(value: str, index: int, file_uri: bool) -> tuple[str,
 
 
 def _posix_hard_boundary(character: str, quoted: bool) -> bool:
-    if character in ':?#<>"' or character.isspace() or _is_control(character):
+    if character in ':?#<>"' or character.isspace() or is_control(character):
         return True
     return quoted and character == '"'
 
@@ -2474,7 +2339,7 @@ def _native_posix_prefix(value: str, start: int, limit: int) -> int | None:
 
 
 def _unsafe_authority_character(character: str, encoded: bool) -> bool:
-    if _is_control(character) or character.isspace() or character == "\\":
+    if is_control(character) or character.isspace() or character == "\\":
         return True
     return not encoded and character in "?#"
 
@@ -2621,7 +2486,7 @@ def _posix_components_end_at_root(
     )
 
 
-def _posix_add_semantic_component(
+def posix_add_semantic_component(
     raw_component: str,
     components: list[str],
     root: tuple[str, tuple[str, ...]],
@@ -2660,7 +2525,7 @@ def _posix_component_accepts_log_character(
 
 
 def _ends_posix_component(character: str) -> bool:
-    return _is_control(character) or character in '<>"'
+    return is_control(character) or character in '<>"'
 
 
 def _posix_component_separator(value: str, index: int, limit: int) -> int | None:
@@ -2718,7 +2583,7 @@ def _posix_terminator(
     unquoted_boundary: bool,
     boundary_allowed: bool,
 ) -> bool:
-    if _is_control(character):
+    if is_control(character):
         return True
     if _posix_uri_terminator(character, encoded, file_uri):
         return True
@@ -2805,7 +2670,7 @@ class _PosixRootScanner:
         return None, source_end
 
     def _close_component(self, source_end: int, terminator: bool) -> tuple | None:
-        valid, matched = _posix_add_semantic_component(
+        valid, matched = posix_add_semantic_component(
             "".join(self.component), self.components, self.root
         )
         if not valid:
@@ -2849,7 +2714,7 @@ class _PosixRootScanner:
         return None
 
     def _finish(self) -> tuple[int | None, int]:
-        valid, matched = _posix_add_semantic_component(
+        valid, matched = posix_add_semantic_component(
             "".join(self.component), self.components, self.root
         )
         if valid and (
@@ -2873,7 +2738,7 @@ def _posix_semantic_root_match_end(
 
 
 def _posix_end_always(character: str, file_uri: bool) -> bool:
-    if _is_control(character) or character in '<>"':
+    if is_control(character) or character in '<>"':
         return True
     return file_uri and character in "?#\\"
 
@@ -2910,7 +2775,7 @@ def _posix_redaction_end(
     file_uri: bool,
     quoted: bool,
 ) -> int:
-    limit = min(len(value), start + _MAX_REDACTION_PATH_TOKEN)
+    limit = min(len(value), start + MAX_REDACTION_PATH_TOKEN)
     index = root_end
     while index < limit:
         next_index = _posix_next_index(value, index, limit, file_uri=file_uri, quoted=quoted)
@@ -2993,188 +2858,11 @@ def _redact_posix_path_tokens(value: str, path: Path, marker: str) -> str:
     return "".join(pieces)
 
 
-def _redact_path(value: str, path: Path, marker: str) -> str:
+def redact_path(value: str, path: Path, marker: str) -> str:
     windows_path = bool(PureWindowsPath(str(path)).drive)
     if windows_path:
         return _redact_windows_path_tokens(value, path, marker)
     return _redact_posix_path_tokens(value, path, marker)
-
-
-def _collapses_to_space(character: str) -> bool:
-    if ord(character) < 32 or 127 <= ord(character) <= 159:
-        return True
-    return unicodedata.category(character) in {"Zl", "Zp"}
-
-
-class _LogScanner:
-    """Drop terminal control sequences while keeping every printable character."""
-
-    _STRING_INTRODUCERS = {
-        "P": False,
-        "X": False,
-        "]": True,
-        "^": False,
-        "_": False,
-    }
-    _C1_STRING_INTRODUCERS = {
-        "\x90": False,
-        "\x98": False,
-        "\x9d": True,
-        "\x9e": False,
-        "\x9f": False,
-    }
-    _C1_INTRODUCERS = frozenset(("\x9b", *_C1_STRING_INTRODUCERS))
-
-    def __init__(self, value: str) -> None:
-        self.value = value
-        self.pieces: list[str] = []
-        self.index = 0
-        self.state = "ground"
-        self.osc = False
-
-    def run(self) -> str:
-        while self.index < len(self.value):
-            self._step()
-        return "".join(self.pieces)
-
-    def _step(self) -> None:
-        character = self.value[self.index]
-        if self._consumed_by_sequence(character):
-            return
-        self._emit(character)
-        self.index += 1
-
-    def _consumed_by_sequence(self, character: str) -> bool:
-        """The first handler, in order, that takes the character; the rest never run."""
-        handlers = (
-            self._string_terminated,
-            self._interrupted_by_introducer,
-            self._inside_sequence,
-            self._introduces_sequence,
-        )
-        return any(handler(character) for handler in handlers)
-
-    def _escape_terminator_follows(self, character: str) -> bool:
-        return character == "\x1b" and self.value[self.index + 1 : self.index + 2] == "\\"
-
-    def _string_terminator_length(self, character: str) -> int:
-        if character == "\x9c":
-            return 1
-        if self._escape_terminator_follows(character):
-            return 2
-        return self._bell_terminator_length(character)
-
-    def _bell_terminator_length(self, character: str) -> int:
-        if self.osc and character == "\x07":
-            return 1
-        return 0
-
-    def _string_terminated(self, character: str) -> bool:
-        if self.state != "string":
-            return False
-        length = self._string_terminator_length(character)
-        if not length:
-            return False
-        self.state = "ground"
-        self.index += length
-        return True
-
-    def _interrupted_by_introducer(self, character: str) -> bool:
-        """A new introducer inside a sequence abandons the unfinished one."""
-        if self.state == "ground":
-            return False
-        if character != "\x1b" and character not in self._C1_INTRODUCERS:
-            return False
-        self.state = "ground"
-        return True
-
-    @staticmethod
-    def _escape_next_state(character: str) -> str:
-        if "0" <= character <= "~":
-            return "ground"
-        if not " " <= character <= "/":
-            return "ground"
-        return "escape"
-
-    def _inside_sequence(self, character: str) -> bool:
-        if self.state == "ground":
-            return False
-        self.index += 1
-        self.state = self._state_after(character)
-        return True
-
-    def _state_after(self, character: str) -> str:
-        """The state after one character inside an escape, CSI or string sequence."""
-        if self.state == "escape":
-            return self._escape_next_state(character)
-        if self.state == "csi" and "@" <= character <= "~":
-            return "ground"
-        return self.state
-
-    def _skip_known_escape(self, following: str) -> None:
-        if " " <= following <= "/":
-            self.state = "escape"
-            self.index += 2
-            return
-        if "0" <= following <= "~":
-            self.index += 2
-            return
-        self.index += 1
-
-    def _skip_escape_body(self, following: str) -> None:
-        if following == "\\":
-            self.index += 2
-            return
-        if not following:
-            self.index += 1
-            return
-        self._skip_known_escape(following)
-
-    def _escape_introducer(self) -> None:
-        following = self.value[self.index + 1 : self.index + 2]
-        if following == "[":
-            self.state = "csi"
-            self.index += 2
-            return
-        if following in self._STRING_INTRODUCERS:
-            self.state = "string"
-            self.osc = self._STRING_INTRODUCERS[following]
-            self.index += 2
-            return
-        self._skip_escape_body(following)
-
-    def _introduces_sequence(self, character: str) -> bool:
-        if character == "\x1b":
-            self._escape_introducer()
-            return True
-        return self._introduces_c1_sequence(character)
-
-    def _introduces_c1_sequence(self, character: str) -> bool:
-        if character == "\x9b":
-            self.state = "csi"
-            self.index += 1
-            return True
-        if character in self._C1_STRING_INTRODUCERS:
-            self.state = "string"
-            self.osc = self._C1_STRING_INTRODUCERS[character]
-            self.index += 1
-            return True
-        return False
-
-    def _append_safe_space(self) -> None:
-        if not self.pieces or self.pieces[-1] != " ":
-            self.pieces.append(" ")
-
-    def _emit(self, character: str) -> None:
-        if not _is_control(character):
-            self.pieces.append(character)
-            return
-        if _collapses_to_space(character):
-            self._append_safe_space()
-
-
-def _normalize_log_text(value: str) -> str:
-    return _LogScanner(value).run()
 
 
 def _require_redaction_input(value: object, repository: RepositoryScope | None):
@@ -3207,7 +2895,7 @@ def _home_paths() -> list[Path]:
 def _redact_home(redacted: str) -> str:
     try:
         for home_path in _home_paths():
-            redacted = _redact_path(redacted, home_path, "<home>")
+            redacted = redact_path(redacted, home_path, "<home>")
     except (OSError, RuntimeError):
         pass
     return redacted
@@ -3222,25 +2910,13 @@ def redact_lsp_text(
     repository = _require_redaction_input(value, repository)
     if _oversized_for_redaction(value):
         return _OVERSIZED_REDACTION_MARKER
-    normalized = _normalize_log_text(value)
-    redacted = _redact_url_userinfo(
-        _redact_standalone_secrets(_redact_assignments(normalized))
+    normalized = normalize_log_text(value)
+    redacted = redact_url_userinfo(
+        redact_standalone_secrets(redact_assignments(normalized))
     )
     if repository is not None:
-        redacted = _redact_path(redacted, Path(repository.checkout_root), "<repository>")
-    return _normalize_log_text(_redact_home(redacted))[:1024]
-
-
-def redact_private_key_blocks(value: str) -> str:
-    """Every PEM private key block in multi-line text, whole or cut at either end.
-
-    A per-line redactor sees a key's body as base64 with nothing naming it (audit
-    C-37, docs/research/2026-09-25-a-stderr-tail-is-redacted-before-it-is-cut.md).
-    An END boundary left after the blocks are gone lost its BEGIN to a cut, so the
-    text before it is body.
-    """
-    whole = _PRIVATE_KEY_BLOCK.sub(_PRIVATE_KEY_MARKER, value)
-    return _PRIVATE_KEY_ORPHAN_END.sub(_PRIVATE_KEY_MARKER, whole)
+        redacted = redact_path(redacted, Path(repository.checkout_root), "<repository>")
+    return normalize_log_text(_redact_home(redacted))[:1024]
 
 
 __all__ = [

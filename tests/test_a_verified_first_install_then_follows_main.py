@@ -22,8 +22,9 @@ for entry in (str(TESTS), str(ROOT / "scripts")):
 import self_update  # noqa: E402
 from powershell_literal import ps_literal  # noqa: E402
 from slow_machine import LONG_TIMEOUT  # noqa: E402
-from test_installer_bootstrap import (  # noqa: E402
-    _bash,
+
+from tests.installer_bootstrap_helpers import (  # noqa: E402
+    _bash,  # noqa: E402
     _powershell_functions,
     _pwsh,
     _shell_function,
@@ -86,7 +87,7 @@ def _pwsh_bootstrap(target: Path, url: str, commit: str) -> int:
 
 def _followed(bootstrap, upstream: Path, target: Path, monkeypatch) -> tuple:
     """Pin the second commit, publish a third, and ask the nightly update what it did."""
-    monkeypatch.setattr(self_update, "_synced_dependencies", lambda _root, _extras: True)
+    monkeypatch.setattr(self_update, "synced_dependencies", lambda _root, _extras: True)
     pinned = _commit(upstream, "two")
     code = bootstrap(target, upstream.as_uri(), pinned)
     installed = _git(target, "rev-parse", "HEAD")
@@ -107,7 +108,7 @@ def test_the_windows_installer_follows_the_same_way(upstream, tmp_path, monkeypa
 
 @needs_bash
 def test_a_pin_outside_the_default_branch_is_left_where_it_is(upstream, tmp_path, monkeypatch) -> None:
-    monkeypatch.setattr(self_update, "_synced_dependencies", lambda _root, _extras: True)
+    monkeypatch.setattr(self_update, "synced_dependencies", lambda _root, _extras: True)
     _git(upstream, "checkout", "-q", "-b", "side")
     pinned = _commit(upstream, "aside")
     _git(upstream, "checkout", "-q", "main")

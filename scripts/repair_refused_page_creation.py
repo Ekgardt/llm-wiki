@@ -35,13 +35,13 @@ SCRIPTS_DIR = Path(__file__).resolve().parent
 if str(SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_DIR))
 
+from llm_wiki import runtime_roots  # noqa: E402
+from llm_wiki.formats.canonical import sha256_bytes  # noqa: E402
 from markdown_transaction import (  # noqa: E402
-    _image_bytes,
     active_or_legacy_coordinator,
+    image_bytes,
     mutate_knowledge,
 )
-from memory_state import ROOT, STATE_ROOT  # noqa: E402
-from reliable_memory import sha256_bytes  # noqa: E402
 
 KNOWLEDGE = "knowledge/"
 # A race is an accident and may be replayed. A DLP refusal is a decision: the
@@ -52,7 +52,7 @@ KNOWLEDGE = "knowledge/"
 REPLAYABLE = "precondition_failed"
 
 
-def _quarantined_ids(database: sqlite3.Connection) -> list[str]:
+def quarantined_ids(database: sqlite3.Connection) -> list[str]:
     return [
         str(row[0])
         for row in database.execute(
@@ -84,7 +84,7 @@ def _recorded_content(directory: Path, operation: dict) -> bytes | None:
 def _intact_after_image(artifact: Path, expected_sha256: object) -> bytes | None:
     if not artifact.is_file():
         return None
-    content = _image_bytes(artifact)
+    content = image_bytes(artifact)
     if sha256_bytes(content) != expected_sha256:
         return None
     return content
@@ -98,7 +98,7 @@ def _is_owed(operation: dict, vault: Path) -> bool:
     return not (vault / path).exists()
 
 
-def _owed_pages(directory: Path, vault: Path) -> list[tuple[str, bytes]]:
+def owed_pages(directory: Path, vault: Path) -> list[tuple[str, bytes]]:
     plan = _plan_of(directory)
     operations = plan.get("operations", []) if isinstance(plan, dict) else []
     owed = []
@@ -111,11 +111,11 @@ def _owed_pages(directory: Path, vault: Path) -> list[tuple[str, bytes]]:
 
 def _collect(coordinator, vault: Path) -> list[tuple[str, str, bytes]]:
     with coordinator._connect() as database:  # noqa: SLF001
-        identifiers = _quarantined_ids(database)
+        identifiers = quarantined_ids(database)
     found = []
     for identifier in identifiers:
         directory = coordinator.transaction_root / identifier
-        for path, content in _owed_pages(directory, vault):
+        for path, content in owed_pages(directory, vault):
             found.append((identifier, path, content))
     return found
 
@@ -144,8 +144,8 @@ def main(argv: list[str] | None = None) -> int:
         "--apply", action="store_true", help="write the pages; otherwise only report"
     )
     args = parser.parse_args(argv)
-    vault = Path(ROOT)
-    coordinator = active_or_legacy_coordinator(vault, Path(STATE_ROOT))
+    vault = Path(runtime_roots.vault_root())
+    coordinator = active_or_legacy_coordinator(vault, Path(runtime_roots.state_root()))
     owed = _collect(coordinator, vault)
     _report(owed)
     if args.apply:

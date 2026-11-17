@@ -1,0 +1,3 @@
+# `docs/research/2026-10-19-durable-compile-progress.md`, part 4 of 4
+
+This packet owns 15 consecutive history records of `docs/research/2026-10-19-durable-compile-progress.md`, from `history-manifest-only-claim-capture-and-standalone-index-planning-design-2026-10-20` to `history-2026-10-20-quote-bearing-parts-disambiguate-repeated-timestamps`, as listed in its manifest. The catalog `compile-progress-history-records.json` proves that the records rebuild the study byte for byte, and every load validates the whole source. A change to the study requires regenerating the catalog. No executable source or runtime state belongs here.

@@ -14,7 +14,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 
-import doctor  # noqa: E402
+from llm_wiki import doctor_generation
 
 
 def _state(root: Path, payload: bytes) -> Path:
@@ -28,20 +28,20 @@ def _state(root: Path, payload: bytes) -> Path:
 def test_the_size_and_the_bound_are_both_named(tmp_path):
     _state(tmp_path, b"x" * 900_000)
 
-    hint = doctor.state_size_hint(tmp_path)
+    hint = doctor_generation.state_size_hint(tmp_path)
 
     assert "900000 bytes" in hint
-    assert str(doctor.MAX_STATE_BYTES) in hint
+    assert str(doctor_generation.MAX_STATE_BYTES) in hint
 
 
 def test_a_missing_state_file_adds_nothing(tmp_path):
-    assert doctor.state_size_hint(tmp_path) == ""
+    assert doctor_generation.state_size_hint(tmp_path) == ""
 
 
 def test_the_hint_reads_the_size_and_not_the_content(tmp_path):
     """A file too large to read is exactly the one this must not parse."""
     _state(tmp_path, b"{ this is not json " + b"y" * 500_000)
 
-    hint = doctor.state_size_hint(tmp_path)
+    hint = doctor_generation.state_size_hint(tmp_path)
 
     assert "bytes against" in hint

@@ -1,0 +1,234 @@
+{
+  "encoding": "o200k_base",
+  "max_tokens": 100000,
+  "serialization": "exact-duplicates/v1",
+  "files": [
+    "AGENTS.md",
+    "CLAUDE.md",
+    "docs/AGENTS.md",
+    "docs/STRUCTURE.md",
+    "docs/modules/an-update-replaces-what-it-owns-helpers.md",
+    "docs/modules/context-bundle.md",
+    "docs/modules/context-records.md",
+    "docs/modules/context-tooling.md",
+    "docs/modules/install-control-helpers.md",
+    "docs/modules/model-choice.md",
+    "docs/modules/product-structure.md",
+    "docs/modules/project-governance.md",
+    "docs/modules/test-an-update-replaces-what-it-owns-context.json",
+    "docs/modules/test-an-update-replaces-what-it-owns.md",
+    "docs/modules/test-support.md",
+    "rules/development-laws.md",
+    "scripts/__init__.py",
+    "scripts/llm_wiki/__init__.py",
+    "scripts/llm_wiki/context_bundle.py",
+    "tests/__init__.py",
+    "tests/an_update_replaces_what_it_owns_helpers.py",
+    "tests/conftest.py",
+    "tests/install_control_helpers.py",
+    "tests/module_context.py",
+    "tests/module_context_paths.py",
+    "tests/module_interface.py",
+    "tests/module_interface_render.py",
+    "tests/module_qualification.py",
+    "tests/module_record_context.py",
+    "tests/module_records.py",
+    "tests/shared_fixtures.py",
+    "tests/slow_machine.py",
+    "tests/test_an_update_replaces_what_it_owns.py"
+  ],
+  "ownership": {
+    "files": [
+      "docs/modules/test-an-update-replaces-what-it-owns-context.json",
+      "docs/modules/test-an-update-replaces-what-it-owns.md",
+      "tests/test_an_update_replaces_what_it_owns.py"
+    ]
+  },
+  "qualified_dependencies": [
+    {
+      "provider": "scripts/install_control.py",
+      "names": [
+        "rollback_from_args"
+      ],
+      "contract_sha256": "c8715466aa3f0cb632c923bb09cea586dcc7e04549731686dee74ef34274f703",
+      "integration_tests": [
+        "tests/test_an_uninstall_names_what_it_leaves.py",
+        "tests/test_an_update_replaces_what_it_owns.py",
+        "tests/test_install_control.py"
+      ]
+    },
+    {
+      "provider": "scripts/install_state.py",
+      "names": [
+        "InstallControlError"
+      ],
+      "contract_sha256": "a3f8e26bc2383cb5aeb82c361465122ee76199faebf8299067de7c63af981106",
+      "integration_tests": [
+        "tests/test_an_update_replaces_what_it_owns.py"
+      ]
+    },
+    {
+      "provider": "scripts/install_takeover.py",
+      "names": [
+        "DROP_IN_NAME",
+        "Line",
+        "drop_in_resources",
+        "keep_changed_whole_files",
+        "named"
+      ],
+      "contract_sha256": "fb5fcc4a2bb44ef52c237c82afe6f71a4c43382ae221f8933d8ced2e1bbe06ca",
+      "integration_tests": [
+        "tests/test_an_update_replaces_what_it_owns.py"
+      ]
+    },
+    {
+      "provider": "scripts/integration_hook_config.py",
+      "names": [
+        "claude_settings_resource",
+        "claude_settings_template"
+      ],
+      "contract_sha256": "d43052c93a6d36eb0afc7193731c4927edd41c82b22e0c9db7c3f07763a27858",
+      "integration_tests": [
+        "tests/test_an_update_replaces_what_it_owns.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/doctor_schedule.py",
+      "names": [
+        "unit_limit_verdict"
+      ],
+      "contract_sha256": "45298a4847d6770be4a6c807abeacaaa574c2e8fe63d84dd254a50b318f9c190",
+      "integration_tests": [
+        "tests/test_an_update_replaces_what_it_owns.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/generation_catalog_store.py",
+      "names": [
+        "GenerationCatalog"
+      ],
+      "contract_sha256": "b18194ebe04bf988b4474379fcb5243516550d43b745a00eaed1453f7844c983",
+      "integration_tests": [
+        "tests/test_a_blocked_task_has_a_way_back.py",
+        "tests/test_a_build_in_flight_is_not_an_orphan.py",
+        "tests/test_a_capacity_refusal_does_not_corrupt_a_generation.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/install_launchd.py",
+      "names": [
+        "launchd_scheduler_resource"
+      ],
+      "contract_sha256": "34b62cbb18508197ea504cb95f95a645e7e875b29dbbf32068a84c22149dd847",
+      "integration_tests": [
+        "tests/test_an_update_replaces_what_it_owns.py",
+        "tests/test_install_control.py",
+        "tests/test_launchd_absent_only_when_launchd_says_so.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/install_release.py",
+      "names": [
+        "build_release_identity"
+      ],
+      "contract_sha256": "bc62d4f35445a8db90edd38825221aa68df56e89c8b78a24f20bd8c73d501d65",
+      "integration_tests": [
+        "tests/test_a_rerun_may_ask_for_fewer_things.py",
+        "tests/test_an_uninstall_names_what_it_leaves.py",
+        "tests/test_install_control.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/install_requests.py",
+      "names": [
+        "install_from_args"
+      ],
+      "contract_sha256": "e4f49c041915fca18ffb0241dd00aa4407e85859438d7ed938f90a475108874d",
+      "integration_tests": [
+        "tests/test_a_rerun_may_ask_for_fewer_things.py",
+        "tests/test_a_rollback_undoes_only_what_it_did.py",
+        "tests/test_an_uninstall_names_what_it_leaves.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/install_resource_builder.py",
+      "names": [
+        "opencode_plugin_destination",
+        "posix_scheduler_resource",
+        "selected_backend"
+      ],
+      "contract_sha256": "e6f5b95deb2fa8a7ab7321627fac829e8c8fea2ea9e10e8b7a27d6109cc799fe",
+      "integration_tests": [
+        "tests/test_a_rerun_may_ask_for_fewer_things.py",
+        "tests/test_an_uninstall_names_what_it_leaves.py",
+        "tests/test_claude_settings_ownership.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/install_scheduler_render.py",
+      "names": [
+        "render_systemd_definitions",
+        "scheduler_limit_hours"
+      ],
+      "contract_sha256": "0a0cc922e6dee88d8e0586061c95dedd284df9230fed58f502b9db782c62e8dd",
+      "integration_tests": [
+        "tests/test_a_scheduled_run_keeps_the_uv_link.py",
+        "tests/test_a_weekly_waits_for_the_nightly.py",
+        "tests/test_an_update_replaces_what_it_owns.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/install_systemd.py",
+      "names": [
+        "systemd_scheduler_resource"
+      ],
+      "contract_sha256": "4c49876010df5e0b233ccb29222eedbfbfa42614f0e99b7eed75614ff585b9c4",
+      "integration_tests": [
+        "tests/test_an_update_replaces_what_it_owns.py",
+        "tests/test_install_control.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/install_v2_transactions.py",
+      "names": [
+        "install_resources"
+      ],
+      "contract_sha256": "074664d4c33ddcaaa76fbe45b137f8f494dc7de80f4f3c32abd52b035eade17b",
+      "integration_tests": [
+        "tests/test_a_changed_task_setting_reaches_an_installed_machine.py",
+        "tests/test_a_rerun_may_ask_for_fewer_things.py",
+        "tests/test_a_rollback_undoes_only_what_it_did.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/model_choice.py",
+      "names": [
+        "using_root"
+      ],
+      "contract_sha256": "d45f2655cb61963e77617d1dfd7d617b134ad77cc770b59b335d0856e5d65019",
+      "integration_tests": [
+        "tests/test_an_update_replaces_what_it_owns.py"
+      ]
+    },
+    {
+      "provider": "scripts/reliable_memory.py",
+      "names": [
+        "validate_state_root"
+      ],
+      "contract_sha256": "8680515cd873056a7c8a36e0057d91f2f83f23c48841263697676ff91f7ff964",
+      "integration_tests": [
+        "tests/test_an_update_replaces_what_it_owns.py"
+      ]
+    },
+    {
+      "provider": "scripts/repository_scope.py",
+      "names": [
+        "sanitized_git_environment"
+      ],
+      "contract_sha256": "fd550ae20761afad50b37fa3a71044a162485b0e4d4b3e2af9b5b22e143c2bec",
+      "integration_tests": [
+        "tests/test_an_update_replaces_what_it_owns.py"
+      ]
+    }
+  ]
+}

@@ -1,0 +1,261 @@
+{
+  "encoding": "o200k_base",
+  "max_tokens": 100000,
+  "serialization": "exact-duplicates/v1",
+  "files": [
+    "AGENTS.md",
+    "CLAUDE.md",
+    "docs/AGENTS.md",
+    "docs/STRUCTURE.md",
+    "docs/modules/context-bundle.md",
+    "docs/modules/context-records.md",
+    "docs/modules/context-tooling.md",
+    "docs/modules/formats.md",
+    "docs/modules/model-choice.md",
+    "docs/modules/product-structure.md",
+    "docs/modules/project-governance.md",
+    "docs/modules/queue-store-context.json",
+    "docs/modules/queue-store.md",
+    "docs/modules/test-support.md",
+    "rules/development-laws.md",
+    "scripts/__init__.py",
+    "scripts/llm_wiki/__init__.py",
+    "scripts/llm_wiki/context_bundle.py",
+    "scripts/llm_wiki/formats/__init__.py",
+    "scripts/llm_wiki/queue_store.py",
+    "tests/__init__.py",
+    "tests/conftest.py",
+    "tests/module_context.py",
+    "tests/module_context_paths.py",
+    "tests/module_interface.py",
+    "tests/module_interface_render.py",
+    "tests/module_qualification.py",
+    "tests/module_record_context.py",
+    "tests/module_records.py",
+    "tests/shared_fixtures.py",
+    "tests/slow_machine.py"
+  ],
+  "ownership": {
+    "files": [
+      "docs/modules/queue-store-context.json",
+      "docs/modules/queue-store.md",
+      "scripts/llm_wiki/queue_store.py"
+    ]
+  },
+  "qualified_dependencies": [
+    {
+      "provider": "scripts/llm_wiki/formats/canonical.py",
+      "names": [
+        "canonical_json_bytes",
+        "sha256_bytes"
+      ],
+      "contract_sha256": "2e42a7aefcb66ac2515f6665a03feae34e6f7bad4807787a789ce031f9f3a9c1",
+      "integration_tests": [
+        "tests/test_a_redrive_carries_the_intent_it_was_for.py",
+        "tests/test_queue_lease_input_binding.py",
+        "tests/test_queue_v3_corruption.py",
+        "tests/test_work_does_not_count_a_capture_it_cannot_claim.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/formats/queue_payload.py",
+      "names": [
+        "validate_payload_blob"
+      ],
+      "contract_sha256": "20f003cddf1108c97252bc51452a23d908eb4bc5afa3b21c194221d695827cf4",
+      "integration_tests": [
+        "tests/test_a_redrive_carries_the_intent_it_was_for.py",
+        "tests/test_queue_lease_input_binding.py",
+        "tests/test_queue_v3_corruption.py",
+        "tests/test_work_does_not_count_a_capture_it_cannot_claim.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/generation_catalog_store.py",
+      "names": [
+        "GenerationCatalog"
+      ],
+      "contract_sha256": "b18194ebe04bf988b4474379fcb5243516550d43b745a00eaed1453f7844c983",
+      "integration_tests": [
+        "tests/test_a_blocked_task_has_a_way_back.py",
+        "tests/test_a_build_in_flight_is_not_an_orphan.py",
+        "tests/test_a_capacity_refusal_does_not_corrupt_a_generation.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/model_choice.py",
+      "names": [
+        "using_root"
+      ],
+      "contract_sha256": "d45f2655cb61963e77617d1dfd7d617b134ad77cc770b59b335d0856e5d65019",
+      "integration_tests": [
+        "tests/test_a_block_opens_one_entry.py",
+        "tests/test_a_blocked_task_has_a_way_back.py",
+        "tests/test_a_build_in_flight_is_not_an_orphan.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/queue_contracts.py",
+      "names": [
+        "LeaseFenceError",
+        "QueueOperationError",
+        "RestoreReceipt",
+        "STATES",
+        "SourceFence"
+      ],
+      "contract_sha256": "ff9dd6609e4cac6eb4e7311e81d2c2905fd26a2c18b0ff9131e4740c044814ae",
+      "integration_tests": [
+        "tests/test_a_redrive_carries_the_intent_it_was_for.py",
+        "tests/test_queue_lease_input_binding.py",
+        "tests/test_queue_v3_corruption.py",
+        "tests/test_work_does_not_count_a_capture_it_cannot_claim.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/queue_export_proof.py",
+      "names": [
+        "verified_export_records"
+      ],
+      "contract_sha256": "4887e1af6079f6d842ce49fd444f5da0bd4d507423314e03817a50b24fd73275",
+      "integration_tests": [
+        "tests/test_a_redrive_carries_the_intent_it_was_for.py",
+        "tests/test_queue_lease_input_binding.py",
+        "tests/test_queue_v3_corruption.py",
+        "tests/test_work_does_not_count_a_capture_it_cannot_claim.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/queue_heartbeat.py",
+      "names": [
+        "SourceFenceHeartbeat"
+      ],
+      "contract_sha256": "4b9128848621106f69bdac2e251754531aeb88fb26198d8938a9368aad734699",
+      "integration_tests": [
+        "tests/test_a_redrive_carries_the_intent_it_was_for.py",
+        "tests/test_queue_lease_input_binding.py",
+        "tests/test_queue_v3_corruption.py",
+        "tests/test_work_does_not_count_a_capture_it_cannot_claim.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/queue_sources.py",
+      "names": [
+        "payload_identity_fields"
+      ],
+      "contract_sha256": "30a89e51c8d7d5d4c3734bf1892ecf2b2994f78caad73fc45261841ba34ef744",
+      "integration_tests": [
+        "tests/test_a_redrive_carries_the_intent_it_was_for.py",
+        "tests/test_queue_lease_input_binding.py",
+        "tests/test_queue_v3_corruption.py",
+        "tests/test_work_does_not_count_a_capture_it_cannot_claim.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/queue_timing.py",
+      "names": [
+        "timestamp"
+      ],
+      "contract_sha256": "89030d569e6d96e66c6a88d1fbd72de688c091e9dd2d64fdeadcd288677a0507",
+      "integration_tests": [
+        "tests/test_a_redrive_carries_the_intent_it_was_for.py",
+        "tests/test_queue_lease_input_binding.py",
+        "tests/test_queue_v3_corruption.py",
+        "tests/test_work_does_not_count_a_capture_it_cannot_claim.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/queue_validation.py",
+      "names": [
+        "require_claim_owner_and_lease",
+        "require_task_identifier",
+        "valid_heartbeat_interval",
+        "validate_retry_policy"
+      ],
+      "contract_sha256": "9d7d0bcc33dd2335babb8f1644289b32edd698106b313abbd17781a5543cf69d",
+      "integration_tests": [
+        "tests/test_a_redrive_carries_the_intent_it_was_for.py",
+        "tests/test_queue_lease_input_binding.py",
+        "tests/test_queue_v3_corruption.py",
+        "tests/test_work_does_not_count_a_capture_it_cannot_claim.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/reliability_defaults.py",
+      "names": [
+        "DEFAULTS"
+      ],
+      "contract_sha256": "f37296a83c15073e42a6cc8b86b88c2d19c548ac19a4ef6d0ca2f7af925c90c8",
+      "integration_tests": [
+        "tests/test_a_redrive_carries_the_intent_it_was_for.py",
+        "tests/test_queue_lease_input_binding.py",
+        "tests/test_queue_v3_corruption.py",
+        "tests/test_work_does_not_count_a_capture_it_cannot_claim.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/sqlite_deadlines.py",
+      "names": [
+        "configure_operational_deadline",
+        "refresh_operational_deadline"
+      ],
+      "contract_sha256": "97149b880eab4a69f732b5db4f91704ab6053714ebfd329c7d3183c874aaa237",
+      "integration_tests": [
+        "tests/test_a_redrive_carries_the_intent_it_was_for.py",
+        "tests/test_queue_lease_input_binding.py",
+        "tests/test_queue_v3_corruption.py",
+        "tests/test_work_does_not_count_a_capture_it_cannot_claim.py"
+      ]
+    },
+    {
+      "provider": "scripts/operational_ownership.py",
+      "names": [
+        "OwnerLease"
+      ],
+      "contract_sha256": "7e48dfb05434c2c448a04b79b773b33da0786c3efbd0e2f3c100df849b1f3d0d",
+      "integration_tests": [
+        "tests/test_a_redrive_carries_the_intent_it_was_for.py",
+        "tests/test_queue_lease_input_binding.py",
+        "tests/test_queue_v3_corruption.py",
+        "tests/test_work_does_not_count_a_capture_it_cannot_claim.py"
+      ]
+    },
+    {
+      "provider": "scripts/reliable_memory.py",
+      "names": [
+        "validate_state_root"
+      ],
+      "contract_sha256": "8680515cd873056a7c8a36e0057d91f2f83f23c48841263697676ff91f7ff964",
+      "integration_tests": [
+        "tests/test_a_redrive_carries_the_intent_it_was_for.py",
+        "tests/test_queue_lease_input_binding.py",
+        "tests/test_queue_v3_corruption.py",
+        "tests/test_work_does_not_count_a_capture_it_cannot_claim.py"
+      ]
+    },
+    {
+      "provider": "scripts/repository_scope.py",
+      "names": [
+        "sanitized_git_environment"
+      ],
+      "contract_sha256": "fd550ae20761afad50b37fa3a71044a162485b0e4d4b3e2af9b5b22e143c2bec",
+      "integration_tests": [
+        "tests/modules/cleanup_worktrees/test_git_refusal.py",
+        "tests/test_a_blocked_task_has_a_way_back.py",
+        "tests/test_a_build_in_flight_is_not_an_orphan.py"
+      ]
+    },
+    {
+      "provider": "scripts/secret_redact.py",
+      "names": [
+        "redact_structure"
+      ],
+      "contract_sha256": "99f834813f94cd91a34f4b0cb1e51e0709d4d8f9ad7b6b523ce1333b7b3e78ee",
+      "integration_tests": [
+        "tests/test_a_redrive_carries_the_intent_it_was_for.py",
+        "tests/test_queue_lease_input_binding.py",
+        "tests/test_queue_v3_corruption.py",
+        "tests/test_work_does_not_count_a_capture_it_cannot_claim.py"
+      ]
+    }
+  ]
+}

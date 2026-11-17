@@ -1,140 +1,17 @@
 from __future__ import annotations
 
-import hashlib
-import json
 import os
 from pathlib import Path
 
 import pytest
-from reliable_memory import canonical_json_bytes  # noqa: E402
 
-
-def _sha(value: bytes) -> str:
-    return hashlib.sha256(value).hexdigest()
-
-
-def _reference(daily_id: str, source: bytes, block: str, start: int, end: int) -> str:
-    return (
-        f"daily:{daily_id} sha256:{_sha(source)} block:{block} "
-        f"bytes:{start}-{end}"
-    )
-
-
-def _write_bag(root: Path, daily_id: str, source: bytes, *, suffix: str = "one") -> Path:
-    bag = root / "knowledge" / "daily" / "archive" / daily_id[:7] / f"bag-test-{suffix}"
-    payload_name = f"data/{daily_id}.md"
-    (bag / "data").mkdir(parents=True)
-    (bag / payload_name).write_bytes(source)
-    (bag / "bagit.txt").write_bytes(
-        b"BagIt-Version: 1.0\nTag-File-Character-Encoding: UTF-8\n"
-    )
-    (bag / "bag-info.txt").write_bytes(
-        (
-            f"Bagging-Date: 2026-07-14\n"
-            f"Payload-Oxum: {len(source)}.1\n"
-            f"External-Identifier: daily:{daily_id}\n"
-        ).encode()
-    )
-    (bag / "manifest-sha256.txt").write_bytes(
-        f"{_sha(source)}  {payload_name}\n".encode()
-    )
-    block_start = source.index(b"## [")
-    evidence = {
-        "block_id": "evt-1",
-        "byte_start": block_start,
-        "byte_end": len(source),
-        "line_start": 2,
-        "line_end": 4,
-        "sha256": _sha(source[block_start:]),
-    }
-    import compile_memory
-
-    logical_path = f"knowledge/daily/{daily_id}.md"
-    source_identity = compile_memory.compile_source_identity(
-        logical_path, _sha(source)
-    )
-    receipt_path = root / f"knowledge/daily/receipts/v3-{source_identity}.md"
-    receipt_hash = _sha(receipt_path.read_bytes()) if receipt_path.exists() else "a" * 64
-    operation_id = "compile:test"
-    if receipt_path.exists():
-        operation_id = json.loads(
-            receipt_path.read_text(encoding="utf-8")
-            .split("```json\n", 1)[1]
-            .split("\n```", 1)[0]
-        )["operation_id"]
-    manifest = {
-        "schema_version": "archive-manifest/v1",
-        "logical_daily_id": daily_id,
-        "original_path": f"knowledge/daily/{daily_id}.md",
-        "source_hash": _sha(source),
-        "payload_hash": _sha(source),
-        "compile_receipt_ref": {
-            "schema": "compile-receipt-ref/v1",
-            "path": f"knowledge/daily/receipts/v3-{source_identity}.md",
-            "logical_path": logical_path,
-            "source_digest": _sha(source),
-            "source_identity": source_identity,
-            "receipt_file_hash": receipt_hash,
-        },
-        "queue_preflight": {
-            "checked_at": "2026-07-14T00:00:00Z",
-            "passed": True,
-            "blocking_task_ids": [],
-        },
-        "operations": [{"operation_id": operation_id, "state": "succeeded"}],
-        "evidence": [evidence],
-        "pins": [],
-        "retention_days": 90,
-    }
-    (bag / "archive-manifest.json").write_bytes(canonical_json_bytes(manifest))
-    tags = ("archive-manifest.json", "bag-info.txt", "bagit.txt", "manifest-sha256.txt")
-    (bag / "tagmanifest-sha256.txt").write_bytes(
-        "".join(f"{_sha((bag / name).read_bytes())}  {name}\n" for name in tags).encode()
-    )
-    return bag
-
-
-def _authorize_archive_source(
-    root: Path, source: bytes, monkeypatch: pytest.MonkeyPatch
-) -> Path:
-    import compile_memory
-    from markdown_transaction import MarkdownCoordinator
-
-    state_root = root / "state"
-    state_root.mkdir()
-    for relative in ("knowledge/daily/receipts", "knowledge/notes"):
-        (root / relative).mkdir(parents=True, exist_ok=True)
-    (root / "knowledge/index.md").write_bytes(b"# index\n")
-    (root / "knowledge/log.md").write_bytes(b"# log\n")
-    (root / "AGENTS.md").write_bytes(b"contract\n")
-    daily = root / "knowledge/daily/2026-01-01.md"
-    daily.write_bytes(source)
-    monkeypatch.setattr(compile_memory, "ROOT", root)
-    monkeypatch.setattr(compile_memory, "STATE_ROOT", state_root)
-    monkeypatch.setattr(compile_memory, "MEMORY", root / "knowledge")
-    monkeypatch.setattr(compile_memory, "DAILY_DIR", root / "knowledge/daily")
-    monkeypatch.setattr(compile_memory, "KNOWLEDGE", root / "knowledge/notes")
-    monkeypatch.setattr(compile_memory, "INDEX", root / "knowledge/index.md")
-    monkeypatch.setattr(compile_memory, "LOG", root / "knowledge/log.md")
-    monkeypatch.setattr(compile_memory, "AGENTS", root / "AGENTS.md")
-    inputs = compile_memory.snapshot_compile_inputs([daily])
-    batch = compile_memory.pack_compile_batches(inputs, model=None)[0]
-    compile_memory.apply_compile_plan(
-        inputs,
-        {"schema_version": "compile-plan/v2", "operations": []},
-        action_key="c" * 64,
-        trigger="manual",
-        coordinator=MarkdownCoordinator(root, state_root),
-        completed_at="2026-07-14T00:00:00Z",
-        batch=batch,
-        provider_budget={
-            "provider": "fake",
-            "model": "fake-v1",
-            "max_output_tokens": 4000,
-        },
-    )
-    daily.unlink()
-    return state_root
+from tests.evidence_resolver_helpers import (
+    _authorize_archive_source,
+    _long_day,
+    _reference,
+    _sha,
+    _write_bag,
+)
 
 
 @pytest.fixture
@@ -268,7 +145,7 @@ def test_validated_archive_resolves_identically_and_ambiguity_fails(
     first = _write_bag(vault, "2026-01-01", source)
     from archive_daily import DailyArchiver
 
-    DailyArchiver._seal(first)
+    DailyArchiver.seal(first)
     start = source.index(b"archived bytes")
     ref = EvidenceRef.parse(_reference("2026-01-01", source, "evt-1", start, len(source) - 1))
     result = EvidenceResolver(vault, state_root=state_root).resolve(ref)
@@ -276,7 +153,7 @@ def test_validated_archive_resolves_identically_and_ambiguity_fails(
     assert result.location == "archive"
 
     second = _write_bag(vault, "2026-01-01", source, suffix="two")
-    DailyArchiver._seal(second)
+    DailyArchiver.seal(second)
     with pytest.raises(EvidenceResolutionError, match="ambiguous"):
         EvidenceResolver(vault, state_root=state_root).resolve(ref)
 
@@ -320,16 +197,47 @@ def test_archive_directory_limit_is_enforced_while_iterating(
         evidence_resolver.EvidenceResolver(vault)._resolve_archive(ref)
 
 
-def _long_day(entries: int, *, filler: int = 400) -> bytes:
-    """A day the compiler must split: many entries, each one marker plus a heading."""
-    parts = []
-    for index in range(entries):
-        parts.append(
-            f"<!-- llm-wiki-operation: op-{index} -->\n"
-            f"## [evt-{index}] entry {index}\n"
-            f"quote-{index} " + "x" * filler + "\n"
-        )
-    return "".join(parts).encode()
+def test_repeated_historical_evidence_reuses_search_but_checks_current_bytes(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from unittest.mock import Mock
+
+    import evidence_resolver as module
+
+    original = b"## [evt-1] event\nretained evidence\n"
+    grown = original + b"\n## [evt-2] later\nmore evidence\n"
+    path = vault / "knowledge/daily/2026-01-02.md"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(grown)
+    start = original.index(b"retained")
+    reference = _reference("2026-01-02", original, "evt-1", start, len(original) - 1)
+    search = Mock(wraps=module.compile_part_slice)
+    monkeypatch.setattr(module, "compile_part_slice", search)
+    resolver = module.EvidenceResolver(vault)
+
+    assert resolver.resolve(reference).bytes == b"retained evidence"
+    assert resolver.resolve(reference).bytes == b"retained evidence"
+    assert search.call_count == 1
+    identity = path.stat()
+    path.write_bytes(grown.replace(b"retained", b"tampered", 1))
+    os.utime(path, ns=(identity.st_atime_ns, identity.st_mtime_ns))
+    with pytest.raises(module.EvidenceResolutionError, match="hash mismatch"):
+        resolver.resolve(reference)
+    assert search.call_count == 2
+
+
+def test_cached_part_still_checks_each_evidence_block(vault: Path) -> None:
+    from evidence_resolver import EvidenceResolutionError, EvidenceResolver
+
+    original = b"## [evt-1] event\nretained evidence\n"
+    path = vault / "knowledge/daily/2026-01-02.md"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(original + b"\n## [evt-2] later\nmore evidence\n")
+    start = original.index(b"retained")
+    resolver = EvidenceResolver(vault)
+    resolver.resolve(_reference("2026-01-02", original, "evt-1", start, len(original) - 1))
+    with pytest.raises(EvidenceResolutionError):
+        resolver.resolve(_reference("2026-01-02", original, "evt-2", start, len(original) - 1))
 
 
 def test_evidence_from_one_compile_part_resolves_after_the_day_grows(vault: Path) -> None:
@@ -338,11 +246,11 @@ def test_evidence_from_one_compile_part_resolves_after_the_day_grows(vault: Path
         EvidenceRef,
         EvidenceResolutionError,
         EvidenceResolver,
-        _daily_part_bounds,
+        daily_part_bounds,
     )
 
     day = _long_day(150)
-    bounds = _daily_part_bounds(day)
+    bounds = daily_part_bounds(day)
     assert len(bounds) > 2, "the fixture must be long enough to be split"
     start, end = bounds[1]
     part = day[start:end]

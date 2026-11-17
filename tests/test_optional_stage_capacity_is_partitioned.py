@@ -8,7 +8,7 @@ shared pool of `MAX_OPTIONAL_STRAGGLERS` permits let the abandoned
 cross-encoder load of an earlier call, which runs for about 20 s, hold the
 permits the dense leg of every later call needed.
 
-These tests drive the two product call sites, `_call_dense` and `_run_reranker`,
+These tests drive the two product call sites, `call_dense` and `run_reranker`,
 rather than the boundary underneath them, so they fail on the behaviour the
 vault measured rather than on a keyword argument.
 """
@@ -19,6 +19,7 @@ import threading
 import time
 
 import pytest
+from llm_wiki import retrieval_optional_stages
 
 # A stage abandoned this fast leaves a straggler holding its permit; the
 # boundary grants a stage half of what is left, so the wait is half of this.
@@ -44,7 +45,7 @@ def _stall(release: threading.Event):
 
 
 def _run_rerank(retrieval, seconds: float):
-    return retrieval._run_reranker(
+    return retrieval.run_reranker(
         [],
         query="q",
         pool_limit=1,
@@ -54,7 +55,7 @@ def _run_rerank(retrieval, seconds: float):
 
 
 def _run_dense(retrieval, backend, seconds: float):
-    return retrieval._call_dense(
+    return retrieval.call_dense(
         backend, {}, deadline_monotonic=time.monotonic() + seconds, cancelled=None
     )
 
@@ -79,8 +80,8 @@ def _refusal_of(start) -> str:
 
 def _owned_permits(retrieval) -> list:
     """Every permit the boundary can hand out, on this test's own semaphores."""
-    kinds = getattr(retrieval, "_OPTIONAL_STAGE_KIND_SLOTS", {})
-    shared = [retrieval._OPTIONAL_STAGE_SLOTS] * retrieval.MAX_OPTIONAL_STRAGGLERS
+    kinds = getattr(retrieval, "OPTIONAL_STAGE_KIND_SLOTS", {})
+    shared = [retrieval_optional_stages.OPTIONAL_STAGE_SLOTS] * retrieval.MAX_OPTIONAL_STRAGGLERS
     return shared + list(kinds.values())
 
 
@@ -102,15 +103,15 @@ def boundary(monkeypatch):
     """
     import retrieval
 
+    monkeypatch.setattr("llm_wiki.retrieval_optional_stages.OPTIONAL_STAGE_OBSERVED", {})
+    monkeypatch.setattr("llm_wiki.retrieval_optional_stages.OPTIONAL_STAGE_OBSERVED_AT", {})
     kinds = getattr(retrieval, "OPTIONAL_STAGE_KINDS", ("dense", "rerank"))
     monkeypatch.setattr(
-        retrieval,
-        "_OPTIONAL_STAGE_SLOTS",
+        "llm_wiki.retrieval_optional_stages.OPTIONAL_STAGE_SLOTS",
         threading.BoundedSemaphore(retrieval.MAX_OPTIONAL_STRAGGLERS),
     )
     monkeypatch.setattr(
-        retrieval,
-        "_OPTIONAL_STAGE_KIND_SLOTS",
+        "llm_wiki.retrieval_optional_stages.OPTIONAL_STAGE_KIND_SLOTS",
         {kind: threading.BoundedSemaphore(1) for kind in kinds},
         raising=False,
     )
@@ -175,8 +176,8 @@ def test_the_kinds_are_fixed_so_no_call_can_widen_the_thread_bound() -> None:
     """Permits are declared, not minted: an unknown kind falls back to the pool."""
     import retrieval
 
-    slots = retrieval._optional_stage_slots
-    assert set(retrieval._OPTIONAL_STAGE_KIND_SLOTS) == set(retrieval.OPTIONAL_STAGE_KINDS)
+    slots = retrieval.optional_stage_slots
+    assert set(retrieval_optional_stages.OPTIONAL_STAGE_KIND_SLOTS) == set(retrieval.OPTIONAL_STAGE_KINDS)
     assert slots("dense") is not slots("rerank")
-    assert slots("invented") is retrieval._OPTIONAL_STAGE_SLOTS
-    assert slots(None) is retrieval._OPTIONAL_STAGE_SLOTS
+    assert slots("invented") is retrieval_optional_stages.OPTIONAL_STAGE_SLOTS
+    assert slots(None) is retrieval_optional_stages.OPTIONAL_STAGE_SLOTS

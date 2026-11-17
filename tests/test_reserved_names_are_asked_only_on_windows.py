@@ -29,14 +29,14 @@ class _PathWithoutIsReserved(type(Path())):
 @pytest.mark.skipif(sys.platform == "win32", reason="the POSIX half of the rule")
 def test_a_posix_path_is_judged_without_the_removed_method(tmp_path: Path) -> None:
     candidate = _PathWithoutIsReserved(tmp_path / "node")
-    assert pyright_profile._is_local_absolute_path(candidate) is True
+    assert pyright_profile.is_local_absolute_path(candidate) is True
 
 
 def test_the_windows_rule_reads_the_text_and_never_warns() -> None:
     with warnings.catch_warnings():
         warnings.simplefilter("error", DeprecationWarning)
         verdicts = (
-            pyright_profile._windows_name_is_reserved("C:\\tools\\nul"),
-            pyright_profile._windows_name_is_reserved("C:\\tools\\node.exe"),
+            pyright_profile.windows_name_is_reserved("C:\\tools\\nul"),
+            pyright_profile.windows_name_is_reserved("C:\\tools\\node.exe"),
         )
     assert verdicts == (True, False)

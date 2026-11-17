@@ -38,10 +38,10 @@ if os.name == "nt":
 
     _CREATE_SUSPENDED = 0x00000004
     _JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x00002000
-    _JOB_OBJECT_BASIC_ACCOUNTING_INFORMATION = 1
-    _JOB_OBJECT_BASIC_PROCESS_ID_LIST = 3
+    JOB_OBJECT_BASIC_ACCOUNTING_INFORMATION = 1
+    JOB_OBJECT_BASIC_PROCESS_ID_LIST = 3
     _JOB_OBJECT_EXTENDED_LIMIT_INFORMATION = 9
-    _MAX_JOB_PROCESS_IDS = 4096
+    MAX_JOB_PROCESS_IDS = 4096
     _WINDOWS_PID_SETTLE_SECONDS = 0.05
     _SYNCHRONIZE = 0x00100000
     _WAIT_OBJECT_0 = 0x00000000
@@ -85,7 +85,7 @@ if os.name == "nt":
             ("peak_job_memory_used", ctypes.c_size_t),
         )
 
-    class _BasicAccountingInformation(ctypes.Structure):
+    class BasicAccountingInformation(ctypes.Structure):
         _fields_ = (
             ("total_user_time", ctypes.c_longlong),
             ("total_kernel_time", ctypes.c_longlong),
@@ -97,14 +97,14 @@ if os.name == "nt":
             ("total_terminated_processes", wintypes.DWORD),
         )
 
-    class _BasicProcessIdList(ctypes.Structure):
+    class BasicProcessIdList(ctypes.Structure):
         _fields_ = (
             ("number_of_assigned_processes", wintypes.DWORD),
             ("number_of_process_ids_in_list", wintypes.DWORD),
             ("process_id_list", ctypes.c_size_t * 1),
         )
 
-    class _ThreadEntry32(ctypes.Structure):
+    class ThreadEntry32(ctypes.Structure):
         _fields_ = (
             ("size", wintypes.DWORD),
             ("usage", wintypes.DWORD),
@@ -115,47 +115,47 @@ if os.name == "nt":
             ("flags", wintypes.DWORD),
         )
 
-    _KERNEL32 = ctypes.WinDLL("kernel32", use_last_error=True)
-    _KERNEL32.CreateJobObjectW.argtypes = (wintypes.LPVOID, wintypes.LPCWSTR)
-    _KERNEL32.CreateJobObjectW.restype = wintypes.HANDLE
-    _KERNEL32.SetInformationJobObject.argtypes = (
+    KERNEL32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    KERNEL32.CreateJobObjectW.argtypes = (wintypes.LPVOID, wintypes.LPCWSTR)
+    KERNEL32.CreateJobObjectW.restype = wintypes.HANDLE
+    KERNEL32.SetInformationJobObject.argtypes = (
         wintypes.HANDLE,
         ctypes.c_int,
         wintypes.LPVOID,
         wintypes.DWORD,
     )
-    _KERNEL32.SetInformationJobObject.restype = wintypes.BOOL
-    _KERNEL32.AssignProcessToJobObject.argtypes = (wintypes.HANDLE, wintypes.HANDLE)
-    _KERNEL32.AssignProcessToJobObject.restype = wintypes.BOOL
-    _KERNEL32.TerminateJobObject.argtypes = (wintypes.HANDLE, wintypes.UINT)
-    _KERNEL32.TerminateJobObject.restype = wintypes.BOOL
-    _KERNEL32.QueryInformationJobObject.argtypes = (
+    KERNEL32.SetInformationJobObject.restype = wintypes.BOOL
+    KERNEL32.AssignProcessToJobObject.argtypes = (wintypes.HANDLE, wintypes.HANDLE)
+    KERNEL32.AssignProcessToJobObject.restype = wintypes.BOOL
+    KERNEL32.TerminateJobObject.argtypes = (wintypes.HANDLE, wintypes.UINT)
+    KERNEL32.TerminateJobObject.restype = wintypes.BOOL
+    KERNEL32.QueryInformationJobObject.argtypes = (
         wintypes.HANDLE,
         ctypes.c_int,
         wintypes.LPVOID,
         wintypes.DWORD,
         ctypes.POINTER(wintypes.DWORD),
     )
-    _KERNEL32.QueryInformationJobObject.restype = wintypes.BOOL
-    _KERNEL32.OpenProcess.argtypes = (wintypes.DWORD, wintypes.BOOL, wintypes.DWORD)
-    _KERNEL32.OpenProcess.restype = wintypes.HANDLE
-    _KERNEL32.WaitForSingleObject.argtypes = (wintypes.HANDLE, wintypes.DWORD)
-    _KERNEL32.WaitForSingleObject.restype = wintypes.DWORD
-    _KERNEL32.CreateToolhelp32Snapshot.argtypes = (wintypes.DWORD, wintypes.DWORD)
-    _KERNEL32.CreateToolhelp32Snapshot.restype = wintypes.HANDLE
-    _KERNEL32.Thread32First.argtypes = (wintypes.HANDLE, ctypes.POINTER(_ThreadEntry32))
-    _KERNEL32.Thread32First.restype = wintypes.BOOL
-    _KERNEL32.Thread32Next.argtypes = (wintypes.HANDLE, ctypes.POINTER(_ThreadEntry32))
-    _KERNEL32.Thread32Next.restype = wintypes.BOOL
-    _KERNEL32.OpenThread.argtypes = (wintypes.DWORD, wintypes.BOOL, wintypes.DWORD)
-    _KERNEL32.OpenThread.restype = wintypes.HANDLE
-    _KERNEL32.ResumeThread.argtypes = (wintypes.HANDLE,)
-    _KERNEL32.ResumeThread.restype = wintypes.DWORD
-    _KERNEL32.CloseHandle.argtypes = (wintypes.HANDLE,)
-    _KERNEL32.CloseHandle.restype = wintypes.BOOL
+    KERNEL32.QueryInformationJobObject.restype = wintypes.BOOL
+    KERNEL32.OpenProcess.argtypes = (wintypes.DWORD, wintypes.BOOL, wintypes.DWORD)
+    KERNEL32.OpenProcess.restype = wintypes.HANDLE
+    KERNEL32.WaitForSingleObject.argtypes = (wintypes.HANDLE, wintypes.DWORD)
+    KERNEL32.WaitForSingleObject.restype = wintypes.DWORD
+    KERNEL32.CreateToolhelp32Snapshot.argtypes = (wintypes.DWORD, wintypes.DWORD)
+    KERNEL32.CreateToolhelp32Snapshot.restype = wintypes.HANDLE
+    KERNEL32.Thread32First.argtypes = (wintypes.HANDLE, ctypes.POINTER(ThreadEntry32))
+    KERNEL32.Thread32First.restype = wintypes.BOOL
+    KERNEL32.Thread32Next.argtypes = (wintypes.HANDLE, ctypes.POINTER(ThreadEntry32))
+    KERNEL32.Thread32Next.restype = wintypes.BOOL
+    KERNEL32.OpenThread.argtypes = (wintypes.DWORD, wintypes.BOOL, wintypes.DWORD)
+    KERNEL32.OpenThread.restype = wintypes.HANDLE
+    KERNEL32.ResumeThread.argtypes = (wintypes.HANDLE,)
+    KERNEL32.ResumeThread.restype = wintypes.DWORD
+    KERNEL32.CloseHandle.argtypes = (wintypes.HANDLE,)
+    KERNEL32.CloseHandle.restype = wintypes.BOOL
 
 
-class _ProcessTreeSpawnError(RuntimeError):
+class ProcessTreeSpawnError(RuntimeError):
     """Process creation failed while OS ownership still needs cleanup."""
 
     def __init__(
@@ -253,15 +253,15 @@ class ProcessTree:
         options: dict[str, object],
         deadline: float,
     ) -> ProcessTree:
-        job = _create_windows_job()
+        job = create_windows_job()
         process: subprocess.Popen[bytes] | None = None
         try:
             process = subprocess.Popen(
                 list(command), creationflags=_CREATE_SUSPENDED, **options
             )
             tree = cls(process, job, None)
-            _assign_windows_process(job, process)
-            _resume_windows_process(process.pid)
+            assign_windows_process(job, process)
+            resume_windows_process(process.pid)
             return tree
         except BaseException as setup_error:
             if process is None:
@@ -273,11 +273,11 @@ class ProcessTree:
         """No child exists yet; only the job object may need closing."""
         cleanup_errors: list[BaseException] = []
         try:
-            _close_windows_handle(job)
+            close_windows_handle(job)
         except BaseException as cleanup_error:
             cleanup_errors.append(cleanup_error)
         if cleanup_errors:
-            raise _ProcessTreeSpawnError(
+            raise ProcessTreeSpawnError(
                 None,
                 tuple(cleanup_errors),
                 windows_job=job,
@@ -299,7 +299,7 @@ class ProcessTree:
         _collect_cleanup_error(cleanup_errors, tree.close)
         child_reaped = _reaped_or_recorded(process, cleanup_errors)
         if tree.windows_job is not None or not child_reaped:
-            raise _ProcessTreeSpawnError(tree, tuple(cleanup_errors)) from setup_error
+            raise ProcessTreeSpawnError(tree, tuple(cleanup_errors)) from setup_error
         raise setup_error
 
     def has_live_descendants(self) -> bool:
@@ -384,7 +384,7 @@ class ProcessTree:
         errors: list[BaseException],
     ) -> bool:
         try:
-            complete, observe_errors = _wait_windows_tree(
+            complete, observe_errors = wait_windows_tree(
                 self.process,
                 job,
                 deadline,
@@ -410,7 +410,7 @@ class ProcessTree:
         _require_windows_tree_gone(errors, direct_reaped, active)
         _close_windows_process_handle(self.process)
         if job is not None:
-            _close_windows_handle(job)
+            close_windows_handle(job)
             self.windows_job = None
 
     def _close_posix(self) -> None:
@@ -425,7 +425,7 @@ class ProcessTree:
 
 def _tracked_job_pids(job: int, errors: list[BaseException]) -> tuple[int, ...]:
     try:
-        return _job_process_ids(job)
+        return job_process_ids(job)
     except BaseException as error:  # noqa: BLE001 - reported by the caller
         errors.append(error)
         return ()
@@ -433,7 +433,7 @@ def _tracked_job_pids(job: int, errors: list[BaseException]) -> tuple[int, ...]:
 
 def _terminate_windows_job(job: int, errors: list[BaseException]) -> None:
     try:
-        if not _KERNEL32.TerminateJobObject(job, 1):
+        if not KERNEL32.TerminateJobObject(job, 1):
             errors.append(ctypes.WinError(ctypes.get_last_error()))
     except BaseException as error:  # noqa: BLE001 - reported by the caller
         errors.append(error)
@@ -625,7 +625,7 @@ def _payload_keeps_group(payload: bytes, group: int) -> bool | None:
     return _stat_belongs_to_live_group(fields, group)
 
 
-def _scan_proc_entries(entries, group: int) -> bool | None:
+def scan_proc_entries(entries, group: int) -> bool | None:
     """True when nothing in /proc keeps the group alive; None when unreadable."""
     for scanned, entry in enumerate(_numeric_entries(entries), 1):
         if scanned > _LINUX_PROC_SCAN_LIMIT:
@@ -653,14 +653,14 @@ def _scan_verdict(keeps: bool | None) -> bool | None:
     return False
 
 
-def _linux_group_is_inert(proc_root: Path, group: int) -> bool | None:
+def linux_group_is_inert(proc_root: Path, group: int) -> bool | None:
     try:
         entries = os.scandir(proc_root)
     except OSError:
         return None
     with entries:
         try:
-            return _scan_proc_entries(entries, group)
+            return scan_proc_entries(entries, group)
         except OSError:
             return None
 
@@ -679,7 +679,7 @@ def _observe_posix_tree(
         # exists either way, which is the only thing this probe asks.
         return direct_reaped, False
     if direct_reaped and sys.platform.startswith("linux"):
-        return direct_reaped, _linux_group_is_inert(Path("/proc"), group) is True
+        return direct_reaped, linux_group_is_inert(Path("/proc"), group) is True
     return direct_reaped, False
 
 
@@ -700,17 +700,17 @@ def _wait_posix_tree(
 # `os.name == "nt"` branches above. Keeping them at module level avoids an
 # artificial nesting level; the ctypes bindings they use stay inside the
 # platform guard and are resolved when a Windows caller runs them.
-def _assign_windows_process(job: int, process: subprocess.Popen[bytes]) -> None:
-    if not _KERNEL32.AssignProcessToJobObject(job, int(process._handle)):
+def assign_windows_process(job: int, process: subprocess.Popen[bytes]) -> None:
+    if not KERNEL32.AssignProcessToJobObject(job, int(process._handle)):
         raise ctypes.WinError(ctypes.get_last_error())
 
 
-def _job_active_processes(job: int) -> int:
-    information = _BasicAccountingInformation()
+def job_active_processes(job: int) -> int:
+    information = BasicAccountingInformation()
     returned = wintypes.DWORD()
-    if not _KERNEL32.QueryInformationJobObject(
+    if not KERNEL32.QueryInformationJobObject(
         job,
-        _JOB_OBJECT_BASIC_ACCOUNTING_INFORMATION,
+        JOB_OBJECT_BASIC_ACCOUNTING_INFORMATION,
         ctypes.byref(information),
         ctypes.sizeof(information),
         ctypes.byref(returned),
@@ -720,28 +720,28 @@ def _job_active_processes(job: int) -> int:
 
 
 def _bounded_job_active_processes(job: int) -> int:
-    active = _job_active_processes(job)
-    if active > _MAX_JOB_PROCESS_IDS:
+    active = job_active_processes(job)
+    if active > MAX_JOB_PROCESS_IDS:
         raise RuntimeError("LSP Windows Job active process bound was exceeded")
     return active
 
 
-def _job_process_ids(job: int) -> tuple[int, ...]:
+def job_process_ids(job: int) -> tuple[int, ...]:
     _bounded_job_active_processes(job)
-    offset = _BasicProcessIdList.process_id_list.offset
-    buffer_size = offset + _MAX_JOB_PROCESS_IDS * ctypes.sizeof(ctypes.c_size_t)
+    offset = BasicProcessIdList.process_id_list.offset
+    buffer_size = offset + MAX_JOB_PROCESS_IDS * ctypes.sizeof(ctypes.c_size_t)
     buffer = ctypes.create_string_buffer(buffer_size)
-    information = _BasicProcessIdList.from_buffer(buffer)
+    information = BasicProcessIdList.from_buffer(buffer)
     returned = wintypes.DWORD()
-    queried = _KERNEL32.QueryInformationJobObject(
+    queried = KERNEL32.QueryInformationJobObject(
         job,
-        _JOB_OBJECT_BASIC_PROCESS_ID_LIST,
+        JOB_OBJECT_BASIC_PROCESS_ID_LIST,
         ctypes.byref(buffer),
         buffer_size,
         ctypes.byref(returned),
     )
     captured = int(information.number_of_process_ids_in_list) if queried else 0
-    if captured <= _MAX_JOB_PROCESS_IDS:
+    if captured <= MAX_JOB_PROCESS_IDS:
         values = (ctypes.c_size_t * captured).from_buffer(buffer, offset)
         process_ids = tuple(int(process_id) for process_id in values)
     else:
@@ -779,8 +779,8 @@ def _require_windows_tree_gone(errors: list[BaseException], direct_reaped: bool,
         raise RuntimeError("Windows LSP process tree is still live")
 
 
-def _windows_pid_alive(pid: int) -> bool:
-    handle = _KERNEL32.OpenProcess(_SYNCHRONIZE, False, pid)
+def windows_pid_alive(pid: int) -> bool:
+    handle = KERNEL32.OpenProcess(_SYNCHRONIZE, False, pid)
     if not handle:
         error = ctypes.get_last_error()
         if error == 87:  # ERROR_INVALID_PARAMETER: process no longer exists.
@@ -788,13 +788,13 @@ def _windows_pid_alive(pid: int) -> bool:
         raise ctypes.WinError(error)
     try:
         return _windows_wait_result_alive(
-            int(_KERNEL32.WaitForSingleObject(handle, 0))
+            int(KERNEL32.WaitForSingleObject(handle, 0))
         )
     finally:
-        _close_windows_handle(int(handle))
+        close_windows_handle(int(handle))
 
 
-def _wait_windows_tree(
+def wait_windows_tree(
     process: subprocess.Popen[bytes],
     job: int,
     deadline: float,
@@ -845,7 +845,7 @@ def _prune_dead_pids(remaining_pids: set[int]) -> None:
 
 def _pid_still_alive(pid: int) -> bool:
     try:
-        return _windows_pid_alive(pid)
+        return windows_pid_alive(pid)
     except BaseException:  # noqa: BLE001 - an unreadable pid stops tracking
         return False
 
@@ -907,15 +907,15 @@ def _wait_direct_process(
     return None
 
 
-def _create_windows_job() -> int:
-    handle = _KERNEL32.CreateJobObjectW(None, None)
+def create_windows_job() -> int:
+    handle = KERNEL32.CreateJobObjectW(None, None)
     if not handle:
         raise ctypes.WinError(ctypes.get_last_error())
     job = int(handle)
     limits = _ExtendedLimitInformation()
     limits.basic_limit_information.limit_flags = _JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
     try:
-        if not _KERNEL32.SetInformationJobObject(
+        if not KERNEL32.SetInformationJobObject(
             job,
             _JOB_OBJECT_EXTENDED_LIMIT_INFORMATION,
             ctypes.byref(limits),
@@ -924,9 +924,9 @@ def _create_windows_job() -> int:
             raise ctypes.WinError(ctypes.get_last_error())
     except BaseException as configuration_error:
         try:
-            _close_windows_handle(job)
+            close_windows_handle(job)
         except BaseException as cleanup_error:
-            raise _ProcessTreeSpawnError(
+            raise ProcessTreeSpawnError(
                 None,
                 (configuration_error, cleanup_error),
                 windows_job=job,
@@ -937,13 +937,13 @@ def _create_windows_job() -> int:
 
 def _resume_one_thread(thread_id: int) -> None:
     """Resume exactly one suspended thread of the freshly created process."""
-    thread = _KERNEL32.OpenThread(_THREAD_SUSPEND_RESUME, False, thread_id)
+    thread = KERNEL32.OpenThread(_THREAD_SUSPEND_RESUME, False, thread_id)
     if not thread:
         raise ctypes.WinError(ctypes.get_last_error())
     try:
-        _require_resumed_once(int(_KERNEL32.ResumeThread(thread)))
+        _require_resumed_once(int(KERNEL32.ResumeThread(thread)))
     finally:
-        _close_windows_handle(int(thread))
+        close_windows_handle(int(thread))
 
 
 def _require_resumed_once(previous_count: int) -> None:
@@ -956,8 +956,8 @@ def _require_resumed_once(previous_count: int) -> None:
         )
 
 
-def _advance_thread_snapshot(snapshot: int, entry: _ThreadEntry32) -> bool:
-    if bool(_KERNEL32.Thread32Next(snapshot, ctypes.byref(entry))):
+def _advance_thread_snapshot(snapshot: int, entry: ThreadEntry32) -> bool:
+    if bool(KERNEL32.Thread32Next(snapshot, ctypes.byref(entry))):
         return True
     error = ctypes.get_last_error()
     if error != _ERROR_NO_MORE_FILES:
@@ -965,9 +965,9 @@ def _advance_thread_snapshot(snapshot: int, entry: _ThreadEntry32) -> bool:
     return False
 
 
-def _resume_threads_of(snapshot: int, entry: _ThreadEntry32, pid: int) -> int:
+def _resume_threads_of(snapshot: int, entry: ThreadEntry32, pid: int) -> int:
     resumed = 0
-    available = bool(_KERNEL32.Thread32First(snapshot, ctypes.byref(entry)))
+    available = bool(KERNEL32.Thread32First(snapshot, ctypes.byref(entry)))
     while available:
         if int(entry.owner_process_id) == pid:
             _resume_one_thread(entry.thread_id)
@@ -976,22 +976,22 @@ def _resume_threads_of(snapshot: int, entry: _ThreadEntry32, pid: int) -> int:
     return resumed
 
 
-def _resume_windows_process(pid: int) -> None:
-    snapshot = _KERNEL32.CreateToolhelp32Snapshot(_TH32CS_SNAPTHREAD, 0)
+def resume_windows_process(pid: int) -> None:
+    snapshot = KERNEL32.CreateToolhelp32Snapshot(_TH32CS_SNAPTHREAD, 0)
     if snapshot == _INVALID_HANDLE_VALUE:
         raise ctypes.WinError(ctypes.get_last_error())
-    entry = _ThreadEntry32()
+    entry = ThreadEntry32()
     entry.size = ctypes.sizeof(entry)
     try:
         resumed = _resume_threads_of(snapshot, entry, pid)
     finally:
-        _close_windows_handle(int(snapshot))
+        close_windows_handle(int(snapshot))
     if resumed != 1:
         raise RuntimeError("suspended LSP process did not have one primary thread")
 
 
-def _close_windows_handle(handle: int) -> None:
-    if not _KERNEL32.CloseHandle(handle):
+def close_windows_handle(handle: int) -> None:
+    if not KERNEL32.CloseHandle(handle):
         raise ctypes.WinError(ctypes.get_last_error())
 
 

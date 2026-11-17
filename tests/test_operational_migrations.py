@@ -8,8 +8,8 @@ import sys
 from pathlib import Path
 
 import markdown_transaction
-import memory_queue
 import pytest
+import queue_core
 from reliable_memory import (
     MigrationStatement,
     OperationalDatabaseContract,
@@ -206,8 +206,8 @@ def _assert_owner_projection_sql(values: tuple[str, str]) -> None:
 def test_queue_v3_fresh_schema_has_complete_invariant(tmp_path: Path) -> None:
     path = tmp_path / "run" / "queue-v3.candidate.sqlite3"
 
-    initialized = memory_queue.initialize_queue_v3_candidate(path, source_v2=None)
-    validated = memory_queue.validate_queue_v3_database(path, state_root=tmp_path)
+    initialized = queue_core.initialize_queue_v3_candidate(path, source_v2=None)
+    validated = queue_core.validate_queue_v3_database(path, state_root=tmp_path)
 
     tables, indexes, triggers, task_sql, task_columns = _queue_schema(path)
     required_triggers = {
@@ -373,7 +373,7 @@ def test_queue_candidate_uses_fixed_application_id_and_user_version(
     tmp_path: Path,
 ) -> None:
     path = tmp_path / "run" / "queue-v3.candidate.sqlite3"
-    memory_queue.initialize_queue_v3_candidate(path, source_v2=None)
+    queue_core.initialize_queue_v3_candidate(path, source_v2=None)
 
     with contextlib.closing(sqlite3.connect(path)) as database:
         assert database.execute("PRAGMA application_id").fetchone()[0] == 0x4C575133
@@ -390,7 +390,7 @@ def test_queue_candidate_header_is_unpublished_until_schema_is_complete(
             raise RuntimeError("stop before complete schema")
 
     with pytest.raises(RuntimeError, match="complete schema"):
-        memory_queue.initialize_queue_v3_candidate(
+        queue_core.initialize_queue_v3_candidate(
             path,
             source_v2=None,
             killpoint=interrupt,
@@ -400,8 +400,8 @@ def test_queue_candidate_header_is_unpublished_until_schema_is_complete(
         assert database.execute("PRAGMA application_id").fetchone()[0] == 0
         assert database.execute("PRAGMA user_version").fetchone()[0] == 0
 
-    memory_queue.initialize_queue_v3_candidate(path, source_v2=None)
-    assert memory_queue.validate_queue_v3_database(path, state_root=tmp_path)[
+    queue_core.initialize_queue_v3_candidate(path, source_v2=None)
+    assert queue_core.validate_queue_v3_database(path, state_root=tmp_path)[
         "application_id"
     ] == 0x4C575133
 
@@ -422,13 +422,13 @@ def test_queue_partial_table_or_index_is_repaired(
         ) as database:
             database.execute("CREATE TABLE tasks(id TEXT PRIMARY KEY)")
     else:
-        memory_queue.initialize_queue_v3_candidate(path, source_v2=None)
+        queue_core.initialize_queue_v3_candidate(path, source_v2=None)
         with contextlib.closing(sqlite3.connect(path, isolation_level=None)) as database:
             database.execute("DROP INDEX queue_claim_order")
 
-    memory_queue.initialize_queue_v3_candidate(path, source_v2=None)
+    queue_core.initialize_queue_v3_candidate(path, source_v2=None)
 
-    result = memory_queue.validate_queue_v3_database(path, state_root=tmp_path)
+    result = queue_core.validate_queue_v3_database(path, state_root=tmp_path)
     assert result["row_counts"]["tasks"] == 0
 
 
@@ -436,7 +436,7 @@ def test_queue_populated_partial_candidate_rebuilds_from_explicit_v2_source(
     tmp_path: Path,
 ) -> None:
     source_root = tmp_path / "source"
-    source_queue = memory_queue.MemoryQueue(source_root)
+    source_queue = queue_core.MemoryQueue(source_root)
     task_id = source_queue.enqueue("query", 1, {"prompt": "authoritative"})
     path = tmp_path / "run" / "queue-v3.candidate.sqlite3"
     with contextlib.closing(
@@ -450,7 +450,7 @@ def test_queue_populated_partial_candidate_rebuilds_from_explicit_v2_source(
         database.execute("CREATE TABLE tasks(id TEXT PRIMARY KEY)")
         database.execute("INSERT INTO tasks(id) VALUES ('stale-partial')")
 
-    summary = memory_queue.initialize_queue_v3_candidate(
+    summary = queue_core.initialize_queue_v3_candidate(
         path, source_v2=source_queue.db_path
     )
 
@@ -464,7 +464,7 @@ def test_queue_v2_backup_rebuild_drops_dependent_indexes_before_tables(
     tmp_path: Path,
 ) -> None:
     source_root = tmp_path / "source"
-    source_queue = memory_queue.MemoryQueue(source_root)
+    source_queue = queue_core.MemoryQueue(source_root)
     task_id = source_queue.enqueue("query", 1, {"prompt": "backed-up"})
     candidate = tmp_path / "run" / "queue-v3.candidate.sqlite3"
     candidate.parent.mkdir(parents=True)
@@ -472,7 +472,7 @@ def test_queue_v2_backup_rebuild_drops_dependent_indexes_before_tables(
         with contextlib.closing(sqlite3.connect(candidate)) as target:
             source.backup(target)
 
-    summary = memory_queue.initialize_queue_v3_candidate(
+    summary = queue_core.initialize_queue_v3_candidate(
         candidate, source_v2=source_queue.db_path
     )
 
@@ -498,9 +498,9 @@ def test_queue_candidate_initializer_never_calls_executescript(
     monkeypatch.setattr(sqlite3, "connect", guarded_connect)
     path = tmp_path / "run" / "queue-v3.candidate.sqlite3"
 
-    memory_queue.initialize_queue_v3_candidate(path, source_v2=None)
+    queue_core.initialize_queue_v3_candidate(path, source_v2=None)
 
-    assert memory_queue.validate_queue_v3_database(path, state_root=tmp_path)[
+    assert queue_core.validate_queue_v3_database(path, state_root=tmp_path)[
         "integrity_check"
     ] == "ok"
 
@@ -509,7 +509,7 @@ def test_queue_v3_validator_rejects_nonterminal_payload_hash_mismatch(
     tmp_path: Path,
 ) -> None:
     path = tmp_path / "run" / "queue-v3.candidate.sqlite3"
-    memory_queue.initialize_queue_v3_candidate(path, source_v2=None)
+    queue_core.initialize_queue_v3_candidate(path, source_v2=None)
     now = "2026-08-05T12:00:00+00:00"
     with contextlib.closing(sqlite3.connect(path)) as database:
         database.execute(
@@ -522,7 +522,7 @@ def test_queue_v3_validator_rejects_nonterminal_payload_hash_mismatch(
         database.commit()
 
     with pytest.raises(OperationalDatabaseContractError) as raised:
-        memory_queue.validate_queue_v3_database(path, state_root=tmp_path)
+        queue_core.validate_queue_v3_database(path, state_root=tmp_path)
 
     assert raised.value.code == "queue_v3_validation_failed"
 
@@ -533,7 +533,7 @@ def test_queue_v3_validator_rejects_hash_valid_noncanonical_payload(
     payload: bytes,
 ) -> None:
     path = tmp_path / "run" / "queue-v3.candidate.sqlite3"
-    memory_queue.initialize_queue_v3_candidate(path, source_v2=None)
+    queue_core.initialize_queue_v3_candidate(path, source_v2=None)
     now = "2026-08-05T12:00:00+00:00"
     with contextlib.closing(sqlite3.connect(path)) as database:
         database.execute(
@@ -541,12 +541,12 @@ def test_queue_v3_validator_rejects_hash_valid_noncanonical_payload(
                    id, kind, handler_version, payload_blob, input_hash, state,
                    priority, created_at, updated_at, available_at
                ) VALUES ('malformed', 'query', 1, ?, ?, 'ready', 0, ?, ?, ?)""",
-            (payload, memory_queue.sha256_bytes(payload), now, now, now),
+            (payload, queue_core.sha256_bytes(payload), now, now, now),
         )
         database.commit()
 
     with pytest.raises(OperationalDatabaseContractError) as raised:
-        memory_queue.validate_queue_v3_database(path, state_root=tmp_path)
+        queue_core.validate_queue_v3_database(path, state_root=tmp_path)
 
     assert raised.value.code == "queue_v3_validation_failed"
 
@@ -558,8 +558,8 @@ def test_v3_candidate_rejects_same_file_identity_as_v2_source(
     database: str,
 ) -> None:
     if database == "queue":
-        source = memory_queue.MemoryQueue(tmp_path / "source").db_path
-        initializer = memory_queue.initialize_queue_v3_candidate
+        source = queue_core.MemoryQueue(tmp_path / "source").db_path
+        initializer = queue_core.initialize_queue_v3_candidate
     else:
         vault = tmp_path / "vault"
         (vault / "knowledge").mkdir(parents=True)
@@ -586,8 +586,8 @@ def test_v2_migration_rejects_unknown_schema_objects(
     database: str,
 ) -> None:
     if database == "queue":
-        source = memory_queue.MemoryQueue(tmp_path / "source").db_path
-        initializer = memory_queue.initialize_queue_v3_candidate
+        source = queue_core.MemoryQueue(tmp_path / "source").db_path
+        initializer = queue_core.initialize_queue_v3_candidate
     else:
         vault = tmp_path / "vault"
         (vault / "knowledge").mkdir(parents=True)

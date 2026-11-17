@@ -1,0 +1,21 @@
+# Failure counters retain their history
+
+Research date: 2026-10-01. A real isolated state save/reload reproduces loss of the earliest diagnostic counter on the 33rd kind. A second regression proves that subsequent capture kinds erase earlier tool-failure and deferred-write counts. This is a reproduced counter defect, not evidence that the installed six-kind capture history already crossed the threshold.
+
+Remove the unexplained 32-kind eviction and its helper. Counters describe cumulative operational evidence, not a disposable cache. The existing state writer deliberately evicts only dedupe/reducer caches under byte pressure and retains health/pending work. Keep that behavior, redaction, reason bounds, bounded diagnostic trail, state locking and recent-versus-historical reporting. Failure kinds are supplied by trusted first-party code, not host payload attributes or user session identities. No new setting, environment contract, storage path or schema is needed.
+
+Three independent primary sources checked today:
+
+- [OpenTelemetry Metrics SDK cardinality](https://opentelemetry.io/docs/specs/otel/metrics/sdk/): overflow accounting preserves measurements; it does not permit silently dropping cumulative observations.
+- [Prometheus instrumentation](https://prometheus.io/docs/practices/instrumentation/): label cardinality has real resource costs; avoid user identifiers as dimensions and measure growing dimensions.
+- [OWASP resource consumption](https://api-security.owasp.org/editions/2023/en/0xa4-unrestricted-resource-consumption/): uncontrolled resource growth requires controls matched to actual exposed resources.
+
+These references support the accounting and resource review, not any numeric optimum. Raising 32 or making it configurable would preserve silent history deletion. Adding an overflow bucket changes the meaning and schema of diagnostic kinds and is unnecessary for the current trusted producer vocabulary. A second database or new diagnostic archive adds architecture without fixing the existing counter. Preserve each producer kind instead.
+
+Tradeoff: retained health counters can grow if trusted code introduces many new diagnostic kinds; the shared writer does not promise to bound non-disposable evidence. This is already true of pending work. If actual health state approaches its reader budget, review the producer vocabulary and durable accounting together; do not evict findings or claim an unlimited-state safety guarantee. The regression verifies 33 short kinds fit the existing budget, and another verifies actual byte pressure evicts cache while retaining historical counters. This repair does not recover counters deleted previously or prove recovery of every historical event.
+
+Evidence: logs/audit-2026-10-01-failure-kinds-architecture-before.json; logs/audit-2026-10-01-failure-kinds-red.txt (2 failed, 1 passed). No model call or context reduction is introduced. Full-cycle benefit is accurate operator findings without a false disappearance or repeated diagnosis caused by losing cumulative counts.
+
+Qualification: 92 candidate checks and 133 public-source checks passed; fresh Gitleaks found no leaks. Ruff and whole branch/nesting guards passed. Real Lizard measured the changed production method CCN 2 and new tests/helpers <=2. The initially requested test file did not exist; that invocation ran no tests and its log is retained separately from the corrected successful run.
+
+Installation used a canonical repair owner and atomic compatible source replacement with verified preimages. An attempted offline exclusive admission refused an owner with unknown liveness; its record was retained. Source installation requires no offline database adoption and does not terminate existing processes. Previously imported code can remain in those processes until their exit. The installed module independently retained all 35 kinds in a real isolated state, with 33 capture losses, one tool failure and one deferred write, using 6,652 bytes. Direct live-vault pytest reported three passed tests and a teardown error because concurrent capture created a session file; it is not claimed as a successful test run. No test protection or live evidence was removed.

@@ -1,0 +1,381 @@
+{
+  "encoding": "o200k_base",
+  "max_tokens": 100000,
+  "serialization": "exact-duplicates/v1",
+  "files": [
+    "AGENTS.md",
+    "CLAUDE.md",
+    "docs/AGENTS.md",
+    "docs/STRUCTURE.md",
+    "docs/modules/context-bundle.md",
+    "docs/modules/context-records.md",
+    "docs/modules/context-tooling.md",
+    "docs/modules/formats.md",
+    "docs/modules/mcp-server-limits.md",
+    "docs/modules/mcp-server-sanitize.md",
+    "docs/modules/mcp-server-vault-context.json",
+    "docs/modules/mcp-server-vault.md",
+    "docs/modules/mcp-server-workers.md",
+    "docs/modules/model-choice.md",
+    "docs/modules/product-structure.md",
+    "docs/modules/project-governance.md",
+    "docs/modules/test-support.md",
+    "rules/development-laws.md",
+    "scripts/__init__.py",
+    "scripts/llm_wiki/__init__.py",
+    "scripts/llm_wiki/context_bundle.py",
+    "scripts/llm_wiki/formats/__init__.py",
+    "scripts/llm_wiki/mcp_server_limits.py",
+    "scripts/llm_wiki/mcp_server_sanitize.py",
+    "scripts/llm_wiki/mcp_server_vault.py",
+    "scripts/llm_wiki/mcp_server_workers.py",
+    "tests/__init__.py",
+    "tests/conftest.py",
+    "tests/module_context.py",
+    "tests/module_context_paths.py",
+    "tests/module_interface.py",
+    "tests/module_interface_render.py",
+    "tests/module_qualification.py",
+    "tests/module_record_context.py",
+    "tests/module_records.py",
+    "tests/shared_fixtures.py",
+    "tests/slow_machine.py"
+  ],
+  "ownership": {
+    "files": [
+      "docs/modules/mcp-server-vault-context.json",
+      "docs/modules/mcp-server-vault.md",
+      "scripts/llm_wiki/mcp_server_vault.py"
+    ]
+  },
+  "qualified_dependencies": [
+    {
+      "provider": "scripts/answer_budget.py",
+      "names": [
+        "BYTES_PER_TOKEN",
+        "estimate_text_tokens",
+        "estimate_tokens"
+      ],
+      "contract_sha256": "2c0bff41d02c96a941f11bfe0252e9524b86a2401e58e03a36f7d0643ece4dbb",
+      "integration_tests": [
+        "tests/modules/answer_budget/test_contract.py",
+        "tests/modules/answer_cost/test_contract.py",
+        "tests/test_a_context_answer_fits_the_budget_it_was_given.py"
+      ]
+    },
+    {
+      "provider": "scripts/bounded_io.py",
+      "names": [
+        "MAX_KNOWLEDGE_PAGE_BYTES",
+        "read_stable_bytes"
+      ],
+      "contract_sha256": "87826f93ff8f76c61d945698c7f5ca82bee5b8701fa1315e9efbe307dda3587f",
+      "integration_tests": [
+        "tests/modules/breadcrumb_documents/test_contract.py",
+        "tests/test_a_file_being_written_is_a_changed_corpus_on_every_system.py",
+        "tests/test_a_journal_is_readable_by_every_reader.py"
+      ]
+    },
+    {
+      "provider": "scripts/capture_diagnostics.py",
+      "names": [
+        "record_capture_failure"
+      ],
+      "contract_sha256": "454709501c56cad9797159a61893aabc86a83cb5b8e1da109156fd6f48807484",
+      "integration_tests": [
+        "tests/test_a_capture_that_fails_says_so.py",
+        "tests/test_a_codex_turn_is_not_a_session.py",
+        "tests/test_a_dropped_telemetry_write_is_recorded.py"
+      ]
+    },
+    {
+      "provider": "scripts/compile_memory.py",
+      "names": [
+        "run_pending_compile"
+      ],
+      "contract_sha256": "23c36bb3755fb55bd24f0b11bc18c3d260000a271c781d2ca76937cbdca40fc8",
+      "integration_tests": [
+        "tests/test_an_answer_says_how_old_its_index_is.py",
+        "tests/test_compile_foreground_queue.py",
+        "tests/test_compile_hardening.py"
+      ]
+    },
+    {
+      "provider": "scripts/context_budget.py",
+      "names": [
+        "BudgetExceededError",
+        "ContextBudget"
+      ],
+      "contract_sha256": "e4cb263d5a6203fa48ad69397d2c90022ced8cf3c516b3283f997e37d81df7b3",
+      "integration_tests": [
+        "tests/modules/compile_answer_records/test_contract.py",
+        "tests/modules/compile_call_runtime/test_lifecycle.py",
+        "tests/modules/model_records/test_contract.py"
+      ]
+    },
+    {
+      "provider": "scripts/context_compiler.py",
+      "names": [
+        "compile_context"
+      ],
+      "contract_sha256": "ffa44d3cb2fd7775d1c8fb5053dacf27f444d8d6e0963be7f9f6f5f35a0a8eb9",
+      "integration_tests": [
+        "tests/test_a_context_answer_sends_its_text_once.py",
+        "tests/test_context_compiler.py",
+        "tests/test_context_noise.py"
+      ]
+    },
+    {
+      "provider": "scripts/contradiction_pipeline.py",
+      "names": [
+        "assess_text"
+      ],
+      "contract_sha256": "3a26a60d3790c0791bf62f6e988a440e32d632fe7ff1a9d1b000af460c1b8914",
+      "integration_tests": [
+        "tests/test_an_error_is_not_an_answer.py",
+        "tests/test_claim_v2_versioned_consumers.py",
+        "tests/test_claims.py"
+      ]
+    },
+    {
+      "provider": "scripts/corpus_snapshot.py",
+      "names": [
+        "CorpusSnapshot",
+        "collect_corpus",
+        "select_snapshot_chunks"
+      ],
+      "contract_sha256": "c9fffcbac4dab041ef892ca0f1b9a282528af01bd7b5dd449575d8105221704b",
+      "integration_tests": [
+        "tests/test_a_capacity_refusal_does_not_corrupt_a_generation.py",
+        "tests/test_a_chunker_that_changes_changes_its_version.py",
+        "tests/test_a_count_that_reached_the_edge_looks_again.py"
+      ]
+    },
+    {
+      "provider": "scripts/daily_log_append.py",
+      "names": [
+        "append_daily"
+      ],
+      "contract_sha256": "b8eaa0f4f567eab8ea1d78a2efd3e5436ec5422515879527a35153e03889fd53",
+      "integration_tests": [
+        "tests/test_a_block_opens_one_entry.py",
+        "tests/test_a_hook_budget_is_one_sum.py",
+        "tests/test_a_redelivery_after_midnight_is_recognised.py"
+      ]
+    },
+    {
+      "provider": "scripts/evidence_resolver.py",
+      "names": [
+        "EvidenceResolutionError",
+        "EvidenceResolver",
+        "evidence_candidates"
+      ],
+      "contract_sha256": "6e43258a5cb0a9df1e90ab6fc830aaa17ab5ab9e8b6bd000dfae8ae739e1bfd3",
+      "integration_tests": [
+        "tests/test_a_block_opens_one_entry.py",
+        "tests/test_a_claim_no_single_span_can_carry.py",
+        "tests/test_a_continuation_keeps_its_original_entry.py"
+      ]
+    },
+    {
+      "provider": "scripts/iso_time.py",
+      "names": [
+        "local_now"
+      ],
+      "contract_sha256": "d855ddcfb0adb26bb08531f2c8ab69c7708bd0195d99df5f7e70fb26f0af878b",
+      "integration_tests": [
+        "tests/modules/iso_time/test_contract.py",
+        "tests/test_a_writer_past_its_lease_is_named.py",
+        "tests/test_compile_progress_cutover.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/formats/schema.py",
+      "names": [
+        "validate_schema"
+      ],
+      "contract_sha256": "753e4abefcf29389d3fc0c051070bfaa66db14ecb88e1c98fc9b85588a6017cb",
+      "integration_tests": [
+        "tests/modules/breadcrumb_protocol/test_record_scope.py",
+        "tests/modules/formats/test_primitives.py",
+        "tests/modules/queue_evidence_records/test_records.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/generation_catalog_store.py",
+      "names": [
+        "GenerationCatalog"
+      ],
+      "contract_sha256": "b18194ebe04bf988b4474379fcb5243516550d43b745a00eaed1453f7844c983",
+      "integration_tests": [
+        "tests/test_a_blocked_task_has_a_way_back.py",
+        "tests/test_a_build_in_flight_is_not_an_orphan.py",
+        "tests/test_a_capacity_refusal_does_not_corrupt_a_generation.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/mcp_server_warmup.py",
+      "names": [
+        "warmup_state"
+      ],
+      "contract_sha256": "fef23eaac118e58bbe020a6a1d738965165590ffb6d390ea3e9d7c895ff5658e",
+      "integration_tests": [
+        "tests/test_foreground_retrieval_preempts_warmup.py",
+        "tests/test_mcp_server_warmup_and_queries.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/model_choice.py",
+      "names": [
+        "using_root"
+      ],
+      "contract_sha256": "d45f2655cb61963e77617d1dfd7d617b134ad77cc770b59b335d0856e5d65019",
+      "integration_tests": [
+        "tests/test_central_model_selection.py",
+        "tests/test_compile_execution_inventory.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/runtime_roots.py",
+      "names": [
+        "state_root",
+        "vault_root"
+      ],
+      "contract_sha256": "904b31835161d11b79ab937c4651d91dd6966bdaa1f33e93b9ea768f519d2d3b",
+      "integration_tests": [
+        "tests/test_a_continuation_keeps_its_original_entry.py",
+        "tests/test_a_prompt_checkpoint_does_not_outwait_its_host.py",
+        "tests/test_a_session_marker_survives_a_busy_writer.py"
+      ]
+    },
+    {
+      "provider": "scripts/lookup_mode.py",
+      "names": [
+        "count_wiki_pages",
+        "index_status",
+        "search_mode"
+      ],
+      "contract_sha256": "075eefa3b9c3452d2e61791e9990ee7c0498ef57a74d561134c8268b38a8877e",
+      "integration_tests": [
+        "tests/test_an_answer_says_how_old_its_index_is.py",
+        "tests/test_mcp_server_helpers.py",
+        "tests/test_the_generation_is_the_only_index.py"
+      ]
+    },
+    {
+      "provider": "scripts/memory_state.py",
+      "names": [
+        "daily_logs",
+        "file_hash",
+        "load_state"
+      ],
+      "contract_sha256": "d13fc39056beb704942766d05a228ab13c9e98360c949ef98dc2b5a251b86275",
+      "integration_tests": [
+        "tests/test_a_bad_model_file_is_fetched_again.py",
+        "tests/test_a_capture_that_fails_says_so.py",
+        "tests/test_a_context_answer_fits_the_budget_it_was_given.py"
+      ]
+    },
+    {
+      "provider": "scripts/query_memory.py",
+      "names": [
+        "QA_DEADLINE_SECONDS"
+      ],
+      "contract_sha256": "25a3c206f9c13f9027243b88f6ffef7024c76caa0417d1648a2dcdaa9beb8939",
+      "integration_tests": [
+        "tests/test_a_claim_no_single_span_can_carry.py",
+        "tests/test_a_count_that_reached_the_edge_looks_again.py",
+        "tests/test_a_counting_question_opens_the_pass_itself.py"
+      ]
+    },
+    {
+      "provider": "scripts/reliable_memory.py",
+      "names": [
+        "validate_state_root"
+      ],
+      "contract_sha256": "8680515cd873056a7c8a36e0057d91f2f83f23c48841263697676ff91f7ff964",
+      "integration_tests": [
+        "tests/test_a_backup_image_carries_what_git_does_not.py",
+        "tests/test_a_changed_task_setting_reaches_an_installed_machine.py",
+        "tests/test_a_committed_source_resolves_an_older_compile_plan.py"
+      ]
+    },
+    {
+      "provider": "scripts/repository_scope.py",
+      "names": [
+        "sanitized_git_environment"
+      ],
+      "contract_sha256": "fd550ae20761afad50b37fa3a71044a162485b0e4d4b3e2af9b5b22e143c2bec",
+      "integration_tests": [
+        "tests/test_a_code_generation_is_not_abandoned.py",
+        "tests/test_a_directory_link_inside_the_checkout_does_not_refuse_the_revision.py",
+        "tests/test_a_document_is_opened_in_its_own_language.py"
+      ]
+    },
+    {
+      "provider": "scripts/retrieval.py",
+      "names": [
+        "CANDIDATE_FANOUT",
+        "analyze_query",
+        "planned_request"
+      ],
+      "contract_sha256": "ca6afa0123a7bc67fd3a8f98bf7decea0e3d4b442d00592d6c37f7d9d74cbad6",
+      "integration_tests": [
+        "tests/test_a_fallback_names_its_cause.py",
+        "tests/test_a_grounded_answer_keeps_automatic_search.py",
+        "tests/test_a_link_list_is_not_an_answer.py"
+      ]
+    },
+    {
+      "provider": "scripts/retrieval_telemetry.py",
+      "names": [
+        "best_effort_make_event",
+        "best_effort_record_events"
+      ],
+      "contract_sha256": "d1ff2704abc1924049f90916189f4675b62e6538f8a55c94aceb2eb72ffa3c21",
+      "integration_tests": [
+        "tests/test_a_dropped_telemetry_write_is_recorded.py",
+        "tests/test_access_tracking.py",
+        "tests/test_automatic_writer_integration.py"
+      ]
+    },
+    {
+      "provider": "scripts/search_memory.py",
+      "names": [
+        "degradation_reasons",
+        "search"
+      ],
+      "contract_sha256": "ec2b2987a48e57233c04fa4659ca174bc90c335d29c709e57f1c2472c47f8f3e",
+      "integration_tests": [
+        "tests/test_a_fallback_names_its_cause.py",
+        "tests/test_a_question_finds_pages_without_a_generation.py",
+        "tests/test_a_row_that_carries_its_text_carries_no_cut_of_it.py"
+      ]
+    },
+    {
+      "provider": "scripts/secret_redact.py",
+      "names": [
+        "describe_error",
+        "redact_secrets"
+      ],
+      "contract_sha256": "15e80f37cf33a095390aff6e606c20403cc8c70ffb9983c3c8594ba3d1d1ae67",
+      "integration_tests": [
+        "tests/modules/secret_redact/test_pattern_prerequisites.py",
+        "tests/modules/secret_redact/test_security_invariants.py",
+        "tests/modules/secret_redact/test_structure.py"
+      ]
+    },
+    {
+      "provider": "scripts/settings.py",
+      "names": [
+        "setting_value"
+      ],
+      "contract_sha256": "ec6d2a43d91dba48c174aad5e9505790a05fd66f1bf1e5292264857f320a9881",
+      "integration_tests": [
+        "tests/test_a_compile_asked_through_mcp_takes_the_compile_lock.py",
+        "tests/test_a_generation_snapshot_uses_the_writer_gate.py",
+        "tests/test_a_rerank_has_the_window_it_was_measured_to_need.py"
+      ]
+    }
+  ]
+}

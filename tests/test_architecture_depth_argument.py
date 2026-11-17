@@ -64,7 +64,7 @@ def test_the_walk_is_asked_for_the_depth_the_caller_named(
     """Omitted means one hop; out of range is clamped, never refused."""
     graph = _RecordingGraph()
 
-    code_graph._stored_dependency_rows(graph, ["seed"], False, asked)
+    code_graph.stored_dependency_rows(graph, ["seed"], False, asked)
 
     assert graph.depths == [expected]
 
@@ -72,7 +72,7 @@ def test_the_walk_is_asked_for_the_depth_the_caller_named(
 def test_every_seed_is_walked_at_the_same_depth() -> None:
     graph = _RecordingGraph()
 
-    code_graph._stored_dependency_rows(graph, ["one", "two", "three"], False, 2)
+    code_graph.stored_dependency_rows(graph, ["one", "two", "three"], False, 2)
 
     assert graph.depths == [2, 2, 2]
 
@@ -85,9 +85,9 @@ def test_the_mode_forwards_the_depth_it_was_given(monkeypatch) -> None:
         return []
 
     monkeypatch.setitem(sys.modules, "code_graph", code_graph)
-    monkeypatch.setattr(code_graph, "find_dependencies", find_dependencies)
+    monkeypatch.setattr("llm_wiki.code_graph_dependencies.find_dependencies", find_dependencies)
 
-    mcp_server._architecture_dependencies(
+    mcp_server.architecture_dependencies(
         {
             "symbol": "scripts/retrieval.py",
             "resolved": Path("/tmp"),
@@ -108,9 +108,9 @@ def test_an_absent_depth_reaches_the_walk_as_none(monkeypatch) -> None:
         seen.update(kwargs)
         return []
 
-    monkeypatch.setattr(code_graph, "find_dependencies", find_dependencies)
+    monkeypatch.setattr("llm_wiki.code_graph_dependencies.find_dependencies", find_dependencies)
 
-    mcp_server._architecture_dependencies(
+    mcp_server.architecture_dependencies(
         {
             "symbol": "x",
             "resolved": Path("/tmp"),
@@ -123,7 +123,7 @@ def test_an_absent_depth_reaches_the_walk_as_none(monkeypatch) -> None:
 
 
 def test_the_mode_accepts_depth_as_an_argument() -> None:
-    _, optional = mcp_server._ARCHITECTURE_CONTRACTS["dependencies"]
+    _, optional = mcp_server.ARCHITECTURE_CONTRACTS["dependencies"]
 
     assert "depth" in optional
 
@@ -141,7 +141,7 @@ def test_the_default_is_one_hop() -> None:
 def test_the_answer_says_how_far_it_walked() -> None:
     rows = [{"depth": 1}, {"depth": 1}]
 
-    assert code_graph._dependency_reach(rows, 1) == {
+    assert code_graph.dependency_reach(rows, 1) == {
         "depth_applied": 1,
         "depth_frontier_open": True,
     }
@@ -151,17 +151,17 @@ def test_a_walk_that_ran_out_before_its_limit_says_so() -> None:
     """Nothing sits at the edge, so this is all of it, not as far as you asked."""
     rows = [{"depth": 1}, {"depth": 2}]
 
-    assert code_graph._dependency_reach(rows, 8) == {
+    assert code_graph.dependency_reach(rows, 8) == {
         "depth_applied": 8,
         "depth_frontier_open": False,
     }
 
 
 def test_an_empty_answer_has_no_open_frontier() -> None:
-    assert code_graph._dependency_reach([], 1)["depth_frontier_open"] is False
+    assert code_graph.dependency_reach([], 1)["depth_frontier_open"] is False
 
 
 def test_the_reach_reaches_the_caller() -> None:
     """A report key the envelope drops would make the bound invisible again."""
-    assert "depth_applied" in mcp_server._ARCHITECTURE_REPORT_KEYS
-    assert "depth_frontier_open" in mcp_server._ARCHITECTURE_REPORT_KEYS
+    assert "depth_applied" in mcp_server.ARCHITECTURE_REPORT_KEYS
+    assert "depth_frontier_open" in mcp_server.ARCHITECTURE_REPORT_KEYS

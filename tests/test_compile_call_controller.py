@@ -1,0 +1,1240 @@
+"""A restart must not buy the same uncertain model call twice."""
+from dataclasses import replace
+
+import compile_progress as progress
+import memory_queue
+import pytest
+import queue_core
+from context_budget import TokenUsage
+from llm_client import BackendResponse
+from llm_wiki import queue_store
+
+from tests.compile_call_controller_helpers import work  # noqa: F401
+from tests.compile_progress_admission_helpers import upgraded as upgraded
+from tests.script_sources import SCRIPTS
+
+
+def _run(work, invoke, **options):  # noqa: F811
+    from compile_controller import run_model_call
+
+    queue, lease, checkpoint = work
+    return run_model_call(queue, lease, checkpoint, request_digest='e' * 64, invoke=invoke, **options)
+
+
+def _answer():
+    return BackendResponse('answer', TokenUsage(input_tokens=123, output_tokens=17))
+
+
+def _must_not_call():
+    pytest.fail('recovery must not call the model again')
+
+
+def test_saved_answer_and_usage_survive_controller_restart(work):  # noqa: F811
+    assert _run(work, _answer) == _answer()
+    assert _run(work, _must_not_call) == _answer()
+    queue, lease, _ = work
+    assert queue.get(lease.id).state == 'leased'
+    assert queue.get(lease.id).result_reference is None
+
+
+def test_unknown_provider_outcome_never_calls_again(work):  # noqa: F811
+    from compile_controller import ProviderOutcomeUnknown
+
+    def interrupted():
+        raise SystemExit('process stopped during provider call')
+
+    with pytest.raises(SystemExit):
+        _run(work, interrupted)
+    with pytest.raises(ProviderOutcomeUnknown):
+        _run(work, _must_not_call)
+
+
+def test_answer_file_recovers_when_event_commit_failed(work, monkeypatch):  # noqa: F811
+    queue, _, _ = work
+    original = queue.record_compile_event
+
+    def fail_answer_commit(lease, event):
+        if event.details.get('model_call', {}).get('phase') == 'answer':
+            raise RuntimeError('interrupted before answer event')
+        return original(lease, event)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(queue, 'record_compile_event', fail_answer_commit)
+        with pytest.raises(RuntimeError):
+            _run(work, _answer)
+    assert _run(work, _must_not_call) == _answer()
+
+
+def test_unknown_call_is_durably_blocked_in_delivery(work):  # noqa: F811
+    from compile_controller import ProviderOutcomeUnknown
+
+    def timeout():
+        raise TimeoutError('provider may have accepted the call')
+
+    with pytest.raises(ProviderOutcomeUnknown):
+        _run(work, timeout)
+    queue, lease, _ = work
+    assert queue.get(lease.id).state == 'blocked'
+    assert queue.get(lease.id).blocked_capability == 'provider_outcome_unknown'
+    queue.unblock(lease.id)
+    replacement = queue.claim('another-worker')
+    with pytest.raises(ProviderOutcomeUnknown):
+        _run((queue, replacement, work[2]), _must_not_call)
+
+
+def test_changed_request_cannot_turn_unknown_dispatch_into_new_expense(work):  # noqa: F811
+    from compile_controller import run_model_call
+
+    def interrupted():
+        raise SystemExit()
+
+    with pytest.raises(SystemExit):
+        _run(work, interrupted)
+    queue, lease, checkpoint = work
+    with pytest.raises(progress.ProgressConflict):
+        run_model_call(queue, lease, checkpoint, request_digest='f' * 64, invoke=_must_not_call)
+
+
+def test_stale_lease_cannot_dispatch(work):  # noqa: F811
+    queue, lease, checkpoint = work
+    with pytest.raises(queue_core.LeaseFenceError):
+        _run((queue, replace(lease, token='stale'), checkpoint), _must_not_call)
+    assert queue.get_compile_event(checkpoint.work_id) == checkpoint
+
+
+def test_unrelated_task_cannot_take_over_compile_work(work):  # noqa: F811
+    queue, _, checkpoint = work
+    queue.enqueue('compile', 1, {'daily': 'unrelated'})
+    other = queue.claim('other-worker')
+    with pytest.raises(progress.ProgressConflict):
+        _run((queue, other, checkpoint), _must_not_call)
+
+
+def test_redrive_reuses_answer_and_usage_without_new_call(work):  # noqa: F811
+    queue, lease, checkpoint = work
+    assert _run(work, _answer) == _answer()
+    queue.fail(lease, queue_core.QueueFailure('handler_failed', permanent=True))
+    child_id = queue.redrive(lease.id)
+    child = queue.claim('redrive-worker')
+    assert child.id == child_id
+    assert _run((queue, child, checkpoint), _must_not_call) == _answer()
+
+
+def test_unknown_usage_stays_unknown_after_recovery(work):  # noqa: F811
+    reply = BackendResponse('answer without usage')
+    assert _run(work, lambda: reply) == reply
+    recovered = _run(work, _must_not_call)
+    assert recovered.usage.input_tokens is None
+    assert recovered.usage.estimated_cost is None
+    assert recovered.usage.cost_kind == 'unknown'
+
+
+def test_unvalidated_answer_cannot_authorize_another_call(work):  # noqa: F811
+    queue, lease, checkpoint = work
+    _run(work, _answer)
+    answer = queue.get_compile_event(checkpoint.work_id)
+    with pytest.raises(progress.ProgressConflict, match='semantic validation'):
+        _run((queue, lease, answer), _must_not_call)
+
+
+def test_corrupt_orphan_is_refused_before_recording_an_answer(work, monkeypatch):  # noqa: F811
+    queue, _, checkpoint = work
+    original = queue.record_compile_event
+
+    def stop_after_file(lease, event):
+        if event.details.get('model_call', {}).get('phase') == 'answer':
+            raise RuntimeError('stop before event')
+        return original(lease, event)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(queue, 'record_compile_event', stop_after_file)
+        with pytest.raises(RuntimeError):
+            _run(work, _answer)
+    dispatch = queue.get_compile_event(checkpoint.work_id)
+    identity = f'compile:{checkpoint.work_id}:{dispatch.sequence + 1}'
+    path = queue.results_dir / (queue_core.sha256_bytes(identity.encode()) + '.result')
+    path.write_bytes(b'{"wrong":"answer"}')
+    with pytest.raises(progress.ProgressCorrupt):
+        _run(work, _must_not_call)
+    assert queue.get_compile_event(checkpoint.work_id) == dispatch
+
+
+def test_missing_saved_answer_is_corruption_not_permission_to_regenerate(work):  # noqa: F811
+    queue, _, checkpoint = work
+    _run(work, _answer)
+    answer = queue.get_compile_event(checkpoint.work_id)
+    (queue.state_root / answer.details['artifact']['reference']).unlink()
+    with pytest.raises(progress.ProgressCorrupt):
+        _run(work, _must_not_call)
+
+
+def test_lease_loss_after_provider_call_cannot_record_false_completion(work, monkeypatch):  # noqa: F811
+    from datetime import timedelta
+
+    queue, lease, checkpoint = work
+
+    def slow_answer():
+        monkeypatch.setattr(queue_store, 'utc_now', lambda: lease.expires_at + timedelta(seconds=1))
+        return _answer()
+
+    with pytest.raises(queue_core.LeaseFenceError):
+        _run(work, slow_answer)
+    assert queue.get_compile_event(checkpoint.work_id).outcome == 'running'
+
+
+_CRASH_CHILD = '''
+import json, os, sys
+from pathlib import Path
+from dataclasses import asdict
+import compile_progress, compile_controller, memory_queue, queue_core
+from iso_time import parse_instant
+from llm_client import BackendResponse
+queue = queue_core.active_memory_queue(Path(sys.argv[1]), Path(sys.argv[2]))
+lease_data = json.loads(sys.argv[3])
+lease_data['expires_at'] = parse_instant(lease_data['expires_at'])
+lease = memory_queue.QueueLease(**lease_data)
+checkpoint = compile_progress.CompileEvent(**json.loads(sys.argv[4]))
+phase = sys.argv[5]
+original = queue.record_compile_event
+
+def record(owner, event):
+    if phase == 'answer' and event.details.get('model_call', {}).get('phase') == 'answer':
+        os._exit(17)
+    return original(owner, event)
+
+def answer():
+    if phase == 'dispatch':
+        os._exit(17)
+    return BackendResponse('durable child answer')
+
+queue.record_compile_event = record
+compile_controller.run_model_call(queue, lease, checkpoint, request_digest='e' * 64, invoke=answer)
+'''
+
+
+@pytest.mark.parametrize('phase', ['dispatch', 'answer'])
+def test_abrupt_process_exit_recovers_without_another_model_call(work, upgraded, phase):  # noqa: F811
+    import json
+    import os
+    import subprocess
+    import sys
+    from dataclasses import asdict
+    from pathlib import Path
+
+    from compile_controller import ProviderOutcomeUnknown
+
+    root, state, _ = upgraded
+    _, lease, checkpoint = work
+    child = subprocess.run(
+        [sys.executable, '-c', _CRASH_CHILD, str(root), str(state),
+         json.dumps(asdict(lease), default=str), json.dumps(asdict(checkpoint)), phase],
+        env={**os.environ, 'PYTHONPATH': str(Path(__file__).resolve().parents[1] / 'scripts')},
+        capture_output=True, text=True, check=False,
+    )
+    assert child.returncode == 17, child.stderr
+    if phase == 'dispatch':
+        with pytest.raises(ProviderOutcomeUnknown):
+            _run(work, _must_not_call)
+        return
+    assert _run(work, _must_not_call) == BackendResponse('durable child answer')
+
+
+def test_empty_answer_preserves_known_cost_without_becoming_a_validated_plan(work):  # noqa: F811
+    reply = BackendResponse('', TokenUsage(input_tokens=40, output_tokens=0))
+    assert _run(work, lambda: reply) == reply
+    assert _run(work, _must_not_call) == reply
+    queue, _, checkpoint = work
+    assert queue.get_compile_event(checkpoint.work_id).stage == 'snapshot_ready'
+
+
+def test_redrive_of_uncertain_call_stays_blocked(work):  # noqa: F811
+    from compile_controller import ProviderOutcomeUnknown
+
+    def interrupted():
+        raise SystemExit()
+
+    with pytest.raises(SystemExit):
+        _run(work, interrupted)
+    queue, lease, checkpoint = work
+    queue.fail(lease, queue_core.QueueFailure('worker_failed', permanent=True))
+    child_id = queue.redrive(lease.id)
+    child = queue.claim('redrive-worker')
+    assert child.id == child_id
+    with pytest.raises(ProviderOutcomeUnknown):
+        _run((queue, child, checkpoint), _must_not_call)
+    assert queue.get(child_id).state == 'blocked'
+
+
+def test_transport_starts_only_after_committed_reservation_and_without_sql_lock(work):  # noqa: F811
+    queue, _, checkpoint = work
+
+    def invoke():
+        current = queue.get_compile_event(checkpoint.work_id)
+        assert current.outcome == 'running'
+        assert current.details['model_call']['phase'] == 'dispatch'
+        with queue.connection() as database:
+            database.execute('BEGIN IMMEDIATE')
+            database.rollback()
+        return _answer()
+
+    assert _run(work, invoke) == _answer()
+
+
+def test_reservation_failure_never_invokes_transport(work, monkeypatch):  # noqa: F811
+    queue, _, checkpoint = work
+
+    def failed_write(*args):
+        raise OSError('reservation could not commit')
+
+    monkeypatch.setattr(queue, 'record_compile_event', failed_write)
+    with pytest.raises(OSError):
+        _run(work, _must_not_call)
+    assert queue.get_compile_event(checkpoint.work_id) == checkpoint
+
+
+def test_missing_checkpoint_is_a_conflict_not_a_new_dispatch(work):  # noqa: F811
+    queue, lease, checkpoint = work
+    with pytest.raises(progress.ProgressConflict, match='not recorded'):
+        _run((queue, lease, replace(checkpoint, work_id='f' * 64)), _must_not_call)
+
+
+@pytest.mark.parametrize('field', ['work_id', 'source_digest', 'sequence'])
+def test_answer_for_another_call_cannot_be_adopted_from_an_orphan(work, monkeypatch, field):  # noqa: F811
+    import json
+
+    from reliable_memory import canonical_json_bytes
+
+    queue, _, checkpoint = work
+    original = queue.record_compile_event
+
+    def stop_after_file(lease, event):
+        if event.details.get('model_call', {}).get('phase') == 'answer':
+            raise RuntimeError('stop before event')
+        return original(lease, event)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(queue, 'record_compile_event', stop_after_file)
+        with pytest.raises(RuntimeError):
+            _run(work, _answer)
+    dispatch = queue.get_compile_event(checkpoint.work_id)
+    identity = f'compile:{checkpoint.work_id}:{dispatch.sequence + 1}'
+    path = queue.results_dir / (queue_core.sha256_bytes(identity.encode()) + '.result')
+    envelope = json.loads(path.read_bytes())
+    envelope['dispatch'][field] = 'different'
+    path.write_bytes(canonical_json_bytes(envelope))
+    with pytest.raises(progress.ProgressCorrupt):
+        _run(work, _must_not_call)
+    assert queue.get_compile_event(checkpoint.work_id) == dispatch
+
+
+def test_explicit_repeat_preserves_unknown_dispatch_and_reuses_checkpoint(work):  # noqa: F811
+    from compile_controller import authorize_model_repeat
+
+    queue, lease, checkpoint = work
+    def interrupted():
+        raise SystemExit()
+
+    with pytest.raises(SystemExit):
+        _run(work, interrupted)
+    dispatch = queue.get_compile_event(checkpoint.work_id)
+    authorization = {'dispatch_digest': progress.event_digest(dispatch),
+                     'actor': 'owner', 'reason': 'Accept one additional call despite unknown cost'}
+    resumed = authorize_model_repeat(queue, lease, checkpoint, request_digest='e' * 64,
+                                     authorization=authorization)
+    assert resumed.sequence == dispatch.sequence + 1
+    assert resumed.details['artifact'] == checkpoint.details['artifact']
+    assert authorize_model_repeat(queue, lease, checkpoint, request_digest='e' * 64,
+                                  authorization=authorization) == resumed
+    assert _run((queue, lease, resumed), _answer) == _answer()
+    assert _run((queue, lease, resumed), _must_not_call) == _answer()
+
+
+def test_repeat_authorization_cannot_discard_a_saved_answer(work):  # noqa: F811
+    from compile_controller import authorize_model_repeat
+
+    _run(work, _answer)
+    queue, lease, checkpoint = work
+    with pytest.raises(progress.ProgressConflict):
+        authorize_model_repeat(queue, lease, checkpoint, request_digest='e' * 64,
+                               authorization={'dispatch_digest': 'f' * 64,
+                                              'actor': 'owner', 'reason': 'retry'})
+    assert _run(work, _must_not_call) == _answer()
+
+
+@pytest.fixture
+def uncertain(work):  # noqa: F811
+    def interrupted():
+        raise SystemExit()
+
+    with pytest.raises(SystemExit):
+        _run(work, interrupted)
+    queue, _, checkpoint = work
+    dispatch = queue.get_compile_event(checkpoint.work_id)
+    return {'dispatch_digest': progress.event_digest(dispatch), 'actor': 'owner', 'reason': 'retry'}
+
+
+def _authorize(work, authorization):  # noqa: F811
+    from compile_controller import authorize_model_repeat
+
+    return authorize_model_repeat(*work, request_digest='e' * 64, authorization=authorization)
+
+
+@pytest.mark.parametrize('field,value', [('dispatch_digest', 'f' * 64), ('actor', ''), ('reason', None)])
+def test_invalid_repeat_authorization_leaves_dispatch_unchanged(work, uncertain, field, value):  # noqa: F811
+    queue, _, checkpoint = work
+    before = queue.get_compile_event(checkpoint.work_id)
+    with pytest.raises(ValueError):
+        _authorize(work, {**uncertain, field: value})
+    assert queue.get_compile_event(checkpoint.work_id) == before
+
+
+def test_repeat_authorization_does_not_allow_changed_request(work, uncertain):  # noqa: F811
+    from compile_controller import run_model_call
+
+    resumed = _authorize(work, uncertain)
+    queue, lease, _ = work
+    with pytest.raises(progress.ProgressConflict, match='another request'):
+        run_model_call(queue, lease, resumed, request_digest='f' * 64, invoke=_must_not_call)
+    assert _run((queue, lease, resumed), _answer) == _answer()
+
+
+def test_authorization_recovers_an_orphan_answer_instead_of_repeating(work, monkeypatch):  # noqa: F811
+    queue, _, checkpoint = work
+    original = queue.record_compile_event
+
+    def interrupt_answer(lease, event):
+        if event.details.get('model_call', {}).get('phase') == 'answer':
+            raise SystemExit()
+        return original(lease, event)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(queue, 'record_compile_event', interrupt_answer)
+        with pytest.raises(SystemExit):
+            _run(work, _answer)
+    dispatch = queue.get_compile_event(checkpoint.work_id)
+    authorization = {'dispatch_digest': progress.event_digest(dispatch), 'actor': 'owner', 'reason': 'retry'}
+    with pytest.raises(progress.ProgressConflict, match='durable answer exists'):
+        _authorize(work, authorization)
+    assert _run(work, _must_not_call) == _answer()
+
+
+def test_stale_lease_cannot_authorize_repeat(work, uncertain):  # noqa: F811
+    queue, lease, _ = work
+    queue.fail(lease, queue_core.QueueFailure('unknown', blocked_capability='unknown'))
+    with pytest.raises(queue_core.LeaseFenceError):
+        _authorize(work, uncertain)
+
+
+def test_repeat_authorization_survives_redrive_without_erasing_history(work, uncertain):  # noqa: F811
+    queue, lease, checkpoint = work
+    queue.fail(lease, queue_core.QueueFailure('worker_failed', permanent=True))
+    queue.redrive(lease.id)
+    child = queue.claim('redrive-worker')
+    resumed = _authorize((queue, child, checkpoint), uncertain)
+    assert _run((queue, child, resumed), _answer) == _answer()
+    with queue._connect() as database:
+        rows = database.execute(
+            'SELECT task_id,sequence FROM compile_work_events WHERE work_id=? ORDER BY sequence',
+            (checkpoint.work_id,),
+        ).fetchall()
+    assert [row['sequence'] for row in rows] == list(range(6))
+    assert rows[2]['task_id'] == lease.id
+    assert rows[3]['task_id'] == child.id
+
+
+def test_repeat_authorization_commit_survives_lost_acknowledgement(work, uncertain, monkeypatch):  # noqa: F811
+    queue, lease, checkpoint = work
+    original = queue.record_compile_event
+
+    def commit_then_stop(held, event):
+        original(held, event)
+        raise SystemExit()
+
+    with monkeypatch.context() as patch:
+        patch.setattr(queue, 'record_compile_event', commit_then_stop)
+        with pytest.raises(SystemExit):
+            _authorize(work, uncertain)
+    reopened = queue_core.active_memory_queue(queue.vault, queue.state_root)
+    resumed = _authorize((reopened, lease, checkpoint), uncertain)
+    assert resumed.sequence == checkpoint.sequence + 2
+    assert _run((reopened, lease, resumed), _answer) == _answer()
+
+
+def _blocked_unknown(work):  # noqa: F811
+    from compile_controller import ProviderOutcomeUnknown
+
+    def timeout():
+        raise TimeoutError('possibly executed')
+
+    with pytest.raises(ProviderOutcomeUnknown):
+        _run(work, timeout)
+    queue, lease, checkpoint = work
+    return queue, lease, queue.get_compile_event(checkpoint.work_id)
+
+
+def test_operator_claim_keeps_unknown_call_and_excludes_worker(work):  # noqa: F811
+    queue, old, dispatch = _blocked_unknown(work)
+    before = queue.get(old.id)
+    lease = queue.claim_uncertain_compile(
+        'operator', task_id=old.id, work_id=dispatch.work_id,
+        dispatch_digest=progress.event_digest(dispatch),
+    )
+    assert lease.id == old.id
+    assert lease.prior_attempts == before.attempts
+    assert queue.claim('competing-worker', task_id=old.id) is None
+    assert queue.get_compile_event(dispatch.work_id) == dispatch
+
+
+def test_operator_claim_rejects_stale_dispatch_without_unblocking(work):  # noqa: F811
+    queue, old, dispatch = _blocked_unknown(work)
+    with pytest.raises(progress.ProgressConflict):
+        queue.claim_uncertain_compile(
+            'operator', task_id=old.id, work_id=dispatch.work_id,
+            dispatch_digest='0' * 64,
+        )
+    assert queue.get(old.id).state == 'blocked'
+
+
+def test_operator_claim_rolls_back_unblock_when_claim_fails(work, monkeypatch):  # noqa: F811
+    queue, old, dispatch = _blocked_unknown(work)
+    monkeypatch.setattr(queue, '_claim_in', lambda *args, **kwargs: None)
+    with pytest.raises(queue_core.QueueOperationError, match='compile_recovery_not_claimable'):
+        queue.claim_uncertain_compile(
+            'operator', task_id=old.id, work_id=dispatch.work_id,
+            dispatch_digest=progress.event_digest(dispatch),
+        )
+    assert queue.get(old.id).state == 'blocked'
+    assert queue.get(old.id).blocked_capability == 'provider_outcome_unknown'
+
+
+def test_separate_unblock_claim_allows_worker_to_win(work):  # noqa: F811
+    queue, old, _ = _blocked_unknown(work)
+    queue.unblock(old.id)
+    competitor = queue.claim('competing-worker', task_id=old.id)
+    assert competitor.id == old.id
+    assert queue.claim('operator', task_id=old.id) is None
+
+
+def test_operator_claim_does_not_expose_ready_state(work, monkeypatch):  # noqa: F811
+    queue, old, dispatch = _blocked_unknown(work)
+    claim = queue._claim_in
+
+    def inspect_before_claim(*args, **kwargs):
+        # A separate connection sees the committed blocked state, never ready.
+        assert queue.get(old.id).state == 'blocked'
+        return claim(*args, **kwargs)
+
+    monkeypatch.setattr(queue, '_claim_in', inspect_before_claim)
+    lease = queue.claim_uncertain_compile(
+        'operator', task_id=old.id, work_id=dispatch.work_id,
+        dispatch_digest=progress.event_digest(dispatch),
+    )
+    assert queue.get(old.id).state == 'leased'
+    assert lease.id == old.id
+
+
+def test_operator_claim_cannot_take_cancelled_work(work):  # noqa: F811
+    queue, old, dispatch = _blocked_unknown(work)
+    queue.cancel(old.id)
+    with pytest.raises(queue_core.QueueOperationError, match='compile_recovery_requires_unknown_outcome'):
+        queue.claim_uncertain_compile(
+            'operator', task_id=old.id, work_id=dispatch.work_id,
+            dispatch_digest=progress.event_digest(dispatch),
+        )
+    assert queue.get(old.id).state == 'cancelled'
+
+
+def test_operator_claim_cannot_take_another_task_family(work):  # noqa: F811
+    queue, old, dispatch = _blocked_unknown(work)
+    other_id = queue.enqueue('compile', 1, {'daily': 'other'})
+    other = queue.claim('worker', task_id=other_id)
+    queue.fail(other, queue_core.QueueFailure(
+        'provider_outcome_unknown', blocked_capability='provider_outcome_unknown'))
+    with pytest.raises(progress.ProgressConflict, match='another task family'):
+        queue.claim_uncertain_compile(
+            'operator', task_id=other_id, work_id=dispatch.work_id,
+            dispatch_digest=progress.event_digest(dispatch),
+        )
+    assert queue.get(other_id).state == 'blocked'
+    assert queue.get(old.id).state == 'blocked'
+
+
+def _inspect_cli(queue, task_id, monkeypatch, capsys):
+    import json
+    import sys
+
+    monkeypatch.setattr(queue_core, 'active_memory_queue', lambda *args: queue)
+    monkeypatch.setattr(sys, 'argv', ['memory_queue.py', 'compile-progress', task_id])
+    code = memory_queue.cli()
+    return code, json.loads(capsys.readouterr().out)
+
+
+def test_operator_inspection_shows_dispatch_without_mutation(work, monkeypatch, capsys):  # noqa: F811
+    queue, old, dispatch = _blocked_unknown(work)
+    before = queue.db_path.read_bytes()
+    code, result = _inspect_cli(queue, old.id, monkeypatch, capsys)
+    assert code == 0
+    assert result['state'] == 'blocked'
+    assert result['answer_artifacts_checked'] is False
+    assert result['history_audited'] is False
+    assert result['works'][0]['event_digest'] == progress.event_digest(dispatch)
+    assert result['works'][0]['model_call']['request_digest'] == 'e' * 64
+    assert queue.db_path.read_bytes() == before
+    assert queue.get_compile_event(dispatch.work_id) == dispatch
+
+
+def test_operator_inspection_never_prints_source_or_answer(work, monkeypatch, capsys):  # noqa: F811
+    import json
+
+    _run(work, _answer)
+    queue, lease, _ = work
+    code, result = _inspect_cli(queue, lease.id, monkeypatch, capsys)
+    assert code == 0
+    assert result['works'][0]['model_call']['phase'] == 'answer'
+    output = json.dumps(result)
+    assert 'verified input snapshot' not in output
+    assert 'queue-results' not in output
+    assert 'artifact' not in result['works'][0]
+    assert 'text' not in result['works'][0]['model_call']
+
+
+def test_operator_inspection_includes_parent_work_after_redrive(work, monkeypatch, capsys):  # noqa: F811
+    queue, lease, checkpoint = work
+    _run(work, _answer)
+    queue.fail(lease, queue_core.QueueFailure('worker_failed', permanent=True))
+    child = queue.redrive(lease.id)
+    code, result = _inspect_cli(queue, child, monkeypatch, capsys)
+    assert code == 0
+    assert result['task_id'] == child
+    assert [item['work_id'] for item in result['works']] == [checkpoint.work_id]
+    assert result['works'][0]['task_id'] == lease.id
+
+
+def test_operator_inspection_refuses_corrupt_checkpoint(work, monkeypatch, capsys):  # noqa: F811
+    queue, old, dispatch = _blocked_unknown(work)
+    with queue.connection() as database:
+        database.execute('DROP TRIGGER compile_work_events_no_update')
+        database.execute('UPDATE compile_work_events SET event_digest=? WHERE sequence=?',
+                         ('0' * 64, dispatch.sequence))
+        database.execute(progress.SCHEMA_STATEMENTS[1])
+    code, result = _inspect_cli(queue, old.id, monkeypatch, capsys)
+    assert code == 2
+    assert result == {'codes': ['compile_progress_corrupt']}
+
+
+def test_operator_inspection_refuses_corrupt_payload_without_quarantining(work, monkeypatch, capsys):  # noqa: F811
+    queue, lease, _ = work
+    with queue.connection() as database:
+        database.execute('UPDATE tasks SET payload_blob=? WHERE id=?',
+                         (b'{"private":"never print this"}', lease.id))
+    before = queue.db_path.read_bytes()
+    code, result = _inspect_cli(queue, lease.id, monkeypatch, capsys)
+    assert code == 2
+    assert result == {'codes': ['redrive_lineage_payload_mismatch']}
+    assert queue.db_path.read_bytes() == before
+
+
+@pytest.mark.parametrize('field,value', [('request_digest', 'private prompt'), ('phase', 'private text')])
+def test_operator_inspection_does_not_export_malformed_call_fields(work, monkeypatch, capsys, field, value):  # noqa: F811
+    import json
+
+    queue, old, dispatch = _blocked_unknown(work)
+    bad = replace(dispatch, details={'model_call': {**dispatch.details['model_call'], field: value}})
+    with queue.connection() as database:
+        database.execute('DROP TRIGGER compile_work_events_no_update')
+        database.execute(
+            'UPDATE compile_work_events SET details_json=?,event_digest=? WHERE work_id=? AND sequence=?',
+            (json.dumps(bad.details), progress.event_digest(bad), bad.work_id, bad.sequence))
+        database.execute(progress.SCHEMA_STATEMENTS[1])
+    code, result = _inspect_cli(queue, old.id, monkeypatch, capsys)
+    assert code == 2
+    assert result == {'codes': ['compile_progress_corrupt']}
+
+
+def test_operator_inspection_does_not_recover_orphan_answer(work, monkeypatch, capsys):  # noqa: F811
+    queue, lease, checkpoint = work
+    original = queue.record_compile_event
+
+    def interrupt_answer(owned, event):
+        if event.details.get('model_call', {}).get('phase') == 'answer':
+            raise SystemExit()
+        return original(owned, event)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(queue, 'record_compile_event', interrupt_answer)
+        with pytest.raises(SystemExit):
+            _run(work, _answer)
+    dispatch = queue.get_compile_event(checkpoint.work_id)
+    code, result = _inspect_cli(queue, lease.id, monkeypatch, capsys)
+    assert code == 0
+    assert result['answer_artifacts_checked'] is False
+    assert result['works'][0]['model_call']['phase'] == 'dispatch'
+    assert queue.get_compile_event(checkpoint.work_id) == dispatch
+    assert _run(work, _must_not_call) == _answer()
+
+
+def test_operator_inspection_real_cli_uses_adopted_journal(work, upgraded):  # noqa: F811
+    import json
+    import os
+    import subprocess
+    import sys
+
+    queue, lease, dispatch = _blocked_unknown(work)
+    root, state, _ = upgraded
+    environment = {**os.environ, 'LLM_WIKI_ROOT': str(root), 'LLM_WIKI_STATE_ROOT': str(state)}
+    before = queue.db_path.read_bytes()
+    result = subprocess.run(
+        [sys.executable, str(SCRIPTS / 'memory_queue.py'), 'compile-progress', lease.id],
+        env=environment, capture_output=True, text=True, check=True,
+    )
+    report = json.loads(result.stdout)
+    assert report['works'][0]['event_digest'] == progress.event_digest(dispatch)
+    assert queue.db_path.read_bytes() == before
+
+
+def test_recorded_repeat_decision_is_idempotent_after_redrive(work, uncertain):  # noqa: F811
+    queue, lease, checkpoint = work
+    resumed = _authorize(work, uncertain)
+    queue.fail(lease, queue_core.QueueFailure('operator_stopped', permanent=True))
+    child_id = queue.redrive(lease.id)
+    child = queue.claim('recovery', task_id=child_id)
+    assert _authorize((queue, child, checkpoint), uncertain) == resumed
+    assert queue.get_compile_event(checkpoint.work_id) == resumed
+    assert resumed.task_id == lease.id
+
+
+def _resolve(work, **options):  # noqa: F811
+    from compile_controller import resolve_model_call
+
+    queue, lease, checkpoint = work
+    dispatch = queue.get_compile_event(checkpoint.work_id, sequence=checkpoint.sequence + 1)
+    return resolve_model_call(queue, lease, dispatch, **options)
+
+
+def test_resolution_without_consent_preserves_unknown_call(work, uncertain):  # noqa: F811
+    queue, lease, _ = work
+    before = queue.db_path.read_bytes()
+    outcome, dispatch = _resolve(work)
+    assert outcome == 'outcome_unknown'
+    assert progress.event_digest(dispatch) == uncertain['dispatch_digest']
+    assert queue.db_path.read_bytes() == before
+    assert queue.get(lease.id).state == 'leased'
+
+
+def test_resolution_reuses_saved_answer_without_exposing_response(work):  # noqa: F811
+    queue, _, checkpoint = work
+    _run(work, _answer)
+    outcome, event = _resolve(work)
+    assert outcome == 'answer_recovered'
+    assert event == queue.get_compile_event(checkpoint.work_id)
+    assert event.details['model_call']['phase'] == 'answer'
+    assert _resolve(work) == (outcome, event)
+
+
+def test_resolution_recovers_orphan_answer_even_with_repeat_consent(work, monkeypatch):  # noqa: F811
+    queue, _, checkpoint = work
+    original = queue.record_compile_event
+
+    def interrupt_answer(lease, event):
+        if event.details.get('model_call', {}).get('phase') == 'answer':
+            raise SystemExit()
+        return original(lease, event)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(queue, 'record_compile_event', interrupt_answer)
+        with pytest.raises(SystemExit):
+            _run(work, _answer)
+    dispatch = queue.get_compile_event(checkpoint.work_id)
+    authorization = {'dispatch_digest': progress.event_digest(dispatch), 'actor': 'owner', 'reason': 'retry'}
+    outcome, event = _resolve(work, authorization=authorization)
+    assert outcome == 'answer_recovered'
+    assert 'repeat_authorization' not in event.details
+    assert _run(work, _must_not_call) == _answer()
+
+
+def test_resolution_reuses_committed_consent_after_redrive_without_new_consent(work, uncertain):  # noqa: F811
+    queue, lease, checkpoint = work
+    outcome, event = _resolve(work, authorization=uncertain)
+    assert outcome == 'repeat_authorized'
+    queue.fail(lease, queue_core.QueueFailure('operator_stopped', permanent=True))
+    child_id = queue.redrive(lease.id)
+    child = queue.claim('recovery', task_id=child_id)
+    assert _resolve((queue, child, checkpoint)) == (outcome, event)
+    assert event.task_id == lease.id
+    assert _run((queue, child, event), _answer) == _answer()
+
+
+def test_resolution_rejects_changed_consent_after_commit(work, uncertain):  # noqa: F811
+    queue, _, checkpoint = work
+    _, event = _resolve(work, authorization=uncertain)
+    with pytest.raises(progress.ProgressConflict):
+        _resolve(work, authorization={**uncertain, 'reason': 'different decision'})
+    assert queue.get_compile_event(checkpoint.work_id) == event
+
+
+def test_resolution_rejects_forged_dispatch(work, uncertain):  # noqa: F811
+    from compile_controller import resolve_model_call
+
+    queue, lease, checkpoint = work
+    dispatch = queue.get_compile_event(checkpoint.work_id)
+    with pytest.raises(progress.ProgressConflict, match='retained dispatch'):
+        resolve_model_call(queue, lease, replace(dispatch, source_digest='f' * 64))
+    assert queue.get_compile_event(checkpoint.work_id) == dispatch
+
+
+def test_resolution_requires_current_lease_even_for_saved_answer(work):  # noqa: F811
+    _run(work, _answer)
+    queue, lease, checkpoint = work
+    with pytest.raises(queue_core.LeaseFenceError):
+        _resolve((queue, replace(lease, token='stale'), checkpoint))
+
+
+def test_resolution_cannot_override_corrupt_answer_with_consent(work):  # noqa: F811
+    queue, _, checkpoint = work
+    _run(work, _answer)
+    answer = queue.get_compile_event(checkpoint.work_id)
+    dispatch = queue.get_compile_event(checkpoint.work_id, sequence=checkpoint.sequence + 1)
+    path = queue.state_root / answer.details['artifact']['reference']
+    path.write_bytes(b'corrupt saved answer')
+    authorization = {'dispatch_digest': progress.event_digest(dispatch), 'actor': 'owner', 'reason': 'retry'}
+    with pytest.raises(progress.ProgressCorrupt):
+        _resolve(work, authorization=authorization)
+    assert queue.get_compile_event(checkpoint.work_id) == answer
+
+
+def test_resolution_consent_survives_lost_ack_and_redrive(work, uncertain, monkeypatch):  # noqa: F811
+    queue, lease, checkpoint = work
+    original = queue.record_compile_event
+
+    def commit_then_stop(owned, event):
+        original(owned, event)
+        raise SystemExit()
+
+    with monkeypatch.context() as patch:
+        patch.setattr(queue, 'record_compile_event', commit_then_stop)
+        with pytest.raises(SystemExit):
+            _resolve(work, authorization=uncertain)
+    recorded = queue.get_compile_event(checkpoint.work_id)
+    queue.fail(lease, queue_core.QueueFailure('operator_stopped', permanent=True))
+    child_id = queue.redrive(lease.id)
+    child = queue.claim('recovery', task_id=child_id)
+    assert _resolve((queue, child, checkpoint)) == ('repeat_authorized', recorded)
+
+
+def test_resolution_uses_atomic_unknown_dispatch_claim(work):  # noqa: F811
+    from compile_controller import resolve_model_call
+
+    queue, old, dispatch = _blocked_unknown(work)
+    lease = queue.claim_uncertain_compile(
+        'operator', task_id=old.id, work_id=dispatch.work_id,
+        dispatch_digest=progress.event_digest(dispatch),
+    )
+    assert resolve_model_call(queue, lease, dispatch) == ('outcome_unknown', dispatch)
+    assert queue.get(old.id).state == 'leased'
+
+
+def test_resolution_cannot_read_another_task_family(work, uncertain):  # noqa: F811
+    from compile_controller import resolve_model_call
+
+    queue, _, checkpoint = work
+    other_id = queue.enqueue('compile', 1, {'daily': 'unrelated recovery'})
+    other = queue.claim('other-worker', task_id=other_id)
+    dispatch = queue.get_compile_event(checkpoint.work_id)
+    with pytest.raises(progress.ProgressConflict, match='another task family'):
+        resolve_model_call(queue, other, dispatch, authorization=uncertain)
+    assert queue.get_compile_event(checkpoint.work_id) == dispatch
+
+
+@pytest.mark.parametrize('operation', ['repeat', 'resolve'])
+def test_recorded_consent_cannot_be_rebound_to_unrelated_delivery(work, uncertain, operation):  # noqa: F811
+    queue, _, _ = work
+    recorded = _authorize(work, uncertain)
+    other_id = queue.enqueue('compile', 1, {'daily': 'unrelated decision'})
+    forged = replace(recorded, task_id=other_id)
+    with queue.connection() as database:
+        database.execute('DROP TRIGGER compile_work_events_no_update')
+        database.execute(
+            'UPDATE compile_work_events SET task_id=?,event_digest=? WHERE work_id=? AND sequence=?',
+            (other_id, progress.event_digest(forged), recorded.work_id, recorded.sequence))
+        database.execute(progress.SCHEMA_STATEMENTS[1])
+    actions = {'repeat': lambda: _authorize(work, uncertain), 'resolve': lambda: _resolve(work)}
+    with pytest.raises(progress.ProgressConflict, match='another task family'):
+        actions[operation]()
+
+
+def _claim_recovery(work):  # noqa: F811
+    queue, old, dispatch = _blocked_unknown(work)
+    lease = queue.claim_uncertain_compile(
+        'operator', task_id=old.id, work_id=dispatch.work_id,
+        dispatch_digest=progress.event_digest(dispatch),
+    )
+    return queue, lease, dispatch
+
+
+def test_expired_recovery_keeps_block_and_execution_budget(work, monkeypatch):  # noqa: F811
+    from datetime import timedelta
+
+    queue, lease, dispatch = _claim_recovery(work)
+    monkeypatch.setattr(queue_store, 'utc_now', lambda: lease.expires_at + timedelta(seconds=1))
+    assert queue.recover_expired_leases() == 1
+    task = queue.get(lease.id)
+    assert task.state == 'blocked'
+    assert task.blocked_capability == 'provider_outcome_unknown'
+    assert task.attempts == lease.prior_attempts
+    assert task.attempt_history[-1].outcome == 'lease_expired'
+    assert queue.get_compile_event(dispatch.work_id) == dispatch
+
+
+def test_recovery_lease_cannot_execute_model(work):  # noqa: F811
+    from compile_controller import resolve_model_call
+
+    queue, lease, dispatch = _claim_recovery(work)
+    consent = {'dispatch_digest': progress.event_digest(dispatch), 'actor': 'owner', 'reason': 'retry'}
+    _, resumed = resolve_model_call(queue, lease, dispatch, authorization=consent)
+    calls = []
+    with pytest.raises(queue_core.QueueOperationError, match='compile_recovery_is_not_execution'):
+        _run((queue, lease, resumed), lambda: calls.append(True) or _answer())
+    assert calls == []
+    assert queue.get_compile_event(dispatch.work_id) == resumed
+
+
+def _recover_cli(queue, task_id, dispatch, monkeypatch, capsys, extra=()):
+    import json
+    import sys
+
+    monkeypatch.setattr(queue_core, 'active_memory_queue', lambda *args: queue)
+    monkeypatch.setattr(sys, 'argv', ['memory_queue.py', 'compile-recover', task_id,
+        '--work-id', dispatch.work_id, '--dispatch-digest', progress.event_digest(dispatch), *extra])
+    code = memory_queue.cli()
+    return code, json.loads(capsys.readouterr().out)
+
+
+def test_recovery_cli_without_consent_keeps_unknown_blocked(work, monkeypatch, capsys):  # noqa: F811
+    queue, old, dispatch = _blocked_unknown(work)
+    before = queue.get(old.id).attempts
+    code, result = _recover_cli(queue, old.id, dispatch, monkeypatch, capsys)
+    assert code == 0
+    assert result['outcome'] == 'outcome_unknown'
+    assert result['task_state'] == 'blocked'
+    assert queue.get(old.id).attempts == before
+    assert queue.get_compile_event(dispatch.work_id) == dispatch
+
+
+def test_recovery_cli_consent_releases_work_without_calling_provider(work, monkeypatch, capsys):  # noqa: F811
+    from llm_wiki import compile_call_runtime
+
+    queue, old, dispatch = _blocked_unknown(work)
+    monkeypatch.setattr(compile_call_runtime, 'invoke_and_save', lambda *args: _must_not_call())
+    code, result = _recover_cli(queue, old.id, dispatch, monkeypatch, capsys,
+                               ('--accept-unknown-cost', '--reason', 'explicit local decision'))
+    assert code == 0
+    assert result['outcome'] == 'repeat_authorized'
+    assert result['task_state'] == 'ready'
+    task = queue.get(old.id)
+    assert task.attempts == 0
+    assert task.attempt_history[-1].error_code == 'compile_repeat_authorized'
+    resumed = queue.get_compile_event(dispatch.work_id)
+    assert resumed.details['repeat_authorization']['reason'] == 'explicit local decision'
+    code, replay = _recover_cli(queue, old.id, dispatch, monkeypatch, capsys)
+    assert code == 0
+    assert replay['outcome'] == 'not_blocked'
+    assert queue.get(old.id).attempt_history == task.attempt_history
+
+
+def test_recovery_cli_requires_reason_before_mutation(work, monkeypatch, capsys):  # noqa: F811
+    queue, old, dispatch = _blocked_unknown(work)
+    before = queue.db_path.read_bytes()
+    code, result = _recover_cli(queue, old.id, dispatch, monkeypatch, capsys, ('--accept-unknown-cost',))
+    assert code == 2
+    assert result == {'codes': ['compile_repeat_reason_required']}
+    assert queue.db_path.read_bytes() == before
+
+
+def test_recovery_cli_finishes_recorded_consent_after_expiry(work, monkeypatch, capsys):  # noqa: F811
+    from datetime import timedelta
+
+    from compile_controller import resolve_model_call
+
+    queue, lease, dispatch = _claim_recovery(work)
+    consent = {'dispatch_digest': progress.event_digest(dispatch), 'actor': 'owner', 'reason': 'retry'}
+    _, recorded = resolve_model_call(queue, lease, dispatch, authorization=consent)
+    monkeypatch.setattr(queue_store, 'utc_now', lambda: lease.expires_at + timedelta(seconds=1))
+    code, result = _recover_cli(queue, lease.id, dispatch, monkeypatch, capsys)
+    assert code == 0
+    assert result['outcome'] == 'repeat_authorized'
+    assert result['task_state'] == 'ready'
+    assert queue.get(lease.id).attempts == lease.prior_attempts
+    assert queue.get_compile_event(dispatch.work_id) == recorded
+
+
+def test_recovery_cli_lost_settlement_ack_is_safe_to_repeat(work, monkeypatch, capsys):  # noqa: F811
+    queue, old, dispatch = _blocked_unknown(work)
+    settle = queue.settle_compile_resolution
+
+    def commit_then_stop(*args, **kwargs):
+        settle(*args, **kwargs)
+        raise SystemExit()
+
+    with monkeypatch.context() as patch:
+        patch.setattr(queue, 'settle_compile_resolution', commit_then_stop)
+        with pytest.raises(SystemExit):
+            _recover_cli(queue, old.id, dispatch, patch, capsys,
+                         ('--accept-unknown-cost', '--reason', 'retry'))
+    task = queue.get(old.id)
+    assert task.state == 'ready'
+    code, result = _recover_cli(queue, old.id, dispatch, monkeypatch, capsys)
+    assert code == 0
+    assert result['outcome'] == 'not_blocked'
+    assert queue.get(old.id).attempt_history == task.attempt_history
+
+
+def test_recovery_cli_recovers_orphan_answer_without_consent(work, monkeypatch, capsys):  # noqa: F811
+    queue, lease, checkpoint = work
+    original = queue.record_compile_event
+
+    def interrupt_answer(owned, event):
+        if event.details.get('model_call', {}).get('phase') == 'answer':
+            raise SystemExit()
+        return original(owned, event)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(queue, 'record_compile_event', interrupt_answer)
+        with pytest.raises(SystemExit):
+            _run(work, _answer)
+    dispatch = queue.get_compile_event(checkpoint.work_id)
+    queue.fail(lease, queue_core.QueueFailure('provider_outcome_unknown',
+                                               blocked_capability='provider_outcome_unknown'))
+    code, result = _recover_cli(queue, lease.id, dispatch, monkeypatch, capsys)
+    assert code == 0
+    assert result['outcome'] == 'answer_recovered'
+    assert result['task_state'] == 'ready'
+    next_lease = queue.claim('worker', task_id=lease.id)
+    assert _run((queue, next_lease, checkpoint), _must_not_call) == _answer()
+
+
+_RECOVERY_CRASH_CHILD = '''
+import os, sys
+sys.path.insert(0, sys.argv.pop(1))
+import memory_queue
+import queue_core
+queue_core.QueueV3CandidateReader.settle_compile_resolution = lambda *a, **kw: os._exit(41)
+sys.argv[0] = 'memory_queue.py'
+raise SystemExit(memory_queue.cli())
+'''
+
+
+def test_recovery_cli_survives_real_process_death_after_consent(work, upgraded, monkeypatch, capsys):  # noqa: F811
+    import os
+    import subprocess
+    import sys
+    from datetime import timedelta
+
+    queue, old, dispatch = _blocked_unknown(work)
+    root, state, _ = upgraded
+    environment = {**os.environ, 'LLM_WIKI_ROOT': str(root), 'LLM_WIKI_STATE_ROOT': str(state)}
+    child = subprocess.run([sys.executable, '-c', _RECOVERY_CRASH_CHILD,
+        str(SCRIPTS), 'compile-recover', old.id,
+        '--work-id', dispatch.work_id, '--dispatch-digest', progress.event_digest(dispatch),
+        '--accept-unknown-cost', '--reason', 'explicit crash test decision'],
+        env=environment, capture_output=True, text=True, check=False)
+    assert child.returncode == 41, child.stderr
+    held = queue.get(old.id)
+    assert held.state == 'leased'
+    assert held.blocked_capability == 'provider_outcome_unknown'
+    recorded = queue.get_compile_event(dispatch.work_id)
+    future = held.lease_expires_at + timedelta(seconds=1)
+    registry = queue.ownership_registry()
+    registry._clock = lambda: future
+    monkeypatch.setattr(queue, 'ownership_registry', lambda: registry)
+    monkeypatch.setattr(queue_store, 'utc_now', lambda: future)
+    code, result = _recover_cli(queue, old.id, dispatch, monkeypatch, capsys)
+    assert code == 0, result
+    assert result['outcome'] == 'repeat_authorized'
+    assert queue.get(old.id).attempts == 0
+    assert queue.get_compile_event(dispatch.work_id) == recorded
+    worker = queue.claim('worker', task_id=old.id)
+    assert _run((queue, worker, recorded), _answer) == _answer()
+    assert _run((queue, worker, recorded), _must_not_call) == _answer()
+
+
+def test_recovery_settlement_refuses_unverified_result(work):  # noqa: F811
+    queue, lease, dispatch = _claim_recovery(work)
+    with pytest.raises(progress.ProgressConflict):
+        queue.settle_compile_resolution(lease, dispatch, ('answer_recovered', dispatch))
+    assert queue.get(lease.id).state == 'leased'
+    assert queue.get_compile_event(dispatch.work_id) == dispatch
+
+
+def test_recovery_settlement_checks_owner_before_releasing(work):  # noqa: F811
+    from compile_controller import resolve_model_call
+
+    queue, lease, dispatch = _claim_recovery(work)
+    resolution = resolve_model_call(queue, lease, dispatch)
+
+    def lost_owner():
+        raise queue_core.QueueOperationError('compile_recovery_owner_lost')
+
+    with pytest.raises(queue_core.QueueOperationError, match='compile_recovery_owner_lost'):
+        queue.settle_compile_resolution(lease, dispatch, resolution, check_owner=lost_owner)
+    assert queue.get(lease.id).state == 'leased'
+
+
+def test_recovery_snapshot_reports_original_dispatch_after_consent(work):  # noqa: F811
+    from compile_controller import resolve_model_call
+
+    queue, lease, dispatch = _claim_recovery(work)
+    consent = {'dispatch_digest': progress.event_digest(dispatch), 'actor': 'owner', 'reason': 'retry'}
+    resolve_model_call(queue, lease, dispatch, authorization=consent)
+    report = queue.inspect_compile_progress(lease.id)
+    assert report['works'][0]['recovery_dispatch']['event_digest'] == consent['dispatch_digest']
+    assert report['works'][0]['recovery_dispatch']['sequence'] == dispatch.sequence
+
+
+def test_recovery_cli_does_not_take_over_live_operator(work, monkeypatch, capsys):  # noqa: F811
+    queue, old, dispatch = _blocked_unknown(work)
+    before = queue.get(old.id)
+    with queue.queue_owner(role='queue-operator', scope=f'compile-recovery:{old.id}'):
+        code, result = _recover_cli(queue, old.id, dispatch, monkeypatch, capsys)
+    assert code == 2
+    assert result['codes'] == ['compile_recovery_owner_unavailable']
+    assert queue.get(old.id).attempt_history == before.attempt_history
+    assert queue.get(old.id).state == 'blocked'
+
+
+def test_expired_ordinary_compile_lease_still_spends_attempt(work, monkeypatch):  # noqa: F811
+    from datetime import timedelta
+
+    queue, lease, _ = work
+    monkeypatch.setattr(queue_store, 'utc_now', lambda: lease.expires_at + timedelta(seconds=1))
+    assert queue.recover_expired_leases() == 1
+    task = queue.get(lease.id)
+    assert task.state == 'ready'
+    assert task.attempts == lease.attempt
+    assert task.attempt_history[-1].outcome == 'lease_expired'
+
+
+def test_operator_cannot_settle_an_execution_lease_as_recovery(work):  # noqa: F811
+    from compile_controller import resolve_model_call
+
+    queue, lease, checkpoint = work
+    _run(work, _answer)
+    dispatch = queue.get_compile_event(checkpoint.work_id, sequence=checkpoint.sequence + 1)
+    resolution = resolve_model_call(queue, lease, dispatch)
+    with pytest.raises(queue_core.QueueOperationError, match='compile_recovery_lease_required'):
+        queue.settle_compile_resolution(lease, dispatch, resolution)
+    assert queue.get(lease.id).attempts == lease.attempt
+
+
+def test_recovery_cli_handles_ready_redrive_without_running_worker_first(work, uncertain, monkeypatch, capsys):  # noqa: F811
+    queue, lease, checkpoint = work
+    dispatch = queue.get_compile_event(checkpoint.work_id)
+    queue.fail(lease, queue_core.QueueFailure('worker_failed', permanent=True))
+    child = queue.redrive(lease.id)
+    code, result = _recover_cli(queue, child, dispatch, monkeypatch, capsys,
+                               ('--accept-unknown-cost', '--reason', 'recover retained request'))
+    assert code == 0, result
+    assert result['outcome'] == 'repeat_authorized'
+    assert queue.get(child).state == 'ready'
+    assert queue.get(child).attempts == 0
+    assert queue.get(lease.id).state == 'dead'
+    assert queue.get_compile_event(checkpoint.work_id).task_id == child
+
+
+def test_ready_unknown_recovery_without_consent_returns_to_blocked(work, monkeypatch, capsys):  # noqa: F811
+    queue, old, dispatch = _blocked_unknown(work)
+    queue.unblock(old.id)
+    code, result = _recover_cli(queue, old.id, dispatch, monkeypatch, capsys)
+    assert code == 0
+    assert result['outcome'] == 'outcome_unknown'
+    assert queue.get(old.id).state == 'blocked'
+    assert queue.get(old.id).attempts == 0
+
+
+def test_recovery_commit_survives_heartbeat_observing_released_lease(work, monkeypatch, capsys):  # noqa: F811
+    queue, old, dispatch = _blocked_unknown(work)
+    stop = queue_core.LeaseHeartbeat.stop
+
+    def renew_after_release(heartbeat):
+        try:
+            heartbeat._renew()
+        except queue_core.LeaseFenceError as error:
+            heartbeat.error = error
+        stop(heartbeat)
+
+    monkeypatch.setattr(queue_core.LeaseHeartbeat, 'stop', renew_after_release)
+    code, result = _recover_cli(queue, old.id, dispatch, monkeypatch, capsys,
+                               ('--accept-unknown-cost', '--reason', 'retry'))
+    assert code == 0, result
+    assert result['task_state'] == 'ready'
+    assert queue.get(old.id).attempts == 0
+
+
+def test_recovery_reports_unexpected_heartbeat_error_after_commit(work, monkeypatch, capsys):  # noqa: F811
+    queue, old, dispatch = _blocked_unknown(work)
+    stop = queue_core.LeaseHeartbeat.stop
+
+    def unexpected_failure(heartbeat):
+        stop(heartbeat)
+        heartbeat.error = queue_core.QueueOperationError('unexpected_heartbeat_failure')
+
+    with monkeypatch.context() as patch:
+        patch.setattr(queue_core.LeaseHeartbeat, 'stop', unexpected_failure)
+        code, result = _recover_cli(queue, old.id, dispatch, patch, capsys,
+                                   ('--accept-unknown-cost', '--reason', 'retry'))
+    assert code == 2
+    assert result == {'codes': ['unexpected_heartbeat_failure']}
+    task = queue.get(old.id)
+    assert task.state == 'ready'
+    code, result = _recover_cli(queue, old.id, dispatch, monkeypatch, capsys)
+    assert code == 0
+    assert result['outcome'] == 'not_blocked'
+    assert queue.get(old.id).attempt_history == task.attempt_history
+
+
+@pytest.mark.parametrize('stage', ['leased', 'ready'])
+def test_recovery_states_pass_backup_database_certification(work, monkeypatch, capsys, stage):  # noqa: F811
+    import private_vault_backup
+
+    queue, lease, dispatch = _claim_recovery(work)
+    if stage == 'ready':
+        queue.abort_compile_recovery(lease)
+        code, result = _recover_cli(queue, lease.id, dispatch, monkeypatch, capsys,
+                                   ('--accept-unknown-cost', '--reason', 'certify retained decision'))
+        assert code == 0, result
+    _, report = private_vault_backup.validated_databases(queue.state_root)
+    assert report['compile_progress']['events'] >= 3
+    assert queue.get(lease.id).state == stage
+
+
+@pytest.mark.parametrize('command', ['compile-progress', 'compile-recover'])
+def test_operator_cli_names_missing_journal_upgrade(tmp_path, monkeypatch, capsys, command):
+    from tests.legacy_adopted_vault import adopt_legacy as adopt
+
+    root, state = adopt(tmp_path)
+    queue = queue_core.active_memory_queue(root, state)
+    task_id = queue.enqueue('compile', 1, {'daily': 'before journal migration'})
+    dispatch = progress.CompileEvent('c' * 64, task_id, 2, 'd' * 64, 'snapshot_ready', 'running', {})
+    before = queue.db_path.read_bytes()
+    actions = {
+        'compile-progress': lambda: _inspect_cli(queue, task_id, monkeypatch, capsys),
+        'compile-recover': lambda: _recover_cli(queue, task_id, dispatch, monkeypatch, capsys),
+    }
+    code, result = actions[command]()
+    assert code == 2
+    assert result == {'codes': ['compile_progress_upgrade_required']}
+    assert queue.db_path.read_bytes() == before
+
+
+def test_call_lifecycle_public_aliases_keep_one_implementation():
+    import compile_controller
+    from llm_wiki import compile_call_runtime
+
+    assert compile_controller.ProviderOutcomeUnknown is compile_call_runtime.ProviderOutcomeUnknown
+    assert compile_controller.CompileDelivery is compile_call_runtime.CompileDelivery
+    assert compile_controller.run_model_call is compile_call_runtime.run_model_call
+    assert compile_controller.authorize_model_repeat is compile_call_runtime.authorize_model_repeat
+    assert compile_controller.resolve_model_call is compile_call_runtime.resolve_model_call
+    assert compile_controller.require_checkpoint is compile_call_runtime.require_checkpoint
+    assert compile_controller.dispatch_event is compile_call_runtime.dispatch_event
+    assert compile_call_runtime.ProviderOutcomeUnknown.__module__ == 'compile_controller'
+    assert compile_call_runtime.CompileDelivery.__module__ == 'compile_controller'

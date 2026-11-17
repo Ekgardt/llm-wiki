@@ -1,0 +1,351 @@
+{
+  "encoding": "o200k_base",
+  "max_tokens": 100000,
+  "serialization": "exact-duplicates/v1",
+  "files": [
+    "AGENTS.md",
+    "CLAUDE.md",
+    "docs/AGENTS.md",
+    "docs/STRUCTURE.md",
+    "docs/modules/breadcrumb-decision-tests.md",
+    "docs/modules/breadcrumb-documents.md",
+    "docs/modules/compile-claims-producer-helpers.md",
+    "docs/modules/compile-paths.md",
+    "docs/modules/compile-pipeline-apply-tests.md",
+    "docs/modules/compile-pipeline-operations-tests-context.json",
+    "docs/modules/compile-pipeline-operations-tests.md",
+    "docs/modules/compile-pipeline-sources-tests-native-compile-projection-has-complete-citation-address-helpers.md",
+    "docs/modules/compile-receipts-tests.md",
+    "docs/modules/context-bundle.md",
+    "docs/modules/context-records.md",
+    "docs/modules/context-tooling.md",
+    "docs/modules/model-choice.md",
+    "docs/modules/native-event-reader.md",
+    "docs/modules/product-structure.md",
+    "docs/modules/project-governance.md",
+    "docs/modules/reliable-memory-tests-compile-transactions-helpers.md",
+    "docs/modules/reliable-memory-tests-llm-descriptors-helpers.md",
+    "docs/modules/script-sources.md",
+    "docs/modules/test-support.md",
+    "rules/development-laws.md",
+    "scripts/__init__.py",
+    "scripts/llm_wiki/__init__.py",
+    "scripts/llm_wiki/context_bundle.py",
+    "tests/__init__.py",
+    "tests/compile_binds_the_protected_source_view_helpers.py",
+    "tests/compile_claims_producer_helpers.py",
+    "tests/compile_measure_reuses_only_immutable_line_bindings_helpers.py",
+    "tests/compile_paths.py",
+    "tests/compile_transactions_helpers.py",
+    "tests/conftest.py",
+    "tests/llm_descriptors_helpers.py",
+    "tests/module_context.py",
+    "tests/module_context_paths.py",
+    "tests/module_interface.py",
+    "tests/module_interface_render.py",
+    "tests/module_qualification.py",
+    "tests/module_record_context.py",
+    "tests/module_records.py",
+    "tests/modules/__init__.py",
+    "tests/modules/breadcrumb_documents/__init__.py",
+    "tests/modules/breadcrumb_documents/contract_helpers.py",
+    "tests/modules/native_event_reader/__init__.py",
+    "tests/modules/native_event_reader/contract_helpers.py",
+    "tests/native_compile_projection_has_complete_citation_address_helpers.py",
+    "tests/native_compile_uses_whole_container_helpers.py",
+    "tests/native_user_frames_keep_their_physical_evidence_helpers.py",
+    "tests/script_sources.py",
+    "tests/shared_fixtures.py",
+    "tests/slow_machine.py",
+    "tests/test_a_rejected_plan_names_its_fields.py",
+    "tests/test_a_slug_without_its_articles_names_the_same_page.py",
+    "tests/test_compile_does_not_update_immutable_decisions.py",
+    "tests/test_compile_entry_overlap_is_reused_only_in_sizing_scope.py",
+    "tests/test_native_compile_projection_has_complete_citation_address.py",
+    "tests/test_source_choices_reject_unmodified_ambiguous_lines_once.py"
+  ],
+  "ownership": {
+    "files": [
+      "docs/modules/compile-pipeline-operations-tests-context.json",
+      "docs/modules/compile-pipeline-operations-tests.md",
+      "tests/compile_measure_reuses_only_immutable_line_bindings_helpers.py",
+      "tests/test_a_rejected_plan_names_its_fields.py",
+      "tests/test_a_slug_without_its_articles_names_the_same_page.py",
+      "tests/test_compile_does_not_update_immutable_decisions.py",
+      "tests/test_compile_entry_overlap_is_reused_only_in_sizing_scope.py",
+      "tests/test_native_compile_projection_has_complete_citation_address.py",
+      "tests/test_source_choices_reject_unmodified_ambiguous_lines_once.py"
+    ]
+  },
+  "qualified_dependencies": [
+    {
+      "provider": "scripts/breadcrumb_decision.py",
+      "names": [
+        "journal_block"
+      ],
+      "contract_sha256": "d9c930484c634bdb57dbd893d182a3cb86d6d5b4893041035de163552c86eebc",
+      "integration_tests": [
+        "tests/test_a_rejected_plan_names_its_fields.py",
+        "tests/test_a_slug_without_its_articles_names_the_same_page.py",
+        "tests/test_compile_does_not_update_immutable_decisions.py",
+        "tests/test_compile_entry_overlap_is_reused_only_in_sizing_scope.py",
+        "tests/test_native_compile_projection_has_complete_citation_address.py",
+        "tests/test_source_choices_reject_unmodified_ambiguous_lines_once.py"
+      ]
+    },
+    {
+      "provider": "scripts/breadcrumb_evidence.py",
+      "names": [
+        "read_head"
+      ],
+      "contract_sha256": "ed6e789206b293b2cd7ca3cc716daa242835e10bc7a60103b33b2431c133913f",
+      "integration_tests": [
+        "tests/test_a_rejected_plan_names_its_fields.py",
+        "tests/test_a_slug_without_its_articles_names_the_same_page.py",
+        "tests/test_compile_does_not_update_immutable_decisions.py",
+        "tests/test_compile_entry_overlap_is_reused_only_in_sizing_scope.py",
+        "tests/test_native_compile_projection_has_complete_citation_address.py",
+        "tests/test_source_choices_reject_unmodified_ambiguous_lines_once.py"
+      ]
+    },
+    {
+      "provider": "scripts/breadcrumb_protocol.py",
+      "names": [
+        "encode_parts",
+        "make_anchor",
+        "make_manifest"
+      ],
+      "contract_sha256": "d9092eee738a1a4113c9bf87afe3ae4ad27a6f4bb640b6b8040da43b1d304729",
+      "integration_tests": [
+        "tests/test_a_rejected_plan_names_its_fields.py",
+        "tests/test_a_slug_without_its_articles_names_the_same_page.py",
+        "tests/test_compile_does_not_update_immutable_decisions.py",
+        "tests/test_compile_entry_overlap_is_reused_only_in_sizing_scope.py",
+        "tests/test_native_compile_projection_has_complete_citation_address.py",
+        "tests/test_source_choices_reject_unmodified_ambiguous_lines_once.py"
+      ]
+    },
+    {
+      "provider": "scripts/compile_pipeline.py",
+      "names": [
+        "sha256_bytes"
+      ],
+      "contract_sha256": "7d34a853c5a6f1be8b00805b2e865ac2a5ca5a6fe3ca141de97ebda61d2a85cf",
+      "integration_tests": [
+        "tests/test_source_choices_reject_unmodified_ambiguous_lines_once.py"
+      ]
+    },
+    {
+      "provider": "scripts/compile_receipts.py",
+      "names": [
+        "DailySnapshot",
+        "SourceSnapshot"
+      ],
+      "contract_sha256": "5fc287d1ebce061cf0fd230c9ab433d26aa8c9bfb352f55938b93408786a736c",
+      "integration_tests": [
+        "tests/test_compile_entry_overlap_is_reused_only_in_sizing_scope.py"
+      ]
+    },
+    {
+      "provider": "scripts/corpus_snapshot.py",
+      "names": [
+        "collect_corpus"
+      ],
+      "contract_sha256": "7ea12368f51c070a84b0754260f0a82db5ac44b0395b95eabcb01e5053c9f0bb",
+      "integration_tests": [
+        "tests/test_a_rejected_plan_names_its_fields.py",
+        "tests/test_a_slug_without_its_articles_names_the_same_page.py",
+        "tests/test_compile_does_not_update_immutable_decisions.py",
+        "tests/test_compile_entry_overlap_is_reused_only_in_sizing_scope.py",
+        "tests/test_native_compile_projection_has_complete_citation_address.py",
+        "tests/test_source_choices_reject_unmodified_ambiguous_lines_once.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/breadcrumb_documents.py",
+      "names": [
+        "source_documents",
+        "source_path"
+      ],
+      "contract_sha256": "9c32d29ba0229ab4fd59256dd23d9ea9fb8fde486cddde3ce431f64e296ab907",
+      "integration_tests": [
+        "tests/test_a_rejected_plan_names_its_fields.py",
+        "tests/test_a_slug_without_its_articles_names_the_same_page.py",
+        "tests/test_compile_does_not_update_immutable_decisions.py",
+        "tests/test_compile_entry_overlap_is_reused_only_in_sizing_scope.py",
+        "tests/test_native_compile_projection_has_complete_citation_address.py",
+        "tests/test_source_choices_reject_unmodified_ambiguous_lines_once.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/compile_pipeline_apply.py",
+      "names": [
+        "apply_compile_plan"
+      ],
+      "contract_sha256": "129ecd76764fbd203f197468ec01d03833729ef205c00c26dd60fb67025303bb",
+      "integration_tests": [
+        "tests/test_compile_does_not_update_immutable_decisions.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/compile_pipeline_base.py",
+      "names": [
+        "compile_budget"
+      ],
+      "contract_sha256": "0ad321a6e320be2a17a443a51571ef93bab759c44ed13dcb13b9445aa06277e5",
+      "integration_tests": [
+        "tests/test_compile_entry_overlap_is_reused_only_in_sizing_scope.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/compile_pipeline_batches.py",
+      "names": [
+        "TokenBatchMeasure",
+        "measure_token_subset"
+      ],
+      "contract_sha256": "b5d32cd13e5e892db4e87f7c47d0f770299cc758c3e5c14bea57716c5e237d5f",
+      "integration_tests": [
+        "tests/test_compile_entry_overlap_is_reused_only_in_sizing_scope.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/compile_pipeline_claims.py",
+      "names": [
+        "verified_claim_quote"
+      ],
+      "contract_sha256": "2109a97be0e99dc606f9a184ff7248372027f8289c780c404f17c743f9e8ebfb",
+      "integration_tests": [
+        "tests/test_native_compile_projection_has_complete_citation_address.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/compile_pipeline_operations.py",
+      "names": [
+        "SEMANTIC_FIELDS",
+        "SOURCE_CHOICE_BINDINGS",
+        "SOURCE_CHOICE_ORIGINAL",
+        "bound_legacy_evidence",
+        "bound_protected_legacy_evidence",
+        "evidence_binding",
+        "input_blob",
+        "part_entry_ids",
+        "require_semantic_shape",
+        "require_target_state",
+        "slug_key",
+        "uncached_part_entry_ids",
+        "with_snapshot_actions"
+      ],
+      "contract_sha256": "0790f28def0ee725d9608f775ba5189f228a022e1b72831fe44281e948cb3535",
+      "integration_tests": [
+        "tests/test_a_rejected_plan_names_its_fields.py",
+        "tests/test_a_slug_without_its_articles_names_the_same_page.py",
+        "tests/test_compile_does_not_update_immutable_decisions.py",
+        "tests/test_compile_entry_overlap_is_reused_only_in_sizing_scope.py",
+        "tests/test_native_compile_projection_has_complete_citation_address.py",
+        "tests/test_source_choices_reject_unmodified_ambiguous_lines_once.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/compile_pipeline_prompts.py",
+      "names": [
+        "ByteBatchMeasure",
+        "draft_prompt",
+        "measure_choice_resolution",
+        "normalize_plan",
+        "source_line_choices",
+        "validate_compile_plan"
+      ],
+      "contract_sha256": "79358edc3cea1bcf568e1bfed169fcc53c4ab75d0c4723eb3dfec112463c31d0",
+      "integration_tests": [
+        "tests/test_compile_does_not_update_immutable_decisions.py",
+        "tests/test_compile_entry_overlap_is_reused_only_in_sizing_scope.py",
+        "tests/test_native_compile_projection_has_complete_citation_address.py",
+        "tests/test_source_choices_reject_unmodified_ambiguous_lines_once.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/compile_pipeline_sources.py",
+      "names": [
+        "CompileInputs",
+        "MAX_FAILURE_DETAIL_CHARS",
+        "TargetSnapshot",
+        "daily_parts",
+        "report_stage_detail",
+        "snapshot_compile_inputs",
+        "subset_compile_inputs"
+      ],
+      "contract_sha256": "879493c0f931fb15216670c6b1e6ed22a7492544b28c535a747121fb7195e381",
+      "integration_tests": [
+        "tests/test_a_rejected_plan_names_its_fields.py",
+        "tests/test_a_slug_without_its_articles_names_the_same_page.py",
+        "tests/test_compile_does_not_update_immutable_decisions.py",
+        "tests/test_compile_entry_overlap_is_reused_only_in_sizing_scope.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/generation_catalog_store.py",
+      "names": [
+        "GenerationCatalog"
+      ],
+      "contract_sha256": "b18194ebe04bf988b4474379fcb5243516550d43b745a00eaed1453f7844c983",
+      "integration_tests": [
+        "tests/test_a_blocked_task_has_a_way_back.py",
+        "tests/test_a_build_in_flight_is_not_an_orphan.py",
+        "tests/test_a_capacity_refusal_does_not_corrupt_a_generation.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/model_choice.py",
+      "names": [
+        "using_root"
+      ],
+      "contract_sha256": "d45f2655cb61963e77617d1dfd7d617b134ad77cc770b59b335d0856e5d65019",
+      "integration_tests": [
+        "tests/test_a_rejected_plan_names_its_fields.py",
+        "tests/test_a_slug_without_its_articles_names_the_same_page.py",
+        "tests/test_compile_does_not_update_immutable_decisions.py",
+        "tests/test_compile_entry_overlap_is_reused_only_in_sizing_scope.py",
+        "tests/test_native_compile_projection_has_complete_citation_address.py",
+        "tests/test_source_choices_reject_unmodified_ambiguous_lines_once.py"
+      ]
+    },
+    {
+      "provider": "scripts/markdown_transaction.py",
+      "names": [
+        "MarkdownChange",
+        "MarkdownCoordinator"
+      ],
+      "contract_sha256": "c911f6133147c97bb248fccfab3c4ddd482550716281b1294bf82a8c8161f20e",
+      "integration_tests": [
+        "tests/test_compile_does_not_update_immutable_decisions.py"
+      ]
+    },
+    {
+      "provider": "scripts/reliable_memory.py",
+      "names": [
+        "canonical_json_bytes",
+        "sha256_bytes",
+        "validate_state_root"
+      ],
+      "contract_sha256": "4243e32fa6ecab88fca1a2d2b3214c0a36944fc23129138102dfaebf6d99457f",
+      "integration_tests": [
+        "tests/test_compile_does_not_update_immutable_decisions.py"
+      ]
+    },
+    {
+      "provider": "scripts/repository_scope.py",
+      "names": [
+        "sanitized_git_environment"
+      ],
+      "contract_sha256": "fd550ae20761afad50b37fa3a71044a162485b0e4d4b3e2af9b5b22e143c2bec",
+      "integration_tests": [
+        "tests/test_a_rejected_plan_names_its_fields.py",
+        "tests/test_a_slug_without_its_articles_names_the_same_page.py",
+        "tests/test_compile_does_not_update_immutable_decisions.py",
+        "tests/test_compile_entry_overlap_is_reused_only_in_sizing_scope.py",
+        "tests/test_native_compile_projection_has_complete_citation_address.py",
+        "tests/test_source_choices_reject_unmodified_ambiguous_lines_once.py"
+      ]
+    }
+  ]
+}

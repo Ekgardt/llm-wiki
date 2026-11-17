@@ -38,13 +38,13 @@ SCRIPTS_DIR = Path(__file__).resolve().parent
 if str(SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_DIR))
 
+from llm_wiki import runtime_roots  # noqa: E402
+from llm_wiki.formats.canonical import sha256_bytes  # noqa: E402
 from markdown_transaction import (  # noqa: E402
-    _image_bytes,
     active_or_legacy_coordinator,
     append_knowledge,
+    image_bytes,
 )
-from memory_state import ROOT, STATE_ROOT  # noqa: E402
-from reliable_memory import sha256_bytes  # noqa: E402
 
 # Daily entries only. A project journal is also append-shaped, but its
 # events carry sequence numbers and a retry rewrites them, so a refused
@@ -63,7 +63,7 @@ class OwedAppend:
     delta: bytes
 
 
-def _quarantined(database: sqlite3.Connection) -> list[tuple[str, str]]:
+def quarantined(database: sqlite3.Connection) -> list[tuple[str, str]]:
     """Refused races that no retry in their lineage ever closed."""
     from transaction_lineage import resolved_by_lineage
 
@@ -100,7 +100,7 @@ def _image(directory: Path, descriptor: object, key: str = "artifact", digest: s
     artifact = _artifact_of(directory, descriptor, key)
     if artifact is None:
         return None
-    content = _image_bytes(artifact)
+    content = image_bytes(artifact)
     if sha256_bytes(content) != descriptor.get(digest):
         return None
     return content
@@ -143,7 +143,7 @@ def _already_present(delta: bytes, live: Path) -> bool:
     return needle in content
 
 
-def _owed_in(directory: Path, identity: tuple[str, str], vault: Path) -> list[OwedAppend]:
+def owed_in(directory: Path, identity: tuple[str, str], vault: Path) -> list[OwedAppend]:
     plan = _plan_of(directory)
     operations = plan.get("operations", []) if isinstance(plan, dict) else []
     owed = []
@@ -157,10 +157,10 @@ def _owed_in(directory: Path, identity: tuple[str, str], vault: Path) -> list[Ow
 
 def _collect(coordinator, vault: Path) -> list[OwedAppend]:
     with coordinator._connect() as database:  # noqa: SLF001
-        identities = _quarantined(database)
+        identities = quarantined(database)
     found: list[OwedAppend] = []
     for identity in identities:
-        found.extend(_owed_in(coordinator.transaction_root / identity[0], identity, vault))
+        found.extend(owed_in(coordinator.transaction_root / identity[0], identity, vault))
     return found
 
 
@@ -186,8 +186,8 @@ def main(argv: list[str] | None = None) -> int:
         "--apply", action="store_true", help="append the blocks; otherwise only report"
     )
     args = parser.parse_args(argv)
-    vault = Path(ROOT)
-    coordinator = active_or_legacy_coordinator(vault, Path(STATE_ROOT))
+    vault = Path(runtime_roots.vault_root())
+    coordinator = active_or_legacy_coordinator(vault, Path(runtime_roots.state_root()))
     owed = _collect(coordinator, vault)
     _report(owed)
     if args.apply:

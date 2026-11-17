@@ -2,6 +2,12 @@
 
 Date: 2026-09-25. Audit item A-3 of `docs/AUDIT-2026-09-25-full.md`.
 
+Status checked 2026-11-02: this is the historical restriction. In the current
+candidate, unverified parts still remain separate, while canonical contiguous
+parts can share a batch after original-byte, partition, digest and coverage
+verification. `tests/test_verified_adjacent_daily_parts_share_a_batch.py` guards
+that distinction. This qualification does not install the candidate in the vault.
+
 ## Question
 
 A daily log over the compile budget is split into parts. When two parts of one day

@@ -10,9 +10,11 @@ import pytest
 from code_navigation import Capability, NavigationRequest, NavigationStatus
 from repository_scope import resolve_repository_scope
 
-from tests.code_kernel_helpers import repository, state_root  # noqa: F401 - fixtures
+from tests.code_navigation_helpers import (
+    _navigation,  # noqa: F401
+    semantic_pyright,  # noqa: F401
+)
 from tests.slow_machine import SHORT_TIMEOUT
-from tests.test_code_navigation import _navigation, semantic_pyright  # noqa: F401 - fixture
 
 
 @pytest.mark.parametrize("capability", list(Capability))

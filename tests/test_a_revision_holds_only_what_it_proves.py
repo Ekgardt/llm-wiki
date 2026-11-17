@@ -12,7 +12,7 @@ from pathlib import Path
 from repository_scope import resolve_repository_scope
 from workspace_revision import compute_workspace_revision
 
-from tests.test_repository_index import _git, _repository
+from tests.repository_index_helpers import _git, _repository
 
 
 def _paths(root: Path) -> set[str]:

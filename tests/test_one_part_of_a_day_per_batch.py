@@ -1,20 +1,23 @@
-"""Two parts of one day never share a compile batch.
+"""Unverified parts of one day cannot share a compile batch.
 
 Sources are keyed by path, so the second part of a day in the same batch was
 dropped from the prompt while its receipt was still written. See
 docs/research/2026-09-25-one-part-of-a-day-per-batch.md.
+Verified adjacent parts now join without losing bytes; their positive and forged
+cases live in test_verified_adjacent_daily_parts_share_a_batch.py.
 """
 
 from __future__ import annotations
 
 from types import SimpleNamespace
 
-import compile_memory
+import compile_receipts
 import pytest
+from llm_wiki import compile_pipeline_batches, compile_pipeline_sources
 
 
-def _part(path: str, index: int, count: int) -> compile_memory.DailySnapshot:
-    return compile_memory.DailySnapshot(
+def _part(path: str, index: int, count: int) -> compile_receipts.DailySnapshot:
+    return compile_receipts.DailySnapshot(
         path, b"x", "0" * 64, part_index=index, part_count=count, byte_start=index, byte_end=index + 1
     )
 
@@ -22,7 +25,7 @@ def _part(path: str, index: int, count: int) -> compile_memory.DailySnapshot:
 def _groups(dailies) -> list[set[str]]:
     inputs = SimpleNamespace(dailies=tuple(dailies))
     budget = SimpleNamespace(available_input_tokens=1_000_000)
-    return compile_memory._group_dailies(inputs, budget, lambda paths, *_: len(paths))
+    return compile_pipeline_batches.group_dailies(inputs, budget, lambda paths, *_: len(paths))
 
 
 def test_each_part_of_a_long_day_goes_to_its_own_batch() -> None:
@@ -47,8 +50,8 @@ def test_the_first_part_of_a_long_day_joins_the_days_before_it() -> None:
     assert [len(group) for group in _groups(dailies)] == [2, 1]
 
 
-def test_a_batch_holding_two_parts_of_one_day_is_refused() -> None:
+def test_a_batch_holding_unverified_parts_of_one_day_is_refused() -> None:
     parts = [_part("knowledge/daily/2026-09-01.md", index, 2) for index in range(2)]
 
-    with pytest.raises(ValueError, match="two parts of one day"):
-        compile_memory._deduplicated_sources(parts)
+    with pytest.raises(ValueError, match="source requires immutable bytes or an owned verified range"):
+        compile_pipeline_sources.deduplicated_sources(parts)

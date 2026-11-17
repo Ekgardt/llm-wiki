@@ -30,7 +30,7 @@ MODE_ARGUMENTS = {
 
 def _answer(mode: str, directory: str):
     arguments = {"mode": mode, "directory": directory, **MODE_ARGUMENTS[mode]}
-    return mcp_server._architecture_tool_call(arguments, time.monotonic() + 10)
+    return mcp_server.architecture_tool_call(arguments, time.monotonic() + 10)
 
 
 @pytest.mark.parametrize("mode", sorted(MODE_ARGUMENTS))
@@ -47,4 +47,4 @@ def test_a_filesystem_root_is_refused_by_name(mode: str) -> None:
 
 
 def test_the_table_of_checked_modes_is_the_table_under_test() -> None:
-    assert sorted(MODE_ARGUMENTS) == sorted(mcp_server._DIRECTORY_CHECKED_MODES)
+    assert sorted(MODE_ARGUMENTS) == sorted(mcp_server.DIRECTORY_CHECKED_MODES)

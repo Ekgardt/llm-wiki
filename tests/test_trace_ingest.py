@@ -113,7 +113,7 @@ def graph(tmp_path):
 
 @pytest.fixture()
 def use_graph(graph, monkeypatch):
-    monkeypatch.setattr(trace_ingest, "_open_graph", lambda directory: graph)
+    monkeypatch.setattr(trace_ingest, "open_graph", lambda directory: graph)
     return graph
 
 
@@ -294,7 +294,7 @@ def test_a_second_distinct_trace_still_contributes(tmp_path, use_graph):
 def test_an_undecorated_frame_binds_on_the_exact_definition_line(graph):
     index = trace_ingest.build_definition_index(graph)
     decorated = trace_ingest.build_decorated_index(index)
-    assert trace_ingest._resolve_frame(("pkg/a.py", 10, "caller_one"), index, decorated) == "n:caller"
+    assert trace_ingest.resolve_frame(("pkg/a.py", 10, "caller_one"), index, decorated) == "n:caller"
 
 
 def test_a_decorated_frame_binds_through_the_decorator_window(graph):
@@ -302,21 +302,21 @@ def test_a_decorated_frame_binds_through_the_decorator_window(graph):
     index = trace_ingest.build_definition_index(graph)
     decorated = trace_ingest.build_decorated_index(index)
     # The profiler reports line 8; the `def` this graph stores is line 10.
-    assert trace_ingest._resolve_frame(("pkg/a.py", 8, "caller_one"), index, decorated) == "n:caller"
+    assert trace_ingest.resolve_frame(("pkg/a.py", 8, "caller_one"), index, decorated) == "n:caller"
 
 
 def test_a_frame_below_the_definition_never_binds(graph):
     """A decorator is above its `def`, so the window opens forwards only."""
     index = trace_ingest.build_definition_index(graph)
     decorated = trace_ingest.build_decorated_index(index)
-    assert trace_ingest._resolve_frame(("pkg/a.py", 11, "caller_one"), index, decorated) is None
+    assert trace_ingest.resolve_frame(("pkg/a.py", 11, "caller_one"), index, decorated) is None
 
 
 def test_a_frame_beyond_the_decorator_window_stays_unbound(graph):
     index = trace_ingest.build_definition_index(graph)
     decorated = trace_ingest.build_decorated_index(index)
     far = 10 - trace_ingest.MAX_DECORATOR_LINES - 1
-    assert trace_ingest._resolve_frame(("pkg/a.py", far, "caller_one"), index, decorated) is None
+    assert trace_ingest.resolve_frame(("pkg/a.py", far, "caller_one"), index, decorated) is None
 
 
 def test_a_frame_matching_two_definitions_in_the_window_stays_unbound(graph):
@@ -324,7 +324,7 @@ def test_a_frame_matching_two_definitions_in_the_window_stays_unbound(graph):
     graph.add_definition("n:twin", "pkg/a.py", 12, "caller_one")
     index = trace_ingest.build_definition_index(graph)
     decorated = trace_ingest.build_decorated_index(index)
-    assert trace_ingest._resolve_frame(("pkg/a.py", 9, "caller_one"), index, decorated) is None
+    assert trace_ingest.resolve_frame(("pkg/a.py", 9, "caller_one"), index, decorated) is None
 
 
 def test_unbindable_frames_are_counted_not_dropped_silently(tmp_path, use_graph):
@@ -390,7 +390,7 @@ def test_an_edge_whose_caller_left_the_generation_is_counted_stale(tmp_path, use
 
 def test_reading_without_an_active_generation_is_empty_not_an_error(tmp_path, monkeypatch):
     """`find_callers` degrades to a live scan here, so the merge must not raise."""
-    monkeypatch.setattr(trace_ingest, "_open_graph", lambda directory: None)
+    monkeypatch.setattr(trace_ingest, "open_graph", lambda directory: None)
     answer = trace_ingest.trace_callers("target_method", tmp_path, state_root=tmp_path)
     assert answer["trace_caller_count"] == 0
     assert answer["trace_generation"] is None
@@ -402,7 +402,7 @@ def test_reading_without_an_active_generation_is_empty_not_an_error(tmp_path, mo
 
 def test_ingesting_without_an_active_generation_is_refused_by_name(tmp_path, monkeypatch):
     """Reading degrades; writing must not, because nothing could bind."""
-    monkeypatch.setattr(trace_ingest, "_open_graph", lambda directory: None)
+    monkeypatch.setattr(trace_ingest, "open_graph", lambda directory: None)
     target = write_trace(
         tmp_path / "t.jsonl",
         [edge(frame("pkg/a.py", 10, "caller_one"), frame("pkg/b.py", 20, "target_method"))],

@@ -9,15 +9,15 @@ from query_memory import slugify
 
 
 def test_cyrillic_preserved():
-    s = slugify("Как работает hook?")
-    assert s.startswith("как-работает-hook")
+    s = slugify("\u041a\u0430\u043a \u0440\u0430\u0431\u043e\u0442\u0430\u0435\u0442 hook?")
+    assert s.startswith("\u043a\u0430\u043a-\u0440\u0430\u0431\u043e\u0442\u0430\u0435\u0442-hook")
     # Must have a hash suffix
-    assert len(s) > len("как-работает-hook")
+    assert len(s) > len("\u043a\u0430\u043a-\u0440\u0430\u0431\u043e\u0442\u0430\u0435\u0442-hook")
 
 
 def test_cyrillic_two_questions_distinct():
-    s1 = slugify("Что такое slug?")
-    s2 = slugify("Где лежит state.md?")
+    s1 = slugify("\u0427\u0442\u043e \u0442\u0430\u043a\u043e\u0435 slug?")
+    s2 = slugify("\u0413\u0434\u0435 \u043b\u0435\u0436\u0438\u0442 state.md?")
     assert s1 != s2
 
 
@@ -49,9 +49,8 @@ def test_no_ascii_destruction():
     The new `[^\\w]+` with re.UNICODE preserves letters in any script.
     Verify at least one Cyrillic char survives.
     """
-    s = slugify("Какой slug?")
-    # "какой" — check first letter preserved as 'к'
-    assert "к" in s
+    s = slugify("\u041a\u0430\u043a\u043e\u0439 slug?")
+    assert "\u043a" in s
 
 
 def test_length_respects_max():

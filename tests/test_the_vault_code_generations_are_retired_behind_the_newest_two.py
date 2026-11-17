@@ -15,10 +15,10 @@ for directory in (TESTS.parent / "scripts", TESTS):
     if str(directory) not in sys.path:
         sys.path.insert(0, str(directory))
 
-from test_prune_generations import _publish  # noqa: E402
-from test_repository_index import ALPHA, _repository  # noqa: E402
-from test_repository_refresh import _isolated_reader_cache, adopted_vault  # noqa: E402,F401
-from test_repository_retention import _generation_ids  # noqa: E402
+from tests.generation_catalog_helpers import _publish  # noqa: E402
+from tests.repository_index_helpers import ALPHA, _repository  # noqa: E402
+from tests.repository_refresh_helpers import _isolated_reader_cache, adopted_vault  # noqa: E402,F401
+from tests.repository_retention_helpers import _generation_ids  # noqa: E402
 
 
 def _edited(root: Path, name: str) -> None:
@@ -26,22 +26,22 @@ def _edited(root: Path, name: str) -> None:
 
 
 def _three_code_generations(root: Path, state: Path) -> list[str]:
-    import repository_index
+    import repository_indexing
 
     _repository(root, {"scripts/alpha.py": ALPHA})
-    first = repository_index.index_repository(root, roots=["scripts"], state_root=state)["generation_id"]
+    first = repository_indexing.index_repository(root, roots=["scripts"], state_root=state)["generation_id"]
     _edited(root, "beta")
-    second = repository_index.refresh_repository(root, state_root=state)["generation_id"]
+    second = repository_indexing.refresh_repository(root, state_root=state)["generation_id"]
     _edited(root, "gamma")
-    third = repository_index.refresh_repository(root, state_root=state)["generation_id"]
+    third = repository_indexing.refresh_repository(root, state_root=state)["generation_id"]
     return [first, second, third]
 
 
 def _memory_publication(root: Path, state: Path) -> str:
-    import generation_catalog
+    from llm_wiki import generation_catalog_store
     from repository_scope import resolve_repository_scope
 
-    catalog = generation_catalog.GenerationCatalog(state)
+    catalog = generation_catalog_store.GenerationCatalog(state)
     _publish(catalog, "gen-memory", repository_scope=resolve_repository_scope(root).as_dict())
     catalog.register("gen-memory")
     return "gen-memory"
@@ -62,13 +62,13 @@ def test_the_vault_keeps_its_newest_two_code_generations_and_its_memory(adopted_
 
 def test_the_vault_hint_table_is_not_an_orphan_while_a_code_generation_lives(adopted_vault):  # noqa: F811
     import code_hints
-    import repository_index
+    import repository_indexing
     import repository_retention
     from repository_scope import resolve_repository_scope
 
     root, state = adopted_vault
     _repository(root, {"scripts/alpha.py": ALPHA})
-    repository_index.index_repository(root, roots=["scripts"], state_root=state)
+    repository_indexing.index_repository(root, roots=["scripts"], state_root=state)
     checkout_id = resolve_repository_scope(root).checkout_id
     written = code_hints.hints_path(state, checkout_id).exists()
 

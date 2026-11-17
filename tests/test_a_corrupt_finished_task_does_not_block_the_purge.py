@@ -8,10 +8,10 @@ Nothing else can move a finished row, so every later purge failed as well.
 from __future__ import annotations
 
 import sqlite3
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
-import memory_queue
+import queue_core
 
 from tests.adopted_vault import adopt, tamper_payload, task_state
 
@@ -31,7 +31,7 @@ def test_the_purge_takes_the_healthy_task_and_demotes_the_corrupt_one(
     tmp_path: Path,
 ) -> None:
     root, state_root = adopt(tmp_path)
-    queue = memory_queue.active_or_legacy_memory_queue(root, state_root)
+    queue = queue_core.active_or_legacy_memory_queue(root, state_root)
     healthy = queue.enqueue("compile", 1, {"daily": "one"})
     corrupt = queue.enqueue("compile", 1, {"daily": "two"})
     queue.cancel(healthy)
@@ -40,7 +40,7 @@ def test_the_purge_takes_the_healthy_task_and_demotes_the_corrupt_one(
     tamper_payload(state_root, corrupt)
 
     receipt = queue.purge(
-        terminal_before=datetime.now(timezone.utc) - timedelta(days=1),
+        terminal_before=datetime.now(UTC) - timedelta(days=1),
         export_path=tmp_path / "export",
     )
 

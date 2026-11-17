@@ -65,12 +65,12 @@ def _live_shaped_answer() -> dict:
     ]
     return {
         "directory": "/repo/llm-wiki",
-        "candidates": code_graph._ordered_dead_candidates(rows),
+        "candidates": code_graph.ordered_dead_candidates(rows),
         "source_generation": "generation-18cfd903a7a4e112-3ce112cb",
         "graph_complete": False,
         "unresolved_count": None,
         "fallback": False,
-        **code_graph._dead_code_counts(rows),
+        **code_graph.dead_code_counts(rows),
     }
 
 
@@ -160,7 +160,7 @@ def test_an_unrecognised_reason_sorts_last_rather_than_ahead_of_a_known_one():
         _candidate(1, "some_future_reason"),
         _candidate(2, "zero_confirmed_incoming_calls"),
     ]
-    ordered = code_graph._ordered_dead_candidates(rows)
+    ordered = code_graph.ordered_dead_candidates(rows)
     assert [row["reason"] for row in ordered] == [
         "zero_confirmed_incoming_calls",
         "some_future_reason",
@@ -182,7 +182,7 @@ def test_the_counts_survive_the_cut_that_removes_the_rows():
 
 
 def test_the_counts_describe_the_candidates_not_the_rows_that_fit():
-    counts = code_graph._dead_code_counts(
+    counts = code_graph.dead_code_counts(
         [_candidate(0, "unresolved_receiver"), _candidate(1, "unresolved_receiver")]
     )
     assert counts == {

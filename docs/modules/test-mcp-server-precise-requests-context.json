@@ -1,0 +1,366 @@
+{
+  "encoding": "o200k_base",
+  "max_tokens": 100000,
+  "serialization": "exact-duplicates/v1",
+  "files": [
+    "AGENTS.md",
+    "CLAUDE.md",
+    "docs/AGENTS.md",
+    "docs/STRUCTURE.md",
+    "docs/modules/context-bundle.md",
+    "docs/modules/context-records.md",
+    "docs/modules/context-tooling.md",
+    "docs/modules/mcp-server-limits.md",
+    "docs/modules/mcp-server-support.md",
+    "docs/modules/mcp-server.md",
+    "docs/modules/model-choice.md",
+    "docs/modules/product-structure.md",
+    "docs/modules/project-governance.md",
+    "docs/modules/test-mcp-server-precise-requests-context.json",
+    "docs/modules/test-mcp-server-precise-requests.md",
+    "docs/modules/test-support.md",
+    "rules/development-laws.md",
+    "scripts/__init__.py",
+    "scripts/llm_wiki/__init__.py",
+    "scripts/llm_wiki/context_bundle.py",
+    "scripts/llm_wiki/mcp_server_limits.py",
+    "scripts/mcp_server.py",
+    "tests/__init__.py",
+    "tests/conftest.py",
+    "tests/mcp_server_support.py",
+    "tests/module_context.py",
+    "tests/module_context_paths.py",
+    "tests/module_interface.py",
+    "tests/module_interface_render.py",
+    "tests/module_qualification.py",
+    "tests/module_record_context.py",
+    "tests/module_records.py",
+    "tests/shared_fixtures.py",
+    "tests/slow_machine.py",
+    "tests/test_mcp_server_precise_requests.py"
+  ],
+  "ownership": {
+    "files": [
+      "docs/modules/test-mcp-server-precise-requests-context.json",
+      "docs/modules/test-mcp-server-precise-requests.md",
+      "tests/test_mcp_server_precise_requests.py"
+    ]
+  },
+  "qualified_dependencies": [
+    {
+      "provider": "scripts/llm_wiki/generation_catalog_store.py",
+      "names": [
+        "GenerationCatalog"
+      ],
+      "contract_sha256": "b18194ebe04bf988b4474379fcb5243516550d43b745a00eaed1453f7844c983",
+      "integration_tests": [
+        "tests/test_a_blocked_task_has_a_way_back.py",
+        "tests/test_a_build_in_flight_is_not_an_orphan.py",
+        "tests/test_a_capacity_refusal_does_not_corrupt_a_generation.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/mcp_server_architecture.py",
+      "names": [
+        "ARCHITECTURE_REPORT_KEYS",
+        "COMMUNITY_MEMBERS_HINT",
+        "architecture_answer",
+        "architecture_callers",
+        "architecture_community",
+        "architecture_definition",
+        "architecture_dependencies",
+        "find_dead_code_answer",
+        "get_architecture_mode",
+        "refresh_action",
+        "repository_freshness",
+        "request_repository_refresh",
+        "request_worktree_follow",
+        "with_generation_freshness",
+        "worktree_follow_fields"
+      ],
+      "contract_sha256": "95ae0267e7c95dff09e2080f48142e30f93e761c94669183c975923f8d82c918",
+      "integration_tests": [
+        "tests/test_mcp_server_precise_requests.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/mcp_server_doctor.py",
+      "names": [
+        "doctor"
+      ],
+      "contract_sha256": "fa6a90a1aa4edf61b9b6bd314962b031870a9bf1c2ce3bd9237a6e8039846f85",
+      "integration_tests": [
+        "tests/test_mcp_server_precise_requests.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/mcp_server_freshness.py",
+      "names": [
+        "NAVIGATION_FRESHNESS",
+        "answer_freshness",
+        "answer_generation",
+        "components_for",
+        "file_sha256",
+        "graph_components",
+        "index_timestamp",
+        "navigation_freshness",
+        "recall_components",
+        "recorded_memory_digests",
+        "requested_signals"
+      ],
+      "contract_sha256": "adc7e6316cd7a3f228c7681d5dbcdbce912ace3aa187bc936eb4605af1019330",
+      "integration_tests": [
+        "tests/test_a_context_answer_says_when_its_corpus_was_read.py",
+        "tests/test_a_missing_leg_is_reported.py",
+        "tests/test_a_structural_answer_says_its_own_freshness.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/mcp_server_navigation.py",
+      "names": [
+        "NAVIGATION_MANAGER",
+        "NAVIGATION_MANAGER_CLOSING",
+        "NavigationSourceCache",
+        "close_navigation_session_manager",
+        "collected_call_locations",
+        "get_precise_architecture",
+        "graph_call_locations",
+        "graph_declaration_locations",
+        "graph_node_ids_at_anchor",
+        "navigation_edge_verifier",
+        "navigation_location_from_span",
+        "navigation_named_by_session",
+        "navigation_profile",
+        "navigation_session_manager",
+        "navigation_source_bytes",
+        "navigation_structural_candidates",
+        "navigation_symbol_resolver",
+        "normalized_navigation_failure",
+        "open_navigation_graph",
+        "same_filesystem_path"
+      ],
+      "contract_sha256": "739acac2751b23c605102498bee5995041de1986f48f8f0bfebb2adac532cade",
+      "integration_tests": [
+        "tests/test_a_cut_in_the_core_says_what_it_left_out.py",
+        "tests/test_an_envelope_failure_is_a_safe_answer.py",
+        "tests/test_an_unreadable_generation_degrades_the_decoration.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/mcp_server_quality.py",
+      "names": [
+        "EXACT_ANSWER_TOOLS",
+        "build_operation_envelope",
+        "quality_for",
+        "quality_of_code_graph",
+        "quality_of_results"
+      ],
+      "contract_sha256": "51a255016e61406cbbf25d50326e23eeff2e4753083bb0ce5cad0c73dbe7ed3a",
+      "integration_tests": [
+        "tests/test_an_answer_names_the_commit_it_read.py",
+        "tests/test_an_envelope_failure_is_a_safe_answer.py",
+        "tests/test_answer_cost.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/mcp_server_runtime.py",
+      "names": [
+        "SHUTDOWN_INFERENCE_SECONDS",
+        "build_resource_definitions",
+        "build_server",
+        "format_tool_result",
+        "handle_resource_read",
+        "register_resources",
+        "register_tools",
+        "run_server",
+        "settle_inference"
+      ],
+      "contract_sha256": "b06b13a7c871f430bb0dd9bc59be6966b58c90852e25bc7074ce79a174cad5fe",
+      "integration_tests": [
+        "tests/test_mcp_http.py",
+        "tests/test_mcp_server_navigation_manager.py",
+        "tests/test_mcp_server_precise_requests.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/mcp_server_sanitize.py",
+      "names": [
+        "sanitize_navigation_text"
+      ],
+      "contract_sha256": "05009c7a334939ed45fe4f7bab1820afb9b62402f905ba8a6f0960e8786cdb3b",
+      "integration_tests": [
+        "tests/test_a_page_is_read_past_one_bad_reference.py",
+        "tests/test_an_answer_names_the_commit_it_read.py",
+        "tests/test_an_envelope_failure_is_a_safe_answer.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/mcp_server_schemas.py",
+      "names": [
+        "ARCHITECTURE_MAX_DEPTH",
+        "TOOL_INPUT_SCHEMAS"
+      ],
+      "contract_sha256": "34078171bb117a8279db954d5760b02924c291b90013301fbba5fae1f26f3e16",
+      "integration_tests": [
+        "tests/test_mcp_server_precise_requests.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/mcp_server_tools.py",
+      "names": [
+        "DIRECTORY_CHECKED_MODES",
+        "TOOL_HANDLERS",
+        "answer_text",
+        "architecture_tool_call",
+        "cross_service_architecture_call",
+        "data_flow_architecture_call",
+        "dispatch_tool",
+        "execute_tool_call",
+        "handle_tool_call",
+        "shaped_code_answer",
+        "tool_call_data",
+        "tool_call_envelope",
+        "tool_get_architecture",
+        "tool_get_decisions",
+        "tool_timeout_envelope_text"
+      ],
+      "contract_sha256": "15003ea7e7d6555dab636a2875101485eaa91244e54cb167e7f9b96894537998",
+      "integration_tests": [
+        "tests/test_a_flow_mode_stops_when_its_caller_stopped_waiting.py",
+        "tests/test_an_answer_names_the_commit_it_read.py",
+        "tests/test_an_envelope_failure_is_a_safe_answer.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/mcp_server_validation.py",
+      "names": [
+        "ARCHITECTURE_CONTRACTS",
+        "build_tool_definitions",
+        "validate_architecture_arguments",
+        "validate_object_schema",
+        "validate_tool_arguments"
+      ],
+      "contract_sha256": "afa46536a6d540482887714429bf5eeba178a1c0e71570250eee7da80c6ceb55",
+      "integration_tests": [
+        "tests/test_a_context_answer_fits_the_budget_it_was_given.py",
+        "tests/test_a_cut_in_the_core_says_what_it_left_out.py",
+        "tests/test_answer_budget.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/mcp_server_vault.py",
+      "names": [
+        "agent_row",
+        "assess_contradiction_text",
+        "check_contradiction",
+        "compiled_context",
+        "context_result",
+        "get_context",
+        "get_decisions",
+        "log_decision",
+        "read_page",
+        "reported_trace",
+        "retrieval_trace",
+        "search_vault",
+        "selected_chunks",
+        "trigger_compile",
+        "unreported_trace",
+        "vault_status",
+        "wiki_overview"
+      ],
+      "contract_sha256": "1d2c70fcdca620cbd280156097dfbdba3bec53e8a587f5cd75f908255f2b9ca4",
+      "integration_tests": [
+        "tests/test_mcp_server_precise_requests.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/mcp_server_warmup.py",
+      "names": [
+        "WARMUP_LIMIT_SECONDS",
+        "WARMUP_PASSES",
+        "start_encoder_warmup",
+        "warmup_retrieval_path",
+        "warmup_stage",
+        "warmup_state"
+      ],
+      "contract_sha256": "003c5b923bab3eac733ad20d095d8aab409a82eb269cd28b7356a5ae6f238b6c",
+      "integration_tests": [
+        "tests/test_mcp_server_precise_requests.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/mcp_server_workers.py",
+      "names": [
+        "CODE_GRAPH_SLOTS",
+        "CODE_GRAPH_WORK_SLOTS",
+        "bounded_operation_deadline",
+        "check_deadline",
+        "is_precise_architecture_request",
+        "operation_cancelled",
+        "retrieval_operation_seconds",
+        "run_bounded",
+        "timeout_envelope_text",
+        "tool_operation_seconds"
+      ],
+      "contract_sha256": "7675aadf19d83adc8dbe18836f77c9156c1efd0ffeb5e1cb55f05197764eba46",
+      "integration_tests": [
+        "tests/test_a_context_answer_fits_the_budget_it_was_given.py",
+        "tests/test_a_context_answer_says_when_its_corpus_was_read.py",
+        "tests/test_a_cut_in_the_core_says_what_it_left_out.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/model_choice.py",
+      "names": [
+        "using_root"
+      ],
+      "contract_sha256": "d45f2655cb61963e77617d1dfd7d617b134ad77cc770b59b335d0856e5d65019",
+      "integration_tests": [
+        "tests/test_mcp_server_precise_requests.py"
+      ]
+    },
+    {
+      "provider": "scripts/lsp_security.py",
+      "names": [
+        "resolve_repository_source"
+      ],
+      "contract_sha256": "ce7182b39b4a7c925d60c48b2de52706710ed7dca5f96683dd9ee3535b652499",
+      "integration_tests": [
+        "tests/test_a_context_answer_fits_the_budget_it_was_given.py",
+        "tests/test_a_cut_in_the_core_says_what_it_left_out.py",
+        "tests/test_a_dead_owner_root_is_swept_when_the_next_server_starts.py"
+      ]
+    },
+    {
+      "provider": "scripts/mcp_supervisor.py",
+      "names": [
+        "main"
+      ],
+      "contract_sha256": "2e3789ef7779f8401ab28e93631958ef3dcfdd432a6d45d23614d46b7fcbfc3f",
+      "integration_tests": [
+        "tests/test_mcp_server_precise_requests.py"
+      ]
+    },
+    {
+      "provider": "scripts/reliable_memory.py",
+      "names": [
+        "validate_state_root"
+      ],
+      "contract_sha256": "8680515cd873056a7c8a36e0057d91f2f83f23c48841263697676ff91f7ff964",
+      "integration_tests": [
+        "tests/test_mcp_server_precise_requests.py"
+      ]
+    },
+    {
+      "provider": "scripts/repository_scope.py",
+      "names": [
+        "resolve_repository_scope",
+        "sanitized_git_environment"
+      ],
+      "contract_sha256": "983dd096d99bafff98ca0aaa2cd722477333e30eed4bfa9297d1830c635e8d90",
+      "integration_tests": [
+        "tests/test_mcp_server_precise_requests.py"
+      ]
+    }
+  ]
+}

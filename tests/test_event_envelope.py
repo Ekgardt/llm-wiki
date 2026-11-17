@@ -4,12 +4,12 @@ import hashlib
 import json
 import time
 from dataclasses import FrozenInstanceError
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import pytest
-from event_envelope import EventEnvelope, build_event_envelope
+from llm_wiki.event_envelope_values import EventEnvelope, build_event_envelope
 
-FIXED_TIME = datetime(2026, 7, 13, 12, 30, 45, tzinfo=timezone.utc)
+from tests.event_envelope_helpers import FIXED_TIME
 
 
 def _prompt_event(**overrides) -> EventEnvelope:
@@ -32,7 +32,7 @@ def test_event_id_is_deterministic_for_canonically_equivalent_content():
 
 
 def test_event_id_ignores_capture_retry_time():
-    later = datetime(2026, 7, 13, 12, 31, 45, tzinfo=timezone.utc)
+    later = datetime(2026, 7, 13, 12, 31, 45, tzinfo=UTC)
 
     first = _prompt_event(captured_at=FIXED_TIME)
     retry = _prompt_event(captured_at=later)
@@ -72,8 +72,8 @@ def test_timestamps_are_serialized_as_timezone_aware_utc():
 
     event = _prompt_event(occurred_at=offset_time, captured_at=offset_time)
 
-    assert event.occurred_at.tzinfo is timezone.utc
-    assert event.captured_at.tzinfo is timezone.utc
+    assert event.occurred_at.tzinfo is UTC
+    assert event.captured_at.tzinfo is UTC
     assert event.to_dict()["occurred_at"] == "2026-07-13T12:30:45Z"
     assert event.to_dict()["captured_at"] == "2026-07-13T12:30:45Z"
 

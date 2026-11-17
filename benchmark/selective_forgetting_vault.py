@@ -36,6 +36,8 @@ import sys
 import time
 from pathlib import Path
 
+from llm_wiki import runtime_roots
+
 BENCHMARK = Path(__file__).resolve().parent
 REPO = BENCHMARK.parent
 
@@ -189,15 +191,15 @@ def build_generation(root: Path, state: Path) -> dict:
     stands index the same way.
     """
     from corpus_snapshot import collect_corpus
-    from doctor import (
-        _corpus_policy,
-        _fresh_generation_id,
-        _generation_source_bytes,
-        _generation_source_extractor,
-        _generation_source_rows,
-    )
     from evidence_graph_builder import build_incremental_generation
-    from generation_catalog import GenerationCatalog
+    from generation_maintenance import (
+        corpus_policy,
+        fresh_generation_id,
+        generation_source_bytes,
+        generation_source_extractor,
+        generation_source_rows,
+    )
+    from llm_wiki.generation_catalog_store import GenerationCatalog
     from longmemeval_vault import _reuse_config
     from repository_scope import resolve_repository_scope
 
@@ -207,13 +209,13 @@ def build_generation(root: Path, state: Path) -> dict:
     catalog = GenerationCatalog(state)
     built = build_incremental_generation(
         catalog,
-        sources=_generation_source_rows(snapshot),
-        source_bytes=_generation_source_bytes(snapshot),
-        extractor=_generation_source_extractor(snapshot, scope.repository_id),
+        sources=generation_source_rows(snapshot),
+        source_bytes=generation_source_bytes(snapshot),
+        extractor=generation_source_extractor(snapshot, scope.repository_id),
         reuse_config=_reuse_config(snapshot),
-        generation_id=_fresh_generation_id(catalog),
+        generation_id=fresh_generation_id(catalog),
         parent_generation_id=_active_id(catalog),
-        policy=_corpus_policy(snapshot),
+        policy=corpus_policy(snapshot),
         expected_active=_active_id(catalog),
         deadline=deadline,
         cancelled=None,
@@ -394,8 +396,8 @@ def _archive_stale_pages() -> list[str]:
     import archive_stale
 
     cutoff = time.time() - 180 * 86400
-    stale = archive_stale._stale_pages(cutoff, 180)
-    return [archive_stale._archive_page(page, True) for page in stale]
+    stale = archive_stale.stale_pages(cutoff, 180)
+    return [archive_stale.archive_page(page, True) for page in stale]
 
 
 def _retained(page: Path) -> bool:
@@ -579,7 +581,7 @@ def _synthetic_case(root: Path, slug: str, body: str) -> dict:
     page = root / "knowledge/notes" / f"{slug}.md"
     page.write_text(body, encoding="utf-8")
     age_past_window(page)
-    archive_outcome = archive_stale._archive_page(page, True)
+    archive_outcome = archive_stale.archive_page(page, True)
     archived = _archived_copy(root, slug)
     result = _restore_one(root, slug, body.encode("utf-8"))
     result["archive_outcome"] = archive_outcome.split(":", 1)[0]
@@ -681,12 +683,11 @@ def _sessions_have_restore() -> bool:
 
 def _legacy_pages() -> set[str]:
     """Every page the legacy lexical walker admits, vault-relative."""
-    import search_memory
-    from memory_state import ROOT as VAULT
+    import generation_search
 
     return {
-        page.resolve().relative_to(VAULT.resolve()).as_posix()
-        for page in search_memory._collect_pages("all")
+        page.resolve().relative_to(runtime_roots.vault_root().resolve()).as_posix()
+        for page in generation_search.collect_pages("all")
     }
 
 
@@ -733,7 +734,7 @@ def _archive_synthetic(root: Path, slug: str, body: str) -> dict:
     page = root / "knowledge/notes" / f"{slug}.md"
     page.write_text(body, encoding="utf-8")
     age_past_window(page)
-    outcome = archive_stale._archive_page(page, True)
+    outcome = archive_stale.archive_page(page, True)
     return {
         "slug": slug,
         "archive_outcome": outcome.split(":", 1)[0],

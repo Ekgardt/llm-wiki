@@ -8,13 +8,13 @@ from __future__ import annotations
 import os
 import sqlite3
 import time
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
 from markdown_transaction import MarkdownCoordinator
 
-from tests.test_every_store_has_a_bound import _append
+from tests.every_store_has_a_bound_helpers import _append
 
 
 def _coordinator(tmp_path: Path) -> MarkdownCoordinator:
@@ -46,7 +46,7 @@ def test_a_settled_row_without_images_is_marked_pruned(tmp_path: Path) -> None:
     for root in coordinator.transaction_root.iterdir():
         coordinator._remove_artifacts(root)
 
-    coordinator.prune(now=datetime.now(timezone.utc) + timedelta(days=3))
+    coordinator.prune(now=datetime.now(UTC) + timedelta(days=3))
 
     with sqlite3.connect(coordinator.database_path) as database:
         marked = database.execute('SELECT artifacts_pruned_at IS NOT NULL FROM "transaction"').fetchall()

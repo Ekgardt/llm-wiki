@@ -15,13 +15,12 @@ def test_prose_that_mentions_the_prefix_is_named_not_fatal() -> None:
 
 def test_the_page_is_returned_with_the_mention_named(tmp_path, monkeypatch) -> None:
     import mcp_server
-    import memory_state
 
     notes = tmp_path / "knowledge" / "notes"
     notes.mkdir(parents=True)
     (notes / "page.md").write_text("Evidence lines start with `daily:` and a date.\n", encoding="utf-8")
-    monkeypatch.setattr(memory_state, "ROOT", tmp_path)
+    monkeypatch.setenv("LLM_WIKI_ROOT", str(tmp_path))
 
-    page = mcp_server._read_page("page")
+    page = mcp_server.read_page("page")
 
     assert (page["slug"], page["evidence"]) == ("page", [{"reference": None, "error": "not_an_evidence_reference"}])

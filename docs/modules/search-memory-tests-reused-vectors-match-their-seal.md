@@ -1,0 +1,11 @@
+# Tests of `scripts/search_memory.py`
+
+- `tests/test_reused_vectors_match_their_seal.py`: A parent's vectors are reused only when they hash to the digest its manifest seals.
+
+`scripts/search_memory.py` itself belongs to another module: this packet carries its exact derived
+description, and these tests are the evidence that the description matches real use.
+
+The owned files and the complete maintenance context are listed in the `-context.json`
+manifest next to this guide.
+
+Run `uv run pytest tests/test_reused_vectors_match_their_seal.py -q`.

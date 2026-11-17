@@ -9,6 +9,7 @@ import subprocess
 from pathlib import Path
 
 import lint_memory
+from llm_wiki import runtime_roots
 
 
 def _is_compiled_page_path(line: str) -> bool:
@@ -19,14 +20,14 @@ def _is_compiled_page_path(line: str) -> bool:
 def _tracked_knowledge_pages() -> list[Path]:
     raw = subprocess.check_output(
         ["git", "ls-files", "knowledge"],
-        cwd=str(lint_memory.ROOT),
+        cwd=str(runtime_roots.vault_root()),
         text=True,
     )
     pages: list[Path] = []
     for line in raw.splitlines():
         if not _is_compiled_page_path(line):
             continue
-        p = lint_memory.ROOT / line
+        p = runtime_roots.vault_root() / line
         if p.is_file():
             pages.append(p)
     return pages
@@ -37,7 +38,7 @@ def test_no_broken_wikilinks_in_tracked_knowledge():
     pages = _tracked_knowledge_pages()
     assert pages, "expected tracked knowledge pages"
     broken = lint_memory.check_broken_links(
-        pages, [lint_memory.VAULT, lint_memory.NOTES]
+        pages, [runtime_roots.knowledge_dir(), runtime_roots.notes_dir()]
     )
     assert broken == [], (
         "broken wikilinks (or links to untracked/gitignored files):\n"
@@ -56,12 +57,9 @@ def test_untracked_target_is_reported(tmp_path, monkeypatch):
     secret.parent.mkdir(parents=True)
     secret.write_text("# secret\n", encoding="utf-8")
 
-    monkeypatch.setattr(lint_memory, "ROOT", vault)
-    monkeypatch.setattr(lint_memory, "VAULT", vault / "knowledge")
-    monkeypatch.setattr(lint_memory, "NOTES", notes)
-    monkeypatch.setattr(lint_memory, "DAILY_DIR", vault / "knowledge" / "daily")
+    monkeypatch.setenv("LLM_WIKI_ROOT", str(vault))
     monkeypatch.setattr(
-        lint_memory, "_git_tracked_paths", lambda: {"knowledge/notes/alpha.md"}
+        lint_memory, "git_tracked_paths", lambda: {"knowledge/notes/alpha.md"}
     )
 
     broken = lint_memory.check_broken_links([page], [vault / "knowledge", notes])

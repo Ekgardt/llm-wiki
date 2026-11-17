@@ -43,7 +43,7 @@ def test_a_stealer_waits_for_the_one_already_judging(tmp_path, monkeypatch):
     lock.write_bytes(b"4242")
     monkeypatch.setattr(memory_state, "STEAL_GUARD_SECONDS", 0.05)
 
-    with memory_state._steal_guard(lock):
+    with memory_state.steal_guard(lock):
         with pytest.raises(memory_state.StateLockTimeout):
             _other_process_retires(lock)
 

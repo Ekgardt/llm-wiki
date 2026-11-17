@@ -37,7 +37,7 @@ def _read_with_a_writer_in_between(path: Path, max_bytes: int, *, label: str) ->
     path.write_bytes(path.read_bytes() + b"# written meanwhile\n")
     descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_BINARY", 0))
     try:
-        return bounded_io._read_open_descriptor(
+        return bounded_io.read_open_descriptor(
             descriptor, path, bounded_io.file_identity(before), max_bytes, label, None
         )
     finally:
@@ -62,7 +62,7 @@ def test_a_file_replaced_under_the_reader_is_named_as_changed(tmp_path):
     os.replace(newer, source)
 
     with pytest.raises(bounded_io.SourceChangedDuringRead):
-        bounded_io._require_same_file_at_path(source, identity, "source")
+        bounded_io.require_same_file_at_path(source, identity, "source")
 
 
 def test_the_collector_calls_that_a_changed_corpus(tmp_path, monkeypatch):
@@ -70,7 +70,7 @@ def test_the_collector_calls_that_a_changed_corpus(tmp_path, monkeypatch):
     monkeypatch.setattr(corpus_snapshot, "read_stable_bytes", _read_with_a_writer_in_between)
 
     with pytest.raises(corpus_snapshot.CorpusChanged):
-        corpus_snapshot._sealed_source_bytes(source, 1024, "source")
+        corpus_snapshot.sealed_source_bytes(source, 1024, "source")
 
 
 def test_an_unsafe_path_is_still_refused_and_not_retried(tmp_path):
@@ -82,29 +82,29 @@ def test_an_unsafe_path_is_still_refused_and_not_retried(tmp_path):
         pytest.skip("this system does not let the test make a symlink")
 
     with pytest.raises(PermissionError) as refused:
-        corpus_snapshot._sealed_source_bytes(link, 1024, "source")
+        corpus_snapshot.sealed_source_bytes(link, 1024, "source")
 
     assert not isinstance(refused.value, bounded_io.SourceChangedDuringRead)
 
 
 def test_a_file_written_while_it_is_sealed_is_a_changed_corpus(tmp_path, monkeypatch):
     vault, source = _source(tmp_path)
-    real_seal = corpus_snapshot._build_path_seal
+    real_seal = corpus_snapshot.build_path_seal
 
     def seal_then_write(*args, **kwargs):
         seal = real_seal(*args, **kwargs)
         source.write_bytes(source.read_bytes() + b"# written meanwhile\n")
         return seal
 
-    monkeypatch.setattr(corpus_snapshot, "_build_path_seal", seal_then_write)
+    monkeypatch.setattr(corpus_snapshot, "build_path_seal", seal_then_write)
 
     with pytest.raises(corpus_snapshot.CorpusChanged):
-        corpus_snapshot._seal_source_file(vault, source, 8)
+        corpus_snapshot.seal_source_file(vault, source, 8)
 
 
 def test_a_quiet_file_is_sealed_down_to_itself(tmp_path):
     vault, source = _source(tmp_path)
 
-    seal = corpus_snapshot._seal_source_file(vault, source, 8)
+    seal = corpus_snapshot.seal_source_file(vault, source, 8)
 
     assert [identity.path for identity in seal] == [vault, vault / "pkg", source]

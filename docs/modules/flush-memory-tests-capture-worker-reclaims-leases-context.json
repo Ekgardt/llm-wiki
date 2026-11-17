@@ -1,0 +1,141 @@
+{
+  "encoding": "o200k_base",
+  "max_tokens": 100000,
+  "serialization": "exact-duplicates/v1",
+  "files": [
+    "AGENTS.md",
+    "CLAUDE.md",
+    "docs/AGENTS.md",
+    "docs/STRUCTURE.md",
+    "docs/modules/context-bundle.md",
+    "docs/modules/context-records.md",
+    "docs/modules/context-tooling.md",
+    "docs/modules/flush-memory-tests-capture-worker-reclaims-leases-context.json",
+    "docs/modules/flush-memory-tests-capture-worker-reclaims-leases.md",
+    "docs/modules/markdown-transaction-tests-queue-v3-capture-links-helpers.md",
+    "docs/modules/model-choice.md",
+    "docs/modules/product-structure.md",
+    "docs/modules/project-governance.md",
+    "docs/modules/test-support.md",
+    "rules/development-laws.md",
+    "scripts/__init__.py",
+    "scripts/llm_wiki/__init__.py",
+    "scripts/llm_wiki/context_bundle.py",
+    "tests/__init__.py",
+    "tests/conftest.py",
+    "tests/module_context.py",
+    "tests/module_context_paths.py",
+    "tests/module_interface.py",
+    "tests/module_interface_render.py",
+    "tests/module_qualification.py",
+    "tests/module_record_context.py",
+    "tests/module_records.py",
+    "tests/queue_v3_capture_links_helpers.py",
+    "tests/shared_fixtures.py",
+    "tests/slow_machine.py",
+    "tests/test_capture_worker_reclaims_leases.py"
+  ],
+  "ownership": {
+    "files": [
+      "docs/modules/flush-memory-tests-capture-worker-reclaims-leases-context.json",
+      "docs/modules/flush-memory-tests-capture-worker-reclaims-leases.md",
+      "tests/test_capture_worker_reclaims_leases.py"
+    ]
+  },
+  "qualified_dependencies": [
+    {
+      "provider": "scripts/flush_memory.py",
+      "names": [
+        "run_capture_worker_once"
+      ],
+      "contract_sha256": "76f3a7903e32dc91b219b97e75514d640f22b10934740ff6bbb151ea70459a4c",
+      "integration_tests": [
+        "tests/test_capture_worker_reclaims_leases.py"
+      ]
+    },
+    {
+      "provider": "scripts/installed_memory_repair.py",
+      "names": [
+        "repair_installed_vault"
+      ],
+      "contract_sha256": "6ab4497d3ed56413bc24ea5ae9e993acf118980056b046072877a80df4f52a18",
+      "integration_tests": [
+        "tests/test_capture_worker_reclaims_leases.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/generation_catalog_store.py",
+      "names": [
+        "GenerationCatalog"
+      ],
+      "contract_sha256": "b18194ebe04bf988b4474379fcb5243516550d43b745a00eaed1453f7844c983",
+      "integration_tests": [
+        "tests/test_a_blocked_task_has_a_way_back.py",
+        "tests/test_a_build_in_flight_is_not_an_orphan.py",
+        "tests/test_a_capacity_refusal_does_not_corrupt_a_generation.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/model_choice.py",
+      "names": [
+        "using_root"
+      ],
+      "contract_sha256": "d45f2655cb61963e77617d1dfd7d617b134ad77cc770b59b335d0856e5d65019",
+      "integration_tests": [
+        "tests/test_capture_worker_reclaims_leases.py"
+      ]
+    },
+    {
+      "provider": "scripts/markdown_transaction.py",
+      "names": [
+        "MarkdownCoordinator",
+        "initialize_coordinator_v3_candidate"
+      ],
+      "contract_sha256": "c90f28cb4198a1b4e5731bc79a575ed3196c6d31c90e6a45902938a1a2cdabb3",
+      "integration_tests": [
+        "tests/test_capture_worker_reclaims_leases.py"
+      ]
+    },
+    {
+      "provider": "scripts/operational_ownership.py",
+      "names": [
+        "OwnershipRegistry"
+      ],
+      "contract_sha256": "70857565f7c3168344b878429913970b84a3b8fdd86fa8770afb24130457a867",
+      "integration_tests": [
+        "tests/test_capture_worker_reclaims_leases.py"
+      ]
+    },
+    {
+      "provider": "scripts/queue_core.py",
+      "names": [
+        "MemoryQueue",
+        "initialize_queue_v3_candidate"
+      ],
+      "contract_sha256": "c97a06080973ae3b314fb5227fa32342387600c7954e4de1e5bc9b7f0a575168",
+      "integration_tests": [
+        "tests/test_capture_worker_reclaims_leases.py"
+      ]
+    },
+    {
+      "provider": "scripts/reliable_memory.py",
+      "names": [
+        "validate_state_root"
+      ],
+      "contract_sha256": "8680515cd873056a7c8a36e0057d91f2f83f23c48841263697676ff91f7ff964",
+      "integration_tests": [
+        "tests/test_capture_worker_reclaims_leases.py"
+      ]
+    },
+    {
+      "provider": "scripts/repository_scope.py",
+      "names": [
+        "sanitized_git_environment"
+      ],
+      "contract_sha256": "fd550ae20761afad50b37fa3a71044a162485b0e4d4b3e2af9b5b22e143c2bec",
+      "integration_tests": [
+        "tests/test_capture_worker_reclaims_leases.py"
+      ]
+    }
+  ]
+}

@@ -14,7 +14,6 @@ import subprocess
 import sys
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
-from types import SimpleNamespace
 
 import pytest
 
@@ -22,7 +21,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 
 import evidence_reader_cache  # noqa: E402
 
-from tests.test_code_graph import _activate_graph  # noqa: E402
+from tests.code_graph_helpers import _activate_graph  # noqa: E402
 
 
 @pytest.fixture(autouse=True)
@@ -80,7 +79,7 @@ def test_a_second_query_reuses_the_validated_reader(tmp_path, monkeypatch):
     import code_graph
 
     catalog = _activate_graph(tmp_path)
-    monkeypatch.setattr(code_graph, "_generation_catalog", lambda _directory: catalog)
+    monkeypatch.setattr("llm_wiki.code_graph_generation.generation_catalog", lambda _directory: catalog)
     opened = _counting_opener(monkeypatch)
 
     first = code_graph.find_callers("callee", tmp_path)
@@ -99,10 +98,10 @@ def test_a_newly_activated_generation_is_opened_and_the_old_reader_retired(
     import code_graph
     from repository_scope import resolve_repository_scope
 
-    from tests.test_evidence_graph_recovery import _publish, _rich_graph_records
+    from tests.evidence_graph_recovery_helpers import _publish, _rich_graph_records
 
     catalog = _activate_graph(tmp_path)
-    monkeypatch.setattr(code_graph, "_generation_catalog", lambda _directory: catalog)
+    monkeypatch.setattr("llm_wiki.code_graph_generation.generation_catalog", lambda _directory: catalog)
     opened = _counting_opener(monkeypatch)
     code_graph.find_callers("callee", tmp_path)
 
@@ -124,14 +123,14 @@ def test_a_commit_refreshes_the_scope_and_keeps_the_reader(tmp_path, monkeypatch
 
     repository = _repository(tmp_path / "repository")
     catalog = _activate_graph(tmp_path, repository)
-    monkeypatch.setattr(code_graph, "_generation_catalog", lambda _directory: catalog)
+    monkeypatch.setattr("llm_wiki.code_graph_generation.generation_catalog", lambda _directory: catalog)
     opened = _counting_opener(monkeypatch)
-    before = code_graph._active_evidence_graph(repository)
+    before = code_graph.active_evidence_graph(repository)
     commit_before = before.cached_scope.git_commit
     before.close()
 
     _git(repository, "commit", "-q", "--allow-empty", "-m", "moved")
-    after = code_graph._active_evidence_graph(repository)
+    after = code_graph.active_evidence_graph(repository)
     commit_after = after.cached_scope.git_commit
     after.close()
 
@@ -146,11 +145,11 @@ def test_closing_a_lease_keeps_the_shared_reader_open(tmp_path, monkeypatch):
     import code_graph
 
     catalog = _activate_graph(tmp_path)
-    monkeypatch.setattr(code_graph, "_generation_catalog", lambda _directory: catalog)
+    monkeypatch.setattr("llm_wiki.code_graph_generation.generation_catalog", lambda _directory: catalog)
 
-    lease = code_graph._active_evidence_graph(tmp_path)
+    lease = code_graph.active_evidence_graph(tmp_path)
     lease.close()
-    again = code_graph._active_evidence_graph(tmp_path)
+    again = code_graph.active_evidence_graph(tmp_path)
     rows = again.find_nodes(name="callee", max_rows=10)
     again.close()
 
@@ -161,7 +160,7 @@ def test_readers_are_shared_across_worker_threads(tmp_path, monkeypatch):
     import code_graph
 
     catalog = _activate_graph(tmp_path)
-    monkeypatch.setattr(code_graph, "_generation_catalog", lambda _directory: catalog)
+    monkeypatch.setattr("llm_wiki.code_graph_generation.generation_catalog", lambda _directory: catalog)
     opened = _counting_opener(monkeypatch)
     code_graph.find_callers("callee", tmp_path)
 
@@ -169,91 +168,3 @@ def test_readers_are_shared_across_worker_threads(tmp_path, monkeypatch):
         answers = list(pool.map(lambda _: code_graph.find_callers("callee", tmp_path), range(8)))
 
     assert (opened, len({str(answer) for answer in answers})) == (["active"], 1)
-
-
-class _FakeReader:
-    def __init__(self, path: Path) -> None:
-        self.database_path = path
-        self.closed = False
-
-    def close(self) -> None:
-        self.closed = True
-
-
-def _scope(root: Path):
-    return SimpleNamespace(
-        checkout_root=str(root), git_common_dir=None, same_repository=lambda _other: True
-    )
-
-
-def _lease_for(key: str, tmp_path: Path, readers: dict) -> evidence_reader_cache.GraphLease:
-    return evidence_reader_cache.leased_graph(
-        (key, False),
-        catalog_path=tmp_path / "catalog.sqlite3",
-        resolve_scope=lambda: _scope(tmp_path),
-        open_graph=lambda _scope: readers.setdefault(key, _FakeReader(tmp_path / key)),
-    )
-
-
-def test_eviction_beyond_the_bound_closes_the_oldest_unheld_reader(tmp_path, monkeypatch):
-    monkeypatch.setattr(evidence_reader_cache, "MAX_ENTRIES", 1)
-    readers: dict[str, _FakeReader] = {}
-
-    _lease_for("first", tmp_path, readers).close()
-    _lease_for("second", tmp_path, readers).close()
-
-    assert (readers["first"].closed, readers["second"].closed) == (True, False)
-
-
-def test_a_held_lease_defers_the_close_until_it_is_released(tmp_path, monkeypatch):
-    monkeypatch.setattr(evidence_reader_cache, "MAX_ENTRIES", 1)
-    readers: dict[str, _FakeReader] = {}
-
-    held = _lease_for("first", tmp_path, readers)
-    _lease_for("second", tmp_path, readers).close()
-    still_open = not readers["first"].closed
-    held.close()
-
-    assert (still_open, readers["first"].closed) == (True, True)
-
-
-def test_an_idle_reader_is_closed_on_the_next_access_and_a_held_one_is_not(
-    tmp_path, monkeypatch
-):
-    # The cache's own clock, so the expectation is stated in seconds and not
-    # in the granularity of the runner's monotonic clock (15.6 ms on Windows
-    # before Python 3.13).
-    clock = [0.0]
-    monkeypatch.setattr(evidence_reader_cache, "_now", lambda: clock[0])
-    readers: dict[str, _FakeReader] = {}
-    _lease_for("idle", tmp_path, readers).close()
-    held = _lease_for("held", tmp_path, readers)
-    clock[0] = evidence_reader_cache.IDLE_SECONDS + 1.0
-
-    _lease_for("fresh", tmp_path, readers).close()
-    idle_closed, held_still_open = readers["idle"].closed, not readers["held"].closed
-    held.close()
-
-    assert (idle_closed, held_still_open, readers["held"].closed) == (True, True, True)
-
-
-def test_a_missing_generation_is_not_cached(tmp_path):
-    answer = evidence_reader_cache.leased_graph(
-        ("absent", False),
-        catalog_path=tmp_path / "catalog.sqlite3",
-        resolve_scope=lambda: _scope(tmp_path),
-        open_graph=lambda _scope: None,
-    )
-
-    assert (answer, evidence_reader_cache.cached_entries()) == (None, 0)
-
-
-@pytest.mark.parametrize(("threadsafety", "supported"), [(0, False), (1, True), (3, True)])
-def test_every_build_but_a_single_thread_one_may_lend_a_reader(
-    monkeypatch, threadsafety, supported
-):
-    # Python 3.10 reports a hard-coded 1; the lease lock makes one thread at
-    # a time the only requirement, which a multi-thread build already meets.
-    monkeypatch.setattr(evidence_reader_cache.sqlite3, "threadsafety", threadsafety)
-
-    assert evidence_reader_cache.shared_readers_supported() is supported

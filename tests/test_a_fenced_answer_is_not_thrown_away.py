@@ -49,20 +49,20 @@ BODY = json.dumps(DOCUMENT, ensure_ascii=False, indent=2)
     ids=("bare", "fenced", "prose-after", "prose-before", "prose-both"),
 )
 def test_a_document_inside_a_fence_is_read_whatever_surrounds_it(reply: str) -> None:
-    assert query_memory._parsed_answer(reply) == DOCUMENT
+    assert query_memory.parsed_answer(reply) == DOCUMENT
 
 
 def test_a_reply_with_no_json_is_still_refused() -> None:
     with pytest.raises(query_memory.GroundedQAError):
-        query_memory._parsed_answer("The designer you mean is Jessica Poole.")
+        query_memory.parsed_answer("The designer you mean is Jessica Poole.")
 
 
 def test_a_truncated_document_is_still_refused() -> None:
     """Recovering a fence is not repairing one."""
     with pytest.raises(query_memory.GroundedQAError):
-        query_memory._parsed_answer('```json\n{"status": "answ\n```')
+        query_memory.parsed_answer('```json\n{"status": "answ\n```')
 
 
 def test_an_empty_reply_is_refused() -> None:
     with pytest.raises(query_memory.GroundedQAError):
-        query_memory._parsed_answer("")
+        query_memory.parsed_answer("")

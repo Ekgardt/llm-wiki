@@ -1,0 +1,258 @@
+{
+  "encoding": "o200k_base",
+  "max_tokens": 100000,
+  "serialization": "exact-duplicates/v1",
+  "files": [
+    "AGENTS.md",
+    "CLAUDE.md",
+    "docs/AGENTS.md",
+    "docs/STRUCTURE.md",
+    "docs/modules/context-bundle.md",
+    "docs/modules/context-records.md",
+    "docs/modules/context-tooling.md",
+    "docs/modules/lsp-process-cleanup.md",
+    "docs/modules/lsp-process-limits.md",
+    "docs/modules/lsp-process-recovery-tests-lsp-recovery-and-restart-decisions-context.json",
+    "docs/modules/lsp-process-recovery-tests-lsp-recovery-and-restart-decisions.md",
+    "docs/modules/lsp-process-recovery.md",
+    "docs/modules/lsp-process-restart.md",
+    "docs/modules/model-choice.md",
+    "docs/modules/product-structure.md",
+    "docs/modules/project-governance.md",
+    "docs/modules/test-support.md",
+    "rules/development-laws.md",
+    "scripts/__init__.py",
+    "scripts/llm_wiki/__init__.py",
+    "scripts/llm_wiki/context_bundle.py",
+    "scripts/llm_wiki/lsp_process_cleanup.py",
+    "scripts/llm_wiki/lsp_process_limits.py",
+    "scripts/llm_wiki/lsp_process_recovery.py",
+    "scripts/llm_wiki/lsp_process_restart.py",
+    "tests/__init__.py",
+    "tests/conftest.py",
+    "tests/module_context.py",
+    "tests/module_context_paths.py",
+    "tests/module_interface.py",
+    "tests/module_interface_render.py",
+    "tests/module_qualification.py",
+    "tests/module_record_context.py",
+    "tests/module_records.py",
+    "tests/shared_fixtures.py",
+    "tests/slow_machine.py",
+    "tests/test_lsp_recovery_and_restart_decisions.py"
+  ],
+  "ownership": {
+    "files": [
+      "docs/modules/lsp-process-recovery-tests-lsp-recovery-and-restart-decisions-context.json",
+      "docs/modules/lsp-process-recovery-tests-lsp-recovery-and-restart-decisions.md",
+      "tests/test_lsp_recovery_and_restart_decisions.py"
+    ]
+  },
+  "qualified_dependencies": [
+    {
+      "provider": "scripts/interruption.py",
+      "names": [
+        "raise_collected_errors"
+      ],
+      "contract_sha256": "8ea18e0e75783880bf21a1eec08a29ebe9565e6cbad7348dd6edfa69fe1baf8c",
+      "integration_tests": [
+        "tests/modules/interruption/test_errors.py",
+        "tests/test_a_dead_owner_root_is_swept_when_the_next_server_starts.py",
+        "tests/test_a_document_is_opened_in_its_own_language.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/generation_catalog_store.py",
+      "names": [
+        "GenerationCatalog"
+      ],
+      "contract_sha256": "b18194ebe04bf988b4474379fcb5243516550d43b745a00eaed1453f7844c983",
+      "integration_tests": [
+        "tests/test_a_blocked_task_has_a_way_back.py",
+        "tests/test_a_build_in_flight_is_not_an_orphan.py",
+        "tests/test_a_capacity_refusal_does_not_corrupt_a_generation.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/lsp_process_failure.py",
+      "names": [
+        "drain_terminal_failures",
+        "ensure_failure_evidence",
+        "failure_evidence_required",
+        "join_owned_thread",
+        "linearize_terminal_outcome",
+        "linearize_terminal_outcome_locked",
+        "mark_terminal_failure",
+        "record_cleanup_error",
+        "remember_mandatory_terminal_failure",
+        "select_terminal_failure_locked",
+        "stop_heartbeat_owner",
+        "stop_recovery_owner",
+        "thread_never_started"
+      ],
+      "contract_sha256": "8eec05429176660dcca8434de6040ab834b70d9d2387a012fce7ad7baa50a838",
+      "integration_tests": [
+        "tests/test_a_dead_owner_root_is_swept_when_the_next_server_starts.py",
+        "tests/test_a_document_is_opened_in_its_own_language.py",
+        "tests/test_a_failed_server_leaves_its_redacted_last_words.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/lsp_process_generation.py",
+      "names": [
+        "bootstrapped_state",
+        "generation_guard_context",
+        "heartbeat_loop",
+        "next_drain_deadline",
+        "prepare_generation",
+        "publish_generation_lease",
+        "queue_expired_drain"
+      ],
+      "contract_sha256": "d748a30cac5f200f76f8ebbedef1567b61dfebe608aba04fab43487abc743edb",
+      "integration_tests": [
+        "tests/test_a_dead_owner_root_is_swept_when_the_next_server_starts.py",
+        "tests/test_a_document_is_opened_in_its_own_language.py",
+        "tests/test_a_failed_server_leaves_its_redacted_last_words.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/lsp_process_launch.py",
+      "names": [
+        "fresh_bootstrap_deadline",
+        "fresh_cleanup_deadline",
+        "generation_launch",
+        "reject_protocol_callback_lifecycle"
+      ],
+      "contract_sha256": "5c9e32be40dd7774e58a41c8f938e8b35349ead5fe4db8cff050621eb41c6fe9",
+      "integration_tests": [
+        "tests/test_a_dead_owner_root_is_swept_when_the_next_server_starts.py",
+        "tests/test_a_document_is_opened_in_its_own_language.py",
+        "tests/test_a_failed_server_leaves_its_redacted_last_words.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/lsp_process_owner.py",
+      "names": [
+        "OwnerDirectory",
+        "new_generation_nonce",
+        "validated_deadline"
+      ],
+      "contract_sha256": "a4234cdabe96723a2e6189cf5cb1463f14b4b3ee2252b51bf8a7d84940bb79a1",
+      "integration_tests": [
+        "tests/test_a_dead_owner_root_is_swept_when_the_next_server_starts.py",
+        "tests/test_a_document_is_opened_in_its_own_language.py",
+        "tests/test_a_failed_server_leaves_its_redacted_last_words.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/lsp_process_requests.py",
+      "names": [
+        "generation_has_channel"
+      ],
+      "contract_sha256": "d252066db73c5520da0197481f0d3961db23af11a87f19f84197855abffa20fc",
+      "integration_tests": [
+        "tests/test_a_dead_owner_root_is_swept_when_the_next_server_starts.py",
+        "tests/test_a_document_is_opened_in_its_own_language.py",
+        "tests/test_a_failed_server_leaves_its_redacted_last_words.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/lsp_process_state.py",
+      "names": [
+        "CleanupResult",
+        "FailureIntent",
+        "Generation",
+        "LifecycleCoordinator",
+        "LifecyclePhase",
+        "LspProcessHandle",
+        "ProcessState",
+        "StderrWake",
+        "acknowledge_failure_intent",
+        "acquire_driver",
+        "acquire_lease",
+        "acquire_lifecycle",
+        "coordinator_has_ownership",
+        "coordinator_has_ownership_locked",
+        "enqueue_failure_intent",
+        "generations_locked",
+        "mark_generation_expected_exit",
+        "notify_lifecycle_locked",
+        "pending_startup_cleanup_snapshot",
+        "release_driver",
+        "release_lease",
+        "release_lifecycle",
+        "remember_background_cleanup_error",
+        "remember_background_restart_error",
+        "require_startup_deadline",
+        "take_background_cleanup_error",
+        "unregister_startup_cleanup"
+      ],
+      "contract_sha256": "c0404d8022990f8651fdd9197157fbb0a00381a208036c376811c5c0875a2166",
+      "integration_tests": [
+        "tests/test_a_dead_owner_root_is_swept_when_the_next_server_starts.py",
+        "tests/test_a_document_is_opened_in_its_own_language.py",
+        "tests/test_a_failed_server_is_started_again.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/model_choice.py",
+      "names": [
+        "using_root"
+      ],
+      "contract_sha256": "d45f2655cb61963e77617d1dfd7d617b134ad77cc770b59b335d0856e5d65019",
+      "integration_tests": [
+        "tests/test_a_block_opens_one_entry.py",
+        "tests/test_a_blocked_task_has_a_way_back.py",
+        "tests/test_a_build_in_flight_is_not_an_orphan.py"
+      ]
+    },
+    {
+      "provider": "scripts/lsp_process_tree.py",
+      "names": [
+        "close_windows_handle"
+      ],
+      "contract_sha256": "07a9bd25187fce67c43fe4d49cdf1409cc0d77c0f4650cf31c3634b945d57069",
+      "integration_tests": [
+        "tests/modules/lsp_process_tree/test_proc_evidence.py",
+        "tests/test_a_blocked_task_has_a_way_back.py",
+        "tests/test_a_changed_task_setting_reaches_an_installed_machine.py"
+      ]
+    },
+    {
+      "provider": "scripts/lsp_protocol.py",
+      "names": [
+        "LspProtocol"
+      ],
+      "contract_sha256": "29ff245836be64bfa845eedb6f65f168acfecb1043504fae1f2b9a87952fe81a",
+      "integration_tests": [
+        "tests/test_a_dead_owner_root_is_swept_when_the_next_server_starts.py",
+        "tests/test_a_document_is_opened_in_its_own_language.py",
+        "tests/test_a_failed_server_leaves_its_redacted_last_words.py"
+      ]
+    },
+    {
+      "provider": "scripts/reliable_memory.py",
+      "names": [
+        "validate_state_root"
+      ],
+      "contract_sha256": "8680515cd873056a7c8a36e0057d91f2f83f23c48841263697676ff91f7ff964",
+      "integration_tests": [
+        "tests/test_a_backup_image_carries_what_git_does_not.py",
+        "tests/test_a_backup_snapshots_what_hooks_write.py",
+        "tests/test_a_backup_takes_what_any_installed_vault_holds.py"
+      ]
+    },
+    {
+      "provider": "scripts/repository_scope.py",
+      "names": [
+        "sanitized_git_environment"
+      ],
+      "contract_sha256": "fd550ae20761afad50b37fa3a71044a162485b0e4d4b3e2af9b5b22e143c2bec",
+      "integration_tests": [
+        "tests/modules/cleanup_worktrees/test_git_refusal.py",
+        "tests/test_a_blocked_task_has_a_way_back.py",
+        "tests/test_a_build_in_flight_is_not_an_orphan.py"
+      ]
+    }
+  ]
+}

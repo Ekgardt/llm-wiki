@@ -1,0 +1,243 @@
+{
+  "encoding": "o200k_base",
+  "max_tokens": 100000,
+  "serialization": "exact-duplicates/v1",
+  "files": [
+    "AGENTS.md",
+    "CLAUDE.md",
+    "docs/AGENTS.md",
+    "docs/STRUCTURE.md",
+    "docs/modules/context-bundle.md",
+    "docs/modules/context-records.md",
+    "docs/modules/context-tooling.md",
+    "docs/modules/doctor-integrations-context.json",
+    "docs/modules/doctor-integrations.md",
+    "docs/modules/model-choice.md",
+    "docs/modules/product-structure.md",
+    "docs/modules/project-governance.md",
+    "docs/modules/test-support.md",
+    "rules/development-laws.md",
+    "scripts/__init__.py",
+    "scripts/llm_wiki/__init__.py",
+    "scripts/llm_wiki/context_bundle.py",
+    "scripts/llm_wiki/doctor_integrations.py",
+    "tests/__init__.py",
+    "tests/conftest.py",
+    "tests/module_context.py",
+    "tests/module_context_paths.py",
+    "tests/module_interface.py",
+    "tests/module_interface_render.py",
+    "tests/module_qualification.py",
+    "tests/module_record_context.py",
+    "tests/module_records.py",
+    "tests/shared_fixtures.py",
+    "tests/slow_machine.py",
+    "tests/test_codex_probe_transport.py",
+    "tests/test_codex_rendered_hooks.py",
+    "tests/test_doctor_names_hooks_older_than_the_release.py"
+  ],
+  "ownership": {
+    "files": [
+      "docs/modules/doctor-integrations-context.json",
+      "docs/modules/doctor-integrations.md",
+      "scripts/llm_wiki/doctor_integrations.py",
+      "tests/test_codex_probe_transport.py",
+      "tests/test_codex_rendered_hooks.py",
+      "tests/test_doctor_names_hooks_older_than_the_release.py"
+    ]
+  },
+  "qualified_dependencies": [
+    {
+      "provider": "scripts/codex_config_state.py",
+      "names": [
+        "codex_mcp_config_state"
+      ],
+      "contract_sha256": "e9ec59c6dc1a4e950fe7afdd912c4e83b6fa0f7277b7e63cf8cdbc75322e04a4",
+      "integration_tests": [
+        "tests/test_codex_probe_transport.py",
+        "tests/test_codex_rendered_hooks.py",
+        "tests/test_doctor_names_hooks_older_than_the_release.py"
+      ]
+    },
+    {
+      "provider": "scripts/codex_hook_identity.py",
+      "names": [
+        "OUR_CODEX_SCRIPTS",
+        "is_our_codex_command"
+      ],
+      "contract_sha256": "01d1079b0ece818fe5260c41842201a2fd8803a407e69ccaca692f83798c0005",
+      "integration_tests": [
+        "tests/test_codex_probe_transport.py",
+        "tests/test_codex_rendered_hooks.py",
+        "tests/test_doctor_names_hooks_older_than_the_release.py"
+      ]
+    },
+    {
+      "provider": "scripts/generation_maintenance.py",
+      "names": [
+        "result",
+        "safe_kind"
+      ],
+      "contract_sha256": "e8f6812d4cd47e1e8b8d9466e1ad43733f8a73551de81b159915da12d6f219a9",
+      "integration_tests": [
+        "tests/test_codex_probe_transport.py",
+        "tests/test_codex_rendered_hooks.py",
+        "tests/test_doctor_names_hooks_older_than_the_release.py"
+      ]
+    },
+    {
+      "provider": "scripts/install_state.py",
+      "names": [
+        "InstallControlError"
+      ],
+      "contract_sha256": "a3f8e26bc2383cb5aeb82c361465122ee76199faebf8299067de7c63af981106",
+      "integration_tests": [
+        "tests/test_codex_probe_transport.py",
+        "tests/test_codex_rendered_hooks.py",
+        "tests/test_doctor_names_hooks_older_than_the_release.py"
+      ]
+    },
+    {
+      "provider": "scripts/integration_adapter.py",
+      "names": [
+        "CAPTURE_DELEGATES"
+      ],
+      "contract_sha256": "4c16021f5c16395602ea9c20448e9b0771095ebcd0401654c548252eb9ec187d",
+      "integration_tests": [
+        "tests/test_doctor_names_hooks_older_than_the_release.py"
+      ]
+    },
+    {
+      "provider": "scripts/integration_hook_config.py",
+      "names": [
+        "codex_rendered_template"
+      ],
+      "contract_sha256": "548f3cc79fd7a2aeec2e2137eabab69d98d02e67638ece182aea077180a53a0a",
+      "integration_tests": [
+        "tests/test_codex_probe_transport.py",
+        "tests/test_codex_rendered_hooks.py",
+        "tests/test_doctor_names_hooks_older_than_the_release.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/doctor_base.py",
+      "names": [
+        "MAX_CONFIG_BYTES",
+        "RUNTIME_DIRECTORIES",
+        "SCHEMA_VERSION",
+        "read_bounded_json"
+      ],
+      "contract_sha256": "9a79c05948b070fc21b591e4c80be46c770a49646f39f6af6963faf0f53f9d12",
+      "integration_tests": [
+        "tests/test_codex_probe_transport.py",
+        "tests/test_codex_rendered_hooks.py",
+        "tests/test_doctor_names_hooks_older_than_the_release.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/doctor_schedule.py",
+      "names": [
+        "PROBE_INCOMPLETE",
+        "codex_app_server_command",
+        "contains_markers"
+      ],
+      "contract_sha256": "0900088a0acba816a4f2199782b3b289ae09111bd28de98c40e7e8b639f3fcc4",
+      "integration_tests": [
+        "tests/test_codex_probe_transport.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/generation_catalog_store.py",
+      "names": [
+        "GenerationCatalog"
+      ],
+      "contract_sha256": "b18194ebe04bf988b4474379fcb5243516550d43b745a00eaed1453f7844c983",
+      "integration_tests": [
+        "tests/test_a_build_in_flight_is_not_an_orphan.py",
+        "tests/test_a_code_generation_is_not_abandoned.py",
+        "tests/test_a_flow_walk_stops_when_its_caller_has.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/install_provider_proof.py",
+      "names": [
+        "installed_codex_provider_bundle"
+      ],
+      "contract_sha256": "f367424ad7ce97a139c078973a9bc4e21d2b2fea7613c5374f314630117eedc4",
+      "integration_tests": [
+        "tests/test_codex_provider_bundle_manifest_proves_desired.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/model_choice.py",
+      "names": [
+        "using_root"
+      ],
+      "contract_sha256": "d45f2655cb61963e77617d1dfd7d617b134ad77cc770b59b335d0856e5d65019",
+      "integration_tests": [
+        "tests/test_codex_probe_transport.py",
+        "tests/test_codex_rendered_hooks.py",
+        "tests/test_doctor_names_hooks_older_than_the_release.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/monotonic_deadline.py",
+      "names": [
+        "deadline_reached"
+      ],
+      "contract_sha256": "780a284b7c14768802bc81209d0e77dcd0f7a79885a4888eaaca663eda331414",
+      "integration_tests": [
+        "tests/test_a_backup_image_carries_what_git_does_not.py",
+        "tests/test_a_backup_snapshots_what_hooks_write.py",
+        "tests/test_a_backup_takes_what_any_installed_vault_holds.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/runtime_roots.py",
+      "names": [
+        "state_root_for"
+      ],
+      "contract_sha256": "d2e6a394a08b7c76f0106a5558f12c3a65c589172b0ab07bfa32c015904e358a",
+      "integration_tests": [
+        "tests/test_a_continuation_keeps_its_original_entry.py",
+        "tests/test_a_prompt_checkpoint_does_not_outwait_its_host.py",
+        "tests/test_a_session_marker_survives_a_busy_writer.py"
+      ]
+    },
+    {
+      "provider": "scripts/lsp_process_tree.py",
+      "names": [
+        "ProcessTree",
+        "windows_pid_alive"
+      ],
+      "contract_sha256": "d872bf769db24184106c7543450609976ae111d97d957ebf454e2990f571a3a9",
+      "integration_tests": [
+        "tests/test_codex_probe_transport.py"
+      ]
+    },
+    {
+      "provider": "scripts/reliable_memory.py",
+      "names": [
+        "validate_state_root"
+      ],
+      "contract_sha256": "8680515cd873056a7c8a36e0057d91f2f83f23c48841263697676ff91f7ff964",
+      "integration_tests": [
+        "tests/test_codex_probe_transport.py",
+        "tests/test_codex_rendered_hooks.py",
+        "tests/test_doctor_names_hooks_older_than_the_release.py"
+      ]
+    },
+    {
+      "provider": "scripts/repository_scope.py",
+      "names": [
+        "sanitized_git_environment"
+      ],
+      "contract_sha256": "fd550ae20761afad50b37fa3a71044a162485b0e4d4b3e2af9b5b22e143c2bec",
+      "integration_tests": [
+        "tests/test_codex_probe_transport.py",
+        "tests/test_codex_rendered_hooks.py",
+        "tests/test_doctor_names_hooks_older_than_the_release.py"
+      ]
+    }
+  ]
+}

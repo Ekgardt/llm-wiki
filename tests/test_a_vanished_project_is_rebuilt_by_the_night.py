@@ -11,7 +11,7 @@ from __future__ import annotations
 import shutil
 import sqlite3
 import sys
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -22,11 +22,12 @@ for entry in (str(SCRIPTS_DIR), str(TESTS)):
     if entry not in sys.path:
         sys.path.insert(0, entry)
 
-import doctor  # noqa: E402
 import project_journal  # noqa: E402
 import repair_orphaned_checkpoint_names as night  # noqa: E402
+from llm_wiki import doctor_capture  # noqa: E402
 from project_journal import ProjectJournalRebuildRequired, ProjectStore  # noqa: E402
-from test_project_journal import checkpoint_event  # noqa: E402
+
+from tests.project_journal_helpers import checkpoint_event  # noqa: E402
 
 
 def _event(index: int) -> dict[str, object]:
@@ -58,7 +59,7 @@ def test_the_night_rebuilds_the_journal_and_settles_the_parked_sequence(tmp_path
 def test_a_journal_ahead_of_the_store_is_never_rebuilt_over(tmp_path: Path) -> None:
     _vault, store = _vanished_project(tmp_path)
 
-    outcome = night._rebuilt(store, ProjectJournalRebuildRequired("demo", 4, 9))
+    outcome = night.rebuilt(store, ProjectJournalRebuildRequired("demo", 4, 9))
 
     assert outcome.startswith(night.FAILED)
 
@@ -86,11 +87,11 @@ def _checkpoint_database(path: Path, attempts: list[str]) -> None:
 def test_doctor_ages_a_stuck_sequence_from_its_first_attempt(tmp_path: Path) -> None:
     path = tmp_path / "markdown-transactions-v3.sqlite3"
     _checkpoint_database(path, ["2026-09-23T21:18:00Z", "2026-09-24T03:09:20Z"])
-    now = datetime(2026, 9, 24, 3, 9, 37, tzinfo=timezone.utc)
+    now = datetime(2026, 9, 24, 3, 9, 37, tzinfo=UTC)
 
-    rows = doctor._checkpoint_head_rows(path)
+    rows = doctor_capture.checkpoint_head_rows(path)
 
-    assert (rows[0]["created_at"], doctor._checkpoint_stuck(rows[0], now)) == ("2026-09-23T21:18:00Z", True)
+    assert (rows[0]["created_at"], doctor_capture.checkpoint_stuck(rows[0], now)) == ("2026-09-23T21:18:00Z", True)
 
 
 def test_an_unreadable_checkpoint_database_is_not_ok(tmp_path: Path) -> None:
@@ -98,6 +99,6 @@ def test_an_unreadable_checkpoint_database_is_not_ok(tmp_path: Path) -> None:
     run.mkdir()
     (run / "markdown-transactions-v3.sqlite3").write_bytes(b"not a database" * 100)
 
-    check = doctor._checkpoint_check(tmp_path, datetime.now(timezone.utc))
+    check = doctor_capture.checkpoint_check(tmp_path, datetime.now(UTC))
 
     assert check["status"] == "degraded"

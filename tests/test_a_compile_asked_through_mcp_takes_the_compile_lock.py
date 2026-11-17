@@ -18,11 +18,11 @@ SCRIPTS = Path(__file__).resolve().parents[1] / "scripts"
 HELD_BY_ANOTHER = """
 import json, os, sys
 sys.path.insert(0, sys.argv[1])
-import compile_memory, maybe_compile, memory_state
-maybe_compile._write_lock(os.getppid())
+import compile_lock, compile_memory, maybe_compile, memory_state
+maybe_compile.write_lock(os.getppid())
 code = compile_memory.run_pending_compile()
 state = memory_state.load_state()
-held = maybe_compile._read_lock()["pid"] == os.getppid()
+held = compile_lock.read_lock()["pid"] == os.getppid()
 print(json.dumps([code, state.get("last_compile_status"), "last_compile_refused_reason" in state, held]))
 """
 
@@ -32,11 +32,11 @@ sys.path.insert(0, sys.argv[1])
 import compile_memory, llm_client, maybe_compile, memory_state
 seen = []
 def observed(args, **bounds):
-    seen.extend([llm_client._timeout_s(), maybe_compile._lock_state()[0], memory_state.load_state()["last_compile_status"]])
+    seen.extend([llm_client.timeout_s(), maybe_compile.lock_state()[0], memory_state.load_state()["last_compile_status"]])
     return 0
-compile_memory._run = observed
+compile_memory.run_queued_compile = observed
 code = compile_memory.run_pending_compile()
-print(json.dumps([code, *seen, maybe_compile._lock_state()[0]]))
+print(json.dumps([code, *seen, maybe_compile.lock_state()[0]]))
 """
 
 

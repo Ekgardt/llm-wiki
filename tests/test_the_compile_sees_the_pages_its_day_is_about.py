@@ -5,7 +5,12 @@ See docs/research/2026-09-25-the-compile-sees-the-pages-its-day-is-about.md.
 
 from __future__ import annotations
 
-from compile_memory import SourceSnapshot, _ContextRanking
+from compile_receipts import (
+    SourceSnapshot,
+)
+from llm_wiki.compile_pipeline_batches import (
+    ContextRanking,
+)
 
 
 def _page(name: str, text: str) -> SourceSnapshot:
@@ -22,12 +27,12 @@ PAGES = [
 def test_the_page_about_the_day_comes_first() -> None:
     day = b"Measured the cold search again: the encoder model loads in 2.3 s."
 
-    ordered = _ContextRanking(PAGES).ordered(day)
+    ordered = ContextRanking(PAGES).ordered(day)
 
     assert ordered[0].logical_path == "knowledge/notes/zz-cold-search.md"
 
 
 def test_with_nothing_in_common_the_order_is_by_path() -> None:
-    ordered = _ContextRanking(PAGES).ordered(b"")
+    ordered = ContextRanking(PAGES).ordered(b"")
 
     assert [item.logical_path for item in ordered] == sorted(item.logical_path for item in PAGES)

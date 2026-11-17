@@ -1,0 +1,171 @@
+{
+  "encoding": "o200k_base",
+  "max_tokens": 100000,
+  "serialization": "exact-duplicates/v1",
+  "files": [
+    "AGENTS.md",
+    "CLAUDE.md",
+    "docs/AGENTS.md",
+    "docs/STRUCTURE.md",
+    "docs/modules/breadcrumb-decision-tests.md",
+    "docs/modules/compile-paths.md",
+    "docs/modules/compile-pipeline-sources-tests-sizing-tool-bindings-reuse-only-owned-partition-proofs-context.json",
+    "docs/modules/compile-pipeline-sources-tests-sizing-tool-bindings-reuse-only-owned-partition-proofs.md",
+    "docs/modules/context-bundle.md",
+    "docs/modules/context-records.md",
+    "docs/modules/context-tooling.md",
+    "docs/modules/model-choice.md",
+    "docs/modules/product-structure.md",
+    "docs/modules/project-governance.md",
+    "docs/modules/script-sources.md",
+    "docs/modules/test-support.md",
+    "rules/development-laws.md",
+    "scripts/__init__.py",
+    "scripts/llm_wiki/__init__.py",
+    "scripts/llm_wiki/context_bundle.py",
+    "tests/__init__.py",
+    "tests/compile_keeps_complete_tool_lines_helpers.py",
+    "tests/compile_paths.py",
+    "tests/conftest.py",
+    "tests/module_context.py",
+    "tests/module_context_paths.py",
+    "tests/module_interface.py",
+    "tests/module_interface_render.py",
+    "tests/module_qualification.py",
+    "tests/module_record_context.py",
+    "tests/module_records.py",
+    "tests/script_sources.py",
+    "tests/shared_fixtures.py",
+    "tests/slow_machine.py",
+    "tests/test_sizing_tool_bindings_reuse_only_owned_partition_proofs.py"
+  ],
+  "ownership": {
+    "files": [
+      "docs/modules/compile-pipeline-sources-tests-sizing-tool-bindings-reuse-only-owned-partition-proofs-context.json",
+      "docs/modules/compile-pipeline-sources-tests-sizing-tool-bindings-reuse-only-owned-partition-proofs.md",
+      "tests/test_sizing_tool_bindings_reuse_only_owned_partition_proofs.py"
+    ]
+  },
+  "qualified_dependencies": [
+    {
+      "provider": "scripts/breadcrumb_decision.py",
+      "names": [
+        "journal_block"
+      ],
+      "contract_sha256": "d9c930484c634bdb57dbd893d182a3cb86d6d5b4893041035de163552c86eebc",
+      "integration_tests": [
+        "tests/test_sizing_tool_bindings_reuse_only_owned_partition_proofs.py"
+      ]
+    },
+    {
+      "provider": "scripts/compile_pipeline.py",
+      "names": [
+        "sha256_bytes"
+      ],
+      "contract_sha256": "7d34a853c5a6f1be8b00805b2e865ac2a5ca5a6fe3ca141de97ebda61d2a85cf",
+      "integration_tests": [
+        "tests/test_sizing_tool_bindings_reuse_only_owned_partition_proofs.py"
+      ]
+    },
+    {
+      "provider": "scripts/evidence_resolver.py",
+      "names": [
+        "EvidenceRef",
+        "daily_entries"
+      ],
+      "contract_sha256": "5d9b5d1c59d222e34eb23bc01601e0c992b4e64494776bde5eefd3446ca52c98",
+      "integration_tests": [
+        "tests/test_sizing_tool_bindings_reuse_only_owned_partition_proofs.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/compile_pipeline_claims.py",
+      "names": [
+        "declaring_entries"
+      ],
+      "contract_sha256": "5770552c1de4061b8c827c712c499060f349b47b2615a5c34555dbc7025f300c",
+      "integration_tests": [
+        "tests/test_sizing_tool_bindings_reuse_only_owned_partition_proofs.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/compile_pipeline_operations.py",
+      "names": [
+        "evidence_binding"
+      ],
+      "contract_sha256": "7d363eccf21492d36766bfdc846671ad7ba13010984612692d96ffff50753537",
+      "integration_tests": [
+        "tests/test_sizing_tool_bindings_reuse_only_owned_partition_proofs.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/compile_pipeline_prompts.py",
+      "names": [
+        "ByteBatchMeasure",
+        "measure_choice_resolution",
+        "source_choice_resolution"
+      ],
+      "contract_sha256": "effa6ae6fb31a52df7ba099d1f0dcaa6216ef4ea280138c5c39c9c8173d7f7b9",
+      "integration_tests": [
+        "tests/test_sizing_tool_bindings_reuse_only_owned_partition_proofs.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/compile_pipeline_sources.py",
+      "names": [
+        "CompileInputs",
+        "SOURCE_CHOICE_PARSING",
+        "daily_parts",
+        "join_partition",
+        "partition_for_join"
+      ],
+      "contract_sha256": "fe7d61a292a33597c0c9396021ff4c0c262a476a755cea7fb04e37445bac57ee",
+      "integration_tests": [
+        "tests/test_sizing_tool_bindings_reuse_only_owned_partition_proofs.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/generation_catalog_store.py",
+      "names": [
+        "GenerationCatalog"
+      ],
+      "contract_sha256": "b18194ebe04bf988b4474379fcb5243516550d43b745a00eaed1453f7844c983",
+      "integration_tests": [
+        "tests/test_a_blocked_task_has_a_way_back.py",
+        "tests/test_a_build_in_flight_is_not_an_orphan.py",
+        "tests/test_a_capacity_refusal_does_not_corrupt_a_generation.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/model_choice.py",
+      "names": [
+        "using_root"
+      ],
+      "contract_sha256": "d45f2655cb61963e77617d1dfd7d617b134ad77cc770b59b335d0856e5d65019",
+      "integration_tests": [
+        "tests/test_sizing_tool_bindings_reuse_only_owned_partition_proofs.py"
+      ]
+    },
+    {
+      "provider": "scripts/reliable_memory.py",
+      "names": [
+        "canonical_json_bytes",
+        "validate_state_root"
+      ],
+      "contract_sha256": "7bba4b535d3f0a73445fece541c540939989b41456c9a79a67f82634748be36b",
+      "integration_tests": [
+        "tests/test_sizing_tool_bindings_reuse_only_owned_partition_proofs.py"
+      ]
+    },
+    {
+      "provider": "scripts/repository_scope.py",
+      "names": [
+        "sanitized_git_environment"
+      ],
+      "contract_sha256": "fd550ae20761afad50b37fa3a71044a162485b0e4d4b3e2af9b5b22e143c2bec",
+      "integration_tests": [
+        "tests/test_sizing_tool_bindings_reuse_only_owned_partition_proofs.py"
+      ]
+    }
+  ]
+}

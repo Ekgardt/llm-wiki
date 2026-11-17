@@ -1,0 +1,234 @@
+{
+  "encoding": "o200k_base",
+  "max_tokens": 100000,
+  "serialization": "exact-duplicates/v1",
+  "files": [
+    "AGENTS.md",
+    "CLAUDE.md",
+    "docs/AGENTS.md",
+    "docs/STRUCTURE.md",
+    "docs/modules/context-bundle.md",
+    "docs/modules/context-records.md",
+    "docs/modules/context-tooling.md",
+    "docs/modules/doctor-lsp-context.json",
+    "docs/modules/doctor-lsp.md",
+    "docs/modules/formats.md",
+    "docs/modules/model-choice.md",
+    "docs/modules/product-structure.md",
+    "docs/modules/project-governance.md",
+    "docs/modules/test-support.md",
+    "docs/modules/windows-workspace.md",
+    "rules/development-laws.md",
+    "scripts/__init__.py",
+    "scripts/llm_wiki/__init__.py",
+    "scripts/llm_wiki/context_bundle.py",
+    "scripts/llm_wiki/doctor_lsp.py",
+    "scripts/llm_wiki/formats/__init__.py",
+    "scripts/windows_workspace.py",
+    "tests/__init__.py",
+    "tests/conftest.py",
+    "tests/module_context.py",
+    "tests/module_context_paths.py",
+    "tests/module_interface.py",
+    "tests/module_interface_render.py",
+    "tests/module_qualification.py",
+    "tests/module_record_context.py",
+    "tests/module_records.py",
+    "tests/shared_fixtures.py",
+    "tests/slow_machine.py"
+  ],
+  "ownership": {
+    "files": [
+      "docs/modules/doctor-lsp-context.json",
+      "docs/modules/doctor-lsp.md",
+      "scripts/llm_wiki/doctor_lsp.py"
+    ]
+  },
+  "qualified_dependencies": [
+    {
+      "provider": "scripts/generation_maintenance.py",
+      "names": [
+        "result"
+      ],
+      "contract_sha256": "1467848cc8942032104d89a329a89673f611c7faa289c1adc1dac7977cc381c4",
+      "integration_tests": [
+        "tests/test_a_build_in_flight_is_not_an_orphan.py",
+        "tests/test_a_capacity_refusal_does_not_corrupt_a_generation.py",
+        "tests/test_a_generation_snapshot_uses_the_writer_gate.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/doctor_queue.py",
+      "names": [
+        "archive_check"
+      ],
+      "contract_sha256": "ba922a9d4be3a88bcdcb5333b819caff4e58dbc15036678af696f0b93e4a12e0",
+      "integration_tests": [
+        "tests/test_adoption_producer_and_tombstone_readers.py",
+        "tests/test_doctor_bounded_scan_truth.py",
+        "tests/test_doctor_reads_a_v3_queue_owner.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/doctor_transactions.py",
+      "names": [
+        "stop_at"
+      ],
+      "contract_sha256": "360502e28e871b8d0b264c364f7bbaebeb3798c86a94ee09fd67d5ccefab50ee",
+      "integration_tests": [
+        "tests/a_prune_keeps_what_resolves_a_quarantine_helpers.py",
+        "tests/append_race_lineage_helpers.py",
+        "tests/doctor_exact_legacy_source_outcome_helpers.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/formats/canonical.py",
+      "names": [
+        "canonical_json_bytes"
+      ],
+      "contract_sha256": "679597eaf19bb4eef12b405f35978a452a06007dd565b01d3f0d04a4f1116c49",
+      "integration_tests": [
+        "tests/test_adoption_preserves_an_open_database_lock.py",
+        "tests/test_doctor.py",
+        "tests/test_memory_state_permissions.py",
+        "tests/test_process_namespace_ownership.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/generation_catalog_store.py",
+      "names": [
+        "GenerationCatalog"
+      ],
+      "contract_sha256": "b18194ebe04bf988b4474379fcb5243516550d43b745a00eaed1453f7844c983",
+      "integration_tests": [
+        "tests/test_a_blocked_task_has_a_way_back.py",
+        "tests/test_a_build_in_flight_is_not_an_orphan.py",
+        "tests/test_a_capacity_refusal_does_not_corrupt_a_generation.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/model_choice.py",
+      "names": [
+        "using_root"
+      ],
+      "contract_sha256": "d45f2655cb61963e77617d1dfd7d617b134ad77cc770b59b335d0856e5d65019",
+      "integration_tests": [
+        "tests/test_compile_execution_inventory.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/monotonic_deadline.py",
+      "names": [
+        "deadline_reached"
+      ],
+      "contract_sha256": "780a284b7c14768802bc81209d0e77dcd0f7a79885a4888eaaca663eda331414",
+      "integration_tests": [
+        "tests/test_a_backup_image_carries_what_git_does_not.py",
+        "tests/test_a_backup_snapshots_what_hooks_write.py",
+        "tests/test_a_backup_takes_what_any_installed_vault_holds.py"
+      ]
+    },
+    {
+      "provider": "scripts/markdown_transaction.py",
+      "names": [
+        "COORDINATOR_V3_CONTRACT"
+      ],
+      "contract_sha256": "a24f426a93b0c2fc14ebad8491cf73b0399a2940fe46c7c03c07cd830ebd56d7",
+      "integration_tests": [
+        "tests/a_dead_owner_is_reclaimed_without_its_marker_helpers.py",
+        "tests/a_prune_keeps_what_resolves_a_quarantine_helpers.py",
+        "tests/a_stray_candidate_after_adoption_helpers.py"
+      ]
+    },
+    {
+      "provider": "scripts/operational_ownership.py",
+      "names": [
+        "require_lease_epoch",
+        "validate_role"
+      ],
+      "contract_sha256": "0565d9c9a3aa2658071cc5668669060e2320102523b31e3a3a9e0d2d2820c125",
+      "integration_tests": [
+        "tests/operational_ownership_helpers.py",
+        "tests/test_a_breadcrumb_has_one_publication_owner.py",
+        "tests/test_a_capture_keeps_its_claim_while_it_asks.py"
+      ]
+    },
+    {
+      "provider": "scripts/process_liveness.py",
+      "names": [
+        "MAX_START_IDENTITY_CHARS",
+        "recorded_process_state"
+      ],
+      "contract_sha256": "22de006052d9e75f1e6b84778936318f7bbbeda8e529d93e26c78c363163e811",
+      "integration_tests": [
+        "tests/a_dead_owner_root_is_swept_when_the_next_server_starts_helpers.py",
+        "tests/test_a_lock_names_the_process_not_only_its_number.py",
+        "tests/test_a_native_server_copy_leaves_with_its_owner.py"
+      ]
+    },
+    {
+      "provider": "scripts/pyright_profile.py",
+      "names": [
+        "discover_pyright"
+      ],
+      "contract_sha256": "1bab7282b669c2e4bd1e47a65bb82d429a3e9fed503734ba7b1bd5bd4f230c18",
+      "integration_tests": [
+        "tests/code_kernel_helpers.py",
+        "tests/install_pyright_helpers.py",
+        "tests/pyright_profile_helpers.py"
+      ]
+    },
+    {
+      "provider": "scripts/reliability_v3_validation.py",
+      "names": [
+        "owner_matches"
+      ],
+      "contract_sha256": "f6761ca7b17b2ca96f02cee211b4937fb524768b8647cfd30bbbe4f4ca6cb9e4",
+      "integration_tests": [
+        "tests/test_a_refused_observation_keeps_its_cause.py",
+        "tests/test_capture_bundle_validation_has_one_parsing_scope.py",
+        "tests/test_compile_progress_health.py"
+      ]
+    },
+    {
+      "provider": "scripts/reliable_memory.py",
+      "names": [
+        "capture_operational_database_identity",
+        "open_readonly_operational_db",
+        "streamed_rows",
+        "validate_state_root"
+      ],
+      "contract_sha256": "f80dc54d7920b84aadaf04718ff18b73f49b4c0c054bc72b7bd69a5c5e7dfd80",
+      "integration_tests": [
+        "tests/a_publication_that_stopped_half_way_is_finished_helpers.py",
+        "tests/capture_intent_adoption_helpers.py",
+        "tests/capture_terminal_helpers.py"
+      ]
+    },
+    {
+      "provider": "scripts/repository_scope.py",
+      "names": [
+        "resolve_repository_scope",
+        "sanitized_git_environment"
+      ],
+      "contract_sha256": "983dd096d99bafff98ca0aaa2cd722477333e30eed4bfa9297d1830c635e8d90",
+      "integration_tests": [
+        "tests/code_graph_helpers.py",
+        "tests/code_navigation_helpers.py",
+        "tests/pyright_session_helpers.py"
+      ]
+    },
+    {
+      "provider": "scripts/secret_redact.py",
+      "names": [
+        "describe_error"
+      ],
+      "contract_sha256": "fb304f29eb5f060ccb0503f24561dd6ee4cfb07e2c36b130c00ad9e1c9000eaf",
+      "integration_tests": [
+        "tests/test_a_redacted_value_keeps_its_closing_markup.py",
+        "tests/test_a_worker_that_failed_lost_no_capture.py",
+        "tests/test_redaction_literal_prerequisites.py"
+      ]
+    }
+  ]
+}

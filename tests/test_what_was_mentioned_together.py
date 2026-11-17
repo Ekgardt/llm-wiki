@@ -132,11 +132,10 @@ def test_only_the_leading_page_spreads_its_neighbours(monkeypatch) -> None:
     import retrieval
 
     monkeypatch.setattr(
-        retrieval,
-        "_co_activation_table",
+        "llm_wiki.retrieval_graph.co_activation_table",
         lambda: {"alpha": {"beta": 1.0}, "gamma": {"delta": 1.0}},
     )
-    monkeypatch.setattr(retrieval, "_standing_disposition", lambda query: {})
+    monkeypatch.setattr("llm_wiki.retrieval_graph.standing_disposition", lambda query: {})
     scores = {"a": 3.0, "b": 1.0, "c": 1.0, "d": 1.0}
     meta = {
         "a": {"relative_path": "knowledge/notes/alpha.md"},
@@ -145,7 +144,7 @@ def test_only_the_leading_page_spreads_its_neighbours(monkeypatch) -> None:
         "d": {"relative_path": "knowledge/notes/delta.md"},
     }
 
-    retrieval._weigh_by_trust(scores, meta, curated_first=False, query="q")
+    retrieval.weigh_by_trust(scores, meta, curated_first=False, query="q")
 
     assert meta["b"]["alongside_weight"] > 1.0
     assert meta["d"]["alongside_weight"] == 1.0
@@ -154,12 +153,12 @@ def test_only_the_leading_page_spreads_its_neighbours(monkeypatch) -> None:
 def test_no_table_leaves_every_score_alone(monkeypatch) -> None:
     import retrieval
 
-    monkeypatch.setattr(retrieval, "_co_activation_table", lambda: {})
-    monkeypatch.setattr(retrieval, "_standing_disposition", lambda query: {})
+    monkeypatch.setattr("llm_wiki.retrieval_graph.co_activation_table", lambda: {})
+    monkeypatch.setattr("llm_wiki.retrieval_graph.standing_disposition", lambda query: {})
     scores = {"a": 2.0}
     meta = {"a": {"relative_path": "knowledge/notes/alpha.md", "authority": "ai-derived"}}
 
-    weighted = retrieval._weigh_by_trust(scores, meta, curated_first=False, query="q")
+    weighted = retrieval.weigh_by_trust(scores, meta, curated_first=False, query="q")
 
     assert weighted["a"] == 2.0
     assert meta["a"]["alongside_weight"] == 1.0

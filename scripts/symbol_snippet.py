@@ -19,23 +19,16 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
-from path_coverage import _current_sha, _freshness, contained_scope
+from path_coverage import contained_scope, current_sha
+from path_coverage import freshness as _freshness
 
-# Definitions a snippet answer shows. A display bound, not a data bound: each is a
-# source block of up to MAX_SNIPPET_LINES lines, so five already fill a screen, and
-# the answer states `resolved_nodes`, `nodes_omitted` and `snippets_omitted` so the
+# Definitions a snippet answer shows. The answer states `resolved_nodes`,
+# `nodes_omitted` and `snippets_omitted` so the
 # reader knows more exist and can qualify the name (the protocol reply bound is
 # 10 000). docs/research/2026-09-27-a-cut-says-what-it-left-out.md.
 MAX_LOCATIONS = 5
 # One source file read for a snippet; fresh positions re-read up to 4 MiB.
 MAX_FILE_BYTES = 1024 * 1024
-# Lines of one definition shown; a longer body is cut and the snippet says
-# `truncated: true`. Basis unknown: value predates measurement (about two screens).
-MAX_SNIPPET_LINES = 120
-# Symbols sharing the asked name; past 200 the answer is refused ("too many symbols
-# share this name") so the caller qualifies it instead of reading a partial list.
-# Basis unknown: value predates measurement.
-MAX_NAME_MATCHES = 200
 # `constant` joined on 2026-09-12: a module-level UPPER_CASE name is a
 # definition an operator asks for by name like any other.
 SNIPPET_KINDS = ("class", "function", "method", "constant")
@@ -63,8 +56,7 @@ def _indent_of(line: str) -> int:
 
 def _block_end(lines: list[str], start: int, indent: int) -> int:
     end = start + 1
-    limit = min(len(lines), start + MAX_SNIPPET_LINES)
-    while end < limit and _still_inside(lines[end], indent):
+    while end < len(lines) and _still_inside(lines[end], indent):
         end += 1
     return end
 
@@ -74,7 +66,7 @@ def _still_inside(line: str, indent: int) -> bool:
     return not stripped or _indent_of(line) > indent
 
 
-def _definition_lines(lines: list[str], symbol: str) -> list[int]:
+def definition_lines(lines: list[str], symbol: str) -> list[int]:
     """Every line defining `symbol`; the answer, not this reader, bounds what it shows."""
     pattern = _definition_pattern(symbol)
     return [index for index, line in enumerate(lines) if pattern.match(line)]
@@ -86,15 +78,15 @@ def _snippet_at(lines: list[str], start: int) -> dict:
         "start_line": start + 1,
         "end_line": end,
         "source": "\n".join(lines[start:end]),
-        "truncated": end - start >= MAX_SNIPPET_LINES,
+        "truncated": False,
     }
 
 
-def _file_snippets(root: Path, relative: str, symbol: str) -> list[dict]:
+def file_snippets(root: Path, relative: str, symbol: str) -> list[dict]:
     lines = _read_bounded(root / relative)
     if lines is None:
         return [{"path": relative, "error": "file unreadable or over 1 MiB"}]
-    starts = _definition_lines(lines, symbol)
+    starts = definition_lines(lines, symbol)
     if not starts:
         return [{"path": relative, "error": "definition line not found"}]
     return [
@@ -140,8 +132,6 @@ def _matching_nodes(graph, symbol: str, deadline: float) -> list[dict]:
     matched = [
         row for row in rows if _owner_matches(str(row["metadata"].get("owner", "")), wanted)
     ]
-    if len(matched) > MAX_NAME_MATCHES:
-        raise ValueError("too many symbols share this name")
     return matched
 
 
@@ -159,15 +149,14 @@ def _stored_lines(graph, relative: str, deadline: float) -> list[str] | None:
     return source["content"].decode("utf-8", errors="ignore").splitlines()
 
 
-def _exact_block(lines: list[str], occurrence: dict) -> dict:
+def exact_block(lines: list[str], occurrence: dict) -> dict:
     start = int(occurrence["line_start"])
     end = int(occurrence["line_end"])
-    cut = min(end, start + MAX_SNIPPET_LINES - 1)
     return {
         "start_line": start,
         "end_line": end,
-        "source": "\n".join(lines[start - 1 : cut]),
-        "truncated": cut < end,
+        "source": "\n".join(lines[start - 1 : end]),
+        "truncated": False,
     }
 
 
@@ -179,10 +168,10 @@ def _exact_snippet(
     if lines is None:
         return {"path": relative, "error": "stored source unavailable or over 1 MiB", **_node_fields(node)}
     recorded = str(occurrence["source_sha256"])
-    freshness = _freshness(recorded, _current_sha(scope, relative, deadline))
+    freshness = _freshness(recorded, current_sha(scope, relative, deadline))
     return {
         "path": relative,
-        **_block_for(directory, relative, lines, occurrence, node, freshness),
+        **block_for(directory, relative, lines, occurrence, node, freshness),
         **_node_fields(node),
         "precision": "exact",
         "source_sha256": recorded,
@@ -206,36 +195,35 @@ def _file_block(directory: Path, relative: str, node: dict) -> dict | None:
     if lines is None:
         return None
     start, end = span
-    cut = min(end, start + MAX_SNIPPET_LINES - 1)
     return {
         "start_line": start,
         "end_line": end,
-        "source": "\n".join(lines[start - 1 : cut]),
-        "truncated": cut < end,
+        "source": "\n".join(lines[start - 1 : end]),
+        "truncated": False,
         "lines_read_from": "file",
     }
 
 
-def _block_for(
+def block_for(
     directory: Path, relative: str, lines: list[str], occurrence: dict, node: dict, freshness: str
 ) -> dict:
     """The stored block while it still matches the file, the file's own after that.
 
     A stale generation used to answer with the line the definition sat on when it
     was indexed, and the text that used to be there. Measured 2026-09-13:
-    `_page_diverse` had moved from 3030 to 3054 and both were wrong until the
+    `page_diverse` had moved from 3030 to 3054 and both were wrong until the
     nightly pass. Research:
     `docs/research/2026-09-13-a-shorter-answer-and-a-fresher-line.md`.
     """
     if freshness != "stale":
-        return _exact_block(lines, occurrence)
+        return exact_block(lines, occurrence)
     fresh = _file_block(directory, relative, node)
-    return fresh or _exact_block(lines, occurrence)
+    return fresh or exact_block(lines, occurrence)
 
 
 def _heuristic_snippets(directory: Path, node: dict, name: str) -> list[dict]:
     relative = str(node["metadata"].get("path") or "")
-    found = _file_snippets(directory, relative, name)
+    found = file_snippets(directory, relative, name)
     for snippet in found:
         snippet.update(_node_fields(node))
         snippet["precision"] = "heuristic"
@@ -251,12 +239,9 @@ def _node_snippets(
     return [_exact_snippet(graph, directory, scope, node, occurrence, deadline)]
 
 
-def _graph_snippets(graph, directory: Path, symbol: str, deadline: float) -> dict:
+def graph_snippets(graph, directory: Path, symbol: str, deadline: float) -> dict:
     answer = {"symbol": symbol, "graph": "active_generation", "generation_id": str(graph.generation_id)}
-    try:
-        nodes = _matching_nodes(graph, symbol, deadline)
-    except ValueError:
-        return {**answer, "snippets": [], "error": "too many symbols share this name; qualify it as owner.name"}
+    nodes = _matching_nodes(graph, symbol, deadline)
     _, name = _split_symbol(symbol)
     # One scope per answer: resolving it asks git, so never once per symbol.
     scope = contained_scope(directory, deadline)
@@ -280,13 +265,13 @@ def _shown_snippets(snippets: list[dict], resolved: int, visited: int) -> dict:
 
 def snippet_for_symbol(directory: Path, symbol: str, deadline: float) -> dict:
     """Exact source blocks for every graph-known definition of the symbol."""
-    from code_graph import _active_evidence_graph
+    from llm_wiki.code_graph_generation import active_evidence_graph
 
-    graph = _active_evidence_graph(directory)
+    graph = active_evidence_graph(directory)
     if graph is None:
         return {"symbol": symbol, "snippets": [], "graph": "unavailable_or_absent"}
     try:
-        return _graph_snippets(graph, directory, symbol, deadline)
+        return graph_snippets(graph, directory, symbol, deadline)
     finally:
         graph.close()
 
@@ -306,10 +291,7 @@ def _definition_site(graph, node: dict, deadline: float) -> dict | None:
 
 def _graph_definition_report(graph, symbol: str, deadline: float) -> dict:
     """The first MAX_LOCATIONS definition sites, and how many matching nodes were left out."""
-    try:
-        nodes = _matching_nodes(graph, symbol, deadline)
-    except ValueError:
-        return {"sites": [], "sites_omitted": 0}
+    nodes = _matching_nodes(graph, symbol, deadline)
     shown = nodes[:MAX_LOCATIONS]
     sites = [_definition_site(graph, node, deadline) for node in shown]
     return {"sites": [site for site in sites if site is not None], "sites_omitted": len(nodes) - len(shown)}
@@ -326,9 +308,9 @@ def definition_report(directory: Path, symbol: str, deadline: float) -> dict:
     more definitions is never answered as if five were all
     (docs/research/2026-09-27-a-cut-says-what-it-left-out.md).
     """
-    from code_graph import _active_evidence_graph
+    from llm_wiki.code_graph_generation import active_evidence_graph
 
-    graph = _active_evidence_graph(directory)
+    graph = active_evidence_graph(directory)
     if graph is None:
         return {"sites": [], "sites_omitted": 0}
     try:

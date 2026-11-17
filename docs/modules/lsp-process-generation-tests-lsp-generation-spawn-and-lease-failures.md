@@ -1,0 +1,10 @@
+# Tests of `scripts/llm_wiki/lsp_process_generation.py`
+
+- `tests/test_lsp_generation_spawn_and_lease_failures.py`
+
+`scripts/llm_wiki/lsp_process_generation.py` itself belongs to another module: this packet carries its whole source, and these tests exercise it.
+
+The owned files and the complete maintenance context are listed in the `-context.json`
+manifest next to this guide.
+
+Run `uv run pytest tests/test_lsp_generation_spawn_and_lease_failures.py -q`.

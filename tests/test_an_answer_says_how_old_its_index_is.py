@@ -15,16 +15,20 @@ import sys
 import time
 from pathlib import Path
 
+from tests.compile_paths import point_compile_path
+
 SCRIPTS_DIR = Path(__file__).resolve().parent.parent / "scripts"
 if str(SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_DIR))
 
 import compile_memory  # noqa: E402
-import doctor  # noqa: E402
+import generation_maintenance  # noqa: E402
+import generation_search  # noqa: E402
 import lookup_mode  # noqa: E402
 import mcp_server  # noqa: E402
-import memory_state  # noqa: E402
 import search_memory  # noqa: E402
+import settings  # noqa: E402
+from llm_wiki import doctor_generation, runtime_roots  # noqa: E402
 
 
 def _vault(tmp_path: Path, monkeypatch, *, page_after_build: bool) -> str:
@@ -41,15 +45,15 @@ def _vault(tmp_path: Path, monkeypatch, *, page_after_build: bool) -> str:
     built_text = b"# Page (as built)\n" if page_after_build else page.read_bytes()
     sources = [{"relative_path": "knowledge/notes/page.md", "sha256": hashlib.sha256(built_text).hexdigest()}]
     (manifest.parent / "source-manifest.json").write_text(json.dumps({"sources": sources}), encoding="utf-8")
-    mcp_server._recorded_memory_digests.cache_clear()
+    mcp_server.recorded_memory_digests.cache_clear()
     built = time.time() - 60
     os.utime(manifest, (built, built))
     page_time = built + 30 if page_after_build else built - 30
     os.utime(page, (page_time, page_time))
     # The directory counts too since a removed page moves only it (audit B-19).
     os.utime(notes, (page_time, page_time))
-    monkeypatch.setattr(memory_state, "ROOT", root)
-    monkeypatch.setattr(memory_state, "STATE_ROOT", state)
+    monkeypatch.setenv("LLM_WIKI_ROOT", str(root))
+    monkeypatch.setenv("LLM_WIKI_STATE_ROOT", str(state))
     return generation
 
 
@@ -67,7 +71,7 @@ def _recall_data(generation: str, mode: str = "HYBRID") -> dict:
 def test_a_page_written_after_the_index_makes_the_answer_stale(tmp_path, monkeypatch):
     generation = _vault(tmp_path, monkeypatch, page_after_build=True)
 
-    components = mcp_server._recall_components(_recall_data(generation))
+    components = mcp_server.recall_components(_recall_data(generation))
 
     assert (components["lexical"]["freshness"], components["dense"]["freshness"]) == ("stale", "stale")
 
@@ -75,7 +79,7 @@ def test_a_page_written_after_the_index_makes_the_answer_stale(tmp_path, monkeyp
 def test_an_index_no_page_has_moved_past_is_fresh(tmp_path, monkeypatch):
     generation = _vault(tmp_path, monkeypatch, page_after_build=False)
 
-    components = mcp_server._recall_components(_recall_data(generation))
+    components = mcp_server.recall_components(_recall_data(generation))
 
     assert components["lexical"]["freshness"] == "fresh"
 
@@ -83,8 +87,8 @@ def test_an_index_no_page_has_moved_past_is_fresh(tmp_path, monkeypatch):
 def test_graph_is_not_reported_missing_when_the_mode_never_asked_for_it(tmp_path, monkeypatch):
     generation = _vault(tmp_path, monkeypatch, page_after_build=False)
 
-    hybrid = mcp_server._recall_components(_recall_data(generation, "HYBRID"))
-    graph = mcp_server._recall_components(_recall_data(generation, "GRAPH"))
+    hybrid = mcp_server.recall_components(_recall_data(generation, "HYBRID"))
+    graph = mcp_server.recall_components(_recall_data(generation, "GRAPH"))
 
     assert ("graph" in hybrid, graph["graph"]["freshness"]) == (False, "missing")
 
@@ -92,10 +96,10 @@ def test_graph_is_not_reported_missing_when_the_mode_never_asked_for_it(tmp_path
 def test_the_envelope_names_when_its_index_was_built(tmp_path, monkeypatch):
     generation = _vault(tmp_path, monkeypatch, page_after_build=False)
 
-    stamp = mcp_server._index_timestamp("recall", _recall_data(generation))
+    stamp = mcp_server.index_timestamp("recall", _recall_data(generation))
 
     assert (stamp is not None, stamp.endswith("+00:00")) == (True, True)
-    assert mcp_server._index_timestamp("vault_status", {}) is None
+    assert mcp_server.index_timestamp("vault_status", {}) is None
 
 
 def test_lookup_mode_reports_the_mode_search_runs_in():
@@ -108,16 +112,16 @@ def test_lookup_mode_reports_the_mode_search_runs_in():
     assert modes == ("DIRECT", "BASE", "HYBRID")
 
 
-def _facts(delta: int) -> doctor._GenerationFacts:
-    return doctor._GenerationFacts(delta, 0, 0, "current", "current", "current")
+def _facts(delta: int) -> doctor_generation.GenerationFacts:
+    return doctor_generation.GenerationFacts(delta, 0, 0, "current", "current", "current")
 
 
 def test_doctor_calls_a_generation_stale_only_when_changed_sources_waited_a_day():
-    day = doctor.GENERATION_FRESH_SECONDS
+    day = doctor_generation.GENERATION_FRESH_SECONDS
     verdicts = (
-        doctor._generation_is_stale(_facts(5), 3600, True),
-        doctor._generation_is_stale(_facts(0), day * 3, True),
-        doctor._generation_is_stale(_facts(5), day + 1, True),
+        doctor_generation.generation_is_stale(_facts(5), 3600, True),
+        doctor_generation.generation_is_stale(_facts(0), day * 3, True),
+        doctor_generation.generation_is_stale(_facts(5), day + 1, True),
     )
 
     assert verdicts == (False, False, True)
@@ -133,25 +137,59 @@ def test_a_cli_hit_shows_its_text_not_only_its_heading():
 def test_a_successful_compile_refreshes_the_generation(monkeypatch):
     calls: list[float] = []
     monkeypatch.setattr(sys, "argv", ["compile_memory.py"])
-    monkeypatch.setattr(compile_memory, "_compile_under_lock", lambda _args: 0)
+    point_compile_path(monkeypatch, "compile_under_lock", lambda _args, **_kwargs: 0)
     monkeypatch.setattr(
-        doctor,
+        generation_maintenance,
         "run_generation_maintenance",
         lambda _root, _state, *, time_budget_seconds: calls.append(time_budget_seconds) or {"status": "current"},
     )
 
-    assert (compile_memory.main(), calls) == (0, [compile_memory.POST_COMPILE_GENERATION_SECONDS])
+    assert (compile_memory.main(), calls) == (0, [settings.setting_value("generation.post_compile_seconds", runtime_roots.vault_root())])
 
 
-def test_a_failed_or_dry_compile_does_not_refresh(monkeypatch):
+def test_a_dry_compile_does_not_refresh(monkeypatch):
     calls: list[int] = []
-    monkeypatch.setattr(compile_memory, "_compile_under_lock", lambda _args: 1)
-    monkeypatch.setattr(compile_memory, "_refresh_generation_after_compile", lambda: calls.append(1))
+    point_compile_path(monkeypatch, "compile_under_lock", lambda _args, **_kwargs: 0)
+    monkeypatch.setattr(compile_memory, "refresh_generation_after_compile", lambda: calls.append(1))
 
-    monkeypatch.setattr(sys, "argv", ["compile_memory.py"])
-    failed = compile_memory.main()
-    monkeypatch.setattr(compile_memory, "_compile_under_lock", lambda _args: 0)
     monkeypatch.setattr(sys, "argv", ["compile_memory.py", "--dry-run"])
     dry = compile_memory.main()
 
-    assert (failed, dry, calls) == (1, 0, [])
+    assert (dry, calls) == (0, [])
+
+
+def _indexed_matches(state: Path, query: str) -> list[dict]:
+    import sqlite3
+
+    from llm_wiki.generation_catalog_store import GenerationCatalog
+
+    manifest = GenerationCatalog(state).get_active()
+    database = state / 'cache/evidence-graph/generations' / manifest['generation_id'] / 'search.sqlite3'
+    with sqlite3.connect(database) as connection:
+        return generation_search.generation_fts_search(
+            query, manifest, connection, scope='all', limit=10,
+            project=None, since=None, as_of=None,
+        )
+
+
+def test_partial_compile_keeps_its_error_but_published_page_is_searchable(tmp_path, monkeypatch):
+    from tests.generation_maintenance_helpers import _vault as empty_vault
+
+    root, state = empty_vault(tmp_path)
+    assert generation_maintenance.run_generation_maintenance(root, state)['status'] == 'built'
+    monkeypatch.setenv('LLM_WIKI_ROOT', str(root))
+    monkeypatch.setenv('LLM_WIKI_STATE_ROOT', str(state))
+    monkeypatch.setenv("LLM_WIKI_ROOT", str(root))
+    monkeypatch.setenv("LLM_WIKI_STATE_ROOT", str(state))
+    monkeypatch.setattr(sys, 'argv', ['compile_memory.py'])
+
+    def partially_committed(_args, **_kwargs):
+        (root / 'knowledge/notes/zirconium.md').write_text(
+            '---\ntype: concept\n---\n# Zirconium\n\nZirconium is the retained fact.\n', encoding='utf-8'
+        )
+        return 1
+
+    point_compile_path(monkeypatch, 'compile_under_lock', partially_committed)
+    assert _indexed_matches(state, 'zirconium') == []
+    assert compile_memory.main() == 1
+    assert _indexed_matches(state, 'zirconium')

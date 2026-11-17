@@ -94,7 +94,7 @@ def evidence_relative_path(day: str, session_id: str, document: bytes = b"") -> 
 PART_DIGEST_CHARS = 8
 
 
-def _free_relative_path(vault: Path, fields: Mapping[str, object], document: bytes) -> str:
+def free_relative_path(vault: Path, fields: Mapping[str, object], document: bytes) -> str:
     """The session's record path, or a sibling when that name holds another window.
 
     A second capture of one session on one day used to replace the first, and
@@ -104,7 +104,7 @@ def _free_relative_path(vault: Path, fields: Mapping[str, object], document: byt
     keeps the first name, so a replay stays one record. See
     `docs/research/2026-09-24-a-long-session-in-the-vault-is-captured.md`.
     """
-    base = evidence_relative_path(_capture_day(fields), str(fields.get("session") or ""), document)
+    base = evidence_relative_path(capture_day(fields), str(fields.get("session") or ""), document)
     existing = vault / base
     if not existing.exists() or _same_bytes(existing, document):
         return base
@@ -153,7 +153,7 @@ def _tool_target(block: Mapping[str, object]) -> str:
     return ""
 
 
-def _tool_line(block: Mapping[str, object]) -> str:
+def tool_line(block: Mapping[str, object]) -> str:
     """One line per tool call; redacted before it is cut.
 
     Cut first, a secret split at the bound no longer matched its pattern and
@@ -187,7 +187,7 @@ def _result_text(content: object) -> str:
     return "\n\n".join(text for text in texts if text)
 
 
-def _clipped_report(text: str) -> str:
+def clipped_report(text: str) -> str:
     from secret_redact import redact_secrets
 
     redacted = redact_secrets(text)
@@ -203,11 +203,11 @@ def _subagent_report(block: Mapping[str, object], subagent_calls: frozenset[str]
     text = _result_text(block.get("content"))
     if not text:
         return None
-    return f"**subagent report:** {_clipped_report(text)}"
+    return f"**subagent report:** {clipped_report(text)}"
 
 
 _RENDERERS = {
-    "tool_use": lambda block, role, calls: _tool_line(block),
+    "tool_use": lambda block, role, calls: tool_line(block),
     "text": lambda block, role, calls: _rendered_text(block, role),
     "tool_result": lambda block, role, calls: _subagent_report(block, calls),
 }
@@ -443,7 +443,7 @@ def render_transcript(text: str) -> str:
     return "\n\n".join(rendered)
 
 
-def _frontmatter(fields: Mapping[str, object]) -> str:
+def frontmatter(fields: Mapping[str, object]) -> str:
     lines = ["---", "type: raw-source", "status: active", "confidence: high"]
     # Not `user`: these are the user's words, but raw and unreviewed, so a page
     # compiled from them must still outrank them in retrieval.
@@ -485,7 +485,7 @@ def _redacted_body(body: str) -> str:
 def _document_from_body(fields: Mapping[str, object], body: str) -> str:
     session = _header_value(fields.get("session") or "unknown session")
     title = f"# Session {session}"
-    return _bounded(f"{_frontmatter(fields)}\n{title}\n\n{_redacted_body(body)}\n")
+    return _bounded(f"{frontmatter(fields)}\n{title}\n\n{_redacted_body(body)}\n")
 
 
 def _part_text(part: object) -> str | None:
@@ -512,7 +512,7 @@ def evidence_text(evidence: Sequence[object]) -> str:
     return "\n".join(parts)
 
 
-def _capture_day(fields: Mapping[str, object]) -> str:
+def capture_day(fields: Mapping[str, object]) -> str:
     captured = str(fields.get("captured_at") or "")
     return captured[:10] or "undated"
 
@@ -550,7 +550,7 @@ def write_session_evidence(
         return None
     document = _document_from_body(fields, body)
     encoded = document.encode("utf-8")
-    relative = _free_relative_path(Path(vault), fields, encoded)
+    relative = free_relative_path(Path(vault), fields, encoded)
     path = Path(vault) / relative
     try:
         _write_record(

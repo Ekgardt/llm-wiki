@@ -15,7 +15,7 @@ for directory in (TESTS.parent / "scripts", TESTS):
     if str(directory) not in sys.path:
         sys.path.insert(0, str(directory))
 
-from test_evidence_graph import _create, _records, _sha  # noqa: E402
+from tests.evidence_graph_records import create_graph, graph_records, sha  # noqa: E402
 
 EDGES = (("callee", "branch-c"), ("caller", "branch-b"), ("caller", "branch-a"), ("branch-a", "caller"))
 
@@ -43,19 +43,19 @@ def _call(number: int, source: str, target: str) -> tuple[dict, dict]:
         "source_id": "src-code",
         "byte_start": 18,
         "byte_end": 26,
-        "span_sha256": _sha(b"callee()"),
+        "span_sha256": sha(b"callee()"),
     }
     return assertion, evidence
 
 
 def _branching_graph(tmp_path: Path):
-    records = _records()
+    records = graph_records()
     records["nodes"].extend(_function(name) for name in ("branch-a", "branch-b", "branch-c"))
     for number, (source, target) in enumerate(EDGES):
         assertion, evidence = _call(number, source, target)
         records["assertions"].append(assertion)
         records["evidence"].append(evidence)
-    return _create(tmp_path, **records)
+    return create_graph(tmp_path, **records)
 
 
 def test_a_path_is_found_inside_the_work_limit_and_refused_when_the_walk_is_cut(tmp_path):

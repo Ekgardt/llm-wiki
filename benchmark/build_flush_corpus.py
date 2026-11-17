@@ -32,19 +32,51 @@ from __future__ import annotations
 
 import argparse
 import json
-import re
 import sys
-from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "scripts"))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+from flush_corpus_labels import CYRILLIC as CYRILLIC  # noqa: E402
+from flush_corpus_labels import KAPPA_MINIMUM_CASES as KAPPA_MINIMUM_CASES  # noqa: E402
+from flush_corpus_labels import KEEP_TO_TIER as KEEP_TO_TIER  # noqa: E402
+from flush_corpus_labels import KNOWN_KINDS as KNOWN_KINDS  # noqa: E402
+from flush_corpus_labels import MAX_MARKER_WORDS as MAX_MARKER_WORDS  # noqa: E402
+from flush_corpus_labels import MAX_PASSAGE_CHARS as MAX_PASSAGE_CHARS  # noqa: E402
+from flush_corpus_labels import MIN_QUOTE_WORDS as MIN_QUOTE_WORDS  # noqa: E402
+from flush_corpus_labels import SENTENCE_END as SENTENCE_END  # noqa: E402
+from flush_corpus_labels import TIERS as TIERS  # noqa: E402
+from flush_corpus_labels import WHITESPACE as WHITESPACE  # noqa: E402
+from flush_corpus_labels import QuoteReading as QuoteReading  # noqa: E402
+from flush_corpus_labels import Verdict as Verdict  # noqa: E402
+from flush_corpus_labels import _case_id as _case_id  # noqa: E402
+from flush_corpus_labels import _expected_agreement as _expected_agreement  # noqa: E402
+from flush_corpus_labels import _json_object as _json_object  # noqa: E402
+from flush_corpus_labels import _kinds_of as _kinds_of  # noqa: E402
+from flush_corpus_labels import _language as _language  # noqa: E402
+from flush_corpus_labels import _markers as _markers  # noqa: E402
+from flush_corpus_labels import _normalised as _normalised  # noqa: E402
+from flush_corpus_labels import _observed_agreement as _observed_agreement  # noqa: E402
+from flush_corpus_labels import _phrases_of as _phrases_of  # noqa: E402
+from flush_corpus_labels import _quoted_in as _quoted_in  # noqa: E402
+from flush_corpus_labels import _sentences as _sentences  # noqa: E402
+from flush_corpus_labels import _share as _share  # noqa: E402
+from flush_corpus_labels import _tier_of as _tier_of  # noqa: E402
+from flush_corpus_labels import agreement as agreement  # noqa: E402
+from flush_corpus_labels import agreement_line as agreement_line  # noqa: E402
+from flush_corpus_labels import build_case as build_case  # noqa: E402
+from flush_corpus_labels import cohens_kappa as cohens_kappa  # noqa: E402
+from flush_corpus_labels import label_status as label_status  # noqa: E402
+from flush_corpus_labels import parse_quote_reading as parse_quote_reading  # noqa: E402
+from flush_corpus_labels import parse_verdict as parse_verdict  # noqa: E402
+from flush_corpus_labels import quote_is_verbatim as quote_is_verbatim  # noqa: E402
 from flush_memory import (  # noqa: E402
     MAX_RECORD_CHARS,
-    _bounded_classifier_evidence,
-    _readable_evidence,
+    bounded_classifier_evidence,
+    readable_evidence,
 )
 from reliable_memory import validate_schema  # noqa: E402
 
@@ -101,27 +133,6 @@ Answer with JSON only, no prose, in exactly this shape:
 {transcript}
 === END ==="""
 
-KEEP_TO_TIER = {"much": "major", "little": "minor", "nothing": "ok"}
-KNOWN_KINDS = {"decision", "lesson", "command", "gotcha", "question"}
-CYRILLIC = re.compile(r"[Ѐ-ӿ]")
-WHITESPACE = re.compile(r"\s+")
-SENTENCE_END = re.compile(r"(?<=[.!?;:])\s+")
-# A sentence shorter than this is a term, not a passage, and proves nothing.
-MIN_QUOTE_WORDS = 4
-MAX_PASSAGE_CHARS = 1000
-# Below this many cases a kappa between the two readings is not reported; see
-# Bujang and Baharum (2017), cited in docs/DEVELOPER-AUDIT-STATUS-2026-08-18.md.
-KAPPA_MINIMUM_CASES = 30
-TIERS = ("major", "minor", "ok")
-
-
-@dataclass(frozen=True)
-class Verdict:
-    tier: str
-    kinds: tuple[str, ...]
-    phrases: tuple[str, ...]
-
-
 def _ask(prompt: str) -> str:
     from llm_client import call_llm
 
@@ -134,152 +145,6 @@ def _judge(transcript: str) -> str:
 
 def _quote_reader(transcript: str) -> str:
     return _ask(QUOTE_PROMPT.format(transcript=transcript))
-
-
-def _json_object(text: str) -> dict:
-    """The first JSON object in the answer; commentary after it is ignored.
-
-    One quote reading of 2026-09-23 answered its JSON and then argued with
-    itself in prose that held braces; first-to-last brace lost the case.
-    """
-    start = text.find("{")
-    if start < 0:
-        raise ValueError("judge did not answer with JSON")
-    document, _ = json.JSONDecoder().raw_decode(text[start:])
-    if not isinstance(document, dict):
-        raise ValueError("judge did not answer with a JSON object")
-    return document
-
-
-def _kinds_of(value: object) -> tuple[str, ...]:
-    if not isinstance(value, list):
-        return ()
-    named = [str(item).strip().casefold() for item in value]
-    return tuple(sorted({item for item in named if item in KNOWN_KINDS}))
-
-
-MAX_MARKER_WORDS = 5
-
-
-def _quoted_in(phrase: str, transcript: str) -> bool:
-    """A marker has to be short enough to survive a rewrite, and really present.
-
-    The metric asks whether the product's summary still contains the marker. A
-    quoted sentence answers a different question — summaries rewrite sentences —
-    so anything longer than a term is dropped rather than counted as a loss.
-    """
-    if not phrase or len(phrase.split()) > MAX_MARKER_WORDS:
-        return False
-    return phrase in transcript
-
-
-def _phrases_of(value: object, transcript: str) -> tuple[str, ...]:
-    if not isinstance(value, list):
-        return ()
-    quoted = [str(item).strip() for item in value]
-    return tuple(item for item in quoted if _quoted_in(item, transcript))[:3]
-
-
-def _tier_of(document: dict) -> str:
-    tier = KEEP_TO_TIER.get(str(document.get("keeps", "")).strip().casefold())
-    if tier is None:
-        raise ValueError("judge did not name what the session keeps")
-    return tier
-
-
-def parse_verdict(text: str, transcript: str) -> Verdict:
-    document = _json_object(text)
-    return Verdict(
-        tier=_tier_of(document),
-        kinds=_kinds_of(document.get("kinds")),
-        phrases=_phrases_of(document.get("phrases"), transcript),
-    )
-
-
-def _normalised(text: str) -> str:
-    return WHITESPACE.sub(" ", text).strip()
-
-
-def _sentences(passage: str) -> list[str]:
-    return [part.strip() for part in SENTENCE_END.split(passage) if part.strip()]
-
-
-def quote_is_verbatim(quote: str, transcript: str) -> bool:
-    """A passage counts only if the transcript really carries it.
-
-    Sentence by sentence: of seven quotes voided on 2026-09-23, four stitched
-    two real sentences that were not consecutive. A quote with one whole
-    sentence of the session in it is grounded; one with none is invented.
-    """
-    text = _normalised(transcript)
-    return any(
-        len(sentence.split()) >= MIN_QUOTE_WORDS and sentence in text
-        for sentence in _sentences(_normalised(quote))
-    )
-
-
-@dataclass(frozen=True)
-class QuoteReading:
-    tier: str | None
-    passage: str
-
-
-def parse_quote_reading(text: str, transcript: str) -> QuoteReading:
-    """The tier the quote reading supports, or None when its quote is not there.
-
-    A reading that keeps nothing needs no quote. One that keeps something must
-    show the passage; a passage the transcript does not contain is an invented
-    one, and the reading is void rather than wrong. The passage is kept so a
-    void reading can be inspected without asking the model again.
-    """
-    document = _json_object(text)
-    tier = _tier_of(document)
-    passage = _normalised(str(document.get("quote", "")))[:MAX_PASSAGE_CHARS]
-    if tier == "ok":
-        return QuoteReading(tier, passage)
-    if quote_is_verbatim(passage, transcript):
-        return QuoteReading(tier, passage)
-    return QuoteReading(None, passage)
-
-
-def _language(transcript: str) -> str:
-    if CYRILLIC.search(transcript):
-        return "RU"
-    return "EN"
-
-
-def _case_id(path: Path, index: int) -> str:
-    stem = re.sub(r"[^a-z0-9]+", "-", path.stem.casefold()).strip("-")
-    return f"live-{index:03d}-{stem[:40]}".strip("-")
-
-
-def _markers(verdict: Verdict) -> list[str]:
-    if verdict.tier == "ok":
-        return []
-    return [phrase[:200] for phrase in verdict.phrases]
-
-
-def label_status(rubric_tier: str, quote_tier: str | None) -> str:
-    if rubric_tier == quote_tier:
-        return "confirmed"
-    return "contested"
-
-
-def build_case(
-    path: Path, index: int, transcript: str, verdict: Verdict, quote: QuoteReading
-) -> dict:
-    return {
-        "case_id": _case_id(path, index),
-        "language": _language(transcript),
-        "event": "session-end",
-        "content_classes": list(verdict.kinds),
-        "transcript": transcript,
-        "expected_tier": verdict.tier,
-        "required_markers": _markers(verdict),
-        "label_provenance": "readings",
-        "label_status": label_status(verdict.tier, quote.tier),
-        "readings": {"rubric": verdict.tier, "quote": quote.tier, "passage": quote.passage},
-    }
 
 
 # The memory's own provider calls (`claude -p`, entrypoint `sdk-cli`) left a
@@ -334,7 +199,7 @@ def _excerpt(path: Path) -> str:
     raw = path.read_text(encoding="utf-8", errors="ignore")[-MAX_RECORD_CHARS:]
     if not raw.strip():
         return ""
-    return _bounded_classifier_evidence(_readable_evidence(raw)).strip()
+    return bounded_classifier_evidence(readable_evidence(raw)).strip()
 
 
 def _labelled_case(path: Path, index: int) -> dict | None:
@@ -357,43 +222,6 @@ def _reported_case(path: Path, index: int, report) -> dict | None:
     return case
 
 
-def _share(pairs: list[tuple[str, str]], index: int, tier: str) -> float:
-    return sum(1 for pair in pairs if pair[index] == tier) / len(pairs)
-
-
-def _observed_agreement(pairs: list[tuple[str, str]]) -> float:
-    return sum(1 for first, second in pairs if first == second) / len(pairs)
-
-
-def _expected_agreement(pairs: list[tuple[str, str]]) -> float:
-    return sum(_share(pairs, 0, tier) * _share(pairs, 1, tier) for tier in TIERS)
-
-
-def cohens_kappa(pairs: list[tuple[str, str]]) -> float | None:
-    """Chance-corrected agreement between the two readings' tiers."""
-    if len(pairs) < KAPPA_MINIMUM_CASES:
-        return None
-    expected = _expected_agreement(pairs)
-    if expected >= 1.0:
-        return None
-    return round((_observed_agreement(pairs) - expected) / (1.0 - expected), 3)
-
-
-def agreement(cases: list[dict]) -> dict[str, object]:
-    """How often the two readings agreed, and the chance-corrected figure."""
-    confirmed = sum(1 for case in cases if case["label_status"] == "confirmed")
-    pairs = [
-        (str(case["readings"]["rubric"]), str(case["readings"]["quote"]))
-        for case in cases
-        if case["readings"]["quote"] is not None
-    ]
-    return {
-        "confirmed": confirmed,
-        "contested": len(cases) - confirmed,
-        "kappa": cohens_kappa(pairs),
-    }
-
-
 def build_corpus(directory: Path, limit: int, report=print) -> dict:
     cases = []
     for index, path in enumerate(_transcripts(directory, limit), start=1):
@@ -405,7 +233,7 @@ def build_corpus(directory: Path, limit: int, report=print) -> dict:
         "corpus_id": "flush-classification-live",
         "schema_version": "flush-classification/v3",
         "source": str(directory),
-        "built_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+        "built_at": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
         "agreement": agreement(cases),
         "thresholds": {
             "tier_accuracy": 0.8,
@@ -424,16 +252,6 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--out", type=Path, default=DEFAULT_OUT)
     parser.add_argument("--limit", type=int, default=40)
     return parser.parse_args(argv)
-
-
-def agreement_line(corpus: dict) -> str:
-    counts = corpus["agreement"]
-    kappa = counts["kappa"]
-    figure = "not reported" if kappa is None else f"{kappa:.3f}"
-    return (
-        f"labels: {counts['confirmed']} confirmed, {counts['contested']} contested; "
-        f"readings' kappa {figure}"
-    )
 
 
 def main(argv: list[str] | None = None) -> int:

@@ -40,7 +40,7 @@ def _recorded(monkeypatch, rows: list[dict]) -> list:
     monkeypatch.setattr(
         retrieval_telemetry, "best_effort_record_events", lambda events: written.extend(events)
     )
-    retrieval._record_impressions(
+    retrieval.record_impressions(
         rows, query="who signs in", corpus_generation="g1", source_tool="search_memory"
     )
     return written
@@ -72,12 +72,12 @@ def test_a_page_decays_by_half_at_the_window_the_contract_states(page_type, days
     from okf_types import TYPE_AGE_DAYS
 
     assert TYPE_AGE_DAYS[page_type] == days
-    assert access_tracking._half_life_days(page_type) == float(days)
-    assert access_tracking._decayed(1.0, days, float(days)) == pytest.approx(0.5)
+    assert access_tracking.half_life_days(page_type) == float(days)
+    assert access_tracking.decayed(1.0, days, float(days)) == pytest.approx(0.5)
 
 
 def test_a_type_that_never_archives_never_decays() -> None:
-    kept = [access_tracking._half_life_days(name) for name in ("decision", "concept", "entity")]
+    kept = [access_tracking.half_life_days(name) for name in ("decision", "concept", "entity")]
 
     assert kept == [None, None, None]
-    assert access_tracking._decayed(0.7, 10_000, None) == 0.7
+    assert access_tracking.decayed(0.7, 10_000, None) == 0.7

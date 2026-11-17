@@ -54,7 +54,7 @@ def _check_registry_stop(
     A Python thread cannot be interrupted from outside, so an abandoned
     extraction only stops where it looks (NEW-110): the caller that stopped
     waiting also needs the walk to stop allocating. Same shape and same
-    ``TimeoutError`` as ``search_memory._check_generation_stop``.
+    ``TimeoutError`` as ``search_memory.check_generation_stop``.
     """
     if _cancel_requested(cancelled):
         raise TimeoutError("symbol registry extraction cancelled")
@@ -89,7 +89,7 @@ def own_source_file(path: Path) -> bool:
     return stat.S_ISREG(info.st_mode) and info.st_size <= LIVE_SOURCE_MAX_BYTES
 
 
-def _workspace_python_files(
+def workspace_python_files(
     directory: Path,
     deadline: float | None = None,
     cancelled: Callable[[], bool] | None = None,
@@ -224,7 +224,7 @@ def build_python_symbol_registry(
     Both default to None, so an unbounded caller behaves exactly as before.
     """
     _check_registry_stop(deadline, cancelled)
-    files = _workspace_python_files(directory, deadline, cancelled)
+    files = workspace_python_files(directory, deadline, cancelled)
     symbols, modules, reexports = _extracted_records(
         files, directory, deadline, cancelled
     )

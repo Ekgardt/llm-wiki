@@ -1,0 +1,22 @@
+{
+  "schema": "module-records/v1",
+  "source": "docs/superpowers/plans/2026-08-05-v4-reliability-queue.md",
+  "bytes": 160389,
+  "sha256": "6509e5ef3ca89dfc53c44f4826e84e5aa89f387635319d351063a08e53888cd0",
+  "records": [
+    {
+      "id": "part-1",
+      "label": "> Current implementation, 2026-09-30: non-permitting Doctor observatio",
+      "start": 0,
+      "end": 129674,
+      "sha256": "b9951964930b9fcbcad7df3808cf9708a5cbf57dcc46862b7d5e5da97f72f6ad"
+    },
+    {
+      "id": "part-2",
+      "label": "### Task 13: Implement Bounded Compile Batches And Path-Bound Receipts",
+      "start": 129674,
+      "end": 160389,
+      "sha256": "ec9b1edcb1fb88a6a7dd5b046b9d246936b8f62f17f7f7b24b991811d4c2c115"
+    }
+  ]
+}

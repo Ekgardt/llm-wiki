@@ -32,23 +32,23 @@ from pathlib import Path
 SCRIPTS_DIR = Path(__file__).resolve().parent.parent / "scripts"
 
 #: stage name -> (module, dotted attribute) of the boundary the kill interrupts.
-#: `_QueueV3CandidateReader` is the class `active_memory_queue` actually returns
+#: `QueueV3CandidateReader` is the class `active_memory_queue` actually returns
 #: on an adopted vault; wrapping `MemoryQueue` would miss the live path.
-_QUEUE = "_QueueV3CandidateReader"
+_QUEUE = "QueueV3CandidateReader"
 STAGE_TARGETS = {
-    "publish-intent": ("memory_queue", f"{_QUEUE}.index_capture_intent_pending"),
-    "intent-ready": ("memory_queue", f"{_QUEUE}.mark_capture_intent_ready"),
-    "enqueue": ("memory_queue", f"{_QUEUE}.enqueue_capture_task_replay_safe"),
-    "claim": ("memory_queue", f"{_QUEUE}.claim_capture"),
+    "publish-intent": ("queue_core", f"{_QUEUE}.index_capture_intent_pending"),
+    "intent-ready": ("queue_core", f"{_QUEUE}.mark_capture_intent_ready"),
+    "enqueue": ("queue_core", f"{_QUEUE}.enqueue_capture_task_replay_safe"),
+    "claim": ("queue_core", f"{_QUEUE}.claim_capture"),
     "record-write": ("session_evidence", "write_session_evidence"),
     "classifier": ("llm_client", "call_llm_result"),
-    "decision-publish": ("memory_queue", f"{_QUEUE}.publish_semantic_decision"),
+    "decision-publish": ("queue_core", f"{_QUEUE}.publish_semantic_decision"),
     "markdown-commit": ("markdown_transaction", "append_captured_knowledge"),
-    "terminal-publish": ("memory_queue", f"{_QUEUE}.complete_capture_terminal"),
+    "terminal-publish": ("queue_core", f"{_QUEUE}.complete_capture_terminal"),
     # The whole fenced publication: "before" dies with nothing durable yet
     # (only the host transcript holds the content), "after" dies with intent,
     # task, and released ownership — the crash the queue is built to replay.
-    "publish-return": ("integration_adapter", "_publish_capture_files_and_task"),
+    "publish-return": ("capture_publication", "publish_capture_files_and_task"),
 }
 #: stages that fire inside the producer process; the rest fire in the worker.
 PRODUCER_STAGES = frozenset(

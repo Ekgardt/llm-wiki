@@ -5,6 +5,7 @@ from __future__ import annotations
 import builtins
 import dataclasses
 import io
+import math
 import os
 import shutil
 import signal
@@ -42,71 +43,9 @@ from reliable_memory import canonical_json_bytes, sha256_bytes
 from repository_scope import resolve_repository_scope
 
 from tests.code_kernel_helpers import create_pyright_fixture
+from tests.forgotten_modules import forget_modules
+from tests.pyright_profile_helpers import _FakeNodeProcess, _FakeNodeTree, _install_fake_node
 from tests.slow_machine import SHORT_TIMEOUT
-
-
-class _FakeNodeProcess:
-    def __init__(
-        self,
-        output: bytes,
-        *,
-        returncode: int = 0,
-        times_out: bool = False,
-        persistent_timeout: bool = False,
-    ) -> None:
-        self.stdout = io.BytesIO(output)
-        self.stdin = io.BytesIO()
-        self.stderr = io.BytesIO()
-        self.returncode: int | None = None
-        self._final_returncode = returncode
-        self._times_out = times_out
-        self._persistent_timeout = persistent_timeout
-        self.killed = False
-        self.kill_calls = 0
-        self.wait_timeouts: list[float] = []
-        self.tree: _FakeNodeTree | None = None
-
-    def wait(self, timeout: float | None = None) -> int:
-        self.wait_timeouts.extend([] if timeout is None else [timeout])
-        if self._still_times_out():
-            raise subprocess.TimeoutExpired(("node", "--version"), timeout)
-        self.returncode = -9 if self.killed else self._final_returncode
-        return self.returncode
-
-    def _still_times_out(self) -> bool:
-        """A persistent timeout outlives the kill; a one-shot one does not."""
-        return self._times_out and (self._persistent_timeout or not self.killed)
-
-    def kill(self) -> None:
-        self.kill_calls += 1
-        self.killed = True
-
-
-class _FakeNodeTree:
-    def __init__(self, process: _FakeNodeProcess) -> None:
-        self.process = process
-        self.descendants_alive = False
-        self.terminate_deadlines: list[float] = []
-        self.close_calls = 0
-        self.closed = False
-
-    def has_live_descendants(self) -> bool:
-        if self.process.returncode is None:
-            raise RuntimeError("direct Node probe is still live")
-        return self.descendants_alive
-
-    def terminate(self, *, deadline: float) -> None:
-        self.terminate_deadlines.append(deadline)
-        if self.process.returncode is None:
-            self.process.kill()
-            self.process.wait(timeout=max(0.0, deadline - time.monotonic()))
-        self.descendants_alive = False
-
-    def close(self) -> None:
-        self.close_calls += 1
-        if self.process.returncode is None or self.descendants_alive:
-            raise RuntimeError("Node probe tree is still live")
-        self.closed = True
 
 
 class _CloseErrorBytesIO(io.BytesIO):
@@ -257,7 +196,7 @@ def _install_prestarted_node_program(
         lsp_process_tree.ProcessTree,
         [sys.executable, "-c", gated_program],
         cwd=tmp_path,
-        env=pyright_profile._node_environment(),
+        env=pyright_profile.node_environment(),
         deadline=time.monotonic() + 5,
     )
     ready_deadline = time.monotonic() + 5
@@ -305,7 +244,7 @@ def _signal_reaches_pid(pid: int) -> bool:
 
 def _pid_alive(pid: int) -> bool:
     if os.name == "nt":
-        return lsp_process_tree._windows_pid_alive(pid)
+        return lsp_process_tree.windows_pid_alive(pid)
     if not _signal_reaches_pid(pid):
         return False
     return not _linux_pid_is_reaped(pid) if sys.platform.startswith("linux") else True
@@ -341,7 +280,7 @@ def _trees_unowned(trees) -> bool:
 
 
 def _trees_pending_cleanup(trees) -> bool:
-    pending = pyright_profile._pending_node_probe_cleanup_snapshot()
+    pending = pyright_profile.pending_node_probe_cleanup_snapshot()
     return all(tree in pending for tree in trees)
 
 
@@ -420,31 +359,6 @@ def _stat_with(
             else file_attributes
         ),
     )
-
-
-def test_exported_pyright_configuration_is_recursively_immutable() -> None:
-    analysis = PYRIGHT_CONFIGURATION["python"]["analysis"]
-    original = analysis["logLevel"]
-    try:
-        with pytest.raises(TypeError):
-            analysis["logLevel"] = "Information"
-    finally:
-        if isinstance(analysis, dict):
-            analysis["logLevel"] = original
-    assert PYRIGHT_CONFIGURATION["python"]["analysis"]["logLevel"] == "Error"
-
-
-def test_exported_pyright_initialization_lists_are_immutable() -> None:
-    exclude = PYRIGHT_INITIALIZATION_OPTIONS["files"]["exclude"]
-    try:
-        with pytest.raises((AttributeError, TypeError)):
-            exclude.append("**/outside")
-    finally:
-        if isinstance(exclude, list):
-            exclude.clear()
-    assert thaw_pyright_profile_value(PYRIGHT_INITIALIZATION_OPTIONS) == {
-        "files": {"exclude": []}
-    }
 
 
 def test_thawed_profile_values_match_live_manifest_fingerprints() -> None:
@@ -1152,7 +1066,7 @@ def test_missing_discovery_has_no_network_process_installer_import_or_state_writ
 ) -> None:
     scope = _scope(repository)
     untouched_state = tmp_path / "untouched-state"
-    sys.modules.pop("install_pyright", None)
+    forget_modules(monkeypatch, "install_pyright")
     real_import = builtins.__import__
 
     def guarded_import(name: str, *args: object, **kwargs: object):
@@ -2595,7 +2509,7 @@ def test_node_executable_rejects_network_path_before_spawn(
     node, calls, _process = _install_node_probe(monkeypatch, tmp_path)
     monkeypatch.setattr(
         pyright_profile,
-        "_known_network_path",
+        "known_network_path",
         lambda path: path == node,
         raising=False,
     )
@@ -2658,7 +2572,7 @@ def test_node_probe_contains_descendant_inheriting_output_before_read(
     operation_seconds = 0.3
     started = time.monotonic()
 
-    result = pyright_profile._probe_node(started + operation_seconds)
+    result = pyright_profile.probe_node(started + operation_seconds)
     elapsed = time.monotonic() - started
     try:
         assert elapsed <= (
@@ -2681,7 +2595,7 @@ def _trees_are_disowned(trees) -> bool:
     """Either no tree still owns its group, or every tree is queued for cleanup."""
     if all(_tree_unowned(tree) for tree in trees):
         return True
-    pending = pyright_profile._pending_node_probe_cleanup_snapshot()
+    pending = pyright_profile.pending_node_probe_cleanup_snapshot()
     return all(tree in pending for tree in trees)
 
 
@@ -2736,7 +2650,7 @@ def test_node_probe_huge_output_kills_inheriting_descendant_within_bound(
     )
     started = time.monotonic()
 
-    result = pyright_profile._probe_node(started + 1.0)
+    result = pyright_profile.probe_node(started + 1.0)
     elapsed = time.monotonic() - started
     descendant_pid = int(pid_file.read_text(encoding="ascii"))
     try:
@@ -2798,14 +2712,14 @@ def test_node_probe_wall_bound_includes_only_one_cleanup_allowance(
         assert result.node_version is None
         assert result.node_major is None
         assert result.status == "degraded"
-        assert pyright_profile._pending_node_probe_cleanup_snapshot() == (tree,)
+        assert pyright_profile.pending_node_probe_cleanup_snapshot() == (tree,)
     finally:
         monkeypatch.setattr(process, "wait", real_wait)
         monkeypatch.setattr(tree, "terminate", real_terminate)
         process._times_out = False
-        pyright_profile._retry_node_probe_cleanups()
+        pyright_profile.retry_node_probe_cleanups()
 
-    assert pyright_profile._pending_node_probe_cleanup_snapshot() == ()
+    assert pyright_profile.pending_node_probe_cleanup_snapshot() == ()
 
 
 def test_node_blocking_output_timeout_kills_reaps_and_closes_probe(
@@ -2911,16 +2825,33 @@ def test_node_persistent_timeout_is_retained_for_bounded_retry(
     assert not process.stderr.closed
     assert result.status == "degraded"
     assert "pyright_node_probe_failed" in result.degradation_codes
-    assert pyright_profile._pending_node_probe_cleanup_snapshot() == (process.tree,)
+    assert pyright_profile.pending_node_probe_cleanup_snapshot() == (process.tree,)
 
     process._persistent_timeout = False
-    pyright_profile._retry_node_probe_cleanups()
+    pyright_profile.retry_node_probe_cleanups()
 
     assert process.returncode == -9
     assert process.stdin.closed
     assert process.stdout.closed
     assert process.stderr.closed
-    assert pyright_profile._pending_node_probe_cleanup_snapshot() == ()
+
+
+@pytest.mark.parametrize("remaining", [0.0, 0.5, 2.0])
+def test_node_probe_relative_wait_keeps_its_declared_budget(monkeypatch, remaining):
+    budget = pyright_profile.NODE_PROBE_TIMEOUT_SECONDS
+    boundary = math.ldexp(1.0, math.frexp(budget)[1] + 1)
+    clock = boundary - budget / 2
+    clock += 3 * math.ulp(clock)
+    assert (clock + budget) - clock > budget
+    monkeypatch.setattr(pyright_profile, "time", SimpleNamespace(monotonic=lambda: clock))
+    process = _FakeNodeProcess(b"v22.23.1\n")
+    run = pyright_profile.ProbeRun(_FakeNodeTree(process), clock + remaining, clock + budget)
+
+    run._wait_parent()
+
+    assert process.wait_timeouts == [min(budget, remaining)]
+    assert run.parent_exited
+    assert pyright_profile.pending_node_probe_cleanup_snapshot() == ()
 
 
 def test_node_stdout_access_error_overrides_timeout_as_probe_failure(
@@ -2955,12 +2886,12 @@ def test_node_stdout_access_error_overrides_timeout_as_probe_failure(
     assert len(process.wait_timeouts) == 2
     assert result.status == "degraded"
     assert "pyright_node_probe_failed" in result.degradation_codes
-    assert pyright_profile._pending_node_probe_cleanup_snapshot() == (process.tree,)
+    assert pyright_profile.pending_node_probe_cleanup_snapshot() == (process.tree,)
 
     monkeypatch.delattr(_FakeNodeProcess, "stdout")
-    pyright_profile._retry_node_probe_cleanups()
+    pyright_profile.retry_node_probe_cleanups()
 
-    assert pyright_profile._pending_node_probe_cleanup_snapshot() == ()
+    assert pyright_profile.pending_node_probe_cleanup_snapshot() == ()
 
 
 @pytest.mark.parametrize(
@@ -3069,13 +3000,13 @@ def test_node_timeout_cleanup_error_is_a_stable_probe_failure(
 
     assert result.status == "degraded"
     assert "pyright_node_probe_failed" in result.degradation_codes
-    assert pyright_profile._pending_node_probe_cleanup_snapshot() == (process.tree,)
+    assert pyright_profile.pending_node_probe_cleanup_snapshot() == (process.tree,)
 
     monkeypatch.setattr(process, "kill", real_kill)
-    pyright_profile._retry_node_probe_cleanups()
+    pyright_profile.retry_node_probe_cleanups()
 
     assert process.returncode == -9
-    assert pyright_profile._pending_node_probe_cleanup_snapshot() == ()
+    assert pyright_profile.pending_node_probe_cleanup_snapshot() == ()
 
 
 def test_node_stream_close_error_is_a_stable_probe_failure(
@@ -3097,12 +3028,12 @@ def test_node_stream_close_error_is_a_stable_probe_failure(
 
     assert result.status == "degraded"
     assert "pyright_node_probe_failed" in result.degradation_codes
-    assert pyright_profile._pending_node_probe_cleanup_snapshot() == (process.tree,)
+    assert pyright_profile.pending_node_probe_cleanup_snapshot() == (process.tree,)
 
     process.stdout = io.BytesIO()
-    pyright_profile._retry_node_probe_cleanups()
+    pyright_profile.retry_node_probe_cleanups()
 
-    assert pyright_profile._pending_node_probe_cleanup_snapshot() == ()
+    assert pyright_profile.pending_node_probe_cleanup_snapshot() == ()
 
 
 def test_node_oversized_completed_output_is_bounded_and_closed(
@@ -3160,32 +3091,6 @@ def test_node_probe_never_constructs_a_reader_thread(
     assert "pyright-node-version-reader" not in created_names
 
 
-def _install_fake_node(monkeypatch, tmp_path: Path, make_process) -> tuple[list, list]:
-    """A synthetic node binary whose every spawned process and tree is recorded."""
-    node = tmp_path / ("node.exe" if os.name == "nt" else "node")
-    node.write_bytes(b"synthetic node executable\n")
-    processes: list = []
-    trees: list = []
-
-    def spawn_tree(*args: object, **kwargs: object) -> _FakeNodeTree:
-        process = make_process()
-        tree = _FakeNodeTree(process)
-        process.tree = tree
-        processes.append(process)
-        trees.append(tree)
-        return tree
-
-    monkeypatch.setattr(
-        pyright_profile.shutil, "which", lambda *args, **kwargs: str(node)
-    )
-    monkeypatch.setattr(
-        pyright_profile,
-        "ProcessTree",
-        SimpleNamespace(spawn_with_deadline=spawn_tree),
-    )
-    return processes, trees
-
-
 def test_repeated_node_probes_reap_processes_and_close_output(
     monkeypatch: pytest.MonkeyPatch,
     repository: Path,
@@ -3202,7 +3107,7 @@ def test_repeated_node_probes_reap_processes_and_close_output(
     for _index in range(3):
         # Since 2026-09-17 one answer stands for the executable it was taken
         # from (finding K-B15), so each probe here is made to be a fresh one.
-        pyright_profile._NODE_PROBE_CACHE.clear()
+        pyright_profile.NODE_PROBE_CACHE.clear()
         results.append(
             discover_pyright(
                 scope,
@@ -3228,7 +3133,7 @@ def test_repeated_timed_out_real_node_probes_are_reaped_before_return(
     monkeypatch.setattr(pyright_profile, "NODE_PROBE_TIMEOUT_SECONDS", 0.05)
 
     try:
-        results = [pyright_profile._probe_node(None) for _index in range(3)]
+        results = [pyright_profile.probe_node(None) for _index in range(3)]
     finally:
         for process in processes:
             _kill_if_running(process)
@@ -3261,21 +3166,21 @@ def test_node_probe_cleanup_ownership_is_bounded_before_spawn(
                 state_root=state_root,
                 candidates=PyrightCandidates((server,), (), ()),
             )
-            for _index in range(pyright_profile._MAX_NODE_PROBE_OWNERS + 1)
+            for _index in range(pyright_profile.MAX_NODE_PROBE_OWNERS + 1)
         ]
 
-        assert len(processes) == pyright_profile._MAX_NODE_PROBE_OWNERS
-        assert pyright_profile._pending_node_probe_cleanup_snapshot() == tuple(trees)
+        assert len(processes) == pyright_profile.MAX_NODE_PROBE_OWNERS
+        assert pyright_profile.pending_node_probe_cleanup_snapshot() == tuple(trees)
         assert {
             "pyright_node_probe_failed" in result.degradation_codes
             for result in results
         } == {True}
     finally:
         _clear_persistent_timeouts(processes)
-        pyright_profile._retry_node_probe_cleanups()
+        pyright_profile.retry_node_probe_cleanups()
 
     assert {process.returncode for process in processes} == {-9}
-    assert pyright_profile._pending_node_probe_cleanup_snapshot() == ()
+    assert pyright_profile.pending_node_probe_cleanup_snapshot() == ()
 
 
 def test_node_probe_cleanup_is_registered_for_normal_interpreter_exit(
@@ -3315,9 +3220,9 @@ class Tree:
     def close(self):
         pass
 
-owner = pyright_profile._reserve_node_probe_owner()
+owner = pyright_profile.reserve_node_probe_owner()
 assert owner is not None
-pyright_profile._retain_node_probe_owner(owner, Tree())
+pyright_profile.retain_node_probe_owner(owner, Tree())
 """
 
     completed = subprocess.run(
@@ -3415,3 +3320,30 @@ def test_node_probe_is_shell_free_credentials_reduced_bounded_and_records_full_v
     assert process.stdin.closed
     assert process.stdout.closed
     assert process.stderr.closed
+
+
+def test_configuration_facade_preserves_public_object_and_pickle_identity():
+    import pickle
+
+    from llm_wiki import pyright_configuration
+
+    assert PYRIGHT_CONFIGURATION is pyright_configuration.PYRIGHT_CONFIGURATION
+    assert PYRIGHT_INITIALIZATION_OPTIONS is pyright_configuration.PYRIGHT_INITIALIZATION_OPTIONS
+    assert thaw_pyright_profile_value is pyright_configuration.thaw_pyright_profile_value
+    assert thaw_pyright_profile_value.__module__ == 'pyright_profile'
+    assert pickle.loads(pickle.dumps(thaw_pyright_profile_value)) is thaw_pyright_profile_value
+
+
+@pytest.mark.parametrize('name', [
+    'MetadataError', 'reject_duplicate_keys', 'reject_json_number', 'strict_json_object',
+    'blank_unless_newline', 'CommentStripper', 'TrailingCommaPass', 'normalize_jsonc',
+])
+def test_metadata_json_facade_preserves_objects_and_serialization(name):
+    import pickle
+
+    from llm_wiki import pyright_metadata_json
+
+    value = getattr(pyright_metadata_json, name)
+    assert getattr(pyright_profile, name) is value
+    assert value.__module__ == 'pyright_profile'
+    assert pickle.loads(pickle.dumps(value)) is value

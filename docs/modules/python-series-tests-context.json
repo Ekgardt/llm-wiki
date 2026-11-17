@@ -1,0 +1,151 @@
+{
+  "encoding": "o200k_base",
+  "max_tokens": 100000,
+  "serialization": "exact-duplicates/v1",
+  "files": [
+    "AGENTS.md",
+    "CLAUDE.md",
+    "docs/AGENTS.md",
+    "docs/STRUCTURE.md",
+    "docs/modules/context-bundle.md",
+    "docs/modules/context-records.md",
+    "docs/modules/context-tooling.md",
+    "docs/modules/model-choice.md",
+    "docs/modules/product-structure.md",
+    "docs/modules/project-governance.md",
+    "docs/modules/python-series-tests-context.json",
+    "docs/modules/python-series-tests.md",
+    "docs/modules/self-update-helpers.md",
+    "docs/modules/self-update.md",
+    "docs/modules/test-support.md",
+    "rules/development-laws.md",
+    "scripts/__init__.py",
+    "scripts/llm_wiki/__init__.py",
+    "scripts/llm_wiki/context_bundle.py",
+    "scripts/self_update.py",
+    "tests/__init__.py",
+    "tests/conftest.py",
+    "tests/module_context.py",
+    "tests/module_context_paths.py",
+    "tests/module_interface.py",
+    "tests/module_interface_render.py",
+    "tests/module_qualification.py",
+    "tests/module_record_context.py",
+    "tests/module_records.py",
+    "tests/self_update_helpers.py",
+    "tests/shared_fixtures.py",
+    "tests/slow_machine.py",
+    "tests/test_an_update_names_the_python_it_needs.py"
+  ],
+  "ownership": {
+    "files": [
+      "docs/modules/python-series-tests-context.json",
+      "docs/modules/python-series-tests.md",
+      "tests/test_an_update_names_the_python_it_needs.py"
+    ]
+  },
+  "qualified_dependencies": [
+    {
+      "provider": "scripts/llm_wiki/doctor_schedule.py",
+      "names": [
+        "update_verdict"
+      ],
+      "contract_sha256": "ab0242c40790ec06963a750b511f4e7ea2b48692c5cff17890b039b946973784",
+      "integration_tests": [
+        "tests/test_an_update_names_the_python_it_needs.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/generation_catalog_store.py",
+      "names": [
+        "GenerationCatalog"
+      ],
+      "contract_sha256": "b18194ebe04bf988b4474379fcb5243516550d43b745a00eaed1453f7844c983",
+      "integration_tests": [
+        "tests/test_a_blocked_task_has_a_way_back.py",
+        "tests/test_a_build_in_flight_is_not_an_orphan.py",
+        "tests/test_a_capacity_refusal_does_not_corrupt_a_generation.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/model_choice.py",
+      "names": [
+        "using_root"
+      ],
+      "contract_sha256": "d45f2655cb61963e77617d1dfd7d617b134ad77cc770b59b335d0856e5d65019",
+      "integration_tests": [
+        "tests/test_an_update_names_the_python_it_needs.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/step_budgets.py",
+      "names": [
+        "FETCH_TIMEOUT_SECONDS",
+        "GIT_TIMEOUT_SECONDS",
+        "PYTHON_PROBE_TIMEOUT_SECONDS",
+        "SYNC_TIMEOUT_SECONDS"
+      ],
+      "contract_sha256": "7796c7787ae7657eed4950440d5d4d8d9ce05ba1e6cb550d2b6fc2e513ff757d",
+      "integration_tests": [
+        "tests/test_an_update_names_the_python_it_needs.py"
+      ]
+    },
+    {
+      "provider": "scripts/python_series.py",
+      "names": [
+        "NIGHTLY_BOUND_PROBE",
+        "PROBE_TIMEOUT_SECONDS",
+        "SUPPORTED_SERIES",
+        "require_supported_python",
+        "site",
+        "subprocess",
+        "sys"
+      ],
+      "contract_sha256": "66c5b88899be7aba3e966074def9125b5d429694a206fe069bf9fa31141f2331",
+      "integration_tests": [
+        "tests/test_an_update_names_the_python_it_needs.py"
+      ]
+    },
+    {
+      "provider": "scripts/reliable_memory.py",
+      "names": [
+        "validate_state_root"
+      ],
+      "contract_sha256": "8680515cd873056a7c8a36e0057d91f2f83f23c48841263697676ff91f7ff964",
+      "integration_tests": [
+        "tests/test_an_update_names_the_python_it_needs.py"
+      ]
+    },
+    {
+      "provider": "scripts/repository_scope.py",
+      "names": [
+        "sanitized_git_environment"
+      ],
+      "contract_sha256": "fd550ae20761afad50b37fa3a71044a162485b0e4d4b3e2af9b5b22e143c2bec",
+      "integration_tests": [
+        "tests/test_an_update_names_the_python_it_needs.py"
+      ]
+    },
+    {
+      "provider": "scripts/scheduled_nightly.py",
+      "names": [
+        "update_record"
+      ],
+      "contract_sha256": "b9dc84ae1aded8d2791359c517182f324561048c8802f5d4d0dab90efc517f21",
+      "integration_tests": [
+        "tests/test_an_update_names_the_python_it_needs.py"
+      ]
+    },
+    {
+      "provider": "scripts/secret_redact.py",
+      "names": [
+        "describe_error",
+        "redact_secrets"
+      ],
+      "contract_sha256": "15e80f37cf33a095390aff6e606c20403cc8c70ffb9983c3c8594ba3d1d1ae67",
+      "integration_tests": [
+        "tests/test_an_update_names_the_python_it_needs.py"
+      ]
+    }
+  ]
+}

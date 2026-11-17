@@ -1,0 +1,143 @@
+{
+  "encoding": "o200k_base",
+  "max_tokens": 100000,
+  "serialization": "exact-duplicates/v1",
+  "files": [
+    "AGENTS.md",
+    "CLAUDE.md",
+    "benchmark/__init__.py",
+    "benchmark/run_conflict_resolution.py",
+    "docs/AGENTS.md",
+    "docs/STRUCTURE.md",
+    "docs/modules/benchmark-run-benchmark.md",
+    "docs/modules/context-bundle.md",
+    "docs/modules/context-records.md",
+    "docs/modules/context-tooling.md",
+    "docs/modules/model-choice.md",
+    "docs/modules/product-structure.md",
+    "docs/modules/project-governance.md",
+    "docs/modules/run-conflict-resolution-context.json",
+    "docs/modules/run-conflict-resolution.md",
+    "docs/modules/test-support.md",
+    "rules/development-laws.md",
+    "scripts/__init__.py",
+    "scripts/llm_wiki/__init__.py",
+    "scripts/llm_wiki/context_bundle.py",
+    "tests/__init__.py",
+    "tests/conftest.py",
+    "tests/module_context.py",
+    "tests/module_context_paths.py",
+    "tests/module_interface.py",
+    "tests/module_interface_render.py",
+    "tests/module_qualification.py",
+    "tests/module_record_context.py",
+    "tests/module_records.py",
+    "tests/shared_fixtures.py",
+    "tests/slow_machine.py"
+  ],
+  "ownership": {
+    "files": [
+      "benchmark/run_conflict_resolution.py",
+      "docs/modules/run-conflict-resolution-context.json",
+      "docs/modules/run-conflict-resolution.md"
+    ]
+  },
+  "qualified_dependencies": [
+    {
+      "provider": "benchmark/factconsolidation_data.py",
+      "names": [
+        "Conflict",
+        "fixture_conflicts",
+        "load_fixture"
+      ],
+      "contract_sha256": "f9a78eda60357ae5929b2ef9e820a5c99df4728e9654da01c7649f290d11f0aa",
+      "integration_tests": [
+        "tests/modules/factconsolidation_data/test_parsing.py",
+        "tests/test_conflict_resolution_stand.py"
+      ]
+    },
+    {
+      "provider": "scripts/bitemporal_claims.py",
+      "names": [
+        "BitemporalRefusal",
+        "as_of"
+      ],
+      "contract_sha256": "5a681428722362cabbc024b9c24e959070134390e017a3db41755b0a336fa523",
+      "integration_tests": [
+        "tests/test_a_less_reliable_claim_does_not_close_a_better_one.py",
+        "tests/test_bitemporal_claims.py",
+        "tests/test_conflict_resolution_stand.py"
+      ]
+    },
+    {
+      "provider": "scripts/claims.py",
+      "names": [
+        "normalize_value"
+      ],
+      "contract_sha256": "2176392cc90e9b07393480d043cef1c7732655a458e40034ab60bcfb65d89d5f",
+      "integration_tests": [
+        "tests/a_blank_line_before_the_next_section_helpers.py",
+        "tests/claim_v2_versioned_consumers_helpers.py",
+        "tests/contradiction_pipeline_helpers.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_client.py",
+      "names": [
+        "call_llm"
+      ],
+      "contract_sha256": "69cae5b47f126ae4e45e541f3401efae2ad068c9c9cac4da4a08a082d7190feb",
+      "integration_tests": [
+        "tests/capture_terminal_helpers.py",
+        "tests/codex_counts_the_prepared_invocation_helpers.py",
+        "tests/codex_planning_basis_owns_the_selected_model_helpers.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/generation_catalog_store.py",
+      "names": [
+        "GenerationCatalog"
+      ],
+      "contract_sha256": "b18194ebe04bf988b4474379fcb5243516550d43b745a00eaed1453f7844c983",
+      "integration_tests": [
+        "tests/test_a_blocked_task_has_a_way_back.py",
+        "tests/test_a_build_in_flight_is_not_an_orphan.py",
+        "tests/test_a_capacity_refusal_does_not_corrupt_a_generation.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/model_choice.py",
+      "names": [
+        "using_root"
+      ],
+      "contract_sha256": "d45f2655cb61963e77617d1dfd7d617b134ad77cc770b59b335d0856e5d65019",
+      "integration_tests": [
+        "tests/test_compile_execution_inventory.py"
+      ]
+    },
+    {
+      "provider": "scripts/reliable_memory.py",
+      "names": [
+        "validate_state_root"
+      ],
+      "contract_sha256": "8680515cd873056a7c8a36e0057d91f2f83f23c48841263697676ff91f7ff964",
+      "integration_tests": [
+        "tests/a_publication_that_stopped_half_way_is_finished_helpers.py",
+        "tests/capture_intent_adoption_helpers.py",
+        "tests/capture_terminal_helpers.py"
+      ]
+    },
+    {
+      "provider": "scripts/repository_scope.py",
+      "names": [
+        "sanitized_git_environment"
+      ],
+      "contract_sha256": "fd550ae20761afad50b37fa3a71044a162485b0e4d4b3e2af9b5b22e143c2bec",
+      "integration_tests": [
+        "tests/test_a_code_generation_is_not_abandoned.py",
+        "tests/test_a_directory_link_inside_the_checkout_does_not_refuse_the_revision.py",
+        "tests/test_a_document_is_opened_in_its_own_language.py"
+      ]
+    }
+  ]
+}

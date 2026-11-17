@@ -26,12 +26,20 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from bounded_io import read_stable_bytes  # noqa: E402
+from claims import (
+    claim_json_bytes,
+    parse_claim_ledger,
+    reflection_history_boundary,
+    reflection_history_spans,
+)
+from llm_wiki import runtime_roots  # noqa: E402
+from llm_wiki.claim_ledger import (
+    claim_ledger_match,
+)
+from llm_wiki.formats.canonical import sha256_bytes  # noqa: E402
 from markdown_transaction import mutate_knowledge, stable_operation_id  # noqa: E402
-from memory_state import ROOT  # noqa: E402
-from reliable_memory import sha256_bytes  # noqa: E402
 from secret_redact import redact_secrets  # noqa: E402
 
-KNOWLEDGE = ROOT / "knowledge" / "notes"
 SKIP_NAMES = {"index.md", "log.md", "README.md", "state.md", "context.md"}
 
 REFLECTION_THRESHOLD = 2  # Minimum Update sections to trigger reflection.
@@ -53,9 +61,9 @@ def find_reflection_candidates() -> list[dict]:
 
     Returns list of dicts: {path, slug, title, update_count}.
     """
-    if not KNOWLEDGE.exists():
+    if not runtime_roots.notes_dir().exists():
         return []
-    candidates = (_reflection_candidate(md) for md in sorted(KNOWLEDGE.rglob("*.md")))
+    candidates = (_reflection_candidate(md) for md in sorted(runtime_roots.notes_dir().rglob("*.md")))
     return [candidate for candidate in candidates if candidate is not None]
 
 
@@ -88,7 +96,7 @@ def _live_body(content: str) -> str:
     them would reflect a page again every week. See
     `docs/research/2026-09-17-a-reflection-is-checked-before-it-is-written.md`.
     """
-    return content.split(HISTORY_MARKER, 1)[0]
+    return live_and_earlier(content)[0]
 
 
 def _reflectable_text(md: Path) -> str | None:
@@ -128,27 +136,31 @@ def reflect_page(md: Path, apply: bool = False) -> str:
     if _never_rewritten(content):
         return f"  {md.stem}: a decision or a retired page is never rewritten, skipping."
     frontmatter, body = _split_frontmatter(content)
-    live, earlier = _live_and_earlier(body)
+    live, earlier = live_and_earlier(body)
     updates = UPDATE_SECTION_RE.findall(live)
-    rewritten, message = _reflection(md, live, len(updates), apply)
+    rewritten, message = reflection(md, live, len(updates), apply)
     if rewritten is None:
         return message
-    page = _reflected_page(md, frontmatter, live, rewritten) + earlier
+    page = reflected_page(md, frontmatter, live, rewritten) + earlier
     encoded = redact_secrets(page).encode("utf-8")
+    _require_preserved_reflection(page.encode("utf-8"), encoded)
     mutate_knowledge(
-        stable_operation_id("reflection", md.relative_to(ROOT).as_posix(), encoded),
+        stable_operation_id("reflection", md.relative_to(runtime_roots.vault_root()).as_posix(), encoded),
         {md: encoded},
         preconditions={
-            md.relative_to(ROOT).as_posix(): sha256_bytes(source_bytes)
+            md.relative_to(runtime_roots.vault_root()).as_posix(): sha256_bytes(source_bytes)
         },
     )
     return f"  {md.stem}: reflected ({len(updates)} updates integrated)."
 
 
-def _live_and_earlier(body: str) -> tuple[str, str]:
+def live_and_earlier(body: str) -> tuple[str, str]:
     """The body a reader sees, and the history blocks of earlier passes, kept as they are."""
-    live, marker, earlier = body.partition(HISTORY_MARKER)
-    return live, marker + earlier
+    encoded = body.encode("utf-8")
+    start = reflection_history_boundary(encoded)
+    if start is None:
+        return body, ""
+    return encoded[:start].decode("utf-8"), encoded[start:].decode("utf-8")
 
 
 def _split_frontmatter(content: str) -> tuple[str, str]:
@@ -157,7 +169,7 @@ def _split_frontmatter(content: str) -> tuple[str, str]:
     return frontmatter, content[len(frontmatter):]
 
 
-def _reflection(md: Path, body: str, update_count: int, apply: bool) -> tuple[str | None, str]:
+def reflection(md: Path, body: str, update_count: int, apply: bool) -> tuple[str | None, str]:
     """(rewritten body, "") when there is one to write; else (None, the line saying why not)."""
     if update_count < REFLECTION_THRESHOLD:
         return None, f"  {md.stem}: only {update_count} updates, skipping."
@@ -219,12 +231,52 @@ Return ONLY the rewritten markdown — no commentary.
 """
 
 
-def _reflected_page(md: Path, frontmatter: str, body: str, rewritten: str) -> str:
+def reflected_page(md: Path, frontmatter: str, body: str, rewritten: str) -> str:
     """Frontmatter, the titled rewrite, then the original body under a dated History section."""
-    new_content = frontmatter + _titled(rewritten, body, md.stem).rstrip() + "\n"
+    preserved = _preserved_claim_rewrite(body, rewritten)
+    new_content = frontmatter + _titled(preserved, body, md.stem).rstrip() + "\n"
     now = datetime.now().strftime("%Y-%m-%d")
     history_header = f"\n\n## History (pre-reflection {now})\n"
-    return new_content + f"{history_header}<details>\n<summary>Original page before reflection</summary>\n\n{body}\n\n</details>\n"
+    result = new_content + f"{history_header}<details>\n<summary>Original page before reflection</summary>\n\n{body}\n\n</details>\n"
+    parse_claim_ledger(result.encode("utf-8"))
+    return result
+
+
+def _preserved_claim_rewrite(body: str, rewritten: str) -> str:
+    original = parse_claim_ledger(body.encode("utf-8"))
+    proposed = parse_claim_ledger(rewritten.encode("utf-8"))
+    _require_unchanged_rewrite_claims(original, proposed)
+    if original is None or proposed is not None:
+        return rewritten
+    matched = claim_ledger_match(body.encode("utf-8"))
+    section = body.encode("utf-8")[matched.start():matched.end()].decode("utf-8")
+    return rewritten.rstrip() + "\n\n" + section + "\n"
+
+
+def _require_unchanged_rewrite_claims(original, proposed):
+    if proposed is None:
+        return
+    if original is None or claim_json_bytes(original) != claim_json_bytes(proposed):
+        raise ValueError("reflection rewrite changes or invents claim authority")
+
+
+def _history_fragments(content: bytes) -> tuple[bytes, ...]:
+    return tuple(content[start:end] for start, end in reflection_history_spans(content))
+
+
+def _active_claim_literal(content: bytes) -> bytes | None:
+    match = claim_ledger_match(content)
+    if match is None:
+        return None
+    return content[match.start(2):match.end(2)]
+
+
+def _require_preserved_reflection(before: bytes, after: bytes) -> None:
+    parse_claim_ledger(after)
+    if _history_fragments(before) != _history_fragments(after):
+        raise ValueError("reflection redaction changes immutable historical bytes")
+    if _active_claim_literal(before) != _active_claim_literal(after):
+        raise ValueError("reflection redaction changes preserved claim authority")
 
 
 def _titled(rewritten: str, body: str, stem: str) -> str:

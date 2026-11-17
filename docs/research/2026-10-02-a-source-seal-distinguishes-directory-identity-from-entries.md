@@ -1,0 +1,13 @@
+# A source seal distinguishes directory identity from its entries
+
+Research date: 2026-10-02. Validated candidate; installation evidence is recorded separately.
+
+The actual installed corpus collector refused the raw-session date directory after 26.15 seconds. A pass-through diagnostic preserved the original failure and showed identical device 2049, inode 789061, mode 16893 and size 1839104; only ctime changed. A separate canonical fenced generation refresh had failed with the same ancestor-traversal refusal. This is evidence of directory entry churn, not index corruption.
+
+A directory's entries can change without replacing the directory. The seal now compares directory device/inode, mode, owner/group and relevant reparse/type attributes, while source files still retain size and ctime checks. POSIX descriptor-relative no-follow traversal and pathname revalidation remain. Directory size and ctime are excluded only for directories; this is not an exception for a particular folder. Changed ownership is included explicitly rather than relying on ctime as its proxy. Windows attributes remain filtered to the existing identity-relevant bits; native Windows execution is not claimed.
+
+Primary sources checked today: [Linux stat(2)](https://man7.org/linux/man-pages/man2/stat.2.html), [Python 3.10 os metadata and descriptor interfaces](https://docs.python.org/3.10/library/os.html), [Microsoft FILE_ID_INFO](https://learn.microsoft.com/en-us/windows/win32/api/winbase/ns-winbase-file_id_info). These independent platform/runtime sources distinguish metadata from object identity. SQLite 3.45.1 and Python 3.12.3 are installed; implementation remains Python 3.10 compatible.
+
+Alternatives: retrying until a busy directory becomes quiet cannot guarantee progress; suppressing all path errors loses substitution protection; stopping independent capture would lose lifecycle evidence. Separating stable directory identity from entry changes is the smallest shared correction. Tradeoff: a newly added source may await the next generation. The snapshot remains captured evidence, not a promise of an atomic view of external editors. File changes, unsafe links/reparse paths, replacement and permission/ownership changes still refuse. No path, environment contract, runtime root, schema or tool changes.
+
+Original regressions: two failures / two passing protections. Final seven cases pass in 0.32s; related and mandatory guards 259 pass, three skipped, 86.27s. All eight changed/new functions are measured by real Lizard, maximum CCN four; Ruff and Gitleaks pass after an import-order correction. Source byte/citation checks remain. Full generation refresh and answer qualification still require installed evidence; none is inferred from unit tests.

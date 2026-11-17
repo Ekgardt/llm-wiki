@@ -3,13 +3,14 @@ from __future__ import annotations
 import copy
 import json
 import math
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
 import pytest
 from ci_timing_report import compile_report, main, nearest_rank_p95
-from reliable_memory import SchemaValidationError, validate_schema
+from ci_timing_report import junit_root as _junit_root
+from llm_wiki.formats.schema import SchemaValidationError, validate_schema
 
 ROOT = Path(__file__).resolve().parent.parent
 SCHEMA = ROOT / "benchmark" / "ci-timeout-evidence-v1.schema.json"
@@ -26,8 +27,62 @@ CLASSES = {
 FULL_CLASSES = {"linux_full", "windows_full", "macos_full"}
 
 
+@pytest.mark.parametrize("declaration", [
+    '<!DOCTYPE testsuite [<!ENTITY marker "expanded">]>',
+    '<!DOCTYPE testsuite SYSTEM "file:///nonexistent-audit-source.dtd">',
+    '<!DOCTYPE testsuite [<!ENTITY marker SYSTEM "file:///nonexistent-audit-source.txt">]>',
+])
+def test_junit_refuses_document_type_declarations(tmp_path, declaration):
+    (tmp_path / "junit.xml").write_text(
+        declaration + '<testsuite time="1"><testcase name="test_ok" time="1"/></testsuite>',
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="invalid JUnit artifact"):
+        _junit_root(tmp_path, "audit")
+
+
+def test_junit_refuses_internal_entity_expansion(tmp_path):
+    (tmp_path / "junit.xml").write_text(
+        '<!DOCTYPE testsuite [<!ENTITY marker "expanded">]>'
+        '<testsuite time="1"><testcase name="&marker;" time="1"/></testsuite>',
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="invalid JUnit artifact"):
+        _junit_root(tmp_path, "audit")
+
+
+def test_junit_refuses_utf16_document_type(tmp_path):
+    (tmp_path / "junit.xml").write_bytes(
+        ('<?xml version="1.0" encoding="UTF-16"?>'
+         '<!DOCTYPE testsuite [<!ENTITY marker "expanded">]>'
+         '<testsuite/>').encode("utf-16")
+    )
+    with pytest.raises(ValueError, match="invalid JUnit artifact"):
+        _junit_root(tmp_path, "audit")
+
+
+def test_junit_preserves_predefined_escapes(tmp_path):
+    (tmp_path / "junit.xml").write_text(
+        '<testsuite><testcase name="a &amp; b &lt; c"/></testsuite>',
+        encoding="utf-8",
+    )
+    root = _junit_root(tmp_path, "audit")
+    assert root[0].attrib["name"] == "a & b < c"
+
+
+def test_compile_report_refuses_artifact_with_document_type(tmp_path):
+    run_jsons, junit_roots = _evidence_inputs(tmp_path)
+    artifact = next(junit_roots[0].rglob("junit.xml"))
+    artifact.write_text(
+        '<!DOCTYPE testsuites [<!ENTITY marker "expanded">]>'
+        + artifact.read_text(encoding="utf-8"), encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="invalid JUnit artifact"):
+        compile_report(run_jsons, junit_roots, head_sha=HEAD_SHA)
+
+
 def _timestamp(value: datetime) -> str:
-    return value.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    return value.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 def _write_attempt(
@@ -38,7 +93,7 @@ def _write_attempt(
     head_sha: str = HEAD_SHA,
 ) -> tuple[Path, Path]:
     root.mkdir(parents=True, exist_ok=True)
-    started = datetime(2026, 8, attempt, tzinfo=timezone.utc)
+    started = datetime(2026, 8, attempt, tzinfo=UTC)
     jobs = []
     junit_root = root / f"junit-{attempt}"
     junit_root.mkdir()
@@ -103,7 +158,7 @@ def test_compile_report_emits_closed_schema_valid_evidence(tmp_path: Path) -> No
         run_jsons,
         junit_roots,
         head_sha=HEAD_SHA,
-        generated_at=datetime(2026, 8, 12, 12, 34, 56, tzinfo=timezone.utc),
+        generated_at=datetime(2026, 8, 12, 12, 34, 56, tzinfo=UTC),
     )
 
     validate_schema(report, SCHEMA)

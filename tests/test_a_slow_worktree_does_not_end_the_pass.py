@@ -11,17 +11,16 @@ import subprocess
 from pathlib import Path
 
 import pytest
-import repository_index
-import repository_worktrees
+import repository_indexing
 
 
 def test_a_timed_out_git_read_is_a_repository_refusal(tmp_path: Path, monkeypatch) -> None:
     def slow(*_args, **_options):
         raise subprocess.TimeoutExpired(["git"], 1)
 
-    monkeypatch.setattr(repository_index.subprocess, "run", slow)
+    monkeypatch.setattr(repository_indexing.subprocess, "run", slow)
 
-    with pytest.raises(repository_index.RepositoryIndexRefused) as refused:
-        repository_worktrees.require_indexing_wanted(tmp_path)
+    with pytest.raises(repository_indexing.RepositoryIndexRefused) as refused:
+        repository_indexing.require_indexing_wanted(tmp_path)
 
     assert refused.value.as_dict()["reason"] == "repository_git_probe_timed_out"

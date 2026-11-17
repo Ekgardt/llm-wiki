@@ -1,0 +1,370 @@
+{
+  "encoding": "o200k_base",
+  "max_tokens": 100000,
+  "serialization": "exact-duplicates/v1",
+  "files": [
+    "AGENTS.md",
+    "CLAUDE.md",
+    "docs/AGENTS.md",
+    "docs/STRUCTURE.md",
+    "docs/modules/context-bundle.md",
+    "docs/modules/context-records.md",
+    "docs/modules/context-tooling.md",
+    "docs/modules/lint-memory-context.json",
+    "docs/modules/lint-memory.md",
+    "docs/modules/model-choice.md",
+    "docs/modules/product-structure.md",
+    "docs/modules/project-governance.md",
+    "docs/modules/script-sources.md",
+    "docs/modules/structure-reference.md",
+    "docs/modules/test-support.md",
+    "rules/development-laws.md",
+    "scripts/__init__.py",
+    "scripts/lint_memory.py",
+    "scripts/llm_wiki/__init__.py",
+    "scripts/llm_wiki/context_bundle.py",
+    "tests/__init__.py",
+    "tests/a_short_page_still_needs_evidence_helpers.py",
+    "tests/conftest.py",
+    "tests/module_context.py",
+    "tests/module_context_paths.py",
+    "tests/module_interface.py",
+    "tests/module_interface_render.py",
+    "tests/module_qualification.py",
+    "tests/module_record_context.py",
+    "tests/module_records.py",
+    "tests/script_sources.py",
+    "tests/shared_fixtures.py",
+    "tests/slow_machine.py",
+    "tests/structure_reference.py",
+    "tests/test_a_short_page_still_needs_evidence.py",
+    "tests/test_an_error_is_not_an_answer.py",
+    "tests/test_lint_evidence.py",
+    "tests/test_lint_orphan_pages.py",
+    "tests/test_quality_guards.py",
+    "tests/test_source_evidence_label_counts_its_citation.py",
+    "tests/test_wikilinks_tracked.py"
+  ],
+  "ownership": {
+    "files": [
+      "docs/modules/lint-memory-context.json",
+      "docs/modules/lint-memory.md",
+      "scripts/lint_memory.py",
+      "tests/a_short_page_still_needs_evidence_helpers.py",
+      "tests/test_a_short_page_still_needs_evidence.py",
+      "tests/test_an_error_is_not_an_answer.py",
+      "tests/test_lint_evidence.py",
+      "tests/test_lint_orphan_pages.py",
+      "tests/test_quality_guards.py",
+      "tests/test_source_evidence_label_counts_its_citation.py",
+      "tests/test_wikilinks_tracked.py"
+    ]
+  },
+  "qualified_dependencies": [
+    {
+      "provider": "scripts/bounded_io.py",
+      "names": [
+        "read_stable_bytes"
+      ],
+      "contract_sha256": "e570dc41e0fd70556ec6a4e887a3da194bcc13122684e515651b13dd19d7d5c1",
+      "integration_tests": [
+        "tests/test_a_short_page_still_needs_evidence.py",
+        "tests/test_an_error_is_not_an_answer.py",
+        "tests/test_lint_evidence.py",
+        "tests/test_lint_orphan_pages.py",
+        "tests/test_quality_guards.py",
+        "tests/test_source_evidence_label_counts_its_citation.py",
+        "tests/test_wikilinks_tracked.py"
+      ]
+    },
+    {
+      "provider": "scripts/claim_tree_manifest.py",
+      "names": [
+        "MAX_CLAIM_TREE_FILE_BYTES",
+        "PROJECT_CLAIM_FILES"
+      ],
+      "contract_sha256": "307ff1af1c534689faf631fc79d63030c1da69ec7a412a366924ab6fd1120dfa",
+      "integration_tests": [
+        "tests/test_a_short_page_still_needs_evidence.py",
+        "tests/test_an_error_is_not_an_answer.py",
+        "tests/test_lint_evidence.py",
+        "tests/test_lint_orphan_pages.py",
+        "tests/test_quality_guards.py",
+        "tests/test_source_evidence_label_counts_its_citation.py",
+        "tests/test_wikilinks_tracked.py"
+      ]
+    },
+    {
+      "provider": "scripts/claims.py",
+      "names": [
+        "MAX_CLAIM_PAGE_BYTES",
+        "claim_json_bytes",
+        "parse_claim_ledger",
+        "validate_claim_candidate",
+        "validate_claim_record"
+      ],
+      "contract_sha256": "534cddc60be96c05e4448f951b7e20cda7b807c8fdc2239cc1e42ccb033f8809",
+      "integration_tests": [
+        "tests/test_a_short_page_still_needs_evidence.py",
+        "tests/test_an_error_is_not_an_answer.py",
+        "tests/test_lint_evidence.py",
+        "tests/test_lint_orphan_pages.py",
+        "tests/test_quality_guards.py",
+        "tests/test_source_evidence_label_counts_its_citation.py",
+        "tests/test_wikilinks_tracked.py"
+      ]
+    },
+    {
+      "provider": "scripts/contradiction_pipeline.py",
+      "names": [
+        "validated_evaluation_output"
+      ],
+      "contract_sha256": "462ce0b4591d6a74876ae7840fe302a5b6ad7b44cd3d144a5a900292079ee689",
+      "integration_tests": [
+        "tests/test_an_error_is_not_an_answer.py"
+      ]
+    },
+    {
+      "provider": "scripts/corpus_snapshot.py",
+      "names": [
+        "frontmatter_problems",
+        "read_frontmatter"
+      ],
+      "contract_sha256": "151584f53f21c8ac836d64e1f47a6a1b7ce45634999ee99735e03b9c067c8a03",
+      "integration_tests": [
+        "tests/test_a_short_page_still_needs_evidence.py",
+        "tests/test_an_error_is_not_an_answer.py",
+        "tests/test_lint_evidence.py",
+        "tests/test_lint_orphan_pages.py",
+        "tests/test_quality_guards.py",
+        "tests/test_source_evidence_label_counts_its_citation.py",
+        "tests/test_wikilinks_tracked.py"
+      ]
+    },
+    {
+      "provider": "scripts/evidence_resolver.py",
+      "names": [
+        "EvidenceResolutionError",
+        "EvidenceResolver",
+        "extract_evidence_references"
+      ],
+      "contract_sha256": "bfb45fa018e21965b15dfce94f51cd986bdf4886e08c22bfa8820f1ad6207456",
+      "integration_tests": [
+        "tests/test_a_short_page_still_needs_evidence.py",
+        "tests/test_an_error_is_not_an_answer.py",
+        "tests/test_lint_evidence.py",
+        "tests/test_lint_orphan_pages.py",
+        "tests/test_quality_guards.py",
+        "tests/test_source_evidence_label_counts_its_citation.py",
+        "tests/test_wikilinks_tracked.py"
+      ]
+    },
+    {
+      "provider": "scripts/fact_keys.py",
+      "names": [
+        "Turn",
+        "key_batch"
+      ],
+      "contract_sha256": "16d93ecd31c84fde9333f04dbbd8135acdf90b7368ea7cb01ae5dcc1b8eb968e",
+      "integration_tests": [
+        "tests/test_an_error_is_not_an_answer.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_client.py",
+      "names": [
+        "call_llm"
+      ],
+      "contract_sha256": "69cae5b47f126ae4e45e541f3401efae2ad068c9c9cac4da4a08a082d7190feb",
+      "integration_tests": [
+        "tests/test_a_short_page_still_needs_evidence.py",
+        "tests/test_an_error_is_not_an_answer.py",
+        "tests/test_lint_evidence.py",
+        "tests/test_lint_orphan_pages.py",
+        "tests/test_quality_guards.py",
+        "tests/test_source_evidence_label_counts_its_citation.py",
+        "tests/test_wikilinks_tracked.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/compile_pipeline_prompts.py",
+      "names": [
+        "parse_json_object"
+      ],
+      "contract_sha256": "3d1b7ea36250c3d2611a350d2aff5e873f34129fdc097fd3973bab59454d02fc",
+      "integration_tests": [
+        "tests/test_an_error_is_not_an_answer.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/generation_catalog_store.py",
+      "names": [
+        "GenerationCatalog"
+      ],
+      "contract_sha256": "b18194ebe04bf988b4474379fcb5243516550d43b745a00eaed1453f7844c983",
+      "integration_tests": [
+        "tests/test_a_blocked_task_has_a_way_back.py",
+        "tests/test_a_build_in_flight_is_not_an_orphan.py",
+        "tests/test_a_capacity_refusal_does_not_corrupt_a_generation.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/model_choice.py",
+      "names": [
+        "using_root"
+      ],
+      "contract_sha256": "d45f2655cb61963e77617d1dfd7d617b134ad77cc770b59b335d0856e5d65019",
+      "integration_tests": [
+        "tests/test_a_short_page_still_needs_evidence.py",
+        "tests/test_an_error_is_not_an_answer.py",
+        "tests/test_lint_evidence.py",
+        "tests/test_lint_orphan_pages.py",
+        "tests/test_quality_guards.py",
+        "tests/test_source_evidence_label_counts_its_citation.py",
+        "tests/test_wikilinks_tracked.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/runtime_roots.py",
+      "names": [
+        "daily_dir",
+        "index_file",
+        "knowledge_dir",
+        "notes_dir",
+        "reports_dir",
+        "state_root",
+        "vault_root"
+      ],
+      "contract_sha256": "d81740119e0e981356ec6231ab7fa111a3f59d035fb8bff12a86862c899d8875",
+      "integration_tests": [
+        "tests/test_a_continuation_keeps_its_original_entry.py",
+        "tests/test_a_prompt_checkpoint_does_not_outwait_its_host.py",
+        "tests/test_a_session_marker_survives_a_busy_writer.py"
+      ]
+    },
+    {
+      "provider": "scripts/mcp_server.py",
+      "names": [
+        "TOOL_INPUT_SCHEMAS"
+      ],
+      "contract_sha256": "d0a7a0bdd1a0aa13c79cd64a2bb84c52a36b36b9fbb52e2886227cc826fc05d0",
+      "integration_tests": [
+        "tests/test_quality_guards.py"
+      ]
+    },
+    {
+      "provider": "scripts/memory_state.py",
+      "names": [
+        "daily_logs",
+        "file_hash",
+        "load_state",
+        "update_state"
+      ],
+      "contract_sha256": "1b275fe161cd5a7db800adcda18a59d27a30eabad7333abb041e6b8ca8104707",
+      "integration_tests": [
+        "tests/test_a_short_page_still_needs_evidence.py",
+        "tests/test_an_error_is_not_an_answer.py",
+        "tests/test_lint_evidence.py",
+        "tests/test_lint_orphan_pages.py",
+        "tests/test_quality_guards.py",
+        "tests/test_source_evidence_label_counts_its_citation.py",
+        "tests/test_wikilinks_tracked.py"
+      ]
+    },
+    {
+      "provider": "scripts/okf_types.py",
+      "names": [
+        "CANONICAL_TYPES",
+        "INBOX_TYPES",
+        "TYPE_ALIASES"
+      ],
+      "contract_sha256": "8e2ad109500f03da9eebfe93a71fda575e6a9ac4e6331bc2a896e5934ce9ef66",
+      "integration_tests": [
+        "tests/test_a_short_page_still_needs_evidence.py",
+        "tests/test_an_error_is_not_an_answer.py",
+        "tests/test_lint_evidence.py",
+        "tests/test_lint_orphan_pages.py",
+        "tests/test_quality_guards.py",
+        "tests/test_source_evidence_label_counts_its_citation.py",
+        "tests/test_wikilinks_tracked.py"
+      ]
+    },
+    {
+      "provider": "scripts/page_status.py",
+      "names": [
+        "is_retired"
+      ],
+      "contract_sha256": "49ad14e3e3d61b1a684408df0b40800edf20acd42b02998db97d07538d63ebe8",
+      "integration_tests": [
+        "tests/test_a_short_page_still_needs_evidence.py",
+        "tests/test_an_error_is_not_an_answer.py",
+        "tests/test_lint_evidence.py",
+        "tests/test_lint_orphan_pages.py",
+        "tests/test_quality_guards.py",
+        "tests/test_source_evidence_label_counts_its_citation.py",
+        "tests/test_wikilinks_tracked.py"
+      ]
+    },
+    {
+      "provider": "scripts/rebuild_memory_index.py",
+      "names": [
+        "published_paths"
+      ],
+      "contract_sha256": "16cae2cf47b51c71cc443958232e62003e7c7ad96d5218761a11580adfb44948",
+      "integration_tests": [
+        "tests/test_a_short_page_still_needs_evidence.py",
+        "tests/test_an_error_is_not_an_answer.py",
+        "tests/test_lint_evidence.py",
+        "tests/test_lint_orphan_pages.py",
+        "tests/test_quality_guards.py",
+        "tests/test_source_evidence_label_counts_its_citation.py",
+        "tests/test_wikilinks_tracked.py"
+      ]
+    },
+    {
+      "provider": "scripts/reliable_memory.py",
+      "names": [
+        "sha256_bytes",
+        "validate_state_root"
+      ],
+      "contract_sha256": "6a7b0b232a73f614931e67eb1d96c7b1a7655d4efe793da9d2bf61430fd1f4c6",
+      "integration_tests": [
+        "tests/test_lint_evidence.py"
+      ]
+    },
+    {
+      "provider": "scripts/repository_scope.py",
+      "names": [
+        "sanitized_git_environment"
+      ],
+      "contract_sha256": "fd550ae20761afad50b37fa3a71044a162485b0e4d4b3e2af9b5b22e143c2bec",
+      "integration_tests": [
+        "tests/test_a_short_page_still_needs_evidence.py",
+        "tests/test_an_error_is_not_an_answer.py",
+        "tests/test_lint_evidence.py",
+        "tests/test_lint_orphan_pages.py",
+        "tests/test_quality_guards.py",
+        "tests/test_source_evidence_label_counts_its_citation.py",
+        "tests/test_wikilinks_tracked.py"
+      ]
+    },
+    {
+      "provider": "scripts/vault_editorial.py",
+      "names": [
+        "BACKLINK_EXEMPT_NAMES",
+        "BROKEN_LINK_SKIP_NAMES",
+        "EDITORIAL_NAMES"
+      ],
+      "contract_sha256": "4cf7702d849c60780968c76a6c118078c35fb063cf19540efbf9046df0f36d2b",
+      "integration_tests": [
+        "tests/test_a_short_page_still_needs_evidence.py",
+        "tests/test_an_error_is_not_an_answer.py",
+        "tests/test_lint_evidence.py",
+        "tests/test_lint_orphan_pages.py",
+        "tests/test_quality_guards.py",
+        "tests/test_source_evidence_label_counts_its_citation.py",
+        "tests/test_wikilinks_tracked.py"
+      ]
+    }
+  ]
+}

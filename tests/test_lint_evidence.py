@@ -23,7 +23,7 @@ def test_lint_uses_shared_resolver_for_evidence_references(
         f"block:evt-1 bytes:{start}-{start + len(b'verified quote')}"
     )
     note.write_text(f"## Evidence\n- `{good}`\n", encoding="utf-8")
-    monkeypatch.setattr(lint_memory, "ROOT", tmp_path)
+    monkeypatch.setenv("LLM_WIKI_ROOT", str(tmp_path))
 
     assert lint_memory.check_evidence_references([note]) == []
 
@@ -41,7 +41,7 @@ def test_lint_reports_malformed_daily_candidate_and_uses_bounded_read(
     note = tmp_path / "knowledge/notes/page.md"
     note.parent.mkdir(parents=True)
     note.write_text("## Evidence\n- `daily:2026-01-01 broken`\n", encoding="utf-8")
-    monkeypatch.setattr(lint_memory, "ROOT", tmp_path)
+    monkeypatch.setenv("LLM_WIKI_ROOT", str(tmp_path))
 
     findings = lint_memory.check_evidence_references([note])
 
@@ -66,7 +66,7 @@ def test_lint_evidence_read_does_not_follow_symlink(tmp_path: Path, monkeypatch)
         os.symlink(outside, note)
     except OSError:
         return
-    monkeypatch.setattr(lint_memory, "ROOT", tmp_path)
+    monkeypatch.setenv("LLM_WIKI_ROOT", str(tmp_path))
 
     findings = lint_memory.check_evidence_references([note])
 
@@ -86,8 +86,7 @@ def test_only_dated_files_count_as_daily_logs(tmp_path: Path, monkeypatch) -> No
     daily.mkdir(parents=True)
     (daily / "2026-01-01.md").write_text("# 2026-01-01\n", encoding="utf-8")
     (daily / "README.md").write_text("# How this directory works\n", encoding="utf-8")
-    monkeypatch.setattr(lint_memory, "ROOT", tmp_path)
-    monkeypatch.setattr(lint_memory, "DAILY_DIR", daily)
+    monkeypatch.setenv("LLM_WIKI_ROOT", str(tmp_path))
 
     assert lint_memory.check_orphan_daily_logs({}) == ["knowledge/daily/2026-01-01.md"]
     stale = {"compiled_daily_hashes": {"README.md": "0" * 64, "2026-01-01.md": "0" * 64}}

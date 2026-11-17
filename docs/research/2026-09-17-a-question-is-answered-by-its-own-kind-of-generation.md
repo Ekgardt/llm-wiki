@@ -97,3 +97,44 @@ Files: `scripts/generation_catalog.py`, `scripts/evidence_graph.py`,
 
 On the vault a code question reads one `source-manifest.json` per memory generation that is
 newer than the newest code generation — after a night, one file, once per catalog object.
+
+## 2026-10-05: keep the sealed collection context during rederivation
+
+A foreign repository can legitimately track a `knowledge/` directory as code.
+The collector labels its Markdown as documentation, but canonical rederivation
+previously inferred a memory type solely from its path. Both the original
+4518cc5f implementation and the streaming candidate reproduce a strict FTS
+refusal with otherwise identical physical fields. Published source metadata had
+the same loss of context. Published policy reconstruction also incorrectly used
+this vault's root allowlist for a verified foreign policy.
+
+The internal canonical source/chunk APIs now accept explicit code roots, empty
+by default for existing memory callers. Verified authoritative source mappings
+carry a read-only tuple from the canonical, digest-bound source manifest's
+existing `policy.code_roots`. The optional top-level generation roots do not
+replace this authority. Published source reconstruction uses that same context,
+and published policy reconstruction retains the already sealed caller roots.
+Containment uses path components, including exact file roots, rather than text
+prefixes. Existing source identities, byte bounds, text, hashes, schemas,
+extractor version, deadlines, cancellation and per-source guards are unchanged.
+No persistent field, database, root, environment variable or dependency is added.
+
+Research checked on 2026-10-05: [Python 3.10.22 pathlib](https://docs.python.org/3.10/library/pathlib.html)
+documents pure component containment and the significance of traversal segments;
+[RFC 8259](https://www.rfc-editor.org/info/rfc8259/) supplies the typed JSON
+policy boundary; [OWASP Path Traversal](https://community.owasp.org/attacks/Path_Traversal)
+supports validating paths rather than trusting textual prefixes. Alternatives
+were a new persisted source-kind field (unnecessary schema change), trusting the
+optional unbound top-level roots (wrong authority), and propagating a separate
+argument through every mapping consumer. A small internal dict subclass retains
+existing mapping consumers while carrying the existing sealed context. Its
+public roots are a read-only tuple; it adds no general mutable metadata cache.
+
+Qualification uses real isolated collection, FTS, a complete canonical generation,
+strict source-manifest validation, and published reconstruction. Controlled test
+embeddings are not semantic model qualification or a production publication.
+The original four role failures and the linked published-policy refusal are
+retained as failed logs. Ordinary memory defaults, component-prefix negatives,
+source hash failure, altered sealed policy, absent/altered optional top-level
+roots, expiry and cancellation are checked separately. Installation and merged
+streaming-candidate qualification remain the parent operator's work.

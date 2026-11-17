@@ -1,0 +1,180 @@
+{
+  "encoding": "o200k_base",
+  "max_tokens": 100000,
+  "serialization": "exact-duplicates/v1",
+  "files": [
+    "AGENTS.md",
+    "CLAUDE.md",
+    "docs/AGENTS.md",
+    "docs/STRUCTURE.md",
+    "docs/modules/context-bundle.md",
+    "docs/modules/context-records.md",
+    "docs/modules/context-tooling.md",
+    "docs/modules/coordinator-validation-context.json",
+    "docs/modules/coordinator-validation.md",
+    "docs/modules/model-choice.md",
+    "docs/modules/product-structure.md",
+    "docs/modules/project-governance.md",
+    "docs/modules/test-support.md",
+    "docs/research/2026-11-03-coordinator-validation-boundary.md",
+    "rules/development-laws.md",
+    "scripts/__init__.py",
+    "scripts/llm_wiki/__init__.py",
+    "scripts/llm_wiki/context_bundle.py",
+    "scripts/llm_wiki/coordinator_validation.py",
+    "tests/__init__.py",
+    "tests/conftest.py",
+    "tests/module_boundaries.py",
+    "tests/module_context.py",
+    "tests/module_context_paths.py",
+    "tests/module_interface.py",
+    "tests/module_interface_render.py",
+    "tests/module_qualification.py",
+    "tests/module_record_context.py",
+    "tests/module_records.py",
+    "tests/modules/__init__.py",
+    "tests/shared_fixtures.py",
+    "tests/slow_machine.py"
+  ],
+  "directories": [
+    "tests/modules/coordinator_validation"
+  ],
+  "ownership": {
+    "files": [
+      "docs/modules/coordinator-validation-context.json",
+      "docs/modules/coordinator-validation.md",
+      "docs/research/2026-11-03-coordinator-validation-boundary.md",
+      "scripts/llm_wiki/coordinator_validation.py"
+    ],
+    "directories": [
+      "tests/modules/coordinator_validation"
+    ]
+  },
+  "qualified_dependencies": [
+    {
+      "provider": "scripts/llm_wiki/coordinator_invariants.py",
+      "names": [
+        "coordinator_migration_error",
+        "coordinator_v3_row_counts",
+        "require_v3_invariants"
+      ],
+      "contract_sha256": "880d21b869066806aa4dd8604faabf6faf36ad33c1bdcdf384224a5342888429",
+      "integration_tests": [
+        "tests/modules/coordinator_invariants/test_integrity.py",
+        "tests/modules/coordinator_invariants/test_rows.py",
+        "tests/modules/coordinator_validation/test_database.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/coordinator_schema.py",
+      "names": [
+        "COORDINATOR_V3_CONTRACT",
+        "COORDINATOR_V3_TABLE_SQL",
+        "coordinator_v3_schema_complete"
+      ],
+      "contract_sha256": "3c5cbe71f425a50685b0caaee12c55d92403bb27e1522aa42d9636c608976dc4",
+      "integration_tests": [
+        "tests/modules/coordinator_invariants/test_rows.py",
+        "tests/modules/coordinator_schema/test_contract.py",
+        "tests/modules/coordinator_validation/test_database.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/generation_catalog_store.py",
+      "names": [
+        "GenerationCatalog"
+      ],
+      "contract_sha256": "b18194ebe04bf988b4474379fcb5243516550d43b745a00eaed1453f7844c983",
+      "integration_tests": [
+        "tests/test_a_blocked_task_has_a_way_back.py",
+        "tests/test_a_build_in_flight_is_not_an_orphan.py",
+        "tests/test_a_capacity_refusal_does_not_corrupt_a_generation.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/model_choice.py",
+      "names": [
+        "using_root"
+      ],
+      "contract_sha256": "d45f2655cb61963e77617d1dfd7d617b134ad77cc770b59b335d0856e5d65019",
+      "integration_tests": [
+        "tests/test_a_block_opens_one_entry.py",
+        "tests/test_a_blocked_task_has_a_way_back.py",
+        "tests/test_a_build_in_flight_is_not_an_orphan.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/reliability_defaults.py",
+      "names": [
+        "DEFAULTS"
+      ],
+      "contract_sha256": "f37296a83c15073e42a6cc8b86b88c2d19c548ac19a4ef6d0ca2f7af925c90c8",
+      "integration_tests": [
+        "tests/modules/breadcrumb_decision/test_wire.py",
+        "tests/modules/breadcrumb_documents/test_contract.py",
+        "tests/modules/breadcrumb_documents/test_rendering.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/runtime_environment.py",
+      "names": [
+        "harden_runtime_owner_only"
+      ],
+      "contract_sha256": "8ab10ebf165ec06ae13b667d79b63e2b916ebeab23ccc319df23642301b6df25",
+      "integration_tests": [
+        "tests/modules/coordinator_validation/test_database.py",
+        "tests/modules/queue_artifacts/test_artifacts.py",
+        "tests/modules/runtime_environment/test_environment.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/sqlite_contracts.py",
+      "names": [
+        "OperationalDatabaseContractError"
+      ],
+      "contract_sha256": "37cf30c4805b468217bbb3b2ffdc60eaa7f8dc42ef15098f84eb7a00253c52e4",
+      "integration_tests": [
+        "tests/modules/coordinator_invariants/test_integrity.py",
+        "tests/modules/coordinator_invariants/test_rows.py",
+        "tests/modules/coordinator_schema/test_contract.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/sqlite_io.py",
+      "names": [
+        "open_operational_db",
+        "open_readonly_operational_db"
+      ],
+      "contract_sha256": "c49f4968a008359f9c021e84edc62234e0eebef68760c52a796c84e99a263cde",
+      "integration_tests": [
+        "tests/modules/coordinator_validation/test_database.py",
+        "tests/modules/sqlite_io/test_connections.py",
+        "tests/modules/sqlite_io/test_probe.py"
+      ]
+    },
+    {
+      "provider": "scripts/reliable_memory.py",
+      "names": [
+        "validate_state_root"
+      ],
+      "contract_sha256": "8680515cd873056a7c8a36e0057d91f2f83f23c48841263697676ff91f7ff964",
+      "integration_tests": [
+        "tests/test_a_backup_image_carries_what_git_does_not.py",
+        "tests/test_a_backup_snapshots_what_hooks_write.py",
+        "tests/test_a_backup_takes_what_any_installed_vault_holds.py"
+      ]
+    },
+    {
+      "provider": "scripts/repository_scope.py",
+      "names": [
+        "sanitized_git_environment"
+      ],
+      "contract_sha256": "fd550ae20761afad50b37fa3a71044a162485b0e4d4b3e2af9b5b22e143c2bec",
+      "integration_tests": [
+        "tests/modules/cleanup_worktrees/test_git_refusal.py",
+        "tests/test_a_blocked_task_has_a_way_back.py",
+        "tests/test_a_build_in_flight_is_not_an_orphan.py"
+      ]
+    }
+  ]
+}

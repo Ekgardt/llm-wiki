@@ -11,6 +11,8 @@ from pathlib import Path
 
 import reclaim_runtime_state as reclaim
 
+from tests.script_sources import script_files, script_key
+
 SCRIPTS = Path(__file__).resolve().parents[1] / "scripts"
 _NONCES = {"uuid.uuid4().hex": "0" * 32, "os.getpid()": "4242"}
 
@@ -38,7 +40,7 @@ def _unsweepable_lines(path: Path) -> list[int]:
 
 
 def test_every_staging_name_in_scripts_is_one_the_sweep_recognises() -> None:
-    unsweepable = {path.name: _unsweepable_lines(path) for path in sorted(SCRIPTS.glob("*.py"))}
+    unsweepable = {script_key(path): _unsweepable_lines(path) for path in script_files()}
 
     assert {name: lines for name, lines in unsweepable.items() if lines} == {}
 

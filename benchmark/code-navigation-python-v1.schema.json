@@ -26,7 +26,7 @@
     "schema_version": {"const": "code-navigation-python/v1"},
     "fixture_seed": {"const": 411},
     "fixture_lines": {"const": 100000},
-    "python_min": {"const": "3.10"},
+    "python_min": {"const": "3.14"},
     "pyright_version": {"const": "1.1.411"},
     "pyright_package_sha256": {"const": "bd5c488fc20fa237a944279bf32cae2f986cf10d5d5d9e8705819859daeb2f4a"},
     "node_major": {"const": 22},

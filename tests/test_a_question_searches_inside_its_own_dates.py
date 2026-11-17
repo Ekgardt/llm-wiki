@@ -12,7 +12,6 @@ from __future__ import annotations
 
 import json
 import sys
-from datetime import date
 from pathlib import Path
 
 SCRIPTS = Path(__file__).resolve().parents[1] / "scripts"
@@ -21,7 +20,6 @@ if str(SCRIPTS) not in sys.path:
 
 from corpus_snapshot import collect_corpus  # noqa: E402
 from query_memory import grounded_qa  # noqa: E402
-from temporal_anchor import window  # noqa: E402
 
 
 def test_a_daily_entry_is_dated_by_its_file_name(tmp_path: Path) -> None:
@@ -32,13 +30,6 @@ def test_a_daily_entry_is_dated_by_its_file_name(tmp_path: Path) -> None:
     snapshot = collect_corpus(root, code_roots=(), daily_paths=["knowledge/daily/2023-05-27.md"])
 
     assert {chunk.valid_from for chunk in snapshot.chunks} == {"2023-05-27"}
-
-
-def test_the_window_covers_the_resolved_days_three_out_each_side() -> None:
-    asked = date(2023, 5, 30)
-
-    assert window("Which book did I finish a week ago?", asked) == ("2023-05-20", "2023-05-26")
-    assert window("How many bikes do I own?", asked) is None
 
 
 def _refusal(prompt: str) -> str:

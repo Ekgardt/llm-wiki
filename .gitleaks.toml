@@ -34,14 +34,6 @@ regexes = [
 ]
 
 [[allowlists]]
-description = "Public jwt.io example used by the secret-redaction regression test"
-condition = "AND"
-targetRules = ["jwt"]
-regexTarget = "line"
-paths = ['''^tests/test_security_invariants\.py$''']
-regexes = ['''^\s+jwt = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9\.eyJzdWIiOiIxMjM0NTY3ODkwIn0\.dozjgNryP4J3jVmNHl0w5N_XgL0n3I9PlFUPCTHLak8"$''']
-
-[[allowlists]]
 description = "Synthetic credential used only by the JSON secret-redaction regression and its research note"
 condition = "AND"
 targetRules = ["generic-api-key"]
@@ -59,3 +51,27 @@ targetRules = ["generic-api-key"]
 regexTarget = "match"
 paths = ['''^tests/test_the_redactor_knows_the_missing_shapes\.py$''']
 regexes = ['''ya29\.a0AfH6SMBxQwErTy12345''']
+
+[[allowlists]]
+description = "Synthetic key for failed-server stderr redaction"
+condition = "AND"
+targetRules = ["generic-api-key"]
+regexTarget = "line"
+paths = ['''^tests/test_a_failed_server_leaves_its_redacted_last_words\.py$''']
+regexes = ['''(?m)^API_KEY = "0123456789abcdef0123"$''']
+
+[[allowlists]]
+description = "Synthetic unprefixed key for credential-assignment redaction"
+condition = "AND"
+targetRules = ["generic-api-key"]
+regexTarget = "line"
+paths = ['''^tests/test_secret_redact\.py$''']
+regexes = ['''(?m)^_UNPREFIXED_SECRET = "Zx8Qw2Lp5Rt9Yv3Nb6Mk1Hj4Gd7Fs0A"$''']
+
+[[allowlists]]
+description = "Public pinned multilingual-e5-small model revision"
+condition = "AND"
+targetRules = ["sourcegraph-access-token"]
+regexTarget = "line"
+paths = ['''^docs/research/2026-08-28-what-a-rebuild-may-reuse\.md$''']
+regexes = ['''(?m)^- `model_revision` is equal \(`614241f622f53c4eeff9890bdc4f31cfecc418b3`\)\.$''']

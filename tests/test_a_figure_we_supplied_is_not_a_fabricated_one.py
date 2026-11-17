@@ -29,7 +29,7 @@ CLAIM = 'You see Dr. Smith every week — in a session captured on 2023-11-03 yo
 
 
 def test_a_date_the_manifest_states_counts_as_the_span_naming_it():
-    query_memory._require_figures_agree(
+    query_memory.require_figures_agree(
         CLAIM, SPAN, "knowledge/daily/2023-11-03.md"
     )
 
@@ -37,12 +37,12 @@ def test_a_date_the_manifest_states_counts_as_the_span_naming_it():
 def test_without_the_manifest_the_same_pair_is_refused():
     """The old behaviour, kept as the thing being fixed."""
     with pytest.raises(GroundedQAError, match="different figures"):
-        query_memory._require_figures_agree(CLAIM, SPAN)
+        query_memory.require_figures_agree(CLAIM, SPAN)
 
 
 def test_a_figure_in_neither_the_span_nor_the_manifest_is_still_refused():
     with pytest.raises(GroundedQAError, match="different figures"):
-        query_memory._require_figures_agree(
+        query_memory.require_figures_agree(
             "You saw Dr. Smith 14 times.",
             "I saw her 3 times.",
             "knowledge/daily/2023-11-03.md",
@@ -64,13 +64,13 @@ def test_only_the_path_is_taken_from_the_manifest():
     assert query_memory.supplied_figures(entry) == "knowledge/daily/2023-11-03.md"
 
     with pytest.raises(GroundedQAError, match="different figures"):
-        query_memory._require_figures_agree(
+        query_memory.require_figures_agree(
             "You saw her 14 times.", "I saw her 3 times.", entry["relative_path"]
         )
 
 
 def test_a_span_with_no_figures_still_supports_a_numeric_claim():
-    query_memory._require_figures_agree(
+    query_memory.require_figures_agree(
         "You saw her 3 times.", "I saw her a few times.", "knowledge/notes/a.md"
     )
 
@@ -78,7 +78,7 @@ def test_a_span_with_no_figures_still_supports_a_numeric_claim():
 def test_the_word_overlap_gate_does_not_read_the_manifest():
     """Repeating a file name is citing a page, not a sentence."""
     with pytest.raises(GroundedQAError, match="shares no content"):
-        query_memory._require_citation_touches_claim(
+        query_memory.require_citation_touches_claim(
             "Cucumbers were harvested in autumn.",
             "The kettle needs descaling before anybody visits.",
             supplied_text="knowledge/daily/cucumbers-autumn.md",

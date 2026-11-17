@@ -1,17 +1,19 @@
 [project]
 name = "llm-wiki"
 version = "5.0.0"
-requires-python = ">=3.10"
+requires-python = ">=3.14,<3.15"
 dependencies = [
-    "mcp>=1.29,<2",
+    "defusedxml==0.7.1",
+    "mcp>=1.30,<2",
     # The canonical frontmatter reader (corpus_snapshot) needs it on every install. See
     # docs/research/2026-09-14-a-base-install-can-search.md.
     "pyyaml>=6.0.3,<7",
-    "tomli>=2.4.1,<3; python_version < '3.11'",
+    "tomlkit>=0.15.2,<0.16",
 ]
 
 # Optional heavy dependencies — install via `uv sync --extra <name>`.
 [project.optional-dependencies]
+benchmark-data = ["pyarrow==26.0.1"]
 lexical-benchmark = ["jieba==0.42.1"]
 retrieval-benchmark = [
     "sentence-transformers>=5.1,<6",
@@ -23,8 +25,7 @@ retrieval-benchmark = [
 semantic = [
     "huggingface-hub>=0.34,<2",
     "numpy>=2.2.6,<3",
-    "onnxruntime>=1.18,<1.24; python_version < '3.11'",
-    "onnxruntime>=1.18,<2; python_version >= '3.11'",
+    "onnxruntime>=1.18,<2",
     "tokenizers>=0.19,<1",
 ]
 # Search as documented: the encoder and the reranker, which is on by default
@@ -56,7 +57,7 @@ reranker = [
     "torch>=2.2,<3",
     "transformers>=4.44,<6",
 ]
-# Convenience: install everything.
+# Convenience: install every product component; benchmark-only extras stay explicit.
 full = [
     "llm-wiki[semantic,hybrid,code-graph,mcp-server,reranker]",
 ]
@@ -83,6 +84,8 @@ dev = [
     "pytest>=8.0.0",
     "pyyaml>=6.0.3,<7",
     "ruff>=0.6.0",
+    "lizard==1.23.0",
+    "tiktoken==0.14.0",
 ]
 # Not installed by default: CI syncs it alone to audit the lock for known
 # vulnerabilities (docs/research/2026-09-27-the-lock-is-audited.md).
@@ -91,12 +94,28 @@ audit = [
 ]
 
 [tool.uv]
+# Preserve the measured retrieval baseline until paired remeasurement replaces it.
+# These versions support Python 3.14 and pass both advisory services; security
+# updates remain unconstrained. See docs/research/2026-11-03-python314-qualification-followup.md.
+constraint-dependencies = [
+    "numpy==2.5.1",
+    "sentence-transformers==5.6.0",
+    "torch==2.13.0",
+    "transformers==5.13.0",
+]
 required-version = "==0.12.3"
-# No filelock release that fixes its 2026 advisories (4.2.1+) supports Python 3.10.
-# Below 3.30 every 3.10-capable release carries the same nine; 3.30 and later add
-# more, up to seventeen in 4.1.0. Remove when Python 3.10 support ends or filelock
-# publishes a fix for it (docs/research/2026-11-06-seven-locked-packages-move-past-their-advisories.md).
-constraint-dependencies = ["filelock<3.30; python_full_version < '3.11'"]
+
+# The reranker runs torch on the CPU; PyPI's Linux torch carries CUDA (about 800 MB
+# of nvidia-* wheels), so Linux takes PyTorch's CPU build. Explicit: this index
+# serves torch and nothing else. Windows and macOS builds on PyPI are already CPU.
+# See docs/research/2026-09-29-every-install-brings-every-component.md.
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
+
+[tool.uv.sources]
+torch = [{ index = "pytorch-cpu", marker = "sys_platform == 'linux'" }]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
@@ -123,7 +142,7 @@ typeCheckingMode = "basic"
 extend-exclude = ["tests/fixtures/code_kernel/python/pkg/broken.py"]
 force-exclude = true
 line-length = 100
-target-version = "py310"
+target-version = "py314"
 
 [tool.ruff.lint]
 # F = pyflakes (undefined names, unused imports), E/W = pycodestyle,
@@ -131,3 +150,29 @@ target-version = "py310"
 select = ["F", "E", "W", "I", "UP"]
 # Docstring-heavy scripts legitimately have long lines in inline examples.
 ignore = ["E501"]
+
+[tool.deptry]
+known_first_party = ["benchmark", "llm_wiki"]
+
+[tool.deptry.package_module_name_map]
+pyyaml = "yaml"
+
+[tool.deptry.per_rule_ignores]
+# Loaded by name through importlib.import_module: code_extractor._GRAMMARS,
+# code_graph_parse (jedi) and retrieval_v2_environment (the pinned jieba segmenter).
+DEP002 = [
+    "jedi",
+    "jieba",
+    "tree-sitter-bash",
+    "tree-sitter-c",
+    "tree-sitter-c-sharp",
+    "tree-sitter-cpp",
+    "tree-sitter-go",
+    "tree-sitter-java",
+    "tree-sitter-javascript",
+    "tree-sitter-php",
+    "tree-sitter-python",
+    "tree-sitter-ruby",
+    "tree-sitter-rust",
+    "tree-sitter-typescript",
+]

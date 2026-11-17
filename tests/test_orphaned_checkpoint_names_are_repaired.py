@@ -22,6 +22,7 @@ from __future__ import annotations
 import json
 import sqlite3
 import sys
+from datetime import UTC
 from pathlib import Path
 
 import pytest
@@ -34,9 +35,11 @@ if str(SCRIPTS_DIR) not in sys.path:
 if str(Path(__file__).resolve().parent) not in sys.path:
     sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+
 import repair_orphaned_checkpoint_names as repair  # noqa: E402
 from project_journal import ProjectStore  # noqa: E402
-from test_project_journal import checkpoint_event  # noqa: E402
+
+from tests.project_journal_helpers import checkpoint_event  # noqa: E402
 
 
 @pytest.fixture
@@ -184,20 +187,20 @@ def test_a_batch_name_that_will_never_return_is_repaired_once_it_is_old(monkeypa
     Age is the only readable signal: a request that was going to return has
     returned within the window.
     """
-    from datetime import datetime, timedelta, timezone
+    from datetime import datetime, timedelta
 
     import repair_orphaned_checkpoint_names as repair
 
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     old = (now - timedelta(seconds=repair.STALE_CHECKPOINT_SECONDS + 60)).isoformat()
     fresh = (now - timedelta(seconds=60)).isoformat()
 
-    assert repair._is_orphaned(
+    assert repair.is_orphaned(
         {"occurrence_id": "batch:abc", "created_at": old, "lease_token": ""},
         now.timestamp(),
         frozenset(),
     )
-    assert not repair._is_orphaned(
+    assert not repair.is_orphaned(
         {"occurrence_id": "batch:abc", "created_at": fresh, "lease_token": ""},
         now.timestamp(),
         frozenset(),
@@ -205,13 +208,13 @@ def test_a_batch_name_that_will_never_return_is_repaired_once_it_is_old(monkeypa
 
 
 def test_a_name_from_before_the_batch_scheme_is_repaired_at_any_age() -> None:
-    from datetime import datetime, timezone
+    from datetime import datetime
 
     import repair_orphaned_checkpoint_names as repair
 
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
 
-    assert repair._is_orphaned(
+    assert repair.is_orphaned(
         {"occurrence_id": "event-1", "created_at": now.isoformat(), "lease_token": ""},
         now.timestamp(),
         frozenset(),
@@ -229,5 +232,5 @@ def test_a_row_with_no_transaction_time_is_treated_as_walled_up() -> None:
 
     walled = {"occurrence_id": "batch:abc", "created_at": None, "lease_token": "gone"}
 
-    assert repair._is_orphaned(walled, 0.0, frozenset())
-    assert not repair._is_orphaned(walled, 0.0, frozenset({"gone"}))
+    assert repair.is_orphaned(walled, 0.0, frozenset())
+    assert not repair.is_orphaned(walled, 0.0, frozenset({"gone"}))

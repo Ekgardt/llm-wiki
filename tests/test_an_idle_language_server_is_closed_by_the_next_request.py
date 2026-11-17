@@ -13,9 +13,8 @@ from __future__ import annotations
 import time
 from pathlib import Path
 
-import pyright_session
 import pytest
-from pyright_session import PyrightSessionManager
+from llm_wiki.pyright_session_manager import IDLE_SECONDS, PyrightSessionManager
 from repository_scope import resolve_repository_scope
 
 from tests.code_kernel_helpers import (
@@ -59,7 +58,7 @@ def test_the_next_request_closes_a_server_idle_past_the_limit(
     try:
         idle = manager.get(scopes[0], deadline=time.monotonic() + SHORT_TIMEOUT)
         idle.start(deadline=time.monotonic() + SHORT_TIMEOUT)
-        _age_session(idle, pyright_session._IDLE_SECONDS + 1.0)
+        _age_session(idle, IDLE_SECONDS + 1.0)
         manager.get(scopes[1], deadline=time.monotonic() + SHORT_TIMEOUT)
         assert (idle._closed, len(manager._sessions)) == (True, 1)
     finally:
@@ -73,7 +72,7 @@ def test_a_server_inside_the_limit_is_left_alone(
     try:
         recent = manager.get(scopes[0], deadline=time.monotonic() + SHORT_TIMEOUT)
         recent.start(deadline=time.monotonic() + SHORT_TIMEOUT)
-        _age_session(recent, pyright_session._IDLE_SECONDS - 1.0)
+        _age_session(recent, IDLE_SECONDS - 1.0)
         manager.get(scopes[1], deadline=time.monotonic() + SHORT_TIMEOUT)
         assert (recent._closed, len(manager._sessions)) == (False, 2)
     finally:
@@ -87,7 +86,7 @@ def test_the_session_being_asked_for_is_never_reaped(
     try:
         session = manager.get(scopes[0], deadline=time.monotonic() + SHORT_TIMEOUT)
         session.start(deadline=time.monotonic() + SHORT_TIMEOUT)
-        _age_session(session, pyright_session._IDLE_SECONDS + 1.0)
+        _age_session(session, IDLE_SECONDS + 1.0)
         again = manager.get(scopes[0], deadline=time.monotonic() + SHORT_TIMEOUT)
         assert (again is session, session._closed) == (True, False)
     finally:

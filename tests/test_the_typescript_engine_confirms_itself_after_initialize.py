@@ -14,9 +14,9 @@ from pathlib import Path
 
 import lsp_profiles
 import lsp_protocol
+from llm_wiki.pyright_session_core import PyrightSession
 from lsp_profiles import TYPESCRIPT_PROFILE
 from pyright_profile import PyrightIdentity
-from pyright_session import PyrightSession
 from repository_scope import resolve_repository_scope
 
 from tests.code_kernel_helpers import create_python_repository

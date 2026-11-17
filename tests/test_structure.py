@@ -17,9 +17,13 @@ import subprocess
 from datetime import date, datetime
 from pathlib import Path
 
-import memory_state as early_memory_state
+import lsp_paths
 import pytest
 import yaml
+from llm_wiki import runtime_roots
+
+from tests.structure_helpers import _linked_note_paths
+from tests.structure_reference import structure_reference
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -196,7 +200,7 @@ def test_agents_md_and_claude_md_are_identical():
 def test_superset_contract_is_canonical() -> None:
     agents = (ROOT / "AGENTS.md").read_bytes()
     claude = (ROOT / "CLAUDE.md").read_bytes()
-    structure = (ROOT / "docs" / "STRUCTURE.md").read_text(encoding="utf-8")
+    structure = structure_reference(ROOT)
     decision = "knowledge/notes/solo-operator-superset-product-decision.md"
     implemented_checkpoint = structure.split(
         "## Implemented corpus-generation checkpoint", 1
@@ -227,7 +231,7 @@ def test_superset_contract_is_canonical() -> None:
 
 
 def test_code_navigation_python_slice_is_reported_as_current() -> None:
-    structure = (ROOT / "docs/STRUCTURE.md").read_text(encoding="utf-8")
+    structure = structure_reference(ROOT)
     current = structure.split("## Implemented corpus-generation checkpoint", 1)[
         1
     ].split("\n## ", 1)[0]
@@ -252,7 +256,7 @@ def test_code_navigation_python_slice_is_reported_as_current() -> None:
         "not written into an active generation",
         "cache/code-tools/pyright/1.1.411/",
         "run/lsp/<owner-nonce>/",
-        "Python 3.10",
+        "Python 3.14",
     ):
         assert value in navigation_words
     for text in (agents, claude):
@@ -276,7 +280,7 @@ def test_code_navigation_python_slice_is_reported_as_current() -> None:
 
 
 def test_lsp_live_lease_layout_is_canonical() -> None:
-    structure = (ROOT / "docs/STRUCTURE.md").read_text(encoding="utf-8")
+    structure = structure_reference(ROOT)
     design = (
         ROOT / "docs/superpowers/specs/2026-07-22-read-only-lsp-navigation-design.md"
     ).read_text(encoding="utf-8")
@@ -308,7 +312,7 @@ def test_lsp_live_lease_layout_is_canonical() -> None:
 
 
 def test_lsp_process_containment_contract_is_platform_qualified() -> None:
-    structure = (ROOT / "docs/STRUCTURE.md").read_text(encoding="utf-8")
+    structure = structure_reference(ROOT)
     design = (
         ROOT / "docs/superpowers/specs/2026-07-22-read-only-lsp-navigation-design.md"
     ).read_text(encoding="utf-8")
@@ -439,40 +443,41 @@ def test_no_tracked_files_in_runtime_dirs():
 
 
 # ---------------------------------------------------------------------------
-# memory_state.py default — STATE_ROOT must default to the vault root.
+# The runtime root defaults to the vault root: no sibling state directory.
 # ---------------------------------------------------------------------------
 
 
-def test_memory_state_default_is_vault_root():
-    """The canonical layout puts runtime INSIDE the vault (gitignored). The
-    default STATE_ROOT in memory_state.py must be ROOT (the vault), not a
-    sibling LLM-wiki-state/ dir. This catches accidental regression to the
-    old sibling layout.
+@pytest.mark.parametrize("unset", [True, False], ids=["unset", "empty"])
+def test_an_unnamed_state_root_is_the_vault_root(tmp_path, monkeypatch, unset):
+    """Runtime lives INSIDE the vault (gitignored), never in `LLM-wiki-state/` beside it.
+
+    An empty variable names nothing; before 2026-11-10 it resolved to the
+    current directory.
     """
-    src = (ROOT / "scripts" / "memory_state.py").read_text(encoding="utf-8")
-    # The default expression must resolve to ROOT, not ROOT.parent / ...
-    assert 'os.environ.get("LLM_WIKI_STATE_ROOT", str(ROOT))' in src, (
-        "memory_state.py STATE_ROOT default must be str(ROOT), not "
-        "ROOT.parent / 'LLM-wiki-state'. See docs/STRUCTURE.md."
-    )
-    assert "ROOT.parent" not in src.split("STATE_ROOT")[1].split("\n")[0], (
-        "STATE_ROOT line references ROOT.parent — sibling layout regression"
-    )
+    monkeypatch.setenv("LLM_WIKI_ROOT", str(tmp_path))
+    if unset:
+        monkeypatch.delenv("LLM_WIKI_STATE_ROOT", raising=False)
+    else:
+        monkeypatch.setenv("LLM_WIKI_STATE_ROOT", "")
+
+    assert runtime_roots.state_root() == tmp_path.resolve()
 
 
 def test_imported_memory_state_uses_the_hermetic_test_root():
-    assert early_memory_state.STATE_ROOT == Path(os.environ["LLM_WIKI_STATE_ROOT"]).resolve()
+    assert runtime_roots.state_root() == Path(os.environ["LLM_WIKI_STATE_ROOT"]).resolve()
 
 
 def test_lsp_runtime_paths_and_navigation_are_canonical() -> None:
     state_root = Path(os.environ["LLM_WIKI_STATE_ROOT"]).resolve()
-    structure = (ROOT / "docs/STRUCTURE.md").read_text(encoding="utf-8")
+    structure = structure_reference(ROOT)
     navigation = structure.split("## Implemented Python code navigation", 1)[1].split(
         "\n## ", 1
     )[0]
 
-    assert early_memory_state.CODE_TOOLS_DIR == state_root / "cache/code-tools"
-    assert early_memory_state.LSP_RUN_DIR == state_root / "run/lsp"
+    assert lsp_paths.managed_pyright_root(runtime_roots.state_root()).parents[1] == (
+        state_root / "cache/code-tools"
+    )
+    assert runtime_roots.state_root() / lsp_paths.LSP_RELATIVE_ROOT == state_root / "run/lsp"
     assert "scripts/lsp_paths.py" in structure
     assert "path helpers are implemented" in navigation
     assert "normalized navigation facade" in navigation
@@ -702,7 +707,7 @@ def _assert_example_reads_as_public(example: str) -> None:
 
 
 def test_docs_name_stage_two_runtime_artifacts():
-    structure = (ROOT / "docs" / "STRUCTURE.md").read_text(encoding="utf-8")
+    structure = structure_reference(ROOT)
     _assert_pyyaml_stays_a_dev_dependency()
     _assert_structure_documents_generations(structure, " ".join(structure.split()))
     _assert_note_allowlist_is_literal()
@@ -905,13 +910,6 @@ def _unpublished_notes(paths: set[str]) -> set[str]:
     return {
         item.decode("utf-8") for item in result.stdout.split(b"\0") if item
     }
-
-
-def _linked_note_paths(text: str) -> set[str]:
-    """The note pages this file names by path: a wikilink, or a back-quoted path."""
-    linked = re.findall(r"\[\[knowledge/notes/([^\]|]+)", text)
-    quoted = re.findall(r"`knowledge/notes/([^`]+?)\.md`", text)
-    return {f"knowledge/notes/{name}.md" for name in [*linked, *quoted]}
 
 
 def test_the_vault_index_and_log_name_only_published_notes() -> None:

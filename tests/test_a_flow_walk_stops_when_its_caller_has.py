@@ -8,6 +8,7 @@ slots after its caller had given up. Research:
 
 from __future__ import annotations
 
+import subprocess
 import sys
 from pathlib import Path
 
@@ -21,13 +22,14 @@ SOURCE = b"def caller():\n    callee()\n"
 
 
 def _repository_with_a_generation(tmp_path, monkeypatch) -> Path:
-    from generation_catalog import GenerationCatalog
+    from llm_wiki.generation_catalog_store import GenerationCatalog
     from repository_scope import resolve_repository_scope
 
-    from tests.test_evidence_graph_recovery import _publish, _rich_graph_records
+    from tests.evidence_graph_recovery_helpers import _publish, _rich_graph_records
 
     repository = tmp_path / "repo"
     repository.mkdir()
+    subprocess.run(["git", "init", "--quiet", str(repository)], check=True, capture_output=True)
     (repository / "app.py").write_bytes(SOURCE)
     catalog = GenerationCatalog(tmp_path / "state")
     _publish(
@@ -45,14 +47,14 @@ def _repository_with_a_generation(tmp_path, monkeypatch) -> Path:
 def _cancel_after_the_seeds(monkeypatch):
     """A caller that gives up once the generation is open and the seeds are in."""
     state = {"give_up": False}
-    resolve = code_graph._dependency_seed_nodes
+    resolve = code_graph.dependency_seed_nodes
 
     def watched(graph, symbol):
         seeds = resolve(graph, symbol)
         state["give_up"] = True
         return seeds
 
-    monkeypatch.setattr(code_graph, "_dependency_seed_nodes", watched)
+    monkeypatch.setattr("llm_wiki.code_graph_dependencies.dependency_seed_nodes", watched)
     return lambda: state["give_up"]
 
 

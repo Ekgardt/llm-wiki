@@ -28,7 +28,7 @@ def archiver(monkeypatch):
 
     fake = SimpleNamespace(eligible=eligible)
     monkeypatch.setattr(archive_daily, "DailyArchiver", lambda root, state_root: fake)
-    monkeypatch.setattr(archive_daily, "_flat_daily_sources", lambda _archiver: DAYS)
+    monkeypatch.setattr(archive_daily, "flat_daily_sources", lambda _archiver: DAYS)
     return fake
 
 

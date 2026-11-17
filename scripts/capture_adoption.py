@@ -42,8 +42,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
-from contextlib import contextmanager
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -51,31 +50,31 @@ SCRIPTS_DIR = Path(__file__).resolve().parent
 if str(SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_DIR))
 
-from integration_adapter import (  # noqa: E402
-    CAPTURE_HANDLER_VERSION,
-    MAX_CAPTURE_INTENT_BYTES,
-    ROOT,
-    STATE_ROOT,
+from capture_handler_identity import (  # noqa: E402
+    verified_capture_handler,
 )
+from capture_publication import (  # noqa: E402
+    capture_publication_fence as fresh_capture_authority,
+)
+from llm_wiki import runtime_roots  # noqa: E402
+from memory_state import MAX_CAPTURE_INTENT_BYTES  # noqa: E402
 
 # One pass adopts at most this many intents. The bound is required rather than
 # tidy: the sweeper runs at the head of the capture worker, which is spawned on
 # every session end and is expected to finish, so an unbounded pass over a
-# backlog would delay the capture that just woke it. The live vault publishes on
-# the order of ten intents a day, so 32 clears about three days — a weekend of
-# failures goes in the first Monday capture. A bound defers work and never drops
-# it: the sweeper runs again on the next capture and again every night.
+# backlog would delay the capture that just woke it. On 2026-09-29, real local
+# adoption of 1/8/32/64 ready records took 0.038/0.260/1.011/2.114 seconds.
+# Keep the default successful-publication batch near one second on this host,
+# then let the worker process work. This is a scheduling tradeoff, not a source
+# cap or latency guarantee. The CLI/API limit is configurable; revisit it when
+# storage latency or backlog drain changes. Failed rows never consume it and
+# no failed-row prefix cutoff remains. See the breadcrumb durability research.
 MAX_ADOPTED_INTENTS_PER_PASS = 32
-
-# A record that cannot be adopted is skipped and left untouched; it must not use
-# the bound above up, or 32 bad records hide every orphan behind them for good.
-# The pass still ends: after this many skips it stops looking further.
-MAX_SKIPPED_INTENTS_PER_PASS = 256
-
 
 def _verified_intent_bytes(state_root: Path, record: dict[str, Any]) -> bytes:
     """Read the record's own bytes and prove they are the ones it names."""
-    from reliable_memory import read_runtime_bytes, sha256_bytes
+    from llm_wiki.formats.canonical import sha256_bytes
+    from reliable_memory import read_runtime_bytes
 
     payload = read_runtime_bytes(
         state_root / str(record["relative_path"]),
@@ -90,23 +89,6 @@ def _verified_intent_bytes(state_root: Path, record: dict[str, Any]) -> bytes:
     return payload
 
 
-@contextmanager
-def _fresh_capture_authority(queue: object, coordinator: object, intent_id: str):
-    """Take this pass's own owner and fence — never the publisher's lost one."""
-    registry = queue.ownership_registry()
-    owner = registry.acquire("capture", scope=f"intent:{intent_id}")
-    try:
-        fence = coordinator.acquire_intent_fence(
-            intent_id, mode="capture", owner=owner
-        )
-        try:
-            yield owner, fence
-        finally:
-            coordinator.release_intent_fence(fence)
-    finally:
-        registry.release(owner)
-
-
 def _adoption_payload(record: dict[str, Any]) -> dict[str, str]:
     """The adapter's payload, rebuilt from the durable record's own columns."""
     return {
@@ -116,17 +98,17 @@ def _adoption_payload(record: dict[str, Any]) -> dict[str, str]:
     }
 
 
-def _adopt_one(
+def adopt_one(
     queue: object, coordinator: object, state_root: Path, record: dict[str, Any]
 ) -> str:
     """Give one orphaned intent a task. Returns the task id."""
     intent_id = str(record["intent_id"])
-    _verified_intent_bytes(state_root, record)
+    handler_version = verified_capture_handler(state_root, record, _verified_intent_bytes(state_root, record))
     payload = _adoption_payload(record)
-    with _fresh_capture_authority(queue, coordinator, intent_id) as (owner, fence):
+    with fresh_capture_authority(queue, coordinator, intent_id) as (owner, fence):
         binding = queue.enqueue_capture_task_replay_safe(
             "flush",
-            CAPTURE_HANDLER_VERSION,
+            handler_version,
             payload,
             intent_id=intent_id,
             intent_path=payload["intent_path"],
@@ -159,7 +141,7 @@ def _adopt_batch(
     for record in records:
         outcome["examined"] += 1
         try:
-            task_id = _adopt_one(queue, coordinator, state_root, record)
+            task_id = adopt_one(queue, coordinator, state_root, record)
         except Exception as error:  # noqa: BLE001 - one bad record must not stop the pass
             outcome["skipped"].append(_skip(record, error))
             continue
@@ -168,41 +150,16 @@ def _adopt_batch(
         )
 
 
-def _not_skipped(
-    records: list[dict[str, Any]], skipped: set[str]
-) -> list[dict[str, Any]]:
-    return [record for record in records if str(record["intent_id"]) not in skipped]
-
-
-def _next_records(
-    reader, outcome: dict[str, Any], limit: int, done_key: str = "adopted"
-) -> list[dict[str, Any]]:
-    """The orphans still owed to this pass; a skipped record does not use the bound up.
-
-    A skipped record is left untouched, so it is among the oldest again on every
-    read. The window is therefore wider by the skips so far, and the pass goes on
-    to the orphans behind them instead of stalling at a head of bad records.
-    See `docs/research/2026-09-17-bad-intents-do-not-use-up-the-adoption-bound.md`.
-    """
-    remaining = limit - len(outcome[done_key])
-    skipped = {entry["intent_id"] for entry in outcome["skipped"]}
-    if remaining < 1 or len(skipped) >= MAX_SKIPPED_INTENTS_PER_PASS:
-        return []
-    return _not_skipped(reader(remaining + len(skipped)), skipped)[:remaining]
-
-
 def _drain(reader, outcome: dict[str, Any], limit: int, done_key: str, batch) -> dict[str, Any]:
-    """Read and handle windows until the bound is met or only skipped records remain.
-
-    One loop for both recovery passes: the pending pass read one fixed window, so a
-    head of records it could not finish hid every half-published intent behind it
-    (audit 2026-09-27 C-4, docs/research/2026-09-27-both-recovery-passes-look-past-a-bad-head.md).
-    """
-    while True:
-        records = _next_records(reader, outcome, limit, done_key)
+    """Advance past each examined row; failed older records cannot hide later work."""
+    after = None
+    while len(outcome[done_key]) < limit:
+        records = reader(limit - len(outcome[done_key]), after=after)
         if not records:
             return outcome
+        after = (str(records[-1]["updated_at"]), str(records[-1]["intent_id"]))
         batch(records, outcome)
+    return outcome
 
 
 def _adopt_records(
@@ -246,9 +203,9 @@ def adopt_orphaned_capture_intents(
 PENDING_INTENT_RECOVERY_SECONDS = 60
 
 
-def _stale_pending_cutoff(now: datetime | None = None) -> str:
+def stale_pending_cutoff(now: datetime | None = None) -> str:
     """The queue's own stored width (microseconds, `+00:00`), so text order is time order."""
-    moment = now or datetime.now(timezone.utc)
+    moment = now or datetime.now(UTC)
     return (moment - timedelta(seconds=PENDING_INTENT_RECOVERY_SECONDS)).isoformat(timespec="microseconds")
 
 
@@ -258,7 +215,16 @@ def _ready_relative_path(record: dict[str, Any]) -> str:
     )
 
 
-def _complete_one_pending(
+def _pending_or_ready_intent_bytes(state_root: Path, record: dict[str, Any]) -> bytes:
+    """A publisher may finish and remove pending after the sweep selected it."""
+    try:
+        return _verified_intent_bytes(state_root, record)
+    except FileNotFoundError:
+        ready_record = {**record, "relative_path": _ready_relative_path(record)}
+        return _verified_intent_bytes(state_root, ready_record)
+
+
+def complete_one_pending(
     queue: object, coordinator: object, state_root: Path, record: dict[str, Any]
 ) -> str:
     """Finish one half-published intent by running the publication sequence again.
@@ -268,11 +234,14 @@ def _complete_one_pending(
     already holds, and the enqueue is replay-safe. The sequence takes its own owner
     and fence, so a publisher that is somehow still alive refuses this pass.
     """
-    from integration_adapter import _publish_capture_files_and_task
+    from capture_publication import (
+        publish_capture_files_and_task,
+    )
 
-    payload = _verified_intent_bytes(state_root, record)
+    payload = _pending_or_ready_intent_bytes(state_root, record)
+    handler_version = verified_capture_handler(state_root, record, payload)
     intent_id = str(record["intent_id"])
-    _publish_capture_files_and_task(
+    publish_capture_files_and_task(
         queue,
         coordinator,
         intent_id=intent_id,
@@ -280,6 +249,7 @@ def _complete_one_pending(
         intent_sha256=str(record["intent_sha256"]),
         pending_relative=str(record["relative_path"]),
         ready_relative=_ready_relative_path(record),
+        handler_version=handler_version,
     )
     return intent_id
 
@@ -294,7 +264,7 @@ def _complete_pending_batch(
     for record in records:
         outcome["examined"] += 1
         try:
-            intent_id = _complete_one_pending(queue, coordinator, state_root, record)
+            intent_id = complete_one_pending(queue, coordinator, state_root, record)
         except Exception as error:  # noqa: BLE001 - one bad record must not stop the pass
             outcome["skipped"].append(_skip(record, error))
             continue
@@ -318,10 +288,10 @@ def complete_pending_capture_intents(
     reader = getattr(queue, "pending_capture_intents", None)
     if reader is None:
         return {**outcome, "reason": "unsupported"}
-    cutoff = _stale_pending_cutoff(now)
+    cutoff = stale_pending_cutoff(now)
 
-    def window(count: int) -> list[dict[str, Any]]:
-        return reader(count, cutoff)
+    def window(count: int, *, after=None) -> list[dict[str, Any]]:
+        return reader(count, cutoff, after=after)
 
     def batch(records: list[dict[str, Any]], result: dict[str, Any]) -> None:
         _complete_pending_batch(queue, coordinator, Path(state_root), records, result)
@@ -329,11 +299,33 @@ def complete_pending_capture_intents(
     return _drain(window, outcome, limit, "completed", batch)
 
 
-# Both recovery passes, in the order a capture needs them: a half-published intent
+def recover_unindexed_capture_intents(
+    queue: object, coordinator: object, *, state_root: Path,
+    limit: int = MAX_ADOPTED_INTENTS_PER_PASS,
+) -> dict[str, Any]:
+    """Discover durable manifests absent from the index.
+
+    The shared caller's limit applies to indexed batches only. Disk discovery
+    cannot stop at an arbitrary prefix: it has no persistent scan cursor yet.
+    Completed publications have no pending manifest and are not reprocessed.
+    """
+    from breadcrumb_storage import recover_pending
+
+    if Path(state_root).resolve() != Path(queue.state_root).resolve():
+        raise ValueError("capture recovery runtime root conflicts with the queue")
+    return recover_pending(queue, coordinator)
+
+
+# Recovery passes, in the order a capture needs them: discover unindexed files,
+# then a half-published intent
 # is finished first, so the adoption right after gives it its task. The capture
 # worker and the nightly command run this one list (audit 2026-09-26 C-12;
 # `docs/research/2026-09-26-the-nightly-finishes-what-a-publisher-left-half-way.md`).
-RECOVERY_SWEEPS = (complete_pending_capture_intents, adopt_orphaned_capture_intents)
+RECOVERY_SWEEPS = (
+    recover_unindexed_capture_intents,
+    complete_pending_capture_intents,
+    adopt_orphaned_capture_intents,
+)
 
 
 def record_standing_skips(skipped: list[dict[str, Any]]) -> int:
@@ -358,10 +350,12 @@ def record_standing_skips(skipped: list[dict[str, Any]]) -> int:
 def adopt_in_active_vault(*, limit: int = MAX_ADOPTED_INTENTS_PER_PASS) -> dict[str, Any]:
     """Run both recovery passes against the installed vault's active runtime."""
     from markdown_transaction import active_markdown_coordinator
-    from memory_queue import active_memory_queue
+    from queue_core import (
+        active_memory_queue,
+    )
 
-    vault = Path(ROOT).resolve(strict=True)
-    state_root = Path(STATE_ROOT).resolve(strict=True)
+    vault = Path(runtime_roots.vault_root()).resolve(strict=True)
+    state_root = Path(runtime_roots.state_root()).resolve(strict=True)
     queue = active_memory_queue(vault, state_root)
     coordinator = active_markdown_coordinator(vault, state_root)
     results = {
@@ -373,12 +367,14 @@ def adopt_in_active_vault(*, limit: int = MAX_ADOPTED_INTENTS_PER_PASS) -> dict[
     return results
 
 
-def _report(results: dict[str, dict[str, Any]]) -> None:
+def report(results: dict[str, dict[str, Any]]) -> None:
     pending = results["complete_pending_capture_intents"]
     adopted = results["adopt_orphaned_capture_intents"]
-    skipped = len(pending["skipped"]) + len(adopted["skipped"])
+    recovered = results["recover_unindexed_capture_intents"]
+    skipped = sum(len(result["skipped"]) for result in results.values())
     print(
-        f"capture adoption: finished {len(pending['completed'])} half-published, "
+        f"capture adoption: recovered {len(recovered['recovered'])} disk manifests, "
+        f"finished {len(pending['completed'])} half-published, "
         f"adopted {len(adopted['adopted'])}, skipped {skipped}"
     )
     print(json.dumps(results, ensure_ascii=False, indent=2))
@@ -397,20 +393,22 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     if args.dry_run:
         return _dry_run(args.limit)
-    _report(adopt_in_active_vault(limit=args.limit))
+    report(adopt_in_active_vault(limit=args.limit))
     return 0
 
 
 def _dry_run(limit: int) -> int:
-    from memory_queue import active_memory_queue
+    from queue_core import (
+        active_memory_queue,
+    )
 
     queue = active_memory_queue(
-        Path(ROOT).resolve(strict=True), Path(STATE_ROOT).resolve(strict=True)
+        Path(runtime_roots.vault_root()).resolve(strict=True), Path(runtime_roots.state_root()).resolve(strict=True)
     )
     _print_records("orphaned capture intents", queue.ready_capture_intents_without_task(limit))
     _print_records(
         "half-published capture intents",
-        queue.pending_capture_intents(limit, _stale_pending_cutoff()),
+        queue.pending_capture_intents(limit, stale_pending_cutoff()),
     )
     return 0
 

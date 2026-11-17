@@ -11,6 +11,8 @@ import uuid
 from pathlib import Path
 from unittest.mock import patch
 
+import memory_state
+
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 
 from tests.adopted_capture_vault import (  # noqa: E402
@@ -19,13 +21,14 @@ from tests.adopted_capture_vault import (  # noqa: E402
     host_transcript,
     intent_summaries,
 )
+from tests.breadcrumb_worker_helpers import ingress as ingress  # noqa: E402
 
 
 def _delegate_payload(raw: dict) -> dict:
     import integration_adapter
 
     envelope = integration_adapter.normalize_event("claude", "user_prompt", raw)
-    return integration_adapter._canonical_capture_payload(envelope)
+    return integration_adapter.canonical_capture_payload(envelope)
 
 
 def test_a_prompt_reaches_its_delegate_with_the_transcript_the_host_named():
@@ -42,21 +45,24 @@ def test_a_prompt_reaches_its_delegate_with_the_transcript_the_host_named():
 
 
 def _submit_prompts(module, monkeypatch, tmp_path, hook: dict, count: int) -> list[list[str]]:
-    """Run the prompt hook `count` times for one session; return what it started."""
+    """Run the prompt hook `count` times for one session; return the running captures it started.
+
+    Every detached start goes through `memory_state.spawn_detached`, so the
+    queue worker each accepted prompt wakes is left out of the answer.
+    """
     started: list[list[str]] = []
     vault = tmp_path / "vault"
     vault.mkdir(exist_ok=True)
-    monkeypatch.setattr(module, "ROOT", vault)
-    monkeypatch.setattr(module, "_append_prompt_tag", lambda *_a, **_k: False)
-    monkeypatch.setattr(module, "spawn_detached", lambda args: started.append(args) or 1)
+    monkeypatch.setenv("LLM_WIKI_ROOT", str(vault))
+    monkeypatch.setattr(memory_state, "spawn_detached", lambda args: started.append(args) or 1)
     for index in range(count):
         text = json.dumps(dict(hook, prompt=f"a meaningful prompt number {index}"))
         with patch.object(sys, "stdin", io.StringIO(text)):
             module.main()
-    return started
+    return [args for args in started if "--running-capture" in args]
 
 
-def test_the_twentieth_prompt_starts_one_running_capture(monkeypatch, tmp_path):
+def test_the_twentieth_prompt_starts_one_running_capture(monkeypatch, tmp_path, ingress):
     import user_prompt_capture
 
     project = tmp_path / "project"
@@ -89,7 +95,7 @@ def test_the_twentieth_prompt_starts_one_running_capture(monkeypatch, tmp_path):
     ]
 
 
-def test_twenty_prompts_without_a_transcript_start_nothing(monkeypatch, tmp_path):
+def test_twenty_prompts_without_a_transcript_start_nothing(monkeypatch, tmp_path, ingress):
     import user_prompt_capture
 
     project = tmp_path / "project"
@@ -102,10 +108,10 @@ def test_twenty_prompts_without_a_transcript_start_nothing(monkeypatch, tmp_path
 def test_a_running_capture_publishes_the_intent_and_wakes_the_worker(monkeypatch, tmp_path):
     import integration_adapter
 
-    state_root, project = adopted_capture_vault(tmp_path, monkeypatch, integration_adapter)
+    state_root, project = adopted_capture_vault(tmp_path, monkeypatch)
     transcript = host_transcript(state_root, "running.jsonl", "we decided to keep the queue\n")
     woken: list[list[str]] = []
-    monkeypatch.setattr(integration_adapter, "spawn_detached", lambda args: woken.append(args) or 1)
+    monkeypatch.setattr(memory_state, "spawn_detached", lambda args: woken.append(args) or 1)
     payload = {
         "session_id": "session-running",
         "cwd": str(project),

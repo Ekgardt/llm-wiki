@@ -25,14 +25,10 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from bounded_io import MAX_KNOWLEDGE_PAGE_BYTES, read_stable_bytes  # noqa: E402
-from lint_memory import (  # noqa: E402
-    NOTES,
-    VAULT,
-    missing_backlink_pairs,
-)
+from lint_memory import backlink_target_is_mutable, missing_backlink_pairs
+from llm_wiki import runtime_roots  # noqa: E402
+from llm_wiki.formats.canonical import sha256_bytes  # noqa: E402
 from markdown_transaction import mutate_knowledge, stable_operation_id  # noqa: E402
-from memory_state import ROOT  # noqa: E402
-from reliable_memory import sha256_bytes  # noqa: E402
 from vault_editorial import EDITORIAL_NAMES  # noqa: E402
 
 # One page is never large enough to justify an unbounded read.
@@ -45,14 +41,14 @@ RELATED_HEADINGS = ("## Related", "## Links", "## Related pages")
 def _pages() -> list[Path]:
     return [
         page
-        for page in sorted(NOTES.rglob("*.md"))
+        for page in sorted(runtime_roots.notes_dir().rglob("*.md"))
         if page.name not in EDITORIAL_NAMES and "archive" not in page.parts
     ]
 
 
 def page_slug(page: Path) -> str:
     """How this vault writes a link to a page: `knowledge/notes/<name>`."""
-    return page.relative_to(ROOT).with_suffix("").as_posix()
+    return page.relative_to(runtime_roots.vault_root()).with_suffix("").as_posix()
 
 
 def _link_line(slug: str) -> str:
@@ -107,9 +103,11 @@ def with_backlink(text: str, slug: str) -> str:
     return "\n".join(_insert_at(lines, bounds[1], line))
 
 
-def _repair_pair(source: Path, target: Path) -> str:
-    relative = target.relative_to(ROOT).as_posix()
+def repair_pair(source: Path, target: Path) -> str:
+    relative = target.relative_to(runtime_roots.vault_root()).as_posix()
     current = read_stable_bytes(target, MAX_PAGE_BYTES, label="backlink target")
+    if not backlink_target_is_mutable(current):
+        raise ValueError("backlink target is immutable or has invalid metadata")
     updated = with_backlink(current.decode("utf-8"), page_slug(source)).encode("utf-8")
     if updated == current:
         return f"UNCHANGED: {relative}"
@@ -123,17 +121,17 @@ def _repair_pair(source: Path, target: Path) -> str:
 
 def _attempt(source: Path, target: Path) -> str:
     try:
-        return _repair_pair(source, target)
+        return repair_pair(source, target)
     except (OSError, RuntimeError, ValueError, UnicodeDecodeError) as exc:
-        return f"ERROR: {target.relative_to(ROOT).as_posix()}: {type(exc).__name__}"
+        return f"ERROR: {target.relative_to(runtime_roots.vault_root()).as_posix()}: {type(exc).__name__}"
 
 
 def repair(*, apply: bool) -> list[str]:
     """Add every owed backlink; a dry run only names them."""
-    pairs = missing_backlink_pairs(_pages(), [VAULT, NOTES])
+    pairs = missing_backlink_pairs(_pages(), [runtime_roots.knowledge_dir(), runtime_roots.notes_dir()])
     if not apply:
         return [
-            f"WOULD LINK: {target.relative_to(ROOT).as_posix()} → {source.stem}"
+            f"WOULD LINK: {target.relative_to(runtime_roots.vault_root()).as_posix()} → {source.stem}"
             for source, target in pairs
         ]
     return [_attempt(source, target) for source, target in pairs]

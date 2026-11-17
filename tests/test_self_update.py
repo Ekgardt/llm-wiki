@@ -1,57 +1,19 @@
 """The vault advances its own checkout only when that cannot lose work."""
 from __future__ import annotations
 
-import subprocess
 import sys
 from pathlib import Path
 
-import pytest
+from tests.self_update_helpers import (
+    _commit,
+    _repository,
+    linked_clone,  # noqa: F401
+)
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 
 
-def _git(root: Path, *arguments: str) -> None:
-    subprocess.run(
-        ["git", *arguments],
-        cwd=str(root),
-        check=True,
-        capture_output=True,
-        text=True,
-    )
-
-
-def _repository(path: Path) -> Path:
-    path.mkdir(parents=True, exist_ok=True)
-    _git(path, "init", "--quiet", "--initial-branch=main")
-    _git(path, "config", "user.email", "test@example.com")
-    _git(path, "config", "user.name", "Test")
-    return path
-
-
-def _commit(root: Path, name: str, content: str) -> None:
-    (root / name).write_text(content, encoding="utf-8")
-    _git(root, "add", name)
-    _git(root, "commit", "--quiet", "-m", f"add {name}")
-
-
-@pytest.fixture()
-def linked_clone(tmp_path: Path) -> tuple[Path, Path]:
-    """An upstream repository and a clone that tracks its main branch."""
-    upstream = _repository(tmp_path / "upstream")
-    _commit(upstream, "product.py", "value = 1\n")
-    clone = tmp_path / "clone"
-    subprocess.run(
-        ["git", "clone", "--quiet", str(upstream), str(clone)],
-        check=True,
-        capture_output=True,
-        text=True,
-    )
-    _git(clone, "config", "user.email", "test@example.com")
-    _git(clone, "config", "user.name", "Test")
-    return upstream, clone
-
-
-def test_an_unchanged_checkout_reports_itself_current(linked_clone) -> None:
+def test_an_unchanged_checkout_reports_itself_current(linked_clone) -> None:  # noqa: F811
     import self_update
 
     _upstream, clone = linked_clone
@@ -61,12 +23,12 @@ def test_an_unchanged_checkout_reports_itself_current(linked_clone) -> None:
     assert outcome["status"] == "current"
 
 
-def test_a_fast_forward_advances_the_checkout(linked_clone, monkeypatch) -> None:
+def test_a_fast_forward_advances_the_checkout(linked_clone, monkeypatch) -> None:  # noqa: F811
     import self_update
 
     upstream, clone = linked_clone
     _commit(upstream, "feature.py", "value = 2\n")
-    monkeypatch.setattr(self_update, "_synced_dependencies", lambda _root, _extras: True)
+    monkeypatch.setattr(self_update, "synced_dependencies", lambda _root, _extras: True)
 
     outcome = self_update.update_checkout(clone)
 
@@ -75,7 +37,7 @@ def test_a_fast_forward_advances_the_checkout(linked_clone, monkeypatch) -> None
     assert (clone / "feature.py").is_file()
 
 
-def test_a_file_the_owner_is_editing_stops_the_update(linked_clone) -> None:
+def test_a_file_the_owner_is_editing_stops_the_update(linked_clone) -> None:  # noqa: F811
     """The rule is not "clean tree" — it is "not this file".
 
     This working tree is dirty almost always, because the runtime rewrites the
@@ -98,14 +60,14 @@ def test_a_file_the_owner_is_editing_stops_the_update(linked_clone) -> None:
 
 
 def test_an_unrelated_local_change_does_not_stop_the_update(
-    linked_clone, monkeypatch
+    linked_clone, monkeypatch  # noqa: F811
 ) -> None:
     import self_update
 
     upstream, clone = linked_clone
     _commit(upstream, "feature.py", "value = 2\n")
     (clone / "product.py").write_text("value = 99\n", encoding="utf-8")
-    monkeypatch.setattr(self_update, "_synced_dependencies", lambda _root, _extras: True)
+    monkeypatch.setattr(self_update, "synced_dependencies", lambda _root, _extras: True)
 
     outcome = self_update.update_checkout(clone)
 
@@ -113,7 +75,7 @@ def test_an_unrelated_local_change_does_not_stop_the_update(
     assert (clone / "product.py").read_text(encoding="utf-8") == "value = 99\n"
 
 
-def test_a_diverged_branch_is_left_alone(linked_clone) -> None:
+def test_a_diverged_branch_is_left_alone(linked_clone) -> None:  # noqa: F811
     import self_update
 
     upstream, clone = linked_clone

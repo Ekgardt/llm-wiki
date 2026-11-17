@@ -29,6 +29,6 @@ def test_shutdown_waits_for_inference_to_reach_its_safe_point():
     inference_threads.start(inference, name="shared-server-inference")
     reached.wait(timeout=SHORT_TIMEOUT)
 
-    mcp_http._shutdown()
+    mcp_http.shutdown()
 
     assert (stopped_when_asked, inference_threads.running()) == ([True], [])

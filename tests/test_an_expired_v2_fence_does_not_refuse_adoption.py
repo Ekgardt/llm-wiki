@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import sqlite3
 import sys
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -22,8 +22,10 @@ if str(SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_DIR))
 
 import installed_memory_repair  # noqa: E402
-import memory_queue  # noqa: E402
-from memory_queue import MemoryQueue  # noqa: E402
+import queue_core  # noqa: E402
+from queue_core import (  # noqa: E402
+    MemoryQueue,
+)
 from reliable_memory import OperationalDatabaseContractError  # noqa: E402
 
 _DAY = "2026-01-01"
@@ -31,7 +33,7 @@ _DIGEST = "d" * 64
 
 
 def _stamp(offset: timedelta) -> str:
-    return memory_queue._timestamp(datetime.now(timezone.utc) + offset)
+    return queue_core.timestamp(datetime.now(UTC) + offset)
 
 
 def _queue_with_fence(tmp_path: Path, offset: timedelta) -> MemoryQueue:
@@ -46,7 +48,7 @@ def _queue_with_fence(tmp_path: Path, offset: timedelta) -> MemoryQueue:
 
 
 def _adopt(tmp_path: Path, queue: MemoryQueue) -> None:
-    memory_queue.initialize_queue_v3_candidate(
+    queue_core.initialize_queue_v3_candidate(
         tmp_path / "run" / "queue-v3.candidate.sqlite3", source_v2=queue.db_path
     )
 
@@ -74,12 +76,12 @@ def test_the_operator_is_told_which_precondition_refused(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     def refuse(**_kwargs: object) -> bool:
-        raise memory_queue._migration_error(
+        raise queue_core.migration_error(
             "queue_v2_source_fence_ambiguous", "some message that stays private"
         )
 
     monkeypatch.setattr(
-        installed_memory_repair, "_apply_reliability_v3_adoption", refuse
+        installed_memory_repair, "apply_reliability_v3_adoption", refuse
     )
 
     report = installed_memory_repair.repair_installed_vault(

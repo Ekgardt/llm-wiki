@@ -6,7 +6,6 @@ import argparse
 import json
 import math
 import os
-import signal
 import subprocess
 import time
 from collections.abc import Callable
@@ -14,6 +13,9 @@ from pathlib import Path
 from typing import NamedTuple
 
 import doctor
+import generation_maintenance
+from llm_wiki import runtime_roots
+from process_tree import run_process_tree
 from settings import setting_value
 
 SCHEMA_VERSION = "1.0"
@@ -32,19 +34,6 @@ DEFAULT_TIME_LIMIT_SECONDS = 30.0
 DEFAULT_ACTION_LIMIT = len(ACTIONS)
 # One dependency check's timeout, within the sync's own limit. basis unknown — value predates measurement; review when a check times out on a healthy install.
 DEPENDENCY_TIMEOUT_SECONDS = 30.0
-# Time to reap a child after it was stopped; the stop itself is already bounded.
-PROCESS_CLEANUP_TIMEOUT_SECONDS = 2.0
-WINDOWS_NEW_PROCESS_GROUP = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0x00000200)
-
-
-class ProcessTreeTimeout(subprocess.TimeoutExpired):
-    """A process timed out, with an explicit tree-cleanup result."""
-
-    def __init__(self, cmd: list[str], timeout: float, *, cleanup_error: str | None):
-        super().__init__(cmd, timeout)
-        self.cleanup_error = cleanup_error
-
-
 def _result(action_id: str, status: str, message: str, details: dict) -> dict:
     if status not in ACTION_STATUSES:
         raise ValueError(f"invalid sync action status: {status}")
@@ -52,7 +41,7 @@ def _result(action_id: str, status: str, message: str, details: dict) -> dict:
 
 
 def _run_uv(command: list[str], *, root: Path, timeout: float) -> subprocess.CompletedProcess[str]:
-    return _run_process_tree(
+    return run_process_tree(
         command,
         cwd=root,
         timeout=timeout,
@@ -98,7 +87,7 @@ _PLAN_STEP = _UvStep(
     "Locked dependency planning failed.",
     {"lock": "current", "environment": "unknown"},
 )
-_SYNC_STEP = _UvStep(
+SYNC_STEP = _UvStep(
     ("uv", "sync", "--locked", "--inexact", "--no-default-groups", "--no-python-downloads", "--quiet"),
     "synchronization",
     "current",
@@ -127,9 +116,10 @@ def _run_uv_step(
     """The completed process, or the error result of a step that could not finish."""
     command = list(step.command)
     try:
-        if remaining() <= 0:
+        seconds = remaining()
+        if seconds <= 0:
             raise subprocess.TimeoutExpired(command, 0)
-        completed = run_uv(command, root=root, timeout=max(0.001, remaining()))
+        completed = run_uv(command, root=root, timeout=seconds)
     except subprocess.TimeoutExpired as exc:  # ProcessTreeTimeout carries cleanup_error
         return None, _uv_timeout_result(step, getattr(exc, "cleanup_error", None))
     except OSError as exc:
@@ -149,7 +139,7 @@ def _missing_files(*paths: Path) -> list[str]:
 
 
 def _baseline_declared(project_text: str, lock_text: str) -> bool:
-    return "mcp>=1.29,<2" in project_text and 'name = "mcp"' in lock_text
+    return "mcp>=1.30,<2" in project_text and 'name = "mcp"' in lock_text
 
 
 def _dependency_inputs_error(root: Path) -> dict | None:
@@ -208,7 +198,7 @@ def _dependency_plan(run_uv, root: Path, remaining) -> tuple[list | None, dict |
 
 
 def _apply_dependency_sync(run_uv, root: Path, remaining) -> dict:
-    _completed, error = _run_uv_step(_SYNC_STEP, run_uv, root=root, remaining=remaining)
+    _completed, error = _run_uv_step(SYNC_STEP, run_uv, root=root, remaining=remaining)
     if error is not None:
         return error
     return _result(
@@ -219,20 +209,20 @@ def _apply_dependency_sync(run_uv, root: Path, remaining) -> dict:
     )
 
 
-def _dependency_deadline(deadline: float | None, timeout: float) -> float:
+def _dependency_clock(deadline: float | None, timeout: float) -> Callable[[], float]:
     if deadline is not None:
-        return deadline
-    return time.monotonic() + timeout
+        return _remaining_clock(deadline)
+    return _remaining_clock(time.monotonic() + timeout, ceiling=timeout)
 
 
-def _remaining_clock(deadline: float) -> Callable[[], float]:
+def _remaining_clock(deadline: float, *, ceiling: float = math.inf) -> Callable[[], float]:
     def remaining() -> float:
-        return max(0.0, deadline - time.monotonic())
+        return min(max(0.0, deadline - time.monotonic()), max(0.0, ceiling))
 
     return remaining
 
 
-def _dependency_action(
+def dependency_action(
     *,
     root: Path,
     apply: bool,
@@ -240,7 +230,7 @@ def _dependency_action(
     timeout: float = DEPENDENCY_TIMEOUT_SECONDS,
     deadline: float | None = None,
 ) -> dict:
-    remaining = _remaining_clock(_dependency_deadline(deadline, timeout))
+    remaining = _dependency_clock(deadline, timeout)
     changes, error = _checked_dependency_plan(run_uv, root, remaining)
     if error is not None:
         return error
@@ -272,127 +262,10 @@ def _planned_but_not_applied(changes: list) -> dict:
     )
 
 
-def _terminate_windows_tree(process: subprocess.Popen[str]) -> str | None:
-    system_root = os.environ.get("SystemRoot", r"C:\Windows")
-    taskkill = Path(system_root) / "System32" / "taskkill.exe"
-    try:
-        terminator = subprocess.Popen(
-            [str(taskkill), "/PID", str(process.pid), "/T", "/F"],
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
-    except OSError:
-        return "taskkill_unavailable"
-    try:
-        terminator.communicate(timeout=PROCESS_CLEANUP_TIMEOUT_SECONDS)
-    except subprocess.TimeoutExpired:
-        try:
-            terminator.kill()
-            terminator.wait(timeout=PROCESS_CLEANUP_TIMEOUT_SECONDS)
-        except (OSError, subprocess.TimeoutExpired):
-            pass
-        return "taskkill_timeout"
-    return None if terminator.returncode == 0 else "taskkill_failed"
-
-
-def _append_cleanup_error(current: str | None, error: str) -> str:
-    return f"{current};{error}" if current else error
-
-
-def _close_captured_pipes(process: subprocess.Popen[str]) -> None:
-    for stream in (process.stdout, process.stderr):
-        if stream is not None:
-            try:
-                stream.close()
-            except OSError:
-                pass
-
-
-def _kill_quietly(process: subprocess.Popen[str], cleanup_error: str | None) -> str | None:
-    try:
-        process.kill()
-    except OSError:
-        return _append_cleanup_error(cleanup_error, "direct_kill_failed")
-    return cleanup_error
-
-
-def _drain_retained_pipes(process: subprocess.Popen[str], cleanup_error: str | None) -> str | None:
-    _close_captured_pipes(process)
-    cleanup_error = _kill_quietly(process, cleanup_error)
-    try:
-        process.wait(timeout=PROCESS_CLEANUP_TIMEOUT_SECONDS)
-    except (OSError, subprocess.TimeoutExpired):
-        cleanup_error = _append_cleanup_error(cleanup_error, "cleanup_wait_failed")
-    return cleanup_error
-
-
-def _finish_timed_out_process(
-    process: subprocess.Popen[str], cleanup_error: str | None
-) -> str | None:
-    if cleanup_error:
-        cleanup_error = _kill_quietly(process, cleanup_error)
-    try:
-        process.communicate(timeout=PROCESS_CLEANUP_TIMEOUT_SECONDS)
-        return cleanup_error
-    except subprocess.TimeoutExpired:
-        return _drain_retained_pipes(process, _append_cleanup_error(cleanup_error, "retained_pipes"))
-
-
-def _piped_streams(options: dict, stdin_text: object) -> None:
-    """Which of the child's streams this call wants as pipes."""
-    if options.pop("capture_output", False):
-        options["stdout"] = subprocess.PIPE
-        options["stderr"] = subprocess.PIPE
-    if stdin_text is not None:
-        options["stdin"] = subprocess.PIPE
-
-
-def _popen_options(kwargs: dict, stdin_text: object = None) -> dict:
-    """Popen options with captured streams and the child in its own group/session."""
-    options = dict(kwargs)
-    _piped_streams(options, stdin_text)
-    if os.name == "nt":
-        options["creationflags"] = int(options.get("creationflags", 0)) | WINDOWS_NEW_PROCESS_GROUP
-        return options
-    options["start_new_session"] = True
-    return options
-
-
-def _kill_process_tree(process: subprocess.Popen[str]) -> str | None:
-    """End the child's whole group; the cleanup error, or None when it was ended."""
-    if os.name == "nt":
-        return _terminate_windows_tree(process)
-    try:
-        os.killpg(os.getpgid(process.pid), getattr(signal, "SIGKILL", 9))
-    except OSError:
-        return "process_group_kill_failed"
-    return None
-
-
-def _run_process_tree(
-    command: list[str], *, timeout: float, input: object = None, **kwargs: object
-) -> subprocess.CompletedProcess[str]:
-    """Run a command whose whole tree is ended when the deadline passes.
-
-    `input` is written to the child's stdin and answers the same need as
-    `subprocess.run(input=...)`: a caller with a long prompt keeps it in a pipe
-    instead of a file on disk. It is the llm_client's CLI providers that need
-    both at once — a prompt through stdin and a tree that dies with its wrapper.
-    """
-    process = subprocess.Popen(command, **_popen_options(dict(kwargs), input))
-    try:
-        stdout, stderr = process.communicate(input=input, timeout=timeout)
-    except subprocess.TimeoutExpired as exc:
-        cleanup_error = _finish_timed_out_process(process, _kill_process_tree(process))
-        raise ProcessTreeTimeout(command, exc.timeout, cleanup_error=cleanup_error) from exc
-    return subprocess.CompletedProcess(command, process.returncode, stdout, stderr)
-
-
 _INDEXES = "indexes"
 
 
-def _run_generation_builder(
+def run_generation_builder(
     *, root: Path, state_root: Path, timeout: float, max_sources: int | None = None
 ) -> dict:
     if timeout <= 0:
@@ -402,7 +275,7 @@ def _run_generation_builder(
             "Generation refresh was not started because the sync time limit was reached.",
             {"bounded": True, "partial": True},
         )
-    result = doctor.run_generation_maintenance(
+    result = generation_maintenance.run_generation_maintenance(
         root=root,
         state_root=state_root,
         time_budget_seconds=timeout,
@@ -489,7 +362,7 @@ def _repair_actions(apply: bool) -> set[str] | None:
     return None
 
 
-def _attention(report: dict) -> dict[str, str]:
+def attention_summary(report: dict) -> dict[str, str]:
     """Each doctor check that is not ok, with its own message."""
     return {
         str(check.get("id")): str(check.get("message") or check.get("status"))
@@ -498,7 +371,11 @@ def _attention(report: dict) -> dict[str, str]:
     }
 
 
-def _final_doctor_message(status: str, attention: dict[str, str]) -> str:
+def _error_ids(report: dict) -> set[str]:
+    return {str(check.get("id")) for check in report.get("checks", []) if check.get("status") == "error"}
+
+
+def final_doctor_message(status: str, attention: dict[str, str]) -> str:
     """The verdict, and when it is not ok, which checks made it so.
 
     "Requires attention" alone left a fresh install ending "with warnings" and no
@@ -518,8 +395,37 @@ def _skipped_by_limit(action_id: str) -> dict:
 
 def _failed_action(action_id: str, exc: Exception) -> dict:
     return _result(
-        action_id, "error", f"{action_id.title()} action failed.", {"error": type(exc).__name__}
+        action_id,
+        "error",
+        f"{action_id.title()} action failed.",
+        {"error": type(exc).__name__, "failed": True},
     )
+
+
+# Actions that report the vault's state as doctor sees it; the others do the sync's work.
+_FINDING_ACTIONS = frozenset({"transactions", "queue", "doctor"})
+
+
+def _is_sync_failure(action: dict) -> bool:
+    """An error the sync or the install owns; a finding about the vault is not one.
+
+    The live update of 2026-09-28 finished every step and then failed on 183
+    refused writes from the three days before it, which no install can settle.
+    """
+    if action["status"] != "error":
+        return False
+    if action["id"] not in _FINDING_ACTIONS or action["details"].get("failed"):
+        return True
+    from install_smoke import INSTALL_OWNED_CHECKS
+
+    return bool(INSTALL_OWNED_CHECKS.intersection(action["details"].get("errors", ())))
+
+
+def _exit_code(report: dict) -> int:
+    """2 when the sync failed, 1 when it finished with findings, 0 when clean."""
+    if any(_is_sync_failure(action) for action in report["actions"]):
+        return 2
+    return {"ok": 0, "changed": 0}.get(report["overall_status"], 1)
 
 
 _SUBSET_CHECKS = {
@@ -577,7 +483,7 @@ class _SyncRun:
         return action
 
     def dependencies_action(self) -> dict:
-        return _dependency_action(
+        return dependency_action(
             root=self.root,
             apply=self.apply,
             deadline=min(self.deadline, time.monotonic() + DEPENDENCY_TIMEOUT_SECONDS),
@@ -592,7 +498,7 @@ class _SyncRun:
         return check["status"] != "ok" and bool(check["details"].get("repairable"))
 
     def _generation_refresh(self) -> dict:
-        return _run_generation_builder(
+        return run_generation_builder(
             root=self.root,
             state_root=self.state_root,
             timeout=self.remaining(),
@@ -615,12 +521,16 @@ class _SyncRun:
     def final_doctor_action(self) -> dict:
         report = self.doctor_report(repair=False, refresh=True)
         status = _mapped_status(str(report.get("overall_status", "error")))
-        attention = _attention(report)
+        attention = attention_summary(report)
         return _result(
             "doctor",
             status,
-            _final_doctor_message(status, attention),
-            {"overall_status": report.get("overall_status", "error"), "attention": attention},
+            final_doctor_message(status, attention),
+            {
+                "overall_status": report.get("overall_status", "error"),
+                "attention": attention,
+                "errors": sorted(_error_ids(report)),
+            },
         )
 
     def action(self, action_id: str) -> dict:
@@ -651,12 +561,8 @@ class _SyncRun:
 
 
 def _sync_paths(root, state_root, home) -> tuple[Path, Path, Path]:
-    root_path = Path(
-        root or os.environ.get("LLM_WIKI_ROOT", Path(__file__).resolve().parent.parent)
-    ).resolve()
-    state_path = Path(
-        os.path.abspath(state_root or os.environ.get("LLM_WIKI_STATE_ROOT", root_path))
-    )
+    root_path = Path(root or runtime_roots.vault_root()).resolve()
+    state_path = Path(os.path.abspath(state_root or runtime_roots.state_root_for(root_path)))
     home_path = Path(home).resolve() if home is not None else Path.home().resolve()
     return root_path, state_path, home_path
 
@@ -750,7 +656,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"LLM-Wiki sync ({report['mode']}): {report['overall_status']}")
         for action in report["actions"]:
             print(f"{action['id']}: {action['status']} - {action['message']}")
-    return {"ok": 0, "changed": 0, "degraded": 1, "error": 2}.get(report["overall_status"], 2)
+    return _exit_code(report)
 
 
 if __name__ == "__main__":

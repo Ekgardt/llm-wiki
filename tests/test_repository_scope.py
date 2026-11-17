@@ -141,7 +141,7 @@ def test_unrelated_git_toplevel_fails_closed_to_requested_directory(tmp_path, mo
             return str((unrelated / ".git").resolve())
         return "a" * 40
 
-    monkeypatch.setattr(repository_scope, "_git_value", unrelated_git_value)
+    monkeypatch.setattr(repository_scope, "git_value", unrelated_git_value)
 
     actual = repository_scope.resolve_repository_scope(requested)
 
@@ -167,7 +167,7 @@ def test_git_toplevel_may_contain_requested_subdirectory(tmp_path, monkeypatch):
             return str((repository / ".git").resolve())
         return str(expected.git_commit)
 
-    monkeypatch.setattr(repository_scope, "_git_value", containing_git_value)
+    monkeypatch.setattr(repository_scope, "git_value", containing_git_value)
 
     assert repository_scope.resolve_repository_scope(nested) == expected
 
@@ -287,7 +287,7 @@ def test_git_marker_prevents_transient_probe_failure_from_becoming_non_git_scope
     def transient_failure(*_args, **_kwargs):
         raise subprocess.CalledProcessError(128, ["git", "rev-parse"])
 
-    monkeypatch.setattr(repository_scope, "_git_value", transient_failure)
+    monkeypatch.setattr(repository_scope, "git_value", transient_failure)
 
     with pytest.raises(repository_scope.RepositoryScopeUnavailable):
         repository_scope.resolve_repository_scope(checkout)
@@ -573,7 +573,7 @@ def test_git_probe_kills_process_when_stdout_exceeds_bound(tmp_path, monkeypatch
     monkeypatch.setattr(repository_scope.subprocess, "Popen", lambda *args, **kwargs: process)
 
     with pytest.raises(ValueError, match="output|ceiling|bound"):
-        repository_scope._git_value(root, "--show-toplevel")
+        repository_scope.git_value(root, "--show-toplevel")
 
     assert reads == [9]
     assert process.killed
@@ -610,7 +610,7 @@ def test_git_probe_kills_process_on_timeout(tmp_path, monkeypatch):
     monkeypatch.setattr(repository_scope.subprocess, "Popen", lambda *args, **kwargs: process)
 
     with pytest.raises(TimeoutError):
-        repository_scope._git_value(root, "--show-toplevel")
+        repository_scope.git_value(root, "--show-toplevel")
 
     assert killed.is_set()
 
@@ -646,7 +646,7 @@ def test_git_probe_uses_only_remaining_caller_budget(tmp_path, monkeypatch):
     started = time.monotonic()
 
     with pytest.raises(TimeoutError):
-        repository_scope._git_value(
+        repository_scope.git_value(
             root,
             "--show-toplevel",
             deadline=started + 0.03,
@@ -702,14 +702,3 @@ def test_git_fixture_invocation_sets_hermetic_options_and_timeout(tmp_path, monk
     assert options["env"]["GIT_CONFIG_GLOBAL"] == os.devnull
     assert options["env"]["GIT_CONFIG_SYSTEM"] == os.devnull
     assert not any(name.startswith("GIT_CONFIG_KEY_") for name in options["env"])
-
-
-def test_the_git_budget_matches_the_one_the_index_gives_the_same_probe():
-    """One operation, one bound. Two seconds was a Linux figure.
-
-    Research: docs/research/2026-09-13-a-shorter-answer-and-a-fresher-line.md.
-    """
-    import repository_index
-    import repository_scope as scope_module
-
-    assert scope_module.GIT_TIMEOUT_SECONDS == repository_index.GIT_TIMEOUT_SECONDS

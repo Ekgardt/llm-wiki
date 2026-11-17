@@ -1,0 +1,311 @@
+{
+  "encoding": "o200k_base",
+  "max_tokens": 100000,
+  "serialization": "exact-duplicates/v1",
+  "files": [
+    "AGENTS.md",
+    "CLAUDE.md",
+    "docs/AGENTS.md",
+    "docs/STRUCTURE.md",
+    "docs/modules/compile-memory.md",
+    "docs/modules/compile-paths.md",
+    "docs/modules/context-bundle.md",
+    "docs/modules/context-records.md",
+    "docs/modules/context-tooling.md",
+    "docs/modules/doctor-generation-tests-context.json",
+    "docs/modules/doctor-generation-tests.md",
+    "docs/modules/generation-maintenance-helpers.md",
+    "docs/modules/model-choice.md",
+    "docs/modules/product-structure.md",
+    "docs/modules/project-governance.md",
+    "docs/modules/script-sources.md",
+    "docs/modules/test-support.md",
+    "rules/development-laws.md",
+    "scripts/__init__.py",
+    "scripts/compile_memory.py",
+    "scripts/llm_wiki/__init__.py",
+    "scripts/llm_wiki/context_bundle.py",
+    "tests/__init__.py",
+    "tests/compile_paths.py",
+    "tests/conftest.py",
+    "tests/generation_maintenance_helpers.py",
+    "tests/module_context.py",
+    "tests/module_context_paths.py",
+    "tests/module_interface.py",
+    "tests/module_interface_render.py",
+    "tests/module_qualification.py",
+    "tests/module_record_context.py",
+    "tests/module_records.py",
+    "tests/script_sources.py",
+    "tests/shared_fixtures.py",
+    "tests/slow_machine.py",
+    "tests/test_a_blind_check_says_why_it_is_blind.py",
+    "tests/test_an_answer_says_how_old_its_index_is.py"
+  ],
+  "ownership": {
+    "files": [
+      "docs/modules/doctor-generation-tests-context.json",
+      "docs/modules/doctor-generation-tests.md",
+      "tests/test_a_blind_check_says_why_it_is_blind.py",
+      "tests/test_an_answer_says_how_old_its_index_is.py"
+    ]
+  },
+  "qualified_dependencies": [
+    {
+      "provider": "scripts/compile_leased_run.py",
+      "names": [
+        "leased_compile_processor"
+      ],
+      "contract_sha256": "863aec0b7901984e1b393865374d1be4a4c05c6bd98ff719e9832d94f4d180bb",
+      "integration_tests": [
+        "tests/test_a_blind_check_says_why_it_is_blind.py",
+        "tests/test_an_answer_says_how_old_its_index_is.py"
+      ]
+    },
+    {
+      "provider": "scripts/compile_lock.py",
+      "names": [
+        "lock_owner_token"
+      ],
+      "contract_sha256": "c417ca9f578d004aa7296946fe7766d087c82858a09e543c77dbbaedcab08ca0",
+      "integration_tests": [
+        "tests/test_a_blind_check_says_why_it_is_blind.py",
+        "tests/test_an_answer_says_how_old_its_index_is.py"
+      ]
+    },
+    {
+      "provider": "scripts/compile_pipeline.py",
+      "names": [
+        "require_compile_active",
+        "run"
+      ],
+      "contract_sha256": "b3b0fe89c363afcf177cfea5bafd887dbc38506f6304869b7187dc745ef8c505",
+      "integration_tests": [
+        "tests/test_an_answer_says_how_old_its_index_is.py"
+      ]
+    },
+    {
+      "provider": "scripts/evidence_graph_builder.py",
+      "names": [
+        "build_full_generation"
+      ],
+      "contract_sha256": "056e93b70cc341eb253323f95833791e52929a5e343d4f8e53acd37f1b2004cd",
+      "integration_tests": [
+        "tests/test_a_blind_check_says_why_it_is_blind.py",
+        "tests/test_an_answer_says_how_old_its_index_is.py"
+      ]
+    },
+    {
+      "provider": "scripts/generation_maintenance.py",
+      "names": [
+        "maintenance_extractor_identity",
+        "run_generation_maintenance"
+      ],
+      "contract_sha256": "5d6a412e0dbc3b313ec9eadf510ed4aef7f29dd9af37ead04666501140a41671",
+      "integration_tests": [
+        "tests/test_an_answer_says_how_old_its_index_is.py"
+      ]
+    },
+    {
+      "provider": "scripts/generation_search.py",
+      "names": [
+        "generation_fts_search"
+      ],
+      "contract_sha256": "4f93fec1f7cc9164d52997983875966d1f64a8e54fd010a3d5f08b42790fcc89",
+      "integration_tests": [
+        "tests/test_an_answer_says_how_old_its_index_is.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/compile_pipeline_selection.py",
+      "names": [
+        "compile_task_payload",
+        "compile_under_lock",
+        "discard_unusable_receipts",
+        "mark_finished",
+        "parse_args",
+        "report_deprecated_flags"
+      ],
+      "contract_sha256": "91a7e916dc576ba5809305b9e80a9557cb81cfcbfc39220445af81770046e444",
+      "integration_tests": [
+        "tests/test_a_blind_check_says_why_it_is_blind.py",
+        "tests/test_an_answer_says_how_old_its_index_is.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/doctor_generation.py",
+      "names": [
+        "GENERATION_FRESH_SECONDS",
+        "GenerationFacts",
+        "MAX_STATE_BYTES",
+        "generation_is_stale",
+        "state_size_hint"
+      ],
+      "contract_sha256": "a22c01e2fd844dc0f13fdd942be902ac2d1a9d2a4a00a1bfde65df7e60b4dccd",
+      "integration_tests": [
+        "tests/test_a_blind_check_says_why_it_is_blind.py",
+        "tests/test_an_answer_says_how_old_its_index_is.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/generation_catalog_store.py",
+      "names": [
+        "GenerationCatalog"
+      ],
+      "contract_sha256": "b18194ebe04bf988b4474379fcb5243516550d43b745a00eaed1453f7844c983",
+      "integration_tests": [
+        "tests/test_a_build_in_flight_is_not_an_orphan.py",
+        "tests/test_a_code_generation_is_not_abandoned.py",
+        "tests/test_a_flow_walk_stops_when_its_caller_has.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/model_choice.py",
+      "names": [
+        "using_root"
+      ],
+      "contract_sha256": "d45f2655cb61963e77617d1dfd7d617b134ad77cc770b59b335d0856e5d65019",
+      "integration_tests": [
+        "tests/test_a_blind_check_says_why_it_is_blind.py",
+        "tests/test_an_answer_says_how_old_its_index_is.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/queue_contracts.py",
+      "names": [
+        "LeaseProcessor"
+      ],
+      "contract_sha256": "65beb9b24756c7432bcfbdb61f10fd40deaba6d9b24f671089b198571d775864",
+      "integration_tests": [
+        "tests/test_a_blind_check_says_why_it_is_blind.py",
+        "tests/test_an_answer_says_how_old_its_index_is.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/reliability_defaults.py",
+      "names": [
+        "DEFAULTS"
+      ],
+      "contract_sha256": "f37296a83c15073e42a6cc8b86b88c2d19c548ac19a4ef6d0ca2f7af925c90c8",
+      "integration_tests": [
+        "tests/test_a_blind_check_says_why_it_is_blind.py",
+        "tests/test_an_answer_says_how_old_its_index_is.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/runtime_roots.py",
+      "names": [
+        "state_root",
+        "vault_root"
+      ],
+      "contract_sha256": "904b31835161d11b79ab937c4651d91dd6966bdaa1f33e93b9ea768f519d2d3b",
+      "integration_tests": [
+        "tests/test_a_continuation_keeps_its_original_entry.py",
+        "tests/test_a_prompt_checkpoint_does_not_outwait_its_host.py",
+        "tests/test_a_session_marker_survives_a_busy_writer.py"
+      ]
+    },
+    {
+      "provider": "scripts/lookup_mode.py",
+      "names": [
+        "search_mode"
+      ],
+      "contract_sha256": "2d6ae6bda25c0adb0c17e3f51cd8bbabfd0918bcc321932f2ce85de13af88289",
+      "integration_tests": [
+        "tests/test_an_answer_says_how_old_its_index_is.py"
+      ]
+    },
+    {
+      "provider": "scripts/mcp_server.py",
+      "names": [
+        "index_timestamp",
+        "recall_components",
+        "recorded_memory_digests"
+      ],
+      "contract_sha256": "0ad1b61e7a04400be761cd99514de011dc95d5a49f5c8abf74c201913e39f242",
+      "integration_tests": [
+        "tests/test_an_answer_says_how_old_its_index_is.py"
+      ]
+    },
+    {
+      "provider": "scripts/operational_ownership.py",
+      "names": [
+        "OwnerLease",
+        "heartbeat_owner"
+      ],
+      "contract_sha256": "c4582c6d1bbabcef579a4c3046b13d8d5245cb46712fbce11b1e2594acf2617f",
+      "integration_tests": [
+        "tests/test_a_blind_check_says_why_it_is_blind.py",
+        "tests/test_an_answer_says_how_old_its_index_is.py"
+      ]
+    },
+    {
+      "provider": "scripts/queue_core.py",
+      "names": [
+        "active_memory_queue",
+        "run_processor_child",
+        "uses_compile_journal",
+        "work_claimed"
+      ],
+      "contract_sha256": "1958e53b967a2a00ee20c3d945e3279fda1605a954605b21b65a71bdc535696b",
+      "integration_tests": [
+        "tests/test_a_blind_check_says_why_it_is_blind.py",
+        "tests/test_an_answer_says_how_old_its_index_is.py"
+      ]
+    },
+    {
+      "provider": "scripts/reliable_memory.py",
+      "names": [
+        "validate_state_root"
+      ],
+      "contract_sha256": "8680515cd873056a7c8a36e0057d91f2f83f23c48841263697676ff91f7ff964",
+      "integration_tests": [
+        "tests/test_a_blind_check_says_why_it_is_blind.py",
+        "tests/test_an_answer_says_how_old_its_index_is.py"
+      ]
+    },
+    {
+      "provider": "scripts/repository_scope.py",
+      "names": [
+        "resolve_repository_scope",
+        "sanitized_git_environment"
+      ],
+      "contract_sha256": "983dd096d99bafff98ca0aaa2cd722477333e30eed4bfa9297d1830c635e8d90",
+      "integration_tests": [
+        "tests/test_a_blind_check_says_why_it_is_blind.py",
+        "tests/test_an_answer_says_how_old_its_index_is.py"
+      ]
+    },
+    {
+      "provider": "scripts/search_memory.py",
+      "names": [
+        "result_snippet"
+      ],
+      "contract_sha256": "90d350d7686ebedfdd28bbab5723356deb4de4a675fb0809b6e4ac11bd14ecbf",
+      "integration_tests": [
+        "tests/test_an_answer_says_how_old_its_index_is.py"
+      ]
+    },
+    {
+      "provider": "scripts/secret_redact.py",
+      "names": [
+        "describe_error"
+      ],
+      "contract_sha256": "fb304f29eb5f060ccb0503f24561dd6ee4cfb07e2c36b130c00ad9e1c9000eaf",
+      "integration_tests": [
+        "tests/test_a_blind_check_says_why_it_is_blind.py",
+        "tests/test_an_answer_says_how_old_its_index_is.py"
+      ]
+    },
+    {
+      "provider": "scripts/settings.py",
+      "names": [
+        "setting_value"
+      ],
+      "contract_sha256": "ec6d2a43d91dba48c174aad5e9505790a05fd66f1bf1e5292264857f320a9881",
+      "integration_tests": [
+        "tests/test_an_answer_says_how_old_its_index_is.py"
+      ]
+    }
+  ]
+}

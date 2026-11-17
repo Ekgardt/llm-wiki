@@ -1,0 +1,158 @@
+{
+  "encoding": "o200k_base",
+  "max_tokens": 100000,
+  "serialization": "exact-duplicates/v1",
+  "files": [
+    "AGENTS.md",
+    "CLAUDE.md",
+    "docs/AGENTS.md",
+    "docs/STRUCTURE.md",
+    "docs/modules/context-bundle.md",
+    "docs/modules/context-records.md",
+    "docs/modules/context-tooling.md",
+    "docs/modules/lsp-process-state-context.json",
+    "docs/modules/lsp-process-state.md",
+    "docs/modules/model-choice.md",
+    "docs/modules/product-structure.md",
+    "docs/modules/project-governance.md",
+    "docs/modules/test-support.md",
+    "rules/development-laws.md",
+    "scripts/__init__.py",
+    "scripts/llm_wiki/__init__.py",
+    "scripts/llm_wiki/context_bundle.py",
+    "scripts/llm_wiki/lsp_process_state.py",
+    "tests/__init__.py",
+    "tests/conftest.py",
+    "tests/module_context.py",
+    "tests/module_context_paths.py",
+    "tests/module_interface.py",
+    "tests/module_interface_render.py",
+    "tests/module_qualification.py",
+    "tests/module_record_context.py",
+    "tests/module_records.py",
+    "tests/shared_fixtures.py",
+    "tests/slow_machine.py"
+  ],
+  "ownership": {
+    "files": [
+      "docs/modules/lsp-process-state-context.json",
+      "docs/modules/lsp-process-state.md",
+      "scripts/llm_wiki/lsp_process_state.py"
+    ]
+  },
+  "qualified_dependencies": [
+    {
+      "provider": "scripts/interruption.py",
+      "names": [
+        "walk_exception_chain"
+      ],
+      "contract_sha256": "a4690792f4de816182a285d99e76a3573958f097e0d35f51e9db5d3688d50556",
+      "integration_tests": [
+        "tests/modules/interruption/test_errors.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/generation_catalog_store.py",
+      "names": [
+        "GenerationCatalog"
+      ],
+      "contract_sha256": "b18194ebe04bf988b4474379fcb5243516550d43b745a00eaed1453f7844c983",
+      "integration_tests": [
+        "tests/test_a_blocked_task_has_a_way_back.py",
+        "tests/test_a_build_in_flight_is_not_an_orphan.py",
+        "tests/test_a_capacity_refusal_does_not_corrupt_a_generation.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/lsp_process_limits.py",
+      "names": [
+        "CLEANUP_STEPS",
+        "GRACEFUL_CLEANUP_SECONDS",
+        "LSP_ENV_ALLOWLIST",
+        "MAX_STARTUP_CLEANUP_OWNERS",
+        "MAX_STDERR_BYTES",
+        "PROCESS_EXITED",
+        "STDERR_CHUNK_BYTES",
+        "STDERR_TAIL_BYTES"
+      ],
+      "contract_sha256": "88f800b545319b642c03b0ef57ba5f8348ca3bfd8e274d568d97a2ce76839a40",
+      "integration_tests": [
+        "tests/test_an_unread_proc_entry_never_calls_a_group_inert.py",
+        "tests/test_lsp_process.py",
+        "tests/test_lsp_terminal_cleanup_fixture_uses_normal_startup.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/lsp_process_owner.py",
+      "names": [
+        "OwnerDirectory"
+      ],
+      "contract_sha256": "2c686e21ebf05f4663ceee2afcc660a187ac20ef27561c68d79be41f33e332fa",
+      "integration_tests": [
+        "tests/test_a_native_server_copy_leaves_with_its_owner.py",
+        "tests/test_lsp_process.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/model_choice.py",
+      "names": [
+        "using_root"
+      ],
+      "contract_sha256": "d45f2655cb61963e77617d1dfd7d617b134ad77cc770b59b335d0856e5d65019",
+      "integration_tests": [
+        "tests/test_central_model_selection.py",
+        "tests/test_compile_execution_inventory.py"
+      ]
+    },
+    {
+      "provider": "scripts/lsp_process_tree.py",
+      "names": [
+        "ProcessTree",
+        "subprocess"
+      ],
+      "contract_sha256": "880a66d117005aa6621dff9c11869822efaa0dfac1221bfafdbd4e10629db3fb",
+      "integration_tests": [
+        "tests/modules/lsp_process_tree/test_proc_evidence.py",
+        "tests/test_codex_probe_transport.py",
+        "tests/test_doctor.py"
+      ]
+    },
+    {
+      "provider": "scripts/lsp_protocol.py",
+      "names": [
+        "LspProtocol",
+        "ProtocolStartupCleanupError"
+      ],
+      "contract_sha256": "75fe1f5b1f6a98071ebbf8b38839097331558648452117a72fef424336b2ad81",
+      "integration_tests": [
+        "tests/test_a_fallback_names_its_cause.py",
+        "tests/test_a_lapsed_deadline_is_not_a_torn_stream.py",
+        "tests/test_an_oversized_reply_fails_its_request_not_its_server.py"
+      ]
+    },
+    {
+      "provider": "scripts/reliable_memory.py",
+      "names": [
+        "validate_state_root"
+      ],
+      "contract_sha256": "8680515cd873056a7c8a36e0057d91f2f83f23c48841263697676ff91f7ff964",
+      "integration_tests": [
+        "tests/test_a_backup_image_carries_what_git_does_not.py",
+        "tests/test_a_changed_task_setting_reaches_an_installed_machine.py",
+        "tests/test_a_committed_source_resolves_an_older_compile_plan.py"
+      ]
+    },
+    {
+      "provider": "scripts/repository_scope.py",
+      "names": [
+        "sanitized_git_environment"
+      ],
+      "contract_sha256": "fd550ae20761afad50b37fa3a71044a162485b0e4d4b3e2af9b5b22e143c2bec",
+      "integration_tests": [
+        "tests/test_a_code_generation_is_not_abandoned.py",
+        "tests/test_a_directory_link_inside_the_checkout_does_not_refuse_the_revision.py",
+        "tests/test_a_document_is_opened_in_its_own_language.py"
+      ]
+    }
+  ]
+}

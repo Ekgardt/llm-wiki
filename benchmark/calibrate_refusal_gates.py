@@ -168,8 +168,8 @@ def dprime_at(hit: float, false_alarm: float) -> float:
     return round(_z(hit) - _z(false_alarm), 3)
 
 
-def _share_at_least(values: list[float], threshold: float) -> float:
-    if not values:
+def _share_at_least(values: list[float], threshold: float | None) -> float:
+    if threshold is None or not values:
         return 0.0
     return sum(1 for value in values if value >= threshold) / len(values)
 
@@ -242,7 +242,7 @@ def _half_report(items: list[Reading], threshold: float | None) -> dict:
     originals = _scores([item.original for item in items])
     twins = _scores([item.twin for item in items])
     area = auc(originals, twins)
-    hit, false_alarm = _share_at_least(originals, threshold or 0.0), _share_at_least(twins, threshold or 0.0)
+    hit, false_alarm = _share_at_least(originals, threshold), _share_at_least(twins, threshold)
     return {
         "n": len(items),
         "mean_original": round(statistics.fmean(originals), 4),

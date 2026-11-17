@@ -10,7 +10,8 @@ from pathlib import Path
 import install_pyright as installer_module
 from install_pyright import install_pyright
 
-from tests.test_install_pyright import _artifact, _Response
+from tests.install_pyright_helpers import _artifact, _Response
+from tests.script_sources import script_files, script_key
 
 SCRIPTS = Path(__file__).resolve().parents[1] / "scripts"
 
@@ -47,6 +48,6 @@ def _called_without_retry(path: Path) -> bool:
 
 
 def test_every_module_that_downloads_a_pin_retries_the_network() -> None:
-    modules = sorted(path.name for path in SCRIPTS.glob("*.py") if path.name != "pinned_download.py")
+    modules = [path for path in script_files() if path.name != "pinned_download.py"]
 
-    assert [name for name in modules if _called_without_retry(SCRIPTS / name)] == []
+    assert [script_key(path) for path in modules if _called_without_retry(path)] == []

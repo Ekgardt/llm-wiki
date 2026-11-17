@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import sqlite3
 import sys
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 SCRIPTS_DIR = Path(__file__).resolve().parent.parent / "scripts"
@@ -17,24 +17,24 @@ if str(SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_DIR))
 
 import markdown_transaction  # noqa: E402
-import memory_queue  # noqa: E402
+import nightly_budget  # noqa: E402
 import operational_ownership  # noqa: E402
-import scheduled_nightly  # noqa: E402
+import queue_core  # noqa: E402
 
-LONG_AGO = datetime.now(timezone.utc) - timedelta(days=60)
+LONG_AGO = datetime.now(UTC) - timedelta(days=60)
 
 
 def _queue(tmp_path: Path):
     coordinator = tmp_path / "run" / "markdown-transactions-v3.candidate.sqlite3"
     candidate = tmp_path / "run" / "queue-v3.candidate.sqlite3"
     markdown_transaction.initialize_coordinator_v3_candidate(coordinator, source_v2=None)
-    memory_queue.initialize_queue_v3_candidate(candidate, source_v2=None)
-    return memory_queue.MemoryQueue._from_v3_candidate(candidate, state_root=tmp_path)
+    queue_core.initialize_queue_v3_candidate(candidate, source_v2=None)
+    return queue_core.MemoryQueue.from_v3_candidate(candidate, state_root=tmp_path)
 
 
 def _dead_capture(tmp_path: Path, queue, intent_id: str) -> str:
     """A capture task that spent its attempts long ago, as the live ones did."""
-    coordinator = markdown_transaction.MarkdownCoordinator._from_v3_candidate(
+    coordinator = markdown_transaction.MarkdownCoordinator.from_v3_candidate(
         tmp_path / "run" / "markdown-transactions-v3.candidate.sqlite3", state_root=tmp_path
     )
     registry = operational_ownership.OwnershipRegistry(tmp_path)
@@ -61,7 +61,7 @@ def _dead_capture(tmp_path: Path, queue, intent_id: str) -> str:
 
 
 def _age(queue, task_id: str, state: str, error_code: str | None) -> None:
-    stamp = memory_queue._timestamp(LONG_AGO)
+    stamp = queue_core.timestamp(LONG_AGO)
     with sqlite3.connect(queue.db_path) as database:
         database.execute(
             "UPDATE tasks SET state=?, error_code=?, attempts=8, updated_at=? WHERE id=?",
@@ -81,7 +81,7 @@ def _children(queue, task_id: str) -> list[tuple[str, str]]:
 def test_a_capture_that_died_before_the_change_is_redriven_once_with_its_intent(tmp_path: Path) -> None:
     queue = _queue(tmp_path)
     dead = _dead_capture(tmp_path, queue, "a" * 64)
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
 
     first = queue.redrive_dead_captures(changed_after=now)
     second = queue.redrive_dead_captures(changed_after=now)
@@ -114,7 +114,7 @@ def test_a_child_that_could_not_reach_the_worker_does_not_spend_the_second_chanc
     dead = _dead_capture(tmp_path, queue, "c" * 64)
     _unreachable_child(queue, dead)
 
-    outcome = queue.redrive_dead_captures(changed_after=datetime.now(timezone.utc))
+    outcome = queue.redrive_dead_captures(changed_after=datetime.now(UTC))
 
     assert [pair[0] for pair in outcome.redriven] == [dead]
 
@@ -124,7 +124,7 @@ def test_a_child_that_carried_the_link_spent_it_even_when_cancelled(tmp_path: Pa
     dead = _dead_capture(tmp_path, queue, "e" * 64)
     queue.cancel(queue.redrive(dead))
 
-    outcome = queue.redrive_dead_captures(changed_after=datetime.now(timezone.utc))
+    outcome = queue.redrive_dead_captures(changed_after=datetime.now(UTC))
 
     assert (outcome.redriven, outcome.refused) == ((), ())
 
@@ -139,7 +139,7 @@ def test_the_purge_keeps_a_capture_it_cannot_prove_and_takes_the_rest(tmp_path: 
     _age(queue, finished, "succeeded", None)
 
     receipt = queue.purge(
-        terminal_before=datetime.now(timezone.utc),
+        terminal_before=datetime.now(UTC),
         export_path=tmp_path / "export",
         include_dead=True,
     )
@@ -147,13 +147,14 @@ def test_the_purge_keeps_a_capture_it_cannot_prove_and_takes_the_rest(tmp_path: 
     assert (receipt.task_ids, receipt.retained) == ((finished,), (dead,))
 
 
-def test_the_nightly_redrives_before_the_queue_worker_runs() -> None:
-    labels = [step.label for step in scheduled_nightly._intake_steps()]
+def test_the_nightly_redrives_before_the_queue_worker_runs(monkeypatch) -> None:
+    monkeypatch.setattr(nightly_budget, "head_arrival_time", lambda: LONG_AGO.isoformat())
+    labels = [step.label for step in nightly_budget.intake_steps()]
 
     assert labels.index("dead_capture_redrive") < labels.index("work")
 
 
 def test_no_readable_head_means_no_redrive_step(monkeypatch) -> None:
-    monkeypatch.setattr(scheduled_nightly, "head_arrival_time", lambda: None)
+    monkeypatch.setattr(nightly_budget, "head_arrival_time", lambda: None)
 
-    assert "dead_capture_redrive" not in [step.label for step in scheduled_nightly._intake_steps()]
+    assert "dead_capture_redrive" not in [step.label for step in nightly_budget.intake_steps()]

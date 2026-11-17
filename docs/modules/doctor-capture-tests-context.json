@@ -1,0 +1,158 @@
+{
+  "encoding": "o200k_base",
+  "max_tokens": 100000,
+  "serialization": "exact-duplicates/v1",
+  "files": [
+    "AGENTS.md",
+    "CLAUDE.md",
+    "docs/AGENTS.md",
+    "docs/STRUCTURE.md",
+    "docs/modules/context-bundle.md",
+    "docs/modules/context-records.md",
+    "docs/modules/context-tooling.md",
+    "docs/modules/doctor-capture-tests-context.json",
+    "docs/modules/doctor-capture-tests.md",
+    "docs/modules/hook-failures-reach-health-helpers.md",
+    "docs/modules/model-choice.md",
+    "docs/modules/product-structure.md",
+    "docs/modules/project-governance.md",
+    "docs/modules/test-support.md",
+    "rules/development-laws.md",
+    "scripts/__init__.py",
+    "scripts/llm_wiki/__init__.py",
+    "scripts/llm_wiki/context_bundle.py",
+    "tests/__init__.py",
+    "tests/conftest.py",
+    "tests/hook_failures_reach_health_helpers.py",
+    "tests/module_context.py",
+    "tests/module_context_paths.py",
+    "tests/module_interface.py",
+    "tests/module_interface_render.py",
+    "tests/module_qualification.py",
+    "tests/module_record_context.py",
+    "tests/module_records.py",
+    "tests/shared_fixtures.py",
+    "tests/slow_machine.py",
+    "tests/test_a_checkpoint_that_never_reached_the_database_is_seen.py",
+    "tests/test_a_lost_race_is_not_a_hook_failure.py",
+    "tests/test_hook_failures_reach_health.py"
+  ],
+  "ownership": {
+    "files": [
+      "docs/modules/doctor-capture-tests-context.json",
+      "docs/modules/doctor-capture-tests.md",
+      "tests/test_a_checkpoint_that_never_reached_the_database_is_seen.py",
+      "tests/test_a_lost_race_is_not_a_hook_failure.py",
+      "tests/test_hook_failures_reach_health.py"
+    ]
+  },
+  "qualified_dependencies": [
+    {
+      "provider": "scripts/llm_wiki/doctor_capture.py",
+      "names": [
+        "HOOK_ERROR_TAIL_BYTES",
+        "checkpoint_check",
+        "hook_error_check",
+        "hook_error_kinds",
+        "hook_error_lines",
+        "hook_error_records",
+        "hook_error_result"
+      ],
+      "contract_sha256": "19573f5a5236b395809e414122f86e5710e118001298e1d0e5f663a5920e043c",
+      "integration_tests": [
+        "tests/test_a_checkpoint_that_never_reached_the_database_is_seen.py",
+        "tests/test_a_lost_race_is_not_a_hook_failure.py",
+        "tests/test_hook_failures_reach_health.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/generation_catalog_store.py",
+      "names": [
+        "GenerationCatalog"
+      ],
+      "contract_sha256": "b18194ebe04bf988b4474379fcb5243516550d43b745a00eaed1453f7844c983",
+      "integration_tests": [
+        "tests/test_a_blocked_task_has_a_way_back.py",
+        "tests/test_a_build_in_flight_is_not_an_orphan.py",
+        "tests/test_a_capacity_refusal_does_not_corrupt_a_generation.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/model_choice.py",
+      "names": [
+        "using_root"
+      ],
+      "contract_sha256": "d45f2655cb61963e77617d1dfd7d617b134ad77cc770b59b335d0856e5d65019",
+      "integration_tests": [
+        "tests/test_a_checkpoint_that_never_reached_the_database_is_seen.py",
+        "tests/test_a_lost_race_is_not_a_hook_failure.py",
+        "tests/test_hook_failures_reach_health.py"
+      ]
+    },
+    {
+      "provider": "scripts/markdown_transaction.py",
+      "names": [
+        "OperationBoundElsewhereError",
+        "ProjectPendingPriorError"
+      ],
+      "contract_sha256": "c1e392ed3e84cc5f9d96546b4cbf593344824ae5d825a13f2e285d8e8abc53d1",
+      "integration_tests": [
+        "tests/test_a_lost_race_is_not_a_hook_failure.py"
+      ]
+    },
+    {
+      "provider": "scripts/memory_state.py",
+      "names": [
+        "StateLockTimeout"
+      ],
+      "contract_sha256": "4a04372391ff487633ebdbe2b9850e90eed7b281b67c63427f15046594ddc4dd",
+      "integration_tests": [
+        "tests/test_a_lost_race_is_not_a_hook_failure.py"
+      ]
+    },
+    {
+      "provider": "scripts/operational_ownership.py",
+      "names": [
+        "OperationalOwnershipError"
+      ],
+      "contract_sha256": "4e690faa26af4ebcb3d40ed8de732b6c3cd74fffbf8ecfe0537e00a088d693eb",
+      "integration_tests": [
+        "tests/test_a_lost_race_is_not_a_hook_failure.py"
+      ]
+    },
+    {
+      "provider": "scripts/project_checkpoint.py",
+      "names": [
+        "checkpoint_log_kind"
+      ],
+      "contract_sha256": "b724a29b0a031caaa5c9d78616bd77a3700c9f71732f90fa51c3f72e29f5f2ec",
+      "integration_tests": [
+        "tests/test_a_lost_race_is_not_a_hook_failure.py"
+      ]
+    },
+    {
+      "provider": "scripts/reliable_memory.py",
+      "names": [
+        "validate_state_root"
+      ],
+      "contract_sha256": "8680515cd873056a7c8a36e0057d91f2f83f23c48841263697676ff91f7ff964",
+      "integration_tests": [
+        "tests/test_a_checkpoint_that_never_reached_the_database_is_seen.py",
+        "tests/test_a_lost_race_is_not_a_hook_failure.py",
+        "tests/test_hook_failures_reach_health.py"
+      ]
+    },
+    {
+      "provider": "scripts/repository_scope.py",
+      "names": [
+        "sanitized_git_environment"
+      ],
+      "contract_sha256": "fd550ae20761afad50b37fa3a71044a162485b0e4d4b3e2af9b5b22e143c2bec",
+      "integration_tests": [
+        "tests/test_a_checkpoint_that_never_reached_the_database_is_seen.py",
+        "tests/test_a_lost_race_is_not_a_hook_failure.py",
+        "tests/test_hook_failures_reach_health.py"
+      ]
+    }
+  ]
+}

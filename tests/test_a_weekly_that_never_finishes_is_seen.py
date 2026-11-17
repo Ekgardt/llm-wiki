@@ -4,11 +4,11 @@ docs/research/2026-09-27-a-weekly-that-never-finishes-is-seen.md
 """
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
-import doctor
+from llm_wiki import doctor_schedule
 
-NOW = datetime(2026, 9, 27, 12, tzinfo=timezone.utc)
+NOW = datetime(2026, 9, 27, 12, tzinfo=UTC)
 
 
 def _stamp(delta: timedelta) -> str:
@@ -18,7 +18,7 @@ def _stamp(delta: timedelta) -> str:
 def test_a_weekly_due_for_over_a_period_with_no_run_is_named() -> None:
     state = {"weekly_due_since": _stamp(timedelta(days=9))}
 
-    assert doctor._weekly_lateness(state, NOW) == "Weekly maintenance has never completed."
+    assert doctor_schedule.weekly_lateness(state, NOW) == "Weekly maintenance has never completed."
 
 
 def test_a_weekly_that_started_and_left_no_result_is_named() -> None:
@@ -27,7 +27,7 @@ def test_a_weekly_that_started_and_left_no_result_is_named() -> None:
         "last_weekly_started_at": _stamp(timedelta(hours=7)),
     }
 
-    assert "did not finish" in str(doctor._weekly_lateness(state, NOW))
+    assert "did not finish" in str(doctor_schedule.weekly_lateness(state, NOW))
 
 
 def test_a_weekly_that_finished_after_it_started_is_quiet() -> None:
@@ -37,4 +37,4 @@ def test_a_weekly_that_finished_after_it_started_is_quiet() -> None:
         "last_weekly_at": _stamp(timedelta(hours=5)),
     }
 
-    assert doctor._weekly_lateness(state, NOW) is None
+    assert doctor_schedule.weekly_lateness(state, NOW) is None

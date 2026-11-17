@@ -1,6 +1,10 @@
 from __future__ import annotations
 
+import ast
+import json
 import math
+import sys
+from pathlib import Path
 
 import pytest
 from context_budget import (
@@ -118,3 +122,53 @@ def test_empty_input_has_deterministic_zero_estimate():
     assert count_tokens("") == TokenCount(tokens=0, source="estimated")
 
 
+
+
+_ROOT = Path(__file__).resolve().parents[1]
+
+
+def _import_roots(node):
+    if isinstance(node, ast.Import):
+        return {alias.name.split('.')[0] for alias in node.names}
+    if isinstance(node, ast.ImportFrom):
+        return {('.' * node.level + (node.module or '')).split('.')[0]}
+    return set()
+
+
+def _nonstdlib_imports(source):
+    roots = set().union(*(_import_roots(node) for node in ast.walk(ast.parse(source))))
+    return roots - sys.stdlib_module_names
+
+
+def test_context_budget_has_no_execution_dependencies():
+    source = (_ROOT / 'scripts/context_budget.py').read_text(encoding='utf-8')
+    assert not _nonstdlib_imports(source)
+
+
+@pytest.mark.parametrize('source', [
+    'import memory_state',
+    'from llm_client import call_llm',
+    'def count():\n import compile_memory as executor',
+    'from reliable_memory import *',
+    'from . import local',
+    'from .json import loads',
+])
+def test_budget_boundary_detects_nonstandard_dependencies(source):
+    assert _nonstdlib_imports(source)
+
+
+def test_budget_boundary_accepts_standard_library_imports():
+    assert not _nonstdlib_imports('import json as wire\nfrom dataclasses import dataclass')
+
+
+def test_complete_context_budget_module_fits_user_ceiling():
+    manifest = json.loads((_ROOT / 'docs/modules/context-budget-context.json').read_text(encoding='utf-8'))
+    paths = manifest['files']
+    assert {'scripts/context_budget.py', 'tests/test_context_budget.py',
+            'tests/test_context_packing.py', 'docs/modules/context-budget.md',
+            'docs/modules/context-budget-context.json'} <= set(paths)
+    assert len(paths) == len(set(paths))
+    assert manifest['max_tokens'] == 100_000
+    from tests.module_context import measure_context
+    total, files = measure_context(_ROOT, _ROOT / 'docs/modules/context-budget-context.json')
+    print(f'context-budget: {total} tokens; {files} files')

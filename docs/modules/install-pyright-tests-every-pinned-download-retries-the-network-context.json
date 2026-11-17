@@ -1,0 +1,225 @@
+{
+  "encoding": "o200k_base",
+  "max_tokens": 100000,
+  "serialization": "exact-duplicates/v1",
+  "files": [
+    "AGENTS.md",
+    "CLAUDE.md",
+    "docs/AGENTS.md",
+    "docs/STRUCTURE.md",
+    "docs/modules/context-bundle.md",
+    "docs/modules/context-records.md",
+    "docs/modules/context-tooling.md",
+    "docs/modules/formats.md",
+    "docs/modules/install-pyright-tests-every-pinned-download-retries-the-network-context.json",
+    "docs/modules/install-pyright-tests-every-pinned-download-retries-the-network.md",
+    "docs/modules/install-pyright.md",
+    "docs/modules/model-choice.md",
+    "docs/modules/product-structure.md",
+    "docs/modules/project-governance.md",
+    "docs/modules/pyright-configuration.md",
+    "docs/modules/pyright-profile-tests.md",
+    "docs/modules/script-sources.md",
+    "docs/modules/test-support.md",
+    "rules/development-laws.md",
+    "scripts/__init__.py",
+    "scripts/install_pyright.py",
+    "scripts/llm_wiki/__init__.py",
+    "scripts/llm_wiki/context_bundle.py",
+    "scripts/llm_wiki/formats/__init__.py",
+    "scripts/llm_wiki/pyright_configuration.py",
+    "tests/__init__.py",
+    "tests/conftest.py",
+    "tests/install_pyright_helpers.py",
+    "tests/module_context.py",
+    "tests/module_context_paths.py",
+    "tests/module_interface.py",
+    "tests/module_interface_render.py",
+    "tests/module_qualification.py",
+    "tests/module_record_context.py",
+    "tests/module_records.py",
+    "tests/pyright_install_artifacts.py",
+    "tests/script_sources.py",
+    "tests/shared_fixtures.py",
+    "tests/slow_machine.py",
+    "tests/test_every_pinned_download_retries_the_network.py"
+  ],
+  "ownership": {
+    "files": [
+      "docs/modules/install-pyright-tests-every-pinned-download-retries-the-network-context.json",
+      "docs/modules/install-pyright-tests-every-pinned-download-retries-the-network.md",
+      "tests/test_every_pinned_download_retries_the_network.py"
+    ]
+  },
+  "qualified_dependencies": [
+    {
+      "provider": "scripts/bounded_io.py",
+      "names": [
+        "IO_CHUNK_BYTES"
+      ],
+      "contract_sha256": "832f143c7663b746e254455c650afd8b3ccb426152369aa1345298267ee40739",
+      "integration_tests": [
+        "tests/test_every_pinned_download_retries_the_network.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/formats/canonical.py",
+      "names": [
+        "canonical_json_bytes",
+        "sha256_bytes"
+      ],
+      "contract_sha256": "2e42a7aefcb66ac2515f6665a03feae34e6f7bad4807787a789ce031f9f3a9c1",
+      "integration_tests": [
+        "tests/test_every_pinned_download_retries_the_network.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/generation_catalog_store.py",
+      "names": [
+        "GenerationCatalog"
+      ],
+      "contract_sha256": "b18194ebe04bf988b4474379fcb5243516550d43b745a00eaed1453f7844c983",
+      "integration_tests": [
+        "tests/test_a_build_in_flight_is_not_an_orphan.py",
+        "tests/test_a_code_generation_is_not_abandoned.py",
+        "tests/test_a_flow_walk_stops_when_its_caller_has.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/model_choice.py",
+      "names": [
+        "using_root"
+      ],
+      "contract_sha256": "d45f2655cb61963e77617d1dfd7d617b134ad77cc770b59b335d0856e5d65019",
+      "integration_tests": [
+        "tests/test_central_model_selection.py",
+        "tests/test_compile_execution_inventory.py"
+      ]
+    },
+    {
+      "provider": "scripts/lsp_paths.py",
+      "names": [
+        "managed_pyright_root"
+      ],
+      "contract_sha256": "47cfb07a26e4f287642ed672c67c56583ff95a174aabae0293f4d8ea41d677c5",
+      "integration_tests": [
+        "tests/test_every_pinned_download_retries_the_network.py"
+      ]
+    },
+    {
+      "provider": "scripts/operational_ownership.py",
+      "names": [
+        "process_start_identity"
+      ],
+      "contract_sha256": "5ddeea83200a511ecdb320bfea56d42175e1e148e49f9c323ca6068ba0aa5377",
+      "integration_tests": [
+        "tests/test_every_pinned_download_retries_the_network.py"
+      ]
+    },
+    {
+      "provider": "scripts/pinned_download.py",
+      "names": [
+        "MAX_COMPRESSED_BYTES",
+        "MAX_DECOMPRESSED_BYTES",
+        "MAX_MEMBERS",
+        "MAX_MEMBER_BYTES",
+        "MAX_PATH_COMPONENTS",
+        "NETWORK_TIMEOUT_SECONDS",
+        "open_pinned_url",
+        "retry_transient"
+      ],
+      "contract_sha256": "18252c6b97a93fb697692382e4f61792fb10ca88a32dc14ea37c2215d524698f",
+      "integration_tests": [
+        "tests/test_every_pinned_download_retries_the_network.py"
+      ]
+    },
+    {
+      "provider": "scripts/process_liveness.py",
+      "names": [
+        "recorded_process_state"
+      ],
+      "contract_sha256": "b20195a5def15136311ec78d232bc382f55965edfbf9bf02912d5097961d0c48",
+      "integration_tests": [
+        "tests/test_every_pinned_download_retries_the_network.py"
+      ]
+    },
+    {
+      "provider": "scripts/pyright_profile.py",
+      "names": [
+        "MAX_EXECUTED_TREE_BYTES",
+        "MAX_EXECUTED_TREE_FILES",
+        "MAX_INSTALL_MANIFEST_BYTES",
+        "MAX_PACKAGE_JSON_BYTES",
+        "MAX_SERVER_BYTES",
+        "PYRIGHT_EXECUTED_TREE_RELATIVE",
+        "PYRIGHT_PACKAGE_URL",
+        "PYRIGHT_SERVER_RELATIVE",
+        "PYRIGHT_VERSION",
+        "build_pyright_install_manifest",
+        "executed_tree_digest",
+        "validate_pyright_install_manifest"
+      ],
+      "contract_sha256": "7a162f09c8f7753c4db677e3b3425a89749e10ccdbe1e1b86ae697987c25060b",
+      "integration_tests": [
+        "tests/test_a_document_is_opened_in_its_own_language.py",
+        "tests/test_a_progress_gate_waits_only_for_an_opened_token.py",
+        "tests/test_a_retained_cleanup_owner_leaves_the_module_registry.py"
+      ]
+    },
+    {
+      "provider": "scripts/reliable_memory.py",
+      "names": [
+        "canonical_json_bytes",
+        "initialize_probe_directory",
+        "set_owner_only",
+        "sqlite_lock_probe",
+        "validate_state_root"
+      ],
+      "contract_sha256": "05547f01ebf6844e9720e89841f953aea6a2bac32c0fe5794c1824c710290312",
+      "integration_tests": [
+        "tests/test_every_pinned_download_retries_the_network.py"
+      ]
+    },
+    {
+      "provider": "scripts/repository_scope.py",
+      "names": [
+        "sanitized_git_environment"
+      ],
+      "contract_sha256": "fd550ae20761afad50b37fa3a71044a162485b0e4d4b3e2af9b5b22e143c2bec",
+      "integration_tests": [
+        "tests/test_every_pinned_download_retries_the_network.py"
+      ]
+    },
+    {
+      "provider": "scripts/windows_workspace.py",
+      "names": [
+        "close_handle",
+        "create_file",
+        "create_writable_directory",
+        "delete_handle",
+        "file_modified_time_ns",
+        "file_size",
+        "flush_directory",
+        "flush_file",
+        "identity",
+        "list_directory",
+        "open_deletable_directory",
+        "open_deletable_file",
+        "open_directory",
+        "open_directory_path",
+        "open_exclusive_readonly_source_file",
+        "open_file",
+        "open_writable_directory_path",
+        "publish_file",
+        "read_chunks",
+        "relative_handle",
+        "seek_start",
+        "write_all"
+      ],
+      "contract_sha256": "df15b978441e25ccceb9e43555cee0bdafc657252a5cce81719708c7dd86569c",
+      "integration_tests": [
+        "tests/test_every_pinned_download_retries_the_network.py"
+      ]
+    }
+  ]
+}

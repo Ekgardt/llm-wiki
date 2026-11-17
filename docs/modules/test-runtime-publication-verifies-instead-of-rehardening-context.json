@@ -1,0 +1,240 @@
+{
+  "encoding": "o200k_base",
+  "max_tokens": 100000,
+  "serialization": "exact-duplicates/v1",
+  "files": [
+    "AGENTS.md",
+    "CLAUDE.md",
+    "docs/AGENTS.md",
+    "docs/STRUCTURE.md",
+    "docs/modules/context-bundle.md",
+    "docs/modules/context-records.md",
+    "docs/modules/context-tooling.md",
+    "docs/modules/formats.md",
+    "docs/modules/model-choice.md",
+    "docs/modules/product-structure.md",
+    "docs/modules/project-governance.md",
+    "docs/modules/runtime-contracts.md",
+    "docs/modules/runtime-environment.md",
+    "docs/modules/runtime-publication.md",
+    "docs/modules/test-runtime-publication-verifies-instead-of-rehardening-context.json",
+    "docs/modules/test-runtime-publication-verifies-instead-of-rehardening.md",
+    "docs/modules/test-support.md",
+    "docs/modules/windows-acl.md",
+    "docs/modules/windows-native.md",
+    "rules/development-laws.md",
+    "scripts/__init__.py",
+    "scripts/llm_wiki/__init__.py",
+    "scripts/llm_wiki/context_bundle.py",
+    "scripts/llm_wiki/formats/__init__.py",
+    "scripts/llm_wiki/runtime_environment.py",
+    "scripts/llm_wiki/runtime_publication.py",
+    "scripts/llm_wiki/windows_acl.py",
+    "tests/__init__.py",
+    "tests/a_windows_owner_with_a_non_ascii_name_is_verified_helpers.py",
+    "tests/conftest.py",
+    "tests/module_context.py",
+    "tests/module_context_paths.py",
+    "tests/module_interface.py",
+    "tests/module_interface_render.py",
+    "tests/module_qualification.py",
+    "tests/module_record_context.py",
+    "tests/module_records.py",
+    "tests/modules/__init__.py",
+    "tests/modules/windows_acl/__init__.py",
+    "tests/modules/windows_acl/boundary_helpers.py",
+    "tests/shared_fixtures.py",
+    "tests/slow_machine.py",
+    "tests/test_runtime_publication_verifies_instead_of_rehardening.py"
+  ],
+  "ownership": {
+    "files": [
+      "docs/modules/test-runtime-publication-verifies-instead-of-rehardening-context.json",
+      "docs/modules/test-runtime-publication-verifies-instead-of-rehardening.md",
+      "tests/test_runtime_publication_verifies_instead_of_rehardening.py"
+    ]
+  },
+  "qualified_dependencies": [
+    {
+      "provider": "scripts/llm_wiki/formats/canonical.py",
+      "names": [
+        "sha256_bytes"
+      ],
+      "contract_sha256": "7d34a853c5a6f1be8b00805b2e865ac2a5ca5a6fe3ca141de97ebda61d2a85cf",
+      "integration_tests": [
+        "tests/test_runtime_publication_verifies_instead_of_rehardening.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/generation_catalog_store.py",
+      "names": [
+        "GenerationCatalog"
+      ],
+      "contract_sha256": "b18194ebe04bf988b4474379fcb5243516550d43b745a00eaed1453f7844c983",
+      "integration_tests": [
+        "tests/test_a_build_in_flight_is_not_an_orphan.py",
+        "tests/test_a_code_generation_is_not_abandoned.py",
+        "tests/test_a_flow_walk_stops_when_its_caller_has.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/model_choice.py",
+      "names": [
+        "using_root"
+      ],
+      "contract_sha256": "d45f2655cb61963e77617d1dfd7d617b134ad77cc770b59b335d0856e5d65019",
+      "integration_tests": [
+        "tests/test_runtime_publication_verifies_instead_of_rehardening.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/queue_artifacts.py",
+      "names": [
+        "is_owner_only"
+      ],
+      "contract_sha256": "d0cf2d1dd004160e3c79d51e2b3572a1f59789ec8023081d1d5d574278b22b3b",
+      "integration_tests": [
+        "tests/modules/queue_artifacts/test_artifacts.py",
+        "tests/test_a_backup_image_carries_what_git_does_not.py",
+        "tests/test_a_backup_snapshots_what_hooks_write.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/runtime_contracts.py",
+      "names": [
+        "RuntimeFileIdentity",
+        "UnsafeStateRoot"
+      ],
+      "contract_sha256": "9868f8f90624ffd75e17d6e6451f57074ee114498d8719cf54e84573a0471476",
+      "integration_tests": [
+        "tests/test_runtime_publication_verifies_instead_of_rehardening.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/runtime_records.py",
+      "names": [
+        "capture_runtime_file_identity",
+        "read_runtime_bytes"
+      ],
+      "contract_sha256": "8660d68e804edbcd128f105aad9fb43c341be30c1f0c0fbc86af3472c7ee8ab0",
+      "integration_tests": [
+        "tests/test_runtime_publication_verifies_instead_of_rehardening.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/runtime_sync.py",
+      "names": [
+        "fsync_directory",
+        "fsync_file",
+        "metadata_durability_error"
+      ],
+      "contract_sha256": "f6cd51add441b83c1b0254deab8c2241e23fa6289f3e960006ea6ac4f0d538b1",
+      "integration_tests": [
+        "tests/test_runtime_publication_verifies_instead_of_rehardening.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/sqlite_contracts.py",
+      "names": [
+        "require_positive_int"
+      ],
+      "contract_sha256": "f146fa9d3d0e09b563e5a1d3a1611731449c3906807306240b3ad04beb478d31",
+      "integration_tests": [
+        "tests/test_runtime_publication_verifies_instead_of_rehardening.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/windows_native.py",
+      "names": [
+        "windows_kernel32"
+      ],
+      "contract_sha256": "14b51993282554a7a9c7484a32c9a4a0cc4eb28a22d5c9942c166c407fdf1089",
+      "integration_tests": [
+        "tests/test_runtime_publication_verifies_instead_of_rehardening.py"
+      ]
+    },
+    {
+      "provider": "scripts/markdown_transaction.py",
+      "names": [
+        "acl_entry_lines",
+        "acl_failure",
+        "acl_line_names_owner",
+        "acl_lines_naming",
+        "acl_output_encodings",
+        "acl_output_text",
+        "acl_permission",
+        "apply_windows_acl",
+        "console_code_page",
+        "harden_windows_acl",
+        "names_identity",
+        "read_windows_acl",
+        "require_verified_windows_owner_acl",
+        "run_acl_command",
+        "verified_owner_acl_line",
+        "verify_no_other_acl",
+        "verify_windows_owner_acl",
+        "windows_acl_identity"
+      ],
+      "contract_sha256": "fab8755350792d8a3f388a2f0f5c19fb2b4fe45f9de319f756d367e4cd44adbb",
+      "integration_tests": [
+        "tests/test_a_busy_append_repeats_its_attempt.py",
+        "tests/test_a_busy_release_is_retried_until_it_lands.py",
+        "tests/test_a_checkpoint_that_fails_at_the_commit_puts_its_files_back.py"
+      ]
+    },
+    {
+      "provider": "scripts/queue_core.py",
+      "names": [
+        "acl_is_owner_only",
+        "acl_owner_lines",
+        "is_owner_only_windows",
+        "windows_acl_lines"
+      ],
+      "contract_sha256": "675158633d31b6dda15f5d0abfb00ae0f52d86b3bb45e0c795f794005da0f5e7",
+      "integration_tests": [
+        "tests/test_a_blocked_task_has_a_way_back.py",
+        "tests/test_a_child_that_dies_at_start_does_not_halt_the_worker.py",
+        "tests/test_a_childs_tree_is_read_when_it_is_killed.py"
+      ]
+    },
+    {
+      "provider": "scripts/reliable_memory.py",
+      "names": [
+        "capture_runtime_file_identity",
+        "harden_runtime_owner_only",
+        "publish_runtime_file",
+        "publish_staged",
+        "require_windows_owner_only",
+        "validate_state_root",
+        "verify_published_runtime_permissions"
+      ],
+      "contract_sha256": "4d8684ab7c35c5285bf8623266edfb95a7e9d72991225e87bbf453155197b0ff",
+      "integration_tests": [
+        "tests/test_runtime_publication_verifies_instead_of_rehardening.py"
+      ]
+    },
+    {
+      "provider": "scripts/repository_scope.py",
+      "names": [
+        "sanitized_git_environment"
+      ],
+      "contract_sha256": "fd550ae20761afad50b37fa3a71044a162485b0e4d4b3e2af9b5b22e143c2bec",
+      "integration_tests": [
+        "tests/test_a_code_generation_is_not_abandoned.py",
+        "tests/test_a_directory_link_inside_the_checkout_does_not_refuse_the_revision.py",
+        "tests/test_a_document_is_opened_in_its_own_language.py"
+      ]
+    },
+    {
+      "provider": "scripts/windows_workspace.py",
+      "names": [
+        "flush_file_path",
+        "move_file_write_through"
+      ],
+      "contract_sha256": "d8e6c454f310773e1a16c1760b5b32878f500b0c7888eae6e164f52b65ab4500",
+      "integration_tests": [
+        "tests/test_runtime_publication_verifies_instead_of_rehardening.py"
+      ]
+    }
+  ]
+}

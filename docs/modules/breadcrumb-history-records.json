@@ -1,0 +1,225 @@
+{
+  "schema": "module-records/v1",
+  "source": "docs/research/2026-09-29-breadcrumb-durability-proposal.md",
+  "bytes": 80729,
+  "sha256": "03c5279e54a00a2e1b23375bd3a810550cf968348a9b11b0e7c9a05ca7fa8520",
+  "records": [
+    {
+      "id": "overview",
+      "label": "Complete-document status and provenance",
+      "start": 0,
+      "end": 523,
+      "sha256": "b8c4ac6d6056fbfec0f01063d69956690efbbbdd60f271bdb772f5e3ceba598b"
+    },
+    {
+      "id": "semantic-admission-and-producer-cleanup-checkpoint-2026-09-30",
+      "label": "Semantic admission and producer cleanup checkpoint, 2026-09-30",
+      "start": 523,
+      "end": 3231,
+      "sha256": "52d4396076d983ff9e0055c25d353d9ce2f23746453fbb35042a696059a7e968"
+    },
+    {
+      "id": "product-path-qualification-failure-2026-09-30",
+      "label": "Product-path qualification failure, 2026-09-30",
+      "start": 3231,
+      "end": 4933,
+      "sha256": "7f34617cb4e76417dd145dafe1b800ebb51e04ed8a1472ebe345e3bd094bb0ff"
+    },
+    {
+      "id": "source-scoring-correction-checkpoint-2026-09-30",
+      "label": "Source scoring correction checkpoint, 2026-09-30",
+      "start": 4933,
+      "end": 7711,
+      "sha256": "f6f6826f5aabefb224a53cdd44ce6982a8f334d01401d73cccf4bd8af3ed2bc2"
+    },
+    {
+      "id": "repair-reporting-correction-and-bounded-search-experiments-2026-09-30",
+      "label": "Repair reporting correction and bounded search experiments, 2026-09-30",
+      "start": 7711,
+      "end": 10776,
+      "sha256": "3e2d69add3de1035c0774b7b1b10535b8ef64d96716f4e44beeff9c59dd315b7"
+    },
+    {
+      "id": "subsequent-verification-2026-09-30",
+      "label": "Subsequent verification, 2026-09-30",
+      "start": 10776,
+      "end": 13106,
+      "sha256": "03133cb22f22dacb7066e0866c1be5153b3d888589bfddbf567a9f4d023acbf0"
+    },
+    {
+      "id": "linked-source-retrieval-qualification-2026-09-30",
+      "label": "Linked-source retrieval qualification, 2026-09-30",
+      "start": 13106,
+      "end": 16901,
+      "sha256": "8773b9074244cadd73ce807620ef93197471d10da94cfd0b92240ef20186d607"
+    },
+    {
+      "id": "common-producer-routing-qualification-2026-09-30",
+      "label": "Common producer routing qualification, 2026-09-30",
+      "start": 16901,
+      "end": 19868,
+      "sha256": "fef54679206b7f0aac1d9bba53e84b567718f37ed89501706fd068478dd01414"
+    },
+    {
+      "id": "retrieval-preparation-and-shared-read-deadline-2026-09-30",
+      "label": "Retrieval preparation and shared read deadline, 2026-09-30",
+      "start": 19868,
+      "end": 24514,
+      "sha256": "5de052c2a25379f52a804cca8f4f88bd3b79fa4519808f603132519667af480b"
+    },
+    {
+      "id": "occurrence-identity-qualification-2026-09-30",
+      "label": "Occurrence identity qualification, 2026-09-30",
+      "start": 24514,
+      "end": 28909,
+      "sha256": "bbebb7995519dca0a73a347b329c54958dc4a0b7f49ff2ca5ed3a2d852efbd33"
+    },
+    {
+      "id": "original-proposal-status",
+      "label": "Original proposal status and delegated decision authority",
+      "start": 28909,
+      "end": 29743,
+      "sha256": "515ae7a96649684957c0a5bd40e38302704698cc3ee96ed8c8bbfdd357379bd7"
+    },
+    {
+      "id": "problem-and-evidence",
+      "label": "Problem and evidence",
+      "start": 29743,
+      "end": 30580,
+      "sha256": "e2f25cc31cf43b1d093bdf3cd2accbf494f2bef66b1e037e02c533ef9f852f33"
+    },
+    {
+      "id": "proposed-contract",
+      "label": "Proposed contract",
+      "start": 30580,
+      "end": 32385,
+      "sha256": "6308ab565f120331e2d6f305b6eda271537facd1ec105f6c7e7ac98fab0c3bc0"
+    },
+    {
+      "id": "alternatives-and-tradeoffs",
+      "label": "Alternatives and tradeoffs",
+      "start": 32385,
+      "end": 33414,
+      "sha256": "c86d6b783f05bf6acdf01d9d34b235e9b750b273212be49bb96c5ca83623a0dc"
+    },
+    {
+      "id": "qualification-before-installation",
+      "label": "Qualification before installation",
+      "start": 33414,
+      "end": 34077,
+      "sha256": "f8dd60a5212d2b52af4c21f1fbd974e5ea5553480d1b9df7a90f932dc36149ed"
+    },
+    {
+      "id": "current-primary-research",
+      "label": "Current primary research",
+      "start": 34077,
+      "end": 35076,
+      "sha256": "026038ebc8a5ec6641cad9e9459fbb1de9c0c9f75abc53e85a0542ecab014129"
+    },
+    {
+      "id": "rechecked-system-and-dependency-boundary",
+      "label": "Rechecked system and dependency boundary",
+      "start": 35076,
+      "end": 37670,
+      "sha256": "1247d2d32efbf552a13647eaf0301aeefb37f34abd21f905930df9ec7556f70a"
+    },
+    {
+      "id": "identity-time-ordering-and-failures",
+      "label": "Identity, time, ordering and failures",
+      "start": 37670,
+      "end": 40066,
+      "sha256": "2b02771fc525cda9cf6b39373bd2d58b158dd80e691ea443d22867e3586eb4c4"
+    },
+    {
+      "id": "compatibility-and-limits",
+      "label": "Compatibility and limits",
+      "start": 40066,
+      "end": 43118,
+      "sha256": "02802d4811ef759ba569832de0e5f976aae2a35cdbc95651de3b55b192eeb40d"
+    },
+    {
+      "id": "publication-qualification-and-the-boundary-size-correction",
+      "label": "Publication qualification and the boundary-size correction",
+      "start": 43118,
+      "end": 48264,
+      "sha256": "b0507a013a0b29468579b549ad553a5c089b2acf6b2ef42d99d27760f82ed902"
+    },
+    {
+      "id": "evidence-required-by-each-development-law",
+      "label": "Evidence required by each development law",
+      "start": 48264,
+      "end": 52214,
+      "sha256": "04b76694d218a897472f24360aedb563d6c02bfa924531d1900ca440d97ab6c3"
+    },
+    {
+      "id": "implementation-checkpoint-2026-09-29",
+      "label": "Implementation checkpoint, 2026-09-29",
+      "start": 52214,
+      "end": 54303,
+      "sha256": "a9cf85e7e233e6f2c5baa9ac6c2378115f6635a171a8bd278e11b3ee7c61dce5"
+    },
+    {
+      "id": "permanent-source-and-deterministic-receipt-checkpoint",
+      "label": "Permanent-source and deterministic-receipt checkpoint",
+      "start": 54303,
+      "end": 56633,
+      "sha256": "17c0406bede92f9c35cbd082bf5104ec4341e0a4cd10608826f2899a89bdf3fe"
+    },
+    {
+      "id": "completion-gate-qualification-2026-09-29-before-activation",
+      "label": "Completion gate qualification (2026-09-29, before activation)",
+      "start": 56633,
+      "end": 60832,
+      "sha256": "da430476eee9f55ff77e9b5121e2e5660f28f0806f903df511721045d6a13387"
+    },
+    {
+      "id": "delayed-replay-and-redrive-2026-09-29",
+      "label": "Delayed replay and redrive (2026-09-29)",
+      "start": 60832,
+      "end": 63199,
+      "sha256": "874a12bec814b107067537b48ae690be392945afffcb702e8c69e235a4286223"
+    },
+    {
+      "id": "qualified-worker-checkpoint-2026-09-29",
+      "label": "Qualified worker checkpoint (2026-09-29)",
+      "start": 63199,
+      "end": 65568,
+      "sha256": "6c2f15d189d47ea6586dcca1274f8841216324122b43423a1778a41d65dd8afd"
+    },
+    {
+      "id": "whole-source-health-and-recovery-traversal-2026-09-29",
+      "label": "Whole-source health and recovery traversal (2026-09-29)",
+      "start": 65568,
+      "end": 72306,
+      "sha256": "48f6c6210e850e8a32e9c4916be3e92abc358fada50ef3b418be5d002fb94c7e"
+    },
+    {
+      "id": "renewal-shutdown-qualification-2026-09-29",
+      "label": "Renewal shutdown qualification — 2026-09-29",
+      "start": 72306,
+      "end": 74763,
+      "sha256": "766096a9bc8f920d2afe64008de8dab5f572033eab392d34e68fef00b4a6d501"
+    },
+    {
+      "id": "prompt-input-read-failures-2026-09-29",
+      "label": "Prompt input read failures — 2026-09-29",
+      "start": 74763,
+      "end": 75619,
+      "sha256": "8d75a341ef21aafe24e93d0b545be31e3511a75186341a59888ba3d78a13e944"
+    },
+    {
+      "id": "storage-fault-and-process-death-qualification-2026-09-29",
+      "label": "Storage fault and process-death qualification — 2026-09-29",
+      "start": 75619,
+      "end": 77513,
+      "sha256": "7e8b0841e3cd039670d0b4e36dcfac8023855e779802104cf2b27eca8496197a"
+    },
+    {
+      "id": "history-2026-10-05-generic-breadcrumbs-and-native-identity",
+      "label": "2026-10-05: generic breadcrumbs and native identity",
+      "start": 77513,
+      "end": 80729,
+      "sha256": "6ed2f5f3b1b70a6fe932a2c5e67f80aaa1316fafe64eecd4cd42aa10c278a70e"
+    }
+  ]
+}

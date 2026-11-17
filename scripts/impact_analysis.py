@@ -21,16 +21,15 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from bounded_io import read_stable_bytes  # noqa: E402
 from corpus_snapshot import (  # noqa: E402
     CorpusChanged,
-    _open_descriptor_chain,
-    _read_bounded_descriptor,
-    _seal_path,
-    _verify_seal,
+    open_descriptor_chain,
+    read_bounded_descriptor,
+    seal_path,
+    verify_seal,
 )
-from memory_state import ROOT, STATE_ROOT  # noqa: E402
+from llm_wiki import runtime_roots  # noqa: E402
 from repository_scope import sanitized_git_environment  # noqa: E402
 from settings import raise_hint, setting_value  # noqa: E402
 
-KNOWLEDGE_DIR = ROOT / "knowledge" / "notes"
 SKIP_NAMES = {"index.md", "log.md", "README.md", "state.md", "context.md"}
 COMPARISONS = {"dirty", "worktree-index", "index-HEAD", "two-commits", "merge-base-branch"}
 CODE_EXTENSIONS = {".py", ".js", ".ts", ".tsx", ".jsx", ".go", ".rs", ".java", ".rb"}
@@ -184,7 +183,7 @@ def _watch_git(
             return
 
 
-def _git(
+def git(
     root: Path,
     arguments: list[str],
     *,
@@ -275,7 +274,7 @@ def _resolve_revision(
 ) -> str:
     revision = _validate_revision(value, label)
     try:
-        resolved = _git(
+        resolved = git(
             root,
             ["rev-parse", "--verify", "--end-of-options", f"{revision}^{{commit}}"],
             deadline=deadline,
@@ -354,7 +353,7 @@ def _merge_base_arguments(request: _DiffRequest) -> list[tuple[str, list[str], b
 
 
 def _merge_base(request: _DiffRequest, base_value: str, branch_value: str) -> str:
-    merge_base = _git(
+    merge_base = git(
         request.root,
         ["merge-base", "--", base_value, branch_value],
         deadline=request.deadline,
@@ -395,7 +394,7 @@ def _decode_path(value: bytes) -> str:
     return os.fsdecode(value).replace("\\", "/")
 
 
-def _parse_raw_records(raw: bytes, comparison: str) -> list[dict]:
+def parse_raw_records(raw: bytes, comparison: str) -> list[dict]:
     fields = raw.split(b"\0")
     if fields and fields[-1] == b"":
         fields.pop()
@@ -474,7 +473,7 @@ def _object_blob(
 ) -> bytes | None:
     if not oid or set(oid) <= ZERO_OID:
         return None
-    return _git(root, ["cat-file", "blob", oid], deadline=deadline, max_bytes=limit, cancelled=cancelled)
+    return git(root, ["cat-file", "blob", oid], deadline=deadline, max_bytes=limit, cancelled=cancelled)
 
 
 def repository_top(directory: Path, deadline: float) -> Path:
@@ -485,14 +484,14 @@ def repository_top(directory: Path, deadline: float) -> Path:
     A directory Git cannot place is used as given.
     """
     try:
-        top = _git(directory, ["rev-parse", "--show-toplevel"], deadline=deadline, max_bytes=8192)
+        top = git(directory, ["rev-parse", "--show-toplevel"], deadline=deadline, max_bytes=8192)
     except (OSError, ValueError, RuntimeError):
         return directory
     text = top.decode("utf-8", "surrogateescape").strip()
     return Path(text).resolve() if text else directory
 
 
-def _worktree_blob(root: Path, relative: str, limit: int) -> bytes | None:
+def worktree_blob(root: Path, relative: str, limit: int) -> bytes | None:
     components = relative.split("/")
     if not components or any(part in {"", ".", ".."} for part in components):
         raise PermissionError("changed worktree path is not repository-relative")
@@ -506,7 +505,7 @@ def _worktree_blob(root: Path, relative: str, limit: int) -> bytes | None:
 def _capture_note_file(root: Path, path: Path, limit: int) -> bytes:
     """Capture one note through a root-anchored stable descriptor chain."""
     relative_parts = _note_relative_parts(root, path)
-    seal = _seal_path(
+    seal = seal_path(
         root,
         path,
         target_directory=False,
@@ -532,19 +531,19 @@ def _capture_sealed_note(seal, path: Path, limit: int) -> bytes:
     """Read the note and verify its seal while the descriptor is still open."""
     if os.name != "posix":
         content = read_stable_bytes(path, limit, label="impact note")
-        _verify_seal(seal, changed_error=PermissionError)
+        verify_seal(seal, changed_error=PermissionError)
         return content
-    descriptor = _open_descriptor_chain(seal, changed_error=PermissionError)
+    descriptor = open_descriptor_chain(seal, changed_error=PermissionError)
     try:
-        content = _read_bounded_descriptor(descriptor, limit)
-        _verify_seal(seal, changed_error=PermissionError)
+        content = read_bounded_descriptor(descriptor, limit)
+        verify_seal(seal, changed_error=PermissionError)
         return content
     finally:
         os.close(descriptor)
 
 
 def collect_git_changes(
-    root: Path = ROOT,
+    root: Path | None = None,
     *,
     comparison: str = "dirty",
     base: str | None = None,
@@ -559,7 +558,7 @@ def collect_git_changes(
     if comparison not in COMPARISONS:
         raise ValueError(f"comparison must be one of: {', '.join(sorted(COMPARISONS))}")
     deadline = _deadline_or_default(deadline, bounds, time.monotonic)
-    root = repository_top(Path(root).resolve(strict=True), deadline)
+    root = repository_top(Path(root or runtime_roots.vault_root()).resolve(strict=True), deadline)
     collector = _ChangeCollector(root, bounds, deadline, cancelled)
     for phase, arguments, worktree_new in _diff_arguments(
         comparison, base=base, target=target, branch=branch, root=root, deadline=deadline, cancelled=cancelled
@@ -582,14 +581,14 @@ class _ChangeCollector:
         self.total_bytes = 0
 
     def add_phase(self, phase: str, arguments: list[str], worktree_new: bool) -> None:
-        raw = _git(
+        raw = git(
             self.root,
             arguments,
             deadline=self.deadline,
             max_bytes=max(64 * 1024, self.bounds.max_files * 16 * 1024),
             cancelled=self.cancelled,
         )
-        parsed = _parse_raw_records(raw, phase)
+        parsed = parse_raw_records(raw, phase)
         if len(self.records) + len(parsed) > self.bounds.max_files:
             raise ValueError("changed file ceiling exceeded")
         for record in parsed:
@@ -620,7 +619,7 @@ class _ChangeCollector:
         if not _holds_source(record, "new"):
             return None
         if worktree_new and record["status"] != "D":
-            return _worktree_blob(self.root, record["new_path"], self.bounds.max_blob_bytes)
+            return worktree_blob(self.root, record["new_path"], self.bounds.max_blob_bytes)
         return self._object_blob(record["new_oid"])
 
 
@@ -630,7 +629,7 @@ def _changed_paths(changes: list[dict]) -> list[str]:
     return sorted({str(item["new_path"] or item["old_path"]) for item in changes})
 
 
-def _textual_symbols(content: bytes | None) -> list[str]:
+def textual_symbols(content: bytes | None) -> list[str]:
     if not content:
         return []
     text = content.decode("utf-8", errors="ignore")
@@ -646,7 +645,7 @@ def find_stale_wiki_pages(
     cancelled: Callable[[], bool] | None = None,
 ) -> list[dict]:
     """Legacy textual-name fallback; never represents graph evidence."""
-    if not changed_symbols or not KNOWLEDGE_DIR.exists():
+    if not changed_symbols or not runtime_roots.notes_dir().exists():
         return []
     bounds = _limits_or_default(limits)
     notes = _NoteWalk(bounds, deadline, cancelled).markdown_files()
@@ -663,7 +662,7 @@ class _NoteWalk:
         self.bounds = bounds
         self.deadline = deadline
         self.cancelled = cancelled
-        self.pending = [KNOWLEDGE_DIR]
+        self.pending = [runtime_roots.notes_dir()]
         self.markdown: list[tuple[Path, int]] = []
         self.file_count = 0
         self.directory_count = 0
@@ -739,13 +738,13 @@ def _stale_page(
 ) -> dict | None:
     if markdown.name in SKIP_NAMES or "archive" in markdown.parts:
         return None
-    content = _note_text(markdown, expected_size, bounds.max_note_bytes)
+    content = note_text(markdown, expected_size, bounds.max_note_bytes)
     if content is None or "status: superseded" in content:
         return None
     return _page_match(markdown, content, changed_symbols)
 
 
-def _note_text(markdown: Path, expected_size: int, limit: int) -> str | None:
+def note_text(markdown: Path, expected_size: int, limit: int) -> str | None:
     raw = _captured_note(markdown, limit)
     if raw is None:
         return None
@@ -757,7 +756,7 @@ def _note_text(markdown: Path, expected_size: int, limit: int) -> str | None:
 def _captured_note(markdown: Path, limit: int) -> bytes | None:
     """The note's bytes; None when it vanished or cannot be read, never on a refusal."""
     try:
-        return _capture_note_file(KNOWLEDGE_DIR, markdown, limit)
+        return _capture_note_file(runtime_roots.notes_dir(), markdown, limit)
     except FileNotFoundError:
         return None
     except PermissionError:
@@ -791,7 +790,7 @@ def _match_confidence(matched: list[str]) -> str:
 
 def _vault_relative(markdown: Path) -> str:
     try:
-        return markdown.relative_to(ROOT).as_posix()
+        return markdown.relative_to(runtime_roots.vault_root()).as_posix()
     except ValueError:
         return str(markdown)
 
@@ -825,7 +824,7 @@ def _weighted_prefix(pages: list[dict], total: int, threshold: float) -> list[di
     return selected
 
 
-def _changed_ranges(
+def changed_ranges(
     old: bytes | None,
     new: bytes | None,
     *,
@@ -843,7 +842,7 @@ def _changed_ranges(
     if prefix == len(old_keys) == len(new_keys):
         return []
     suffix = _common_suffix(old_keys, new_keys, prefix, stop)
-    hunks = _hunks(old_keys, new_keys, prefix, suffix, stop)
+    hunks = diff_hunks(old_keys, new_keys, prefix, suffix, stop)
     return [_hunk_ranges(hunk, new_lines, old_offsets, new_offsets) for hunk in hunks]
 
 
@@ -883,7 +882,7 @@ _DIFF_ARGUMENTS = ["-c", "core.autocrlf=false", "diff", "--no-index", "--no-colo
 _HUNK_HEADER_BYTES = 64
 
 
-def _hunks(
+def diff_hunks(
     old_lines: list[bytes], new_lines: list[bytes], prefix: int, suffix: int, stop: tuple
 ) -> list[tuple[int, int, int, int]]:
     """Each edited run as (old start, old end, new start, new end), between the common ends."""
@@ -902,7 +901,7 @@ def _git_hunks(old_middle: list[bytes], new_middle: list[bytes], stop: tuple) ->
         root = Path(scratch)
         (root / "old").write_bytes(old_bytes)
         (root / "new").write_bytes(new_bytes)
-        output = _git(
+        output = git(
             root, _DIFF_ARGUMENTS, deadline=_finite_deadline(deadline), max_bytes=ceiling,
             cancelled=cancelled, success_codes=(0, 1),
         )
@@ -1007,33 +1006,33 @@ class GenerationUnreadable(RuntimeError):
     """
 
 
-def _active_graph(root: Path, deadline: float):
+def active_graph(root: Path, deadline: float):
     """The active generation of `root`, None when it has none."""
     try:
-        return _opened_active_graph(root, deadline)
+        return opened_active_graph(root, deadline)
     except TimeoutError:
         raise
     except (OSError, ValueError, sqlite3.Error) as exc:
         raise GenerationUnreadable(f"{type(exc).__name__}: {exc}") from exc
 
 
-def _opened_active_graph(root: Path, deadline: float):
+def opened_active_graph(root: Path, deadline: float):
     from evidence_graph import EvidenceGraph
-    from generation_catalog import GenerationCatalog
+    from llm_wiki.generation_catalog_store import GenerationCatalog
     from repository_scope import resolve_repository_scope
 
-    state_root = STATE_ROOT
+    state_root = runtime_roots.state_root()
     catalog_path = state_root / "cache" / "evidence-graph" / "catalog.sqlite3"
     if not catalog_path.is_file():
         return None
-    from code_graph import _opened_code_or_active
+    from llm_wiki.code_graph_generation import opened_code_or_active
 
     scope = resolve_repository_scope(root, deadline=deadline)
     # A diff maps to code, so this asks for the checkout's code generation and falls
     # through to the pointer only when it has none — the two steps every other code
     # reader takes. See
     # `docs/research/2026-09-17-a-question-is-answered-by-its-own-kind-of-generation.md`.
-    return _opened_code_or_active(
+    return opened_code_or_active(
         EvidenceGraph,
         GenerationCatalog(state_root, catalog_path=catalog_path),
         scope,
@@ -1098,7 +1097,8 @@ def _note_symbol(
     existing = symbols.get(node["node_id"])
     if existing is None:
         symbols[node["node_id"]] = _symbol_record(node, occurrence, side, old_range, classification)
-    elif side not in existing["sides"]:
+        return
+    if side not in existing["sides"]:
         existing["sides"].append(side)
 
 
@@ -1196,7 +1196,7 @@ def _map_symbols(
     return sorted(symbols.values(), key=lambda item: (item["path"], item["name"], item["node_id"]))
 
 
-def _project_file_ids(
+def project_file_ids(
     graph, changes: list[dict], bounds: ImpactLimits, deadline: float, cancelled: Callable[[], bool] | None = None
 ) -> set[str]:
     """Resolve project-journal file values before following checkpoint edges."""
@@ -1370,7 +1370,7 @@ def _is_test_artifact(path: str, metadata: dict) -> bool:
 
 def analyze_impact(
     *,
-    root: Path = ROOT,
+    root: Path | None = None,
     comparison: str = "dirty",
     base: str | None = None,
     target: str | None = None,
@@ -1390,7 +1390,7 @@ def analyze_impact(
     bounds = _limits_or_default(limits)
     deadline = _deadline_or_default(deadline, bounds, monotonic)
     _check_impact_stop(deadline, cancelled)
-    root = repository_top(Path(root).resolve(strict=True), deadline)
+    root = repository_top(Path(root or runtime_roots.vault_root()).resolve(strict=True), deadline)
     run = _ImpactRun(bounds, deadline, cancelled)
     run.collect(root, comparison=comparison, base=base, target=target, branch=branch)
     run.describe()
@@ -1449,11 +1449,11 @@ class _ImpactRun:
     def describe(self) -> None:
         for change in self.changes:
             _check_impact_stop(self.deadline, self.cancelled)
-            change["ranges"] = _changed_ranges(
+            change["ranges"] = changed_ranges(
                 change["old_blob"], change["new_blob"], deadline=self.deadline, cancelled=self.cancelled
             )
-            self.textual_names.update(_textual_symbols(change["old_blob"]))
-            self.textual_names.update(_textual_symbols(change["new_blob"]))
+            self.textual_names.update(textual_symbols(change["old_blob"]))
+            self.textual_names.update(textual_symbols(change["new_blob"]))
             self.public_changes.append({key: change[key] for key in _PUBLIC_CHANGE_KEYS})
 
     def map_changes(self, graph, root: Path) -> None:
@@ -1514,7 +1514,7 @@ class _ImpactRun:
 
     def _reached_ids(self, graph) -> set[str]:
         symbol_ids = {item["node_id"] for item in self.changed_symbols}
-        return symbol_ids | _project_file_ids(graph, self.changes, self.bounds, self.deadline, self.cancelled)
+        return symbol_ids | project_file_ids(graph, self.changes, self.bounds, self.deadline, self.cancelled)
 
     def classification(self) -> str:
         if self.graph_missing and self.changes:
@@ -1559,7 +1559,7 @@ def _resolution(changes: list[dict], changed_symbols: list[dict]) -> str:
 def _selected_graph(graph, root: Path, deadline: float):
     if graph is not None:
         return graph
-    return _active_graph(root, deadline)
+    return active_graph(root, deadline)
 
 
 def _has_unsourced_edge(affected: dict) -> bool:

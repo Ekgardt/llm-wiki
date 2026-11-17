@@ -1,0 +1,338 @@
+{
+  "encoding": "o200k_base",
+  "max_tokens": 100000,
+  "serialization": "exact-duplicates/v1",
+  "files": [
+    "AGENTS.md",
+    "CLAUDE.md",
+    "docs/AGENTS.md",
+    "docs/STRUCTURE.md",
+    "docs/modules/breadcrumb-storage.md",
+    "docs/modules/context-bundle.md",
+    "docs/modules/context-records.md",
+    "docs/modules/context-tooling.md",
+    "docs/modules/install-models.md",
+    "docs/modules/model-choice.md",
+    "docs/modules/product-structure.md",
+    "docs/modules/project-governance.md",
+    "docs/modules/queue-core-tests-reliability-v3-adoption-helpers.md",
+    "docs/modules/script-sources.md",
+    "docs/modules/test-runtime-deletion-contract-context.json",
+    "docs/modules/test-runtime-deletion-contract.md",
+    "docs/modules/test-support.md",
+    "rules/development-laws.md",
+    "scripts/__init__.py",
+    "scripts/llm_wiki/__init__.py",
+    "scripts/llm_wiki/context_bundle.py",
+    "tests/__init__.py",
+    "tests/breadcrumb_storage_helpers.py",
+    "tests/conftest.py",
+    "tests/doctor_helpers.py",
+    "tests/module_context.py",
+    "tests/module_context_paths.py",
+    "tests/module_interface.py",
+    "tests/module_interface_render.py",
+    "tests/module_qualification.py",
+    "tests/module_record_context.py",
+    "tests/module_records.py",
+    "tests/reliability_v3_adoption_helpers.py",
+    "tests/script_sources.py",
+    "tests/shared_fixtures.py",
+    "tests/slow_machine.py",
+    "tests/test_runtime_deletion_contract.py"
+  ],
+  "ownership": {
+    "files": [
+      "docs/modules/test-runtime-deletion-contract-context.json",
+      "docs/modules/test-runtime-deletion-contract.md",
+      "tests/test_runtime_deletion_contract.py"
+    ]
+  },
+  "qualified_dependencies": [
+    {
+      "provider": "scripts/blackboard.py",
+      "names": [
+        "claim_task"
+      ],
+      "contract_sha256": "ff28630d80a9a5952be728ac4fb9edf498f01e2e1c6625a73622aa98f0ab3ee1",
+      "integration_tests": [
+        "tests/test_automatic_writer_integration.py",
+        "tests/test_blackboard.py",
+        "tests/test_blackboard_inputs_use_the_journal_contract.py"
+      ]
+    },
+    {
+      "provider": "scripts/breadcrumb_bundle.py",
+      "names": [
+        "load_bundle",
+        "stored_manifest"
+      ],
+      "contract_sha256": "0b8a223de8ff949722e64e3868d16bf8ed953706b9c1811603642540f2f7858b",
+      "integration_tests": [
+        "tests/test_runtime_deletion_contract.py"
+      ]
+    },
+    {
+      "provider": "scripts/breadcrumb_storage.py",
+      "names": [
+        "publish_breadcrumb"
+      ],
+      "contract_sha256": "9406dd43a27f72fe241a62c818dffda547146c570d792fd630427347b8a76b86",
+      "integration_tests": [
+        "tests/test_runtime_deletion_contract.py"
+      ]
+    },
+    {
+      "provider": "scripts/claims.py",
+      "names": [
+        "ClaimIndex"
+      ],
+      "contract_sha256": "c66d3b1b1d8bfad960288ad5ea53a74adcb686e240fe70cc4bb08d27c96b80b0",
+      "integration_tests": [
+        "tests/test_runtime_deletion_contract.py"
+      ]
+    },
+    {
+      "provider": "scripts/corpus_snapshot.py",
+      "names": [
+        "collect_corpus"
+      ],
+      "contract_sha256": "7ea12368f51c070a84b0754260f0a82db5ac44b0395b95eabcb01e5053c9f0bb",
+      "integration_tests": [
+        "tests/test_runtime_deletion_contract.py"
+      ]
+    },
+    {
+      "provider": "scripts/doctor.py",
+      "names": [
+        "run_doctor",
+        "time"
+      ],
+      "contract_sha256": "081378e281c574733c396a4a7f1ea7acb280b17ae89b8adc43e765a745844581",
+      "integration_tests": [
+        "tests/test_runtime_deletion_contract.py"
+      ]
+    },
+    {
+      "provider": "scripts/evidence_graph_builder.py",
+      "names": [
+        "build_full_generation"
+      ],
+      "contract_sha256": "056e93b70cc341eb253323f95833791e52929a5e343d4f8e53acd37f1b2004cd",
+      "integration_tests": [
+        "tests/test_runtime_deletion_contract.py"
+      ]
+    },
+    {
+      "provider": "scripts/generation_maintenance.py",
+      "names": [
+        "maintenance_extractor_identity"
+      ],
+      "contract_sha256": "6155b9fd16203e4406c49671a0456a9248cc335753aafc2e1375508b2b9c75fb",
+      "integration_tests": [
+        "tests/test_runtime_deletion_contract.py"
+      ]
+    },
+    {
+      "provider": "scripts/install_models.py",
+      "names": [
+        "hub_library",
+        "pinned_models"
+      ],
+      "contract_sha256": "9a6c3545cdbff6160d81687d42bfb1947647503068382262658d5bc5d97a7e2f",
+      "integration_tests": [
+        "tests/test_runtime_deletion_contract.py"
+      ]
+    },
+    {
+      "provider": "scripts/install_state.py",
+      "names": [
+        "ManagedResource"
+      ],
+      "contract_sha256": "2f5e800dda2d5ee72c5dcb8abf9ed7707c1c748f37bc5b2e735c87559cfc3d16",
+      "integration_tests": [
+        "tests/test_runtime_deletion_contract.py"
+      ]
+    },
+    {
+      "provider": "scripts/installed_memory_repair.py",
+      "names": [
+        "repair_installed_vault"
+      ],
+      "contract_sha256": "6ab4497d3ed56413bc24ea5ae9e993acf118980056b046072877a80df4f52a18",
+      "integration_tests": [
+        "tests/test_runtime_deletion_contract.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/doctor_base.py",
+      "names": [
+        "readonly_database"
+      ],
+      "contract_sha256": "1172597f58408542e6b0b0289416838671f55c9b7df15b74874374c71d9a14b1",
+      "integration_tests": [
+        "tests/test_runtime_deletion_contract.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/doctor_deletion.py",
+      "names": [
+        "run_deletion_check"
+      ],
+      "contract_sha256": "f7c6c2707e0c4cf26b04b5e27338b6a0be6c2e57da7d97258ab3c21e3f87d2c0",
+      "integration_tests": [
+        "tests/test_runtime_deletion_contract.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/doctor_lsp.py",
+      "names": [
+        "pyright_check"
+      ],
+      "contract_sha256": "3c445a457d8f69a3d5fbb41d97391bc64cbd89430971d46393d2895d2a6cf4dd",
+      "integration_tests": [
+        "tests/test_runtime_deletion_contract.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/doctor_queue.py",
+      "names": [
+        "queue_check",
+        "queue_v2_check"
+      ],
+      "contract_sha256": "7a26e38d306d14bd64a6895a7c82477f172446b3d9cc049c39f1371922dfdbf9",
+      "integration_tests": [
+        "tests/test_runtime_deletion_contract.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/doctor_transactions.py",
+      "names": [
+        "transaction_check"
+      ],
+      "contract_sha256": "06bfeb7f99baf8078974271173d1c2962bbe1f09fd17dc518dbffe9631bfc3a5",
+      "integration_tests": [
+        "tests/test_runtime_deletion_contract.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/generation_catalog_store.py",
+      "names": [
+        "GenerationCatalog"
+      ],
+      "contract_sha256": "b18194ebe04bf988b4474379fcb5243516550d43b745a00eaed1453f7844c983",
+      "integration_tests": [
+        "tests/test_a_build_in_flight_is_not_an_orphan.py",
+        "tests/test_a_code_generation_is_not_abandoned.py",
+        "tests/test_a_flow_walk_stops_when_its_caller_has.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/install_v2_transactions.py",
+      "names": [
+        "install_resources"
+      ],
+      "contract_sha256": "074664d4c33ddcaaa76fbe45b137f8f494dc7de80f4f3c32abd52b035eade17b",
+      "integration_tests": [
+        "tests/test_a_changed_task_setting_reaches_an_installed_machine.py",
+        "tests/test_a_rerun_may_ask_for_fewer_things.py",
+        "tests/test_a_rollback_undoes_only_what_it_did.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/model_choice.py",
+      "names": [
+        "using_root"
+      ],
+      "contract_sha256": "d45f2655cb61963e77617d1dfd7d617b134ad77cc770b59b335d0856e5d65019",
+      "integration_tests": [
+        "tests/test_runtime_deletion_contract.py"
+      ]
+    },
+    {
+      "provider": "scripts/markdown_transaction.py",
+      "names": [
+        "COORDINATOR_V3_SCHEMA_SHA256",
+        "active_markdown_coordinator",
+        "initialize_coordinator_v3_candidate",
+        "validate_coordinator_v3_database"
+      ],
+      "contract_sha256": "339212d372f725589e160d68f7f52db9d35c32dc4401bea9cc615ce1fa92f898",
+      "integration_tests": [
+        "tests/test_runtime_deletion_contract.py"
+      ]
+    },
+    {
+      "provider": "scripts/operational_ownership.py",
+      "names": [
+        "MarkerIdentity",
+        "OperationalOwnershipError",
+        "OwnershipRegistry"
+      ],
+      "contract_sha256": "74ddc08ba4065ef3cce6c3dad209f2535cb23568ba8b00cd13ac58b7dae9d0ba",
+      "integration_tests": [
+        "tests/test_runtime_deletion_contract.py"
+      ]
+    },
+    {
+      "provider": "scripts/queue_core.py",
+      "names": [
+        "QUEUE_V3_SCHEMA_SHA256",
+        "active_memory_queue",
+        "harden_owner_only",
+        "initialize_queue_v3_candidate",
+        "validate_queue_v3_database"
+      ],
+      "contract_sha256": "fba3daebc911c04883061fe007dfcbad3139574b51931375c13aec0703754682",
+      "integration_tests": [
+        "tests/test_runtime_deletion_contract.py"
+      ]
+    },
+    {
+      "provider": "scripts/reliability_v3_validation.py",
+      "names": [
+        "validate_reliability_v3_runtime"
+      ],
+      "contract_sha256": "2af1763eeb7caa792a410626fbeb8cd8b620bfc934148d1b048e255e579a16bc",
+      "integration_tests": [
+        "tests/test_runtime_deletion_contract.py"
+      ]
+    },
+    {
+      "provider": "scripts/reliable_memory.py",
+      "names": [
+        "canonical_json_bytes",
+        "capture_runtime_file_identity",
+        "harden_runtime_owner_only",
+        "sha256_bytes",
+        "validate_operational_db_file",
+        "validate_state_root"
+      ],
+      "contract_sha256": "4f152a84d1460d0ce212ee41f07000cc3327bf60ee38dcd29d5c3f162d052e98",
+      "integration_tests": [
+        "tests/test_runtime_deletion_contract.py"
+      ]
+    },
+    {
+      "provider": "scripts/repository_scope.py",
+      "names": [
+        "resolve_repository_scope",
+        "sanitized_git_environment"
+      ],
+      "contract_sha256": "983dd096d99bafff98ca0aaa2cd722477333e30eed4bfa9297d1830c635e8d90",
+      "integration_tests": [
+        "tests/test_runtime_deletion_contract.py"
+      ]
+    },
+    {
+      "provider": "scripts/session_start_context.py",
+      "names": [
+        "health_block"
+      ],
+      "contract_sha256": "157e964a5fa20bc2990d5ee9d773a37aba91c684e48363684919bb9782830109",
+      "integration_tests": [
+        "tests/test_runtime_deletion_contract.py"
+      ]
+    }
+  ]
+}

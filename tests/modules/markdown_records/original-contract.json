@@ -1,0 +1,498 @@
+{
+  "classes": {
+    "MarkdownChange": "gASVKwAAAAAAAACMFG1hcmtkb3duX3RyYW5zYWN0aW9ulIwOTWFya2Rvd25DaGFuZ2WUk5Qu",
+    "MarkdownOperation": "gASVLgAAAAAAAACMFG1hcmtkb3duX3RyYW5zYWN0aW9ulIwRTWFya2Rvd25PcGVyYXRpb26Uk5Qu",
+    "CommittedWriteAuthority": "gASVNAAAAAAAAACMFG1hcmtkb3duX3RyYW5zYWN0aW9ulIwXQ29tbWl0dGVkV3JpdGVBdXRob3JpdHmUk5Qu",
+    "TransactionRecord": "gASVLgAAAAAAAACMFG1hcmtkb3duX3RyYW5zYWN0aW9ulIwRVHJhbnNhY3Rpb25SZWNvcmSUk5Qu",
+    "IntentFence": "gASVKAAAAAAAAACMFG1hcmtkb3duX3RyYW5zYWN0aW9ulIwLSW50ZW50RmVuY2WUk5Qu",
+    "TransactionAbortReceipt": "gASVNAAAAAAAAACMFG1hcmtkb3duX3RyYW5zYWN0aW9ulIwXVHJhbnNhY3Rpb25BYm9ydFJlY2VpcHSUk5Qu",
+    "ProjectCheckpointReservation": "gASVOQAAAAAAAACMFG1hcmtkb3duX3RyYW5zYWN0aW9ulIwcUHJvamVjdENoZWNrcG9pbnRSZXNlcnZhdGlvbpSTlC4=",
+    "OperationBoundElsewhereError": "gASVOQAAAAAAAACMFG1hcmtkb3duX3RyYW5zYWN0aW9ulIwcT3BlcmF0aW9uQm91bmRFbHNld2hlcmVFcnJvcpSTlC4=",
+    "TransactionFailure": "gASVLwAAAAAAAACMFG1hcmtkb3duX3RyYW5zYWN0aW9ulIwSVHJhbnNhY3Rpb25GYWlsdXJllJOULg==",
+    "TransactionDriftError": "gASVMgAAAAAAAACMFG1hcmtkb3duX3RyYW5zYWN0aW9ulIwVVHJhbnNhY3Rpb25EcmlmdEVycm9ylJOULg==",
+    "WriterAdmissionTimeout": "gASVMwAAAAAAAACMFG1hcmtkb3duX3RyYW5zYWN0aW9ulIwWV3JpdGVyQWRtaXNzaW9uVGltZW91dJSTlC4=",
+    "ProjectPendingPriorError": "gASVNQAAAAAAAACMFG1hcmtkb3duX3RyYW5zYWN0aW9ulIwYUHJvamVjdFBlbmRpbmdQcmlvckVycm9ylJOULg==",
+    "TargetBoundaryFailure": "gASVMgAAAAAAAACMFG1hcmtkb3duX3RyYW5zYWN0aW9ulIwVVGFyZ2V0Qm91bmRhcnlGYWlsdXJllJOULg==",
+    "TargetTooLargeError": "gASVMAAAAAAAAACMFG1hcmtkb3duX3RyYW5zYWN0aW9ulIwTVGFyZ2V0VG9vTGFyZ2VFcnJvcpSTlC4=",
+    "TargetPathBoundaryError": "gASVNAAAAAAAAACMFG1hcmtkb3duX3RyYW5zYWN0aW9ulIwXVGFyZ2V0UGF0aEJvdW5kYXJ5RXJyb3KUk5Qu",
+    "PreconditionChangedError": "gASVNQAAAAAAAACMFG1hcmtkb3duX3RyYW5zYWN0aW9ulIwYUHJlY29uZGl0aW9uQ2hhbmdlZEVycm9ylJOULg==",
+    "TransactionImageError": "gASVMgAAAAAAAACMFG1hcmtkb3duX3RyYW5zYWN0aW9ulIwVVHJhbnNhY3Rpb25JbWFnZUVycm9ylJOULg==",
+    "TransactionStateError": "gASVMgAAAAAAAACMFG1hcmtkb3duX3RyYW5zYWN0aW9ulIwVVHJhbnNhY3Rpb25TdGF0ZUVycm9ylJOULg==",
+    "TargetStateMismatch": "gASVMAAAAAAAAACMFG1hcmtkb3duX3RyYW5zYWN0aW9ulIwTVGFyZ2V0U3RhdGVNaXNtYXRjaJSTlC4=",
+    "RefusedOperation": "gASVLQAAAAAAAACMFG1hcmtkb3duX3RyYW5zYWN0aW9ulIwQUmVmdXNlZE9wZXJhdGlvbpSTlC4=",
+    "RefusedArgument": "gASVLAAAAAAAAACMFG1hcmtkb3duX3RyYW5zYWN0aW9ulIwPUmVmdXNlZEFyZ3VtZW50lJOULg=="
+  },
+  "fields": {
+    "MarkdownChange": [
+      {
+        "name": "kind",
+        "type": "ChangeKind",
+        "default": {
+          "missing": true
+        }
+      },
+      {
+        "name": "path",
+        "type": "str",
+        "default": {
+          "missing": true
+        }
+      },
+      {
+        "name": "content",
+        "type": "bytes | None",
+        "default": {
+          "missing": true
+        }
+      },
+      {
+        "name": "max_before_bytes",
+        "type": "int | None",
+        "default": {
+          "value": null
+        }
+      }
+    ],
+    "MarkdownOperation": [
+      {
+        "name": "kind",
+        "type": "ChangeKind",
+        "default": {
+          "missing": true
+        }
+      },
+      {
+        "name": "path",
+        "type": "str",
+        "default": {
+          "missing": true
+        }
+      },
+      {
+        "name": "before_hash",
+        "type": "str",
+        "default": {
+          "missing": true
+        }
+      },
+      {
+        "name": "after_hash",
+        "type": "str",
+        "default": {
+          "missing": true
+        }
+      }
+    ],
+    "CommittedWriteAuthority": [
+      {
+        "name": "id",
+        "type": "str",
+        "default": {
+          "missing": true
+        }
+      },
+      {
+        "name": "operation_id",
+        "type": "str",
+        "default": {
+          "missing": true
+        }
+      },
+      {
+        "name": "state",
+        "type": "str",
+        "default": {
+          "missing": true
+        }
+      },
+      {
+        "name": "operations",
+        "type": "tuple[MarkdownOperation, ...]",
+        "default": {
+          "missing": true
+        }
+      }
+    ],
+    "TransactionRecord": [
+      {
+        "name": "id",
+        "type": "str",
+        "default": {
+          "missing": true
+        }
+      },
+      {
+        "name": "operation_id",
+        "type": "str",
+        "default": {
+          "missing": true
+        }
+      },
+      {
+        "name": "state",
+        "type": "str",
+        "default": {
+          "missing": true
+        }
+      },
+      {
+        "name": "operations",
+        "type": "tuple[MarkdownOperation, ...]",
+        "default": {
+          "missing": true
+        }
+      },
+      {
+        "name": "preconditions",
+        "type": "Mapping[str, object]",
+        "default": {
+          "missing": true
+        }
+      },
+      {
+        "name": "created_at",
+        "type": "str",
+        "default": {
+          "missing": true
+        }
+      },
+      {
+        "name": "updated_at",
+        "type": "str",
+        "default": {
+          "missing": true
+        }
+      },
+      {
+        "name": "parent_transaction_id",
+        "type": "str | None",
+        "default": {
+          "value": null
+        }
+      },
+      {
+        "name": "error_code",
+        "type": "str | None",
+        "default": {
+          "value": null
+        }
+      }
+    ],
+    "IntentFence": [
+      {
+        "name": "intent_id",
+        "type": "str",
+        "default": {
+          "missing": true
+        }
+      },
+      {
+        "name": "mode",
+        "type": "Literal['capture', 'worker', 'operator']",
+        "default": {
+          "missing": true
+        }
+      },
+      {
+        "name": "token",
+        "type": "str",
+        "default": {
+          "missing": true
+        }
+      },
+      {
+        "name": "epoch",
+        "type": "int",
+        "default": {
+          "missing": true
+        }
+      },
+      {
+        "name": "owner",
+        "type": "OwnerLease",
+        "default": {
+          "missing": true
+        }
+      },
+      {
+        "name": "expires_at",
+        "type": "datetime",
+        "default": {
+          "missing": true
+        }
+      }
+    ],
+    "TransactionAbortReceipt": [
+      {
+        "name": "transaction_id",
+        "type": "str",
+        "default": {
+          "missing": true
+        }
+      },
+      {
+        "name": "intent_id",
+        "type": "str",
+        "default": {
+          "missing": true
+        }
+      },
+      {
+        "name": "abort_operation_id",
+        "type": "str",
+        "default": {
+          "missing": true
+        }
+      },
+      {
+        "name": "receipt_path",
+        "type": "str",
+        "default": {
+          "missing": true
+        }
+      },
+      {
+        "name": "receipt_sha256",
+        "type": "str",
+        "default": {
+          "missing": true
+        }
+      },
+      {
+        "name": "aborted_at",
+        "type": "str",
+        "default": {
+          "missing": true
+        }
+      }
+    ],
+    "ProjectCheckpointReservation": [
+      {
+        "name": "project",
+        "type": "str",
+        "default": {
+          "missing": true
+        }
+      },
+      {
+        "name": "sequence",
+        "type": "int",
+        "default": {
+          "missing": true
+        }
+      },
+      {
+        "name": "occurrence_id",
+        "type": "str",
+        "default": {
+          "missing": true
+        }
+      },
+      {
+        "name": "idempotency_key",
+        "type": "str",
+        "default": {
+          "missing": true
+        }
+      },
+      {
+        "name": "event_json",
+        "type": "str",
+        "default": {
+          "missing": true
+        }
+      },
+      {
+        "name": "operation_id",
+        "type": "str",
+        "default": {
+          "missing": true
+        }
+      },
+      {
+        "name": "attempt_number",
+        "type": "int",
+        "default": {
+          "missing": true
+        }
+      },
+      {
+        "name": "state",
+        "type": "str",
+        "default": {
+          "missing": true
+        }
+      },
+      {
+        "name": "transaction_id",
+        "type": "str | None",
+        "default": {
+          "value": null
+        }
+      },
+      {
+        "name": "parent_operation_id",
+        "type": "str | None",
+        "default": {
+          "value": null
+        }
+      },
+      {
+        "name": "duplicate",
+        "type": "bool",
+        "default": {
+          "value": false
+        }
+      }
+    ]
+  },
+  "errors": {
+    "OperationBoundElsewhereError": {
+      "arguments": [
+        "busy"
+      ],
+      "message": "busy",
+      "attributes": {},
+      "pickle": "gASVRwAAAAAAAACMFG1hcmtkb3duX3RyYW5zYWN0aW9ulIwcT3BlcmF0aW9uQm91bmRFbHNld2hlcmVFcnJvcpSTlIwEYnVzeZSFlFKUfZRiLg=="
+    },
+    "TransactionFailure": {
+      "arguments": [
+        "failure",
+        "code",
+        "prepared"
+      ],
+      "message": "failure",
+      "attributes": {
+        "code": "code",
+        "state": "prepared"
+      },
+      "pickle": "gASVTwAAAAAAAACMFG1hcmtkb3duX3RyYW5zYWN0aW9ulIwSVHJhbnNhY3Rpb25GYWlsdXJllJOUjAdmYWlsdXJllIwEY29kZZSMCHByZXBhcmVklIeUUpQu"
+    },
+    "TransactionDriftError": {
+      "arguments": [
+        "tx",
+        [
+          "a",
+          "b"
+        ]
+      ],
+      "message": "committed transaction target drift detected; use a new operation_id: a, b",
+      "attributes": {
+        "transaction_id": "tx",
+        "paths": [
+          "a",
+          "b"
+        ]
+      },
+      "pickle": "gASVRQAAAAAAAACMFG1hcmtkb3duX3RyYW5zYWN0aW9ulIwVVHJhbnNhY3Rpb25EcmlmdEVycm9ylJOUjAJ0eJSMAWGUjAFilIaUhpRSlC4="
+    },
+    "WriterAdmissionTimeout": {
+      "arguments": [
+        "late"
+      ],
+      "message": "late",
+      "attributes": {},
+      "pickle": "gASVQQAAAAAAAACMFG1hcmtkb3duX3RyYW5zYWN0aW9ulIwWV3JpdGVyQWRtaXNzaW9uVGltZW91dJSTlIwEbGF0ZZSFlFKUfZRiLg=="
+    },
+    "ProjectPendingPriorError": {
+      "arguments": [
+        "project",
+        2,
+        1
+      ],
+      "message": "project 'project' sequence 2 waits for sequence 1",
+      "attributes": {
+        "code": "pending_prior",
+        "state": "prepared",
+        "project": "project",
+        "sequence": 2,
+        "prior_sequence": 1
+      },
+      "pickle": "gASVRwAAAAAAAACMFG1hcmtkb3duX3RyYW5zYWN0aW9ulIwYUHJvamVjdFBlbmRpbmdQcmlvckVycm9ylJOUjAdwcm9qZWN0lEsCSwGHlFKULg=="
+    },
+    "TargetBoundaryFailure": {
+      "arguments": [
+        "boundary"
+      ],
+      "message": "boundary",
+      "attributes": {},
+      "pickle": "gASVRAAAAAAAAACMFG1hcmtkb3duX3RyYW5zYWN0aW9ulIwVVGFyZ2V0Qm91bmRhcnlGYWlsdXJllJOUjAhib3VuZGFyeZSFlFKUfZRiLg=="
+    },
+    "TargetTooLargeError": {
+      "arguments": [
+        "large"
+      ],
+      "message": "large",
+      "attributes": {},
+      "pickle": "gASVPwAAAAAAAACMFG1hcmtkb3duX3RyYW5zYWN0aW9ulIwTVGFyZ2V0VG9vTGFyZ2VFcnJvcpSTlIwFbGFyZ2WUhZRSlH2UYi4="
+    },
+    "TargetPathBoundaryError": {
+      "arguments": [
+        "path"
+      ],
+      "message": "path",
+      "attributes": {},
+      "pickle": "gASVQgAAAAAAAACMFG1hcmtkb3duX3RyYW5zYWN0aW9ulIwXVGFyZ2V0UGF0aEJvdW5kYXJ5RXJyb3KUk5SMBHBhdGiUhZRSlH2UYi4="
+    },
+    "PreconditionChangedError": {
+      "arguments": [
+        "precondition"
+      ],
+      "message": "precondition",
+      "attributes": {},
+      "pickle": "gASVSwAAAAAAAACMFG1hcmtkb3duX3RyYW5zYWN0aW9ulIwYUHJlY29uZGl0aW9uQ2hhbmdlZEVycm9ylJOUjAxwcmVjb25kaXRpb26UhZRSlH2UYi4="
+    },
+    "TransactionImageError": {
+      "arguments": [
+        "image"
+      ],
+      "message": "image",
+      "attributes": {},
+      "pickle": "gASVQQAAAAAAAACMFG1hcmtkb3duX3RyYW5zYWN0aW9ulIwVVHJhbnNhY3Rpb25JbWFnZUVycm9ylJOUjAVpbWFnZZSFlFKUfZRiLg=="
+    },
+    "TransactionStateError": {
+      "arguments": [
+        "prepared"
+      ],
+      "message": "transaction cannot be applied from state prepared",
+      "attributes": {
+        "state": "prepared"
+      },
+      "pickle": "gASVQQAAAAAAAACMFG1hcmtkb3duX3RyYW5zYWN0aW9ulIwVVHJhbnNhY3Rpb25TdGF0ZUVycm9ylJOUjAhwcmVwYXJlZJSFlFKULg=="
+    },
+    "TargetStateMismatch": {
+      "arguments": [
+        "before",
+        "path"
+      ],
+      "message": "before state mismatch for path",
+      "attributes": {
+        "state_name": "before",
+        "path": "path"
+      },
+      "pickle": "gASVRAAAAAAAAACMFG1hcmtkb3duX3RyYW5zYWN0aW9ulIwTVGFyZ2V0U3RhdGVNaXNtYXRjaJSTlIwGYmVmb3JllIwEcGF0aJSGlFKULg=="
+    },
+    "RefusedOperation": {
+      "arguments": [
+        "no",
+        "refusal"
+      ],
+      "message": "no",
+      "attributes": {
+        "code": "refusal"
+      },
+      "pickle": "gASVQAAAAAAAAACMFG1hcmtkb3duX3RyYW5zYWN0aW9ulIwQUmVmdXNlZE9wZXJhdGlvbpSTlIwCbm+UjAdyZWZ1c2FslIaUUpQu"
+    },
+    "RefusedArgument": {
+      "arguments": [
+        "arg",
+        "argument"
+      ],
+      "message": "arg",
+      "attributes": {
+        "code": "argument"
+      },
+      "pickle": "gASVQQAAAAAAAACMFG1hcmtkb3duX3RyYW5zYWN0aW9ulIwPUmVmdXNlZEFyZ3VtZW50lJOUjANhcmeUjAhhcmd1bWVudJSGlFKULg=="
+    }
+  }
+}

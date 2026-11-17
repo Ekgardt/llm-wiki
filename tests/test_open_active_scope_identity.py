@@ -32,13 +32,13 @@ def _scope(tmp_path: Path, commit: str | None, name: str = "repo"):
     # shard s2). Serialize through the product's own canonicaliser instead.
     from repository_scope import (
         RepositoryScope,
-        _local_serialized_path,
         derive_checkout_id,
         derive_repository_id,
+        local_serialized_path,
     )
 
-    root = _local_serialized_path(tmp_path / name, strict=False)
-    common = _local_serialized_path(tmp_path / name / ".git", strict=False)
+    root = local_serialized_path(tmp_path / name, strict=False)
+    common = local_serialized_path(tmp_path / name / ".git", strict=False)
     repository_id = derive_repository_id(checkout_root=root, git_common_dir=common)
     return RepositoryScope(
         schema_version="repository-scope/v1",
@@ -150,7 +150,7 @@ def test_open_active_for_repository_opens_when_only_the_commit_moved(tmp_path):
     ``PermissionError: active Evidence Graph changed while opening``.
     """
     import evidence_graph
-    from generation_catalog import GenerationCatalog
+    from llm_wiki.generation_catalog_store import GenerationCatalog
 
     built_scope, current_scope = _commit_moved_scopes(tmp_path)
     catalog = GenerationCatalog(tmp_path / "state")
@@ -173,7 +173,7 @@ def test_open_active_for_repository_opens_when_only_the_commit_moved(tmp_path):
 def test_open_active_for_repository_still_refuses_a_torn_generation(tmp_path):
     """The commit-moved path must not weaken the torn-generation guarantee."""
     import evidence_graph
-    from generation_catalog import GenerationCatalog
+    from llm_wiki.generation_catalog_store import GenerationCatalog
 
     catalog = GenerationCatalog(tmp_path / "state")
     _publish_active(catalog, "gen-1", _scope(tmp_path, COMMIT_BUILT))
@@ -189,7 +189,7 @@ def test_open_active_for_repository_still_refuses_a_torn_generation(tmp_path):
 def test_open_active_for_repository_still_refuses_another_checkout(tmp_path):
     """A different checkout identity stays ineligible even at the same commit."""
     import evidence_graph
-    from generation_catalog import GenerationCatalog
+    from llm_wiki.generation_catalog_store import GenerationCatalog
 
     catalog = GenerationCatalog(tmp_path / "state")
     _publish_active(catalog, "gen-1", _scope(tmp_path, COMMIT_BUILT, name="one"))
@@ -204,18 +204,18 @@ def test_open_active_for_repository_still_refuses_another_checkout(tmp_path):
 def test_a_second_open_reuses_the_remembered_format_verdict(tmp_path, monkeypatch):
     """The constructor's closed-format pass runs once per exact artifact bytes."""
     import evidence_graph
-    from generation_catalog import GenerationCatalog
+    from llm_wiki.generation_catalog_store import GenerationCatalog
 
-    monkeypatch.setattr(evidence_graph, "_FORMAT_VALIDATED", set())
+    monkeypatch.setattr(evidence_graph, "FORMAT_VALIDATED", set())
     passes = 0
-    real_validate = evidence_graph._validate_connection
+    real_validate = evidence_graph.validate_connection
 
     def counting_validate(*args, **kwargs):
         nonlocal passes
         passes += 1
         return real_validate(*args, **kwargs)
 
-    monkeypatch.setattr(evidence_graph, "_validate_connection", counting_validate)
+    monkeypatch.setattr(evidence_graph, "validate_connection", counting_validate)
     catalog = GenerationCatalog(tmp_path / "state")
     _publish_active(catalog, "gen-1", _scope(tmp_path, COMMIT_BUILT))
     after_publish = passes
@@ -238,11 +238,11 @@ def test_a_second_open_reuses_the_remembered_format_verdict(tmp_path, monkeypatc
 def test_changed_artifact_bytes_do_not_inherit_the_remembered_verdict(tmp_path, monkeypatch):
     """A remembered verdict binds exact bytes; different bytes are validated."""
     import evidence_graph
-    from generation_catalog import GenerationCatalog
+    from llm_wiki.generation_catalog_store import GenerationCatalog
 
     catalog = GenerationCatalog(tmp_path / "state")
     _publish_active(catalog, "gen-1", _scope(tmp_path, COMMIT_BUILT))
-    monkeypatch.setattr(evidence_graph, "_FORMAT_VALIDATED", set())
+    monkeypatch.setattr(evidence_graph, "FORMAT_VALIDATED", set())
     graph = evidence_graph.EvidenceGraph.open_active_for_repository(
         catalog, _scope(tmp_path, COMMIT_NOW)
     )

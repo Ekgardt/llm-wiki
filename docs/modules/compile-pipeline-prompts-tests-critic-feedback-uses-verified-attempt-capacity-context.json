@@ -1,0 +1,267 @@
+{
+  "encoding": "o200k_base",
+  "max_tokens": 100000,
+  "serialization": "exact-duplicates/v1",
+  "files": [
+    "AGENTS.md",
+    "CLAUDE.md",
+    "docs/AGENTS.md",
+    "docs/STRUCTURE.md",
+    "docs/modules/breadcrumb-decision-tests.md",
+    "docs/modules/breadcrumb-documents.md",
+    "docs/modules/compile-claims-producer-helpers.md",
+    "docs/modules/compile-paths.md",
+    "docs/modules/compile-pipeline-apply-tests.md",
+    "docs/modules/compile-pipeline-batches-tests-compile-uses-the-attempt-model-budget-helpers.md",
+    "docs/modules/compile-pipeline-prompts-tests-compile-critic-preserves-native-claim-origin-helpers.md",
+    "docs/modules/compile-pipeline-prompts-tests-critic-feedback-uses-verified-attempt-capacity-context.json",
+    "docs/modules/compile-pipeline-prompts-tests-critic-feedback-uses-verified-attempt-capacity.md",
+    "docs/modules/compile-pipeline-sources-tests-compile-packing-counts-original-entry-metadata-helpers.md",
+    "docs/modules/compile-pipeline-sources-tests-native-compile-projection-has-complete-citation-address-helpers.md",
+    "docs/modules/context-bundle.md",
+    "docs/modules/context-records.md",
+    "docs/modules/context-tooling.md",
+    "docs/modules/model-choice.md",
+    "docs/modules/native-event-reader.md",
+    "docs/modules/product-structure.md",
+    "docs/modules/project-governance.md",
+    "docs/modules/script-sources.md",
+    "docs/modules/test-support.md",
+    "rules/development-laws.md",
+    "scripts/__init__.py",
+    "scripts/llm_wiki/__init__.py",
+    "scripts/llm_wiki/context_bundle.py",
+    "tests/__init__.py",
+    "tests/compile_claims_producer_helpers.py",
+    "tests/compile_critic_preserves_native_claim_origin_helpers.py",
+    "tests/compile_packing_counts_original_entry_metadata_helpers.py",
+    "tests/compile_paths.py",
+    "tests/compile_uses_the_attempt_model_budget_helpers.py",
+    "tests/conftest.py",
+    "tests/module_context.py",
+    "tests/module_context_paths.py",
+    "tests/module_interface.py",
+    "tests/module_interface_render.py",
+    "tests/module_qualification.py",
+    "tests/module_record_context.py",
+    "tests/module_records.py",
+    "tests/modules/__init__.py",
+    "tests/modules/breadcrumb_documents/__init__.py",
+    "tests/modules/breadcrumb_documents/contract_helpers.py",
+    "tests/modules/native_event_reader/__init__.py",
+    "tests/modules/native_event_reader/contract_helpers.py",
+    "tests/native_compile_projection_has_complete_citation_address_helpers.py",
+    "tests/native_compile_uses_whole_container_helpers.py",
+    "tests/native_user_frames_keep_their_physical_evidence_helpers.py",
+    "tests/script_sources.py",
+    "tests/shared_fixtures.py",
+    "tests/slow_machine.py",
+    "tests/test_critic_feedback_uses_verified_attempt_capacity.py"
+  ],
+  "ownership": {
+    "files": [
+      "docs/modules/compile-pipeline-prompts-tests-critic-feedback-uses-verified-attempt-capacity-context.json",
+      "docs/modules/compile-pipeline-prompts-tests-critic-feedback-uses-verified-attempt-capacity.md",
+      "tests/test_critic_feedback_uses_verified_attempt_capacity.py"
+    ]
+  },
+  "qualified_dependencies": [
+    {
+      "provider": "scripts/breadcrumb_decision.py",
+      "names": [
+        "journal_block"
+      ],
+      "contract_sha256": "d9c930484c634bdb57dbd893d182a3cb86d6d5b4893041035de163552c86eebc",
+      "integration_tests": [
+        "tests/test_critic_feedback_uses_verified_attempt_capacity.py"
+      ]
+    },
+    {
+      "provider": "scripts/breadcrumb_evidence.py",
+      "names": [
+        "read_head"
+      ],
+      "contract_sha256": "ed6e789206b293b2cd7ca3cc716daa242835e10bc7a60103b33b2431c133913f",
+      "integration_tests": [
+        "tests/test_critic_feedback_uses_verified_attempt_capacity.py"
+      ]
+    },
+    {
+      "provider": "scripts/breadcrumb_protocol.py",
+      "names": [
+        "encode_parts",
+        "make_anchor",
+        "make_manifest"
+      ],
+      "contract_sha256": "d9092eee738a1a4113c9bf87afe3ae4ad27a6f4bb640b6b8040da43b1d304729",
+      "integration_tests": [
+        "tests/test_critic_feedback_uses_verified_attempt_capacity.py"
+      ]
+    },
+    {
+      "provider": "scripts/compile_pipeline.py",
+      "names": [
+        "sha256_bytes"
+      ],
+      "contract_sha256": "7d34a853c5a6f1be8b00805b2e865ac2a5ca5a6fe3ca141de97ebda61d2a85cf",
+      "integration_tests": [
+        "tests/test_critic_feedback_uses_verified_attempt_capacity.py"
+      ]
+    },
+    {
+      "provider": "scripts/compile_receipts.py",
+      "names": [
+        "SourceSnapshot"
+      ],
+      "contract_sha256": "02926d8c4ae579f35a373ac76b77bf41a7016f084df2b6a04a4afaeda23c25c1",
+      "integration_tests": [
+        "tests/test_critic_feedback_uses_verified_attempt_capacity.py"
+      ]
+    },
+    {
+      "provider": "scripts/corpus_snapshot.py",
+      "names": [
+        "collect_corpus"
+      ],
+      "contract_sha256": "7ea12368f51c070a84b0754260f0a82db5ac44b0395b95eabcb01e5053c9f0bb",
+      "integration_tests": [
+        "tests/test_critic_feedback_uses_verified_attempt_capacity.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_client.py",
+      "names": [
+        "provider_candidates"
+      ],
+      "contract_sha256": "61683a99132933dd60207b8a7fdbe1254ea3e333c893135196afeaba7e6ad1cf",
+      "integration_tests": [
+        "tests/test_critic_feedback_uses_verified_attempt_capacity.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/breadcrumb_documents.py",
+      "names": [
+        "source_documents",
+        "source_path"
+      ],
+      "contract_sha256": "9c32d29ba0229ab4fd59256dd23d9ea9fb8fde486cddde3ce431f64e296ab907",
+      "integration_tests": [
+        "tests/test_critic_feedback_uses_verified_attempt_capacity.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/compile_pipeline_apply.py",
+      "names": [
+        "apply_compile_plan"
+      ],
+      "contract_sha256": "129ecd76764fbd203f197468ec01d03833729ef205c00c26dd60fb67025303bb",
+      "integration_tests": [
+        "tests/test_critic_feedback_uses_verified_attempt_capacity.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/compile_pipeline_base.py",
+      "names": [
+        "DRAFT_SYSTEM"
+      ],
+      "contract_sha256": "b6b8bfd29c34d98c81a2f7a15a3c29adf5520f7608d5634806bc8ab85ac7dfcd",
+      "integration_tests": [
+        "tests/test_critic_feedback_uses_verified_attempt_capacity.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/compile_pipeline_batches.py",
+      "names": [
+        "pack_compile_batches"
+      ],
+      "contract_sha256": "42879fb77545b262126891bf818efcf8a9307f66323329e8e70bef806a53fc39",
+      "integration_tests": [
+        "tests/test_critic_feedback_uses_verified_attempt_capacity.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/compile_pipeline_operations.py",
+      "names": [
+        "with_derived_claims"
+      ],
+      "contract_sha256": "930269ecbb09f9c38ace6e7f6a5cf3b2ecf6eecf7604d6b372849c21e950e0e5",
+      "integration_tests": [
+        "tests/test_critic_feedback_uses_verified_attempt_capacity.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/compile_pipeline_prompts.py",
+      "names": [
+        "CRITIQUE_SCHEMA",
+        "CRITIQUE_SYSTEM",
+        "CompileAttempt",
+        "attempt_input_budget",
+        "compile_prompt_fits",
+        "critique_prompt",
+        "draft_feedback_prompt",
+        "expand_choice_fields",
+        "source_line_choices"
+      ],
+      "contract_sha256": "422ef7d9ecb1718423f8b6290b83af3770274cbc30e20cace3607f5d3bf858c8",
+      "integration_tests": [
+        "tests/test_critic_feedback_uses_verified_attempt_capacity.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/compile_pipeline_sources.py",
+      "names": [
+        "CompileInputs",
+        "daily_parts",
+        "snapshot_compile_inputs",
+        "subset_compile_inputs"
+      ],
+      "contract_sha256": "d0653026b27a99c722d20218790bc3ecfadad357c3a198c07bbeecf42e1d7483",
+      "integration_tests": [
+        "tests/test_critic_feedback_uses_verified_attempt_capacity.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/generation_catalog_store.py",
+      "names": [
+        "GenerationCatalog"
+      ],
+      "contract_sha256": "b18194ebe04bf988b4474379fcb5243516550d43b745a00eaed1453f7844c983",
+      "integration_tests": [
+        "tests/test_a_blocked_task_has_a_way_back.py",
+        "tests/test_a_build_in_flight_is_not_an_orphan.py",
+        "tests/test_a_capacity_refusal_does_not_corrupt_a_generation.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/model_choice.py",
+      "names": [
+        "using_root"
+      ],
+      "contract_sha256": "d45f2655cb61963e77617d1dfd7d617b134ad77cc770b59b335d0856e5d65019",
+      "integration_tests": [
+        "tests/test_critic_feedback_uses_verified_attempt_capacity.py"
+      ]
+    },
+    {
+      "provider": "scripts/reliable_memory.py",
+      "names": [
+        "sha256_bytes",
+        "validate_state_root"
+      ],
+      "contract_sha256": "6a7b0b232a73f614931e67eb1d96c7b1a7655d4efe793da9d2bf61430fd1f4c6",
+      "integration_tests": [
+        "tests/test_critic_feedback_uses_verified_attempt_capacity.py"
+      ]
+    },
+    {
+      "provider": "scripts/repository_scope.py",
+      "names": [
+        "sanitized_git_environment"
+      ],
+      "contract_sha256": "fd550ae20761afad50b37fa3a71044a162485b0e4d4b3e2af9b5b22e143c2bec",
+      "integration_tests": [
+        "tests/test_critic_feedback_uses_verified_attempt_capacity.py"
+      ]
+    }
+  ]
+}

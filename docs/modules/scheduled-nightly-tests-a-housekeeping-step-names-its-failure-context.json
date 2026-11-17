@@ -1,0 +1,275 @@
+{
+  "encoding": "o200k_base",
+  "max_tokens": 100000,
+  "serialization": "exact-duplicates/v1",
+  "files": [
+    "AGENTS.md",
+    "CLAUDE.md",
+    "docs/AGENTS.md",
+    "docs/STRUCTURE.md",
+    "docs/modules/context-bundle.md",
+    "docs/modules/context-records.md",
+    "docs/modules/context-tooling.md",
+    "docs/modules/memory-state-tests-scheduled-fence-helpers.md",
+    "docs/modules/model-choice.md",
+    "docs/modules/product-structure.md",
+    "docs/modules/project-governance.md",
+    "docs/modules/scheduled-nightly-tests-a-housekeeping-step-names-its-failure-context.json",
+    "docs/modules/scheduled-nightly-tests-a-housekeeping-step-names-its-failure.md",
+    "docs/modules/scheduled-nightly.md",
+    "docs/modules/test-support.md",
+    "rules/development-laws.md",
+    "scripts/__init__.py",
+    "scripts/llm_wiki/__init__.py",
+    "scripts/llm_wiki/context_bundle.py",
+    "scripts/scheduled_nightly.py",
+    "tests/__init__.py",
+    "tests/conftest.py",
+    "tests/module_context.py",
+    "tests/module_context_paths.py",
+    "tests/module_interface.py",
+    "tests/module_interface_render.py",
+    "tests/module_qualification.py",
+    "tests/module_record_context.py",
+    "tests/module_records.py",
+    "tests/scheduled_fence_helpers.py",
+    "tests/shared_fixtures.py",
+    "tests/slow_machine.py",
+    "tests/test_a_housekeeping_step_names_its_failure.py"
+  ],
+  "ownership": {
+    "files": [
+      "docs/modules/scheduled-nightly-tests-a-housekeeping-step-names-its-failure-context.json",
+      "docs/modules/scheduled-nightly-tests-a-housekeeping-step-names-its-failure.md",
+      "tests/test_a_housekeeping_step_names_its_failure.py"
+    ]
+  },
+  "qualified_dependencies": [
+    {
+      "provider": "scripts/compile_lock.py",
+      "names": [
+        "process_status"
+      ],
+      "contract_sha256": "b343fc3a906094bb9c34d064071b40db89fe023f004e791c90a7ccc337d6233a",
+      "integration_tests": [
+        "tests/test_a_housekeeping_step_names_its_failure.py"
+      ]
+    },
+    {
+      "provider": "scripts/doctor.py",
+      "names": [
+        "run_doctor"
+      ],
+      "contract_sha256": "081378e281c574733c396a4a7f1ea7acb280b17ae89b8adc43e765a745844581",
+      "integration_tests": [
+        "tests/test_a_housekeeping_step_names_its_failure.py"
+      ]
+    },
+    {
+      "provider": "scripts/generation_maintenance.py",
+      "names": [
+        "run_generation_maintenance"
+      ],
+      "contract_sha256": "f993c23c1e2b938d88bee02a716a716c4bb2c99dfcb153bbb47aacab7a37f71b",
+      "integration_tests": [
+        "tests/test_a_housekeeping_step_names_its_failure.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/generation_catalog_store.py",
+      "names": [
+        "GenerationCatalog"
+      ],
+      "contract_sha256": "b18194ebe04bf988b4474379fcb5243516550d43b745a00eaed1453f7844c983",
+      "integration_tests": [
+        "tests/test_a_blocked_task_has_a_way_back.py",
+        "tests/test_a_build_in_flight_is_not_an_orphan.py",
+        "tests/test_a_capacity_refusal_does_not_corrupt_a_generation.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/model_choice.py",
+      "names": [
+        "using_root"
+      ],
+      "contract_sha256": "d45f2655cb61963e77617d1dfd7d617b134ad77cc770b59b335d0856e5d65019",
+      "integration_tests": [
+        "tests/test_a_housekeeping_step_names_its_failure.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/runtime_publication.py",
+      "names": [
+        "write_all"
+      ],
+      "contract_sha256": "0c87cf7b659cca5738ba41c3cc77c42118959b9c2283b24a345d862f8901dcd1",
+      "integration_tests": [
+        "tests/test_a_housekeeping_step_names_its_failure.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/runtime_roots.py",
+      "names": [
+        "reports_dir",
+        "state_root",
+        "vault_root"
+      ],
+      "contract_sha256": "731ab871ff014e1c00e32f2d6eb199f0995730018f87e962f8ee0672959c0e67",
+      "integration_tests": [
+        "tests/test_a_continuation_keeps_its_original_entry.py",
+        "tests/test_a_prompt_checkpoint_does_not_outwait_its_host.py",
+        "tests/test_a_session_marker_survives_a_busy_writer.py"
+      ]
+    },
+    {
+      "provider": "scripts/maintenance_helpers.py",
+      "names": [
+        "prune_maintenance_output",
+        "run_step",
+        "trim_scheduler_logs",
+        "wait_for_compile_idle"
+      ],
+      "contract_sha256": "9246ac798b2aa3d69baf1311231ed9bbf804349f465c30294b879eedcdaa04e9",
+      "integration_tests": [
+        "tests/test_a_housekeeping_step_names_its_failure.py"
+      ]
+    },
+    {
+      "provider": "scripts/markdown_transaction.py",
+      "names": [
+        "active_or_legacy_coordinator"
+      ],
+      "contract_sha256": "c925a7d2a81ec95533c80abc3906d8b8f0c1422d98e7175814de9a57f0ec45ec",
+      "integration_tests": [
+        "tests/test_a_housekeeping_step_names_its_failure.py"
+      ]
+    },
+    {
+      "provider": "scripts/memory_state.py",
+      "names": [
+        "load_state",
+        "retire_stale_lock",
+        "update_state"
+      ],
+      "contract_sha256": "280884738799d98678da2c33e8bc248890c3c11fccecff55d8a26d38d6b27d3a",
+      "integration_tests": [
+        "tests/test_a_corrupt_state_is_not_replaced_by_an_empty_one.py",
+        "tests/test_a_discarded_receipt_reopens_its_day.py",
+        "tests/test_a_lock_is_released_even_while_somebody_is_reading_it.py"
+      ]
+    },
+    {
+      "provider": "scripts/nightly_budget.py",
+      "names": [
+        "Step",
+        "compile_step",
+        "fact_keys_step",
+        "intake_steps",
+        "post_compile_steps",
+        "worst_case_seconds"
+      ],
+      "contract_sha256": "1c7c0f6e69d95659ea1405b868170df2825934de683f1c5d85f6cc7e557f85e9",
+      "integration_tests": [
+        "tests/test_a_housekeeping_step_names_its_failure.py"
+      ]
+    },
+    {
+      "provider": "scripts/operational_ownership.py",
+      "names": [
+        "OperationalOwnershipError",
+        "OwnerLease",
+        "OwnershipRegistry",
+        "acquire_scheduled_owner",
+        "heartbeat_owner",
+        "release_marker_owner"
+      ],
+      "contract_sha256": "f62e5bbbfd4d022e2e2f3f15dd30848a35a0f823ef4e708397d6f010ecb872f3",
+      "integration_tests": [
+        "tests/test_a_housekeeping_step_names_its_failure.py"
+      ]
+    },
+    {
+      "provider": "scripts/process_liveness.py",
+      "names": [
+        "owner_alive",
+        "process_start_identity"
+      ],
+      "contract_sha256": "53b16fb306b92132ba05d885846e99a49f10bb5c8a92092f2d704b5832b0d804",
+      "integration_tests": [
+        "tests/test_a_housekeeping_step_names_its_failure.py"
+      ]
+    },
+    {
+      "provider": "scripts/python_series.py",
+      "names": [
+        "require_supported_python"
+      ],
+      "contract_sha256": "57bf542fde7c87f26112ffd4e3cfc93a65ece403b34a35a187f50dbc2b98cfaf",
+      "integration_tests": [
+        "tests/test_a_housekeeping_step_names_its_failure.py"
+      ]
+    },
+    {
+      "provider": "scripts/reliable_memory.py",
+      "names": [
+        "validate_state_root"
+      ],
+      "contract_sha256": "8680515cd873056a7c8a36e0057d91f2f83f23c48841263697676ff91f7ff964",
+      "integration_tests": [
+        "tests/test_a_housekeeping_step_names_its_failure.py"
+      ]
+    },
+    {
+      "provider": "scripts/repository_scope.py",
+      "names": [
+        "sanitized_git_environment"
+      ],
+      "contract_sha256": "fd550ae20761afad50b37fa3a71044a162485b0e4d4b3e2af9b5b22e143c2bec",
+      "integration_tests": [
+        "tests/test_a_housekeeping_step_names_its_failure.py"
+      ]
+    },
+    {
+      "provider": "scripts/retrieval_telemetry.py",
+      "names": [
+        "compact"
+      ],
+      "contract_sha256": "a2f146900083e884871afbdb1bcd2992e5efd03783349a0bebc7f379ff500923",
+      "integration_tests": [
+        "tests/test_a_housekeeping_step_names_its_failure.py"
+      ]
+    },
+    {
+      "provider": "scripts/secret_redact.py",
+      "names": [
+        "describe_error",
+        "describe_error_chain"
+      ],
+      "contract_sha256": "884e5e05013d225e77560cc5211c6b673e5a2eb93f21415faed38c0cb7c412e2",
+      "integration_tests": [
+        "tests/test_a_housekeeping_step_names_its_failure.py"
+      ]
+    },
+    {
+      "provider": "scripts/self_update.py",
+      "names": [
+        "sync_dependencies",
+        "update_checkout"
+      ],
+      "contract_sha256": "374cc392946658cae7ecc2b00ecc6b1d557e9fec8acd12ac59f2beee5c69766d",
+      "integration_tests": [
+        "tests/test_a_housekeeping_step_names_its_failure.py"
+      ]
+    },
+    {
+      "provider": "scripts/settings.py",
+      "names": [
+        "setting_value"
+      ],
+      "contract_sha256": "ec6d2a43d91dba48c174aad5e9505790a05fd66f1bf1e5292264857f320a9881",
+      "integration_tests": [
+        "tests/test_a_housekeeping_step_names_its_failure.py"
+      ]
+    }
+  ]
+}

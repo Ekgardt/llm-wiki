@@ -11,7 +11,6 @@ import threading
 import time
 from pathlib import Path
 
-import code_graph
 import mcp_server
 
 from tests.slow_machine import LONG_TIMEOUT
@@ -24,10 +23,10 @@ def test_a_hung_callers_query_answers_timeout_and_holds_no_tool_thread(tmp_path:
         released.wait(LONG_TIMEOUT)
         return {"callers": []}
 
-    monkeypatch.setattr(code_graph, "find_callers", hangs)
+    monkeypatch.setattr("llm_wiki.code_graph_calls.find_callers", hangs)
     started = time.monotonic()
     try:
-        answer = mcp_server._get_architecture_mode(
+        answer = mcp_server.get_architecture_mode(
             str(tmp_path), mode="callers", symbol="anything", deadline=time.monotonic() + 0.5
         )
     finally:

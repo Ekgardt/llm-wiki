@@ -1,0 +1,197 @@
+{
+  "encoding": "o200k_base",
+  "max_tokens": 100000,
+  "serialization": "exact-duplicates/v1",
+  "files": [
+    "AGENTS.md",
+    "CLAUDE.md",
+    "docs/AGENTS.md",
+    "docs/STRUCTURE.md",
+    "docs/modules/context-bundle.md",
+    "docs/modules/context-records.md",
+    "docs/modules/context-tooling.md",
+    "docs/modules/markdown-writer-gate-context.json",
+    "docs/modules/markdown-writer-gate.md",
+    "docs/modules/model-choice.md",
+    "docs/modules/operational-ownership-tests-writer-gate-reclaims-a-dead-projection.md",
+    "docs/modules/product-structure.md",
+    "docs/modules/project-governance.md",
+    "docs/modules/test-support.md",
+    "rules/development-laws.md",
+    "scripts/__init__.py",
+    "scripts/llm_wiki/__init__.py",
+    "scripts/llm_wiki/context_bundle.py",
+    "scripts/llm_wiki/markdown_writer_gate.py",
+    "tests/__init__.py",
+    "tests/conftest.py",
+    "tests/module_context.py",
+    "tests/module_context_paths.py",
+    "tests/module_interface.py",
+    "tests/module_interface_render.py",
+    "tests/module_qualification.py",
+    "tests/module_record_context.py",
+    "tests/module_records.py",
+    "tests/shared_fixtures.py",
+    "tests/slow_machine.py",
+    "tests/test_a_failed_release_does_not_keep_the_gate.py",
+    "tests/writer_gate_reclaims_a_dead_projection_helpers.py"
+  ],
+  "ownership": {
+    "files": [
+      "docs/modules/markdown-writer-gate-context.json",
+      "docs/modules/markdown-writer-gate.md",
+      "scripts/llm_wiki/markdown_writer_gate.py",
+      "tests/test_a_failed_release_does_not_keep_the_gate.py"
+    ]
+  },
+  "qualified_dependencies": [
+    {
+      "provider": "scripts/lease_renewal.py",
+      "names": [
+        "renew_until_stopped"
+      ],
+      "contract_sha256": "b2ab0739508c291354a6b92c1a414225732496cb481a22a3ff3b824be15c52bd",
+      "integration_tests": [
+        "tests/test_a_failed_release_does_not_keep_the_gate.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/coordinator_schema.py",
+      "names": [
+        "COORDINATOR_V3_CONTRACT"
+      ],
+      "contract_sha256": "a24f426a93b0c2fc14ebad8491cf73b0399a2940fe46c7c03c07cd830ebd56d7",
+      "integration_tests": [
+        "tests/test_a_failed_release_does_not_keep_the_gate.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/generation_catalog_store.py",
+      "names": [
+        "GenerationCatalog"
+      ],
+      "contract_sha256": "b18194ebe04bf988b4474379fcb5243516550d43b745a00eaed1453f7844c983",
+      "integration_tests": [
+        "tests/test_a_blocked_task_has_a_way_back.py",
+        "tests/test_a_build_in_flight_is_not_an_orphan.py",
+        "tests/test_a_capacity_refusal_does_not_corrupt_a_generation.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/markdown_records.py",
+      "names": [
+        "WriterAdmissionTimeout"
+      ],
+      "contract_sha256": "2c2244f461839c38e3f74fd42a925c8fddd3b753ffe576a317497e163d3029b6",
+      "integration_tests": [
+        "tests/test_a_failed_release_does_not_keep_the_gate.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/markdown_store.py",
+      "names": [
+        "RELEASE_RETRY_DELAYS",
+        "WRITER_HEARTBEAT_SECONDS",
+        "WRITER_LEASE_SECONDS",
+        "WRITER_WAIT_SECONDS",
+        "future_timestamp",
+        "is_transient_writer_contention",
+        "now",
+        "parse_stored_timestamp",
+        "retry_writer_or_raise",
+        "stored_timestamp_text",
+        "writer_retry_delay"
+      ],
+      "contract_sha256": "9152cef5f7a2b896099a10aa5ff34d9ca5c5fac84d9807b6d2b00b170e4d24a6",
+      "integration_tests": [
+        "tests/test_a_failed_release_does_not_keep_the_gate.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/model_choice.py",
+      "names": [
+        "using_root"
+      ],
+      "contract_sha256": "d45f2655cb61963e77617d1dfd7d617b134ad77cc770b59b335d0856e5d65019",
+      "integration_tests": [
+        "tests/test_a_failed_release_does_not_keep_the_gate.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/reliability_defaults.py",
+      "names": [
+        "DEFAULTS"
+      ],
+      "contract_sha256": "f37296a83c15073e42a6cc8b86b88c2d19c548ac19a4ef6d0ca2f7af925c90c8",
+      "integration_tests": [
+        "tests/test_a_failed_release_does_not_keep_the_gate.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/sqlite_transactions.py",
+      "names": [
+        "begin_immediate"
+      ],
+      "contract_sha256": "fb9ecde177ce133dd8e6e34a67214ca0c051a02d758e8611dac84b568d955373",
+      "integration_tests": [
+        "tests/test_a_failed_release_does_not_keep_the_gate.py"
+      ]
+    },
+    {
+      "provider": "scripts/markdown_transaction.py",
+      "names": [
+        "MarkdownCoordinator",
+        "initialize_coordinator_v3_candidate"
+      ],
+      "contract_sha256": "c90f28cb4198a1b4e5731bc79a575ed3196c6d31c90e6a45902938a1a2cdabb3",
+      "integration_tests": [
+        "tests/test_a_failed_release_does_not_keep_the_gate.py"
+      ]
+    },
+    {
+      "provider": "scripts/operational_ownership.py",
+      "names": [
+        "OperationalOwnershipError",
+        "OwnerLease",
+        "OwnershipRegistry",
+        "current_process_identity"
+      ],
+      "contract_sha256": "a8e8727dc4260c2905921290d9cb964eed8301c18ef7033fc2a5c93e4ad7b3e9",
+      "integration_tests": [
+        "tests/test_a_failed_release_does_not_keep_the_gate.py"
+      ]
+    },
+    {
+      "provider": "scripts/process_liveness.py",
+      "names": [
+        "owner_alive"
+      ],
+      "contract_sha256": "43a93650e5db69f95a022901e1dc186127c6b792e0f8e8f2e13af548be8ebc1b",
+      "integration_tests": [
+        "tests/test_a_failed_release_does_not_keep_the_gate.py"
+      ]
+    },
+    {
+      "provider": "scripts/reliable_memory.py",
+      "names": [
+        "validate_state_root"
+      ],
+      "contract_sha256": "8680515cd873056a7c8a36e0057d91f2f83f23c48841263697676ff91f7ff964",
+      "integration_tests": [
+        "tests/test_a_failed_release_does_not_keep_the_gate.py"
+      ]
+    },
+    {
+      "provider": "scripts/repository_scope.py",
+      "names": [
+        "sanitized_git_environment"
+      ],
+      "contract_sha256": "fd550ae20761afad50b37fa3a71044a162485b0e4d4b3e2af9b5b22e143c2bec",
+      "integration_tests": [
+        "tests/test_a_code_generation_is_not_abandoned.py",
+        "tests/test_a_directory_link_inside_the_checkout_does_not_refuse_the_revision.py",
+        "tests/test_a_document_is_opened_in_its_own_language.py"
+      ]
+    }
+  ]
+}

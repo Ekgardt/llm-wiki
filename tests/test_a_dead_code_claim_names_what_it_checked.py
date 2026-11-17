@@ -9,9 +9,9 @@ import pytest
 import value_references
 
 
-def _row(path: str) -> dict:
+def _row(path: str, index=value_references.EMPTY_INDEX) -> dict:
     node = {"node_id": "code:function:" + "a" * 32, "metadata": {"name": "render", "owner": ""}}
-    return code_graph._dead_candidate_row(node, (path, 3), frozenset(), value_references.EMPTY_INDEX)
+    return code_graph.dead_candidate_row(node, (path, 3), frozenset(), index)
 
 
 @pytest.mark.parametrize(
@@ -31,3 +31,9 @@ def test_the_unchecked_verdict_is_cut_first() -> None:
     order = code_graph.DEAD_CODE_REASON_ORDER
 
     assert order.index("references_not_indexed") == len(order) - 1
+
+
+@pytest.mark.parametrize('source', [b'lookup="\\u0072ender"', b'lookup="ren" "der"'])
+def test_transformed_reference_cannot_receive_the_unused_verdict(source):
+    index = value_references.build_reference_index([('caller.py', source)], names=frozenset({'render'}))
+    assert _row('src/app.py', index)['reason'] == 'referenced_without_call'

@@ -1,6 +1,6 @@
 """Audit 3, B26: an unreadable generation is not an absent one.
 
-`_active_evidence_graph` used to answer `None` for "this repository has no
+`active_evidence_graph` used to answer `None` for "this repository has no
 generation", for "it has one that cannot be opened" and for a plain `TypeError`
 inside the opening path. Research:
 `docs/research/2026-09-17-graph-a-generation-that-cannot-be-read-is-not-a-generation-that-is-absent.md`.
@@ -8,6 +8,7 @@ inside the opening path. Research:
 
 from __future__ import annotations
 
+import subprocess
 import sys
 from pathlib import Path
 
@@ -22,13 +23,14 @@ SOURCE = b"def caller():\n    callee()\n"
 
 def _repository_with_a_generation(tmp_path, monkeypatch):
     """A real published generation for a real checkout, as the product opens it."""
-    from generation_catalog import GenerationCatalog
+    from llm_wiki.generation_catalog_store import GenerationCatalog
     from repository_scope import resolve_repository_scope
 
-    from tests.test_evidence_graph_recovery import _publish, _rich_graph_records
+    from tests.evidence_graph_recovery_helpers import _publish, _rich_graph_records
 
     repository = tmp_path / "repo"
     repository.mkdir()
+    subprocess.run(["git", "init", "--quiet", str(repository)], check=True, capture_output=True)
     (repository / "app.py").write_bytes(SOURCE)
     catalog = GenerationCatalog(tmp_path / "state")
     scope = resolve_repository_scope(repository)
@@ -89,7 +91,7 @@ def test_a_programming_error_in_the_opening_path_is_not_swallowed(monkeypatch):
     def broken(*_args, **_options):
         raise TypeError("wrong keyword")
 
-    monkeypatch.setattr(code_graph, "_leased_active_graph", broken)
+    monkeypatch.setattr("llm_wiki.code_graph_generation.leased_active_graph", broken)
 
     with pytest.raises(TypeError, match="wrong keyword"):
-        code_graph._active_evidence_graph(Path("."))
+        code_graph.active_evidence_graph(Path("."))

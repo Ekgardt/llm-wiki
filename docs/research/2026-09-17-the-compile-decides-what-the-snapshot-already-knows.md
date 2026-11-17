@@ -83,3 +83,9 @@ Files: `scripts/compile_memory.py`, `skills/session-memory-compile/SKILL.md`,
   under *Deprecated* in `CHANGELOG.md`. The skill and the user guide stop offering it. It is
   not made real, for the reason above. The owner's rule that a CLI spelling named in the user
   guide is not deleted outright is kept.
+
+## Policy update, 2026-10-07
+
+This dated research remains historical. Current automatic compilation refuses a
+source-bound critique rejection instead of accepting the filtered remainder as
+source completion. See [the current rejection boundary](2026-10-07-a-rejected-draft-is-not-source-no-content.md).

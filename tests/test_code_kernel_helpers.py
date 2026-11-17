@@ -56,7 +56,8 @@ def test_shared_plugin_provides_independent_state_and_repository_fixtures(
     assert state_root.is_dir()
     assert (repository / ".git").exists()
     assert state_root not in repository.parents
-    assert pytestconfig.pluginmanager.hasplugin("tests.code_kernel_helpers")
+    assert pytestconfig.pluginmanager.hasplugin("tests.shared_fixtures")
+    assert not pytestconfig.pluginmanager.hasplugin("tests.code_kernel_helpers")
 
 
 def test_fixture_repository_ignores_ambient_git_config_and_templates(

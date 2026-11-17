@@ -7,7 +7,7 @@ costs 7.99 s and ~1.1 GiB resident per process (`knowledge/log.md`,
 
 What this is not. It is a *transport*, not a capability. The tool surface is
 the same twelve tools, reached through `mcp_server.build_server()` - the same
-`_validate_tool_arguments`, the same operation deadline, the same envelope.
+`validate_tool_arguments`, the same operation deadline, the same envelope.
 Nothing here dispatches a tool itself.
 
 Protocol: Streamable HTTP as specified in MCP revision **2025-11-25**
@@ -63,6 +63,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import mcp_server  # noqa: E402
+from llm_wiki import runtime_roots  # noqa: E402
 
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 8765
@@ -120,9 +121,8 @@ def allowed_host_headers(host: str, port: int) -> tuple[str, ...]:
 
 def default_token_path() -> Path:
     """The token lives with the rest of the runtime state, under `run/`."""
-    from memory_state import STATE_DIR
 
-    return Path(STATE_DIR) / "mcp-http" / "token"
+    return Path(runtime_roots.run_dir()) / "mcp-http" / "token"
 
 
 def _private_mode_is_enforceable() -> bool:
@@ -443,25 +443,25 @@ def _announce(host: str, port: int, token_path: Path) -> None:
 
 def _close_navigation_sessions() -> None:
     try:
-        mcp_server._close_navigation_session_manager(
+        mcp_server.close_navigation_session_manager(
             time.monotonic() + mcp_server.MCP_OPERATION_SECONDS
         )
     except Exception as error:  # noqa: BLE001 - reported, never hidden
         print(f"mcp_http: navigation sessions not closed cleanly: {error}", file=sys.stderr)
 
 
-def _shutdown() -> None:
+def shutdown() -> None:
     """Close navigation, then let no model be mid-inference when we exit.
 
     Audit 3, A8: the stdio transport settled inference and this one did not,
     although abandoned retrieval stages run here. One rule, one function:
-    `mcp_server._settle_inference`. Research:
+    `mcp_server.settle_inference`. Research:
     `docs/research/2026-09-17-the-shared-server-settles-inference-too.md`.
     """
     try:
         _close_navigation_sessions()
     finally:
-        mcp_server._settle_inference()
+        mcp_server.settle_inference()
 
 
 # How long the warm-up may take before we give up and serve anyway. It is not a
@@ -480,7 +480,7 @@ def _warm_shared_surface() -> None:
     at all.
 
     Why it is synchronous, and why it is the whole path rather than the encoder
-    alone. `mcp_server._start_encoder_warmup` already loads the encoder on a
+    alone. `mcp_server.start_encoder_warmup` already loads the encoder on a
     background thread for both transports. Measured here, interleaved, four
     fresh processes per variant on a four-core machine at load average 8-12,
     four paired `recall`/`get_decisions` rounds each:
@@ -507,7 +507,7 @@ def _warm_shared_surface() -> None:
         # Still warm what a memory-tight machine can afford: the background
         # daemon load this function otherwise replaces. Without this the opt-out
         # would remove all warming rather than only the synchronous part.
-        mcp_server._start_encoder_warmup()
+        mcp_server.start_encoder_warmup()
         return
     print("warming the retrieval path before serving...", file=sys.stderr)
     started = time.monotonic()
@@ -560,7 +560,7 @@ def serve(
     try:
         uvicorn.Server(config).run()
     finally:
-        _shutdown()
+        shutdown()
     return 0
 
 

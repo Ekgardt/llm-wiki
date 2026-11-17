@@ -84,7 +84,7 @@ def _age_days(path: Path) -> int | None:
     return max(0, int((time.time() - modified) / 86400))
 
 
-def _read_head(path: Path) -> str | None:
+def read_head(path: Path) -> str | None:
     try:
         with path.open("r", encoding="utf-8", errors="ignore") as handle:
             return handle.read(MAX_FRONTMATTER_BYTES)
@@ -125,7 +125,7 @@ def read_page_facts(vault: Path, relative_path: str) -> PageFacts | None:
     if not relative_path:
         return None
     path = Path(vault) / relative_path
-    text = _read_head(path)
+    text = read_head(path)
     if text is None:
         return None
     return _facts_from(relative_path, path, text)

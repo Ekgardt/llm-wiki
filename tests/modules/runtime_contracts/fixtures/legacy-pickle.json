@@ -1,0 +1,20 @@
+{
+  "UnsafeStateRoot": "gASVJwAAAAAAAACMD3JlbGlhYmxlX21lbW9yeZSMD1Vuc2FmZVN0YXRlUm9vdJSTlC4=",
+  "MetadataDurabilityUnavailable": "gASVNQAAAAAAAACMD3JlbGlhYmxlX21lbW9yeZSMHU1ldGFkYXRhRHVyYWJpbGl0eVVuYXZhaWxhYmxllJOULg==",
+  "RuntimeFileIdentity": "gASVKwAAAAAAAACMD3JlbGlhYmxlX21lbW9yeZSME1J1bnRpbWVGaWxlSWRlbnRpdHmUk5Qu",
+  "validate_runtime_file": "gASVLQAAAAAAAACMD3JlbGlhYmxlX21lbW9yeZSMFXZhbGlkYXRlX3J1bnRpbWVfZmlsZZSTlC4=",
+  "validate_operational_db_file": "gASVNAAAAAAAAACMD3JlbGlhYmxlX21lbW9yeZSMHHZhbGlkYXRlX29wZXJhdGlvbmFsX2RiX2ZpbGWUk5Qu",
+  "read_runtime_bytes": "gASVKgAAAAAAAACMD3JlbGlhYmxlX21lbW9yeZSMEnJlYWRfcnVudGltZV9ieXRlc5STlC4=",
+  "fingerprint_runtime_file": "gASVMAAAAAAAAACMD3JlbGlhYmxlX21lbW9yeZSMGGZpbmdlcnByaW50X3J1bnRpbWVfZmlsZZSTlC4=",
+  "fingerprint_regular_file": "gASVMAAAAAAAAACMD3JlbGlhYmxlX21lbW9yeZSMGGZpbmdlcnByaW50X3JlZ3VsYXJfZmlsZZSTlC4=",
+  "capture_runtime_file_identity": "gASVNQAAAAAAAACMD3JlbGlhYmxlX21lbW9yeZSMHWNhcHR1cmVfcnVudGltZV9maWxlX2lkZW50aXR5lJOULg==",
+  "capture_operational_database_identity": "gASVPQAAAAAAAACMD3JlbGlhYmxlX21lbW9yeZSMJWNhcHR1cmVfb3BlcmF0aW9uYWxfZGF0YWJhc2VfaWRlbnRpdHmUk5Qu",
+  "fsync_file": "gASVIgAAAAAAAACMD3JlbGlhYmxlX21lbW9yeZSMCmZzeW5jX2ZpbGWUk5Qu",
+  "fsync_directory": "gASVJwAAAAAAAACMD3JlbGlhYmxlX21lbW9yeZSMD2ZzeW5jX2RpcmVjdG9yeZSTlC4=",
+  "sync_runtime_directory": "gASVLgAAAAAAAACMD3JlbGlhYmxlX21lbW9yeZSMFnN5bmNfcnVudGltZV9kaXJlY3RvcnmUk5Qu",
+  "durable_publish_file": "gASVLAAAAAAAAACMD3JlbGlhYmxlX21lbW9yeZSMFGR1cmFibGVfcHVibGlzaF9maWxllJOULg==",
+  "publish_runtime_file": "gASVLAAAAAAAAACMD3JlbGlhYmxlX21lbW9yeZSMFHB1Ymxpc2hfcnVudGltZV9maWxllJOULg==",
+  "identity_instance": "gASVdwAAAAAAAACMD3JlbGlhYmxlX21lbW9yeZSME1J1bnRpbWVGaWxlSWRlbnRpdHmUk5QpgZR9lCiMCHBsYXRmb3JtlIwFcG9zaXiUjAZ2b2x1bWWUjAExlIwHZmlsZV9pZJSMATKUjARzaXpllEsDjAhtdGltZV9uc5RLBHViLg==",
+  "unsafe_instance": "gASVNQAAAAAAAACMD3JlbGlhYmxlX21lbW9yeZSMD1Vuc2FmZVN0YXRlUm9vdJSTlIwHZXhhbXBsZZSFlFKULg==",
+  "durability_instance": "gASVRQAAAAAAAACMD3JlbGlhYmxlX21lbW9yeZSMHU1ldGFkYXRhRHVyYWJpbGl0eVVuYXZhaWxhYmxllJOUSwWMB2V4YW1wbGWUhpRSlC4="
+}

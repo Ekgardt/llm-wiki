@@ -1,0 +1,163 @@
+{
+  "encoding": "o200k_base",
+  "max_tokens": 100000,
+  "serialization": "exact-duplicates/v1",
+  "files": [
+    "AGENTS.md",
+    "CLAUDE.md",
+    "docs/AGENTS.md",
+    "docs/STRUCTURE.md",
+    "docs/modules/context-bundle.md",
+    "docs/modules/context-records.md",
+    "docs/modules/context-tooling.md",
+    "docs/modules/evidence-graph-tests-open-active-scope-identity-context.json",
+    "docs/modules/evidence-graph-tests-open-active-scope-identity.md",
+    "docs/modules/evidence-graph.md",
+    "docs/modules/formats.md",
+    "docs/modules/model-choice.md",
+    "docs/modules/product-structure.md",
+    "docs/modules/project-governance.md",
+    "docs/modules/test-support.md",
+    "rules/development-laws.md",
+    "scripts/__init__.py",
+    "scripts/evidence_graph.py",
+    "scripts/llm_wiki/__init__.py",
+    "scripts/llm_wiki/context_bundle.py",
+    "scripts/llm_wiki/formats/__init__.py",
+    "tests/__init__.py",
+    "tests/conftest.py",
+    "tests/module_context.py",
+    "tests/module_context_paths.py",
+    "tests/module_interface.py",
+    "tests/module_interface_render.py",
+    "tests/module_qualification.py",
+    "tests/module_record_context.py",
+    "tests/module_records.py",
+    "tests/shared_fixtures.py",
+    "tests/slow_machine.py",
+    "tests/test_open_active_scope_identity.py"
+  ],
+  "ownership": {
+    "files": [
+      "docs/modules/evidence-graph-tests-open-active-scope-identity-context.json",
+      "docs/modules/evidence-graph-tests-open-active-scope-identity.md",
+      "tests/test_open_active_scope_identity.py"
+    ]
+  },
+  "qualified_dependencies": [
+    {
+      "provider": "scripts/bounded_io.py",
+      "names": [
+        "IO_CHUNK_BYTES"
+      ],
+      "contract_sha256": "832f143c7663b746e254455c650afd8b3ccb426152369aa1345298267ee40739",
+      "integration_tests": [
+        "tests/test_open_active_scope_identity.py"
+      ]
+    },
+    {
+      "provider": "scripts/corpus_snapshot.py",
+      "names": [
+        "COLLECTOR_VERSION",
+        "EXTRACTOR_VERSION",
+        "canonical_source_manifest",
+        "validate_canonical_source_manifest"
+      ],
+      "contract_sha256": "8382bb31c6d84800ba422ff73d973e53dbca03b5b0441733929b2f70a4706e5a",
+      "integration_tests": [
+        "tests/test_open_active_scope_identity.py"
+      ]
+    },
+    {
+      "provider": "scripts/graph_storable.py",
+      "names": [
+        "MAX_IDENTITY_KEY_CHARS",
+        "storable_identity_key",
+        "storable_metadata",
+        "valid_graph_text"
+      ],
+      "contract_sha256": "fdf7c53ed56fbd4ff60f0638fb042631c80d6ab4c15e4812cb9b5f7944d9a4e8",
+      "integration_tests": [
+        "tests/test_open_active_scope_identity.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/evidence_graph_limits.py",
+      "names": [
+        "MAX_VALIDATION_ROWS"
+      ],
+      "contract_sha256": "e0271d3f28aac2461d4543e7d12fd011b8b5b2e56f9c8efbaff103300b4ac7b2",
+      "integration_tests": [
+        "tests/test_evidence_graph_builder.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/formats/canonical.py",
+      "names": [
+        "canonical_json_bytes"
+      ],
+      "contract_sha256": "679597eaf19bb4eef12b405f35978a452a06007dd565b01d3f0d04a4f1116c49",
+      "integration_tests": [
+        "tests/test_open_active_scope_identity.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/generation_catalog_store.py",
+      "names": [
+        "GenerationCatalog"
+      ],
+      "contract_sha256": "b18194ebe04bf988b4474379fcb5243516550d43b745a00eaed1453f7844c983",
+      "integration_tests": [
+        "tests/test_a_build_in_flight_is_not_an_orphan.py",
+        "tests/test_a_code_generation_is_not_abandoned.py",
+        "tests/test_a_flow_walk_stops_when_its_caller_has.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/model_choice.py",
+      "names": [
+        "using_root"
+      ],
+      "contract_sha256": "d45f2655cb61963e77617d1dfd7d617b134ad77cc770b59b335d0856e5d65019",
+      "integration_tests": [
+        "tests/test_open_active_scope_identity.py"
+      ]
+    },
+    {
+      "provider": "scripts/reliable_memory.py",
+      "names": [
+        "canonical_json_bytes",
+        "validate_runtime_file",
+        "validate_state_root"
+      ],
+      "contract_sha256": "c3eb9adb7eb6f43017b59dcf88a647f801617edbf743b215465ca1db9201305f",
+      "integration_tests": [
+        "tests/test_open_active_scope_identity.py"
+      ]
+    },
+    {
+      "provider": "scripts/repository_scope.py",
+      "names": [
+        "RepositoryScope",
+        "derive_checkout_id",
+        "derive_repository_id",
+        "local_serialized_path",
+        "sanitized_git_environment"
+      ],
+      "contract_sha256": "4234fe078e71c32cee5d040573e0af6772360800d4c152db9701f6bb392e4bdc",
+      "integration_tests": [
+        "tests/test_open_active_scope_identity.py"
+      ]
+    },
+    {
+      "provider": "scripts/verified_artifacts.py",
+      "names": [
+        "VerifiedArtifacts"
+      ],
+      "contract_sha256": "bd1ed04fc1531f814d3f002f87984a57cda1b73fcc98d454d405c948ad0a5f87",
+      "integration_tests": [
+        "tests/test_open_active_scope_identity.py"
+      ]
+    }
+  ]
+}

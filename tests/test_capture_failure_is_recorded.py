@@ -19,6 +19,11 @@ import sys
 from unittest.mock import patch
 
 import integration_adapter
+import memory_state
+
+from tests.breadcrumb_storage_helpers import _bundle
+from tests.breadcrumb_worker_helpers import _ingress_event
+from tests.breadcrumb_worker_helpers import ingress as ingress
 
 
 class _Recorder:
@@ -33,7 +38,7 @@ def _run_failing_session_end(monkeypatch, error):
     def explode(_args):
         raise error
 
-    monkeypatch.setattr(integration_adapter, "_run_cli_event", explode)
+    monkeypatch.setattr(integration_adapter, "run_cli_event", explode)
     with patch.object(sys, "stdin", io.StringIO("{}")):
         return integration_adapter.main(
             ["--source", "claude", "--event", "session_end"]
@@ -91,7 +96,7 @@ def test_a_vanished_transcript_is_not_a_failed_capture(tmp_path):
 
     missing = tmp_path / "gone.jsonl"
 
-    assert not integration_adapter._transcript_present({"transcript_path": str(missing)})
+    assert not integration_adapter.transcript_present({"transcript_path": str(missing)})
 
 
 def test_a_transcript_that_exists_is_still_read(tmp_path):
@@ -100,28 +105,28 @@ def test_a_transcript_that_exists_is_still_read(tmp_path):
     present = tmp_path / "there.jsonl"
     present.write_text("{}\n", encoding="utf-8")
 
-    assert integration_adapter._transcript_present({"transcript_path": str(present)})
+    assert integration_adapter.transcript_present({"transcript_path": str(present)})
 
 
 def test_no_path_at_all_is_still_no_transcript():
     import integration_adapter
 
-    assert not integration_adapter._transcript_present({})
-    assert not integration_adapter._transcript_present({"transcript_path": ""})
-    assert not integration_adapter._transcript_present({"transcript_path": 7})
+    assert not integration_adapter.transcript_present({})
+    assert not integration_adapter.transcript_present({"transcript_path": ""})
+    assert not integration_adapter.transcript_present({"transcript_path": 7})
 
 
 def test_a_directory_is_not_a_transcript(tmp_path):
     """`is_file` rather than `exists`: a directory would read as a transcript."""
     import integration_adapter
 
-    assert not integration_adapter._transcript_present({"transcript_path": str(tmp_path)})
+    assert not integration_adapter.transcript_present({"transcript_path": str(tmp_path)})
 
 
 def test_a_vanished_transcript_does_not_lose_the_session(tmp_path, monkeypatch) -> None:
     """Five sessions were lost in four seconds because a file had gone.
 
-    `_transcript_present` guards the session-end branch. This is the other path
+    `transcript_present` guards the session-end branch. This is the other path
     to the same file and had no guard: `resolve(strict=True)` raised
     `FileNotFoundError` and the whole capture was recorded as lost. Measured
     2026-09-05, all of them sessions started outside any project, whose
@@ -131,7 +136,7 @@ def test_a_vanished_transcript_does_not_lose_the_session(tmp_path, monkeypatch) 
 
     missing = tmp_path / "projects" / "-home-user" / "gone.jsonl"
 
-    assert integration_adapter._capture_path_evidence(str(missing)) is None
+    assert integration_adapter.capture_path_evidence(str(missing)) is None
 
 
 def test_a_transcript_outside_the_allowed_roots_is_still_refused(tmp_path) -> None:
@@ -143,46 +148,34 @@ def test_a_transcript_outside_the_allowed_roots_is_still_refused(tmp_path) -> No
     outside.write_text("{}\n", encoding="utf-8")
 
     with _pytest.raises(PermissionError):
-        integration_adapter._capture_path_evidence(str(outside))
+        integration_adapter.capture_path_evidence(str(outside))
 
 
 def test_an_empty_path_is_no_transcript_at_all() -> None:
     import integration_adapter
 
-    assert integration_adapter._capture_path_evidence("") is None
-    assert integration_adapter._capture_path_evidence(None) is None
+    assert integration_adapter.capture_path_evidence("") is None
+    assert integration_adapter.capture_path_evidence(None) is None
 
 
-def test_a_dropped_capture_operation_write_is_counted(monkeypatch):
-    """Audit OPS-21: a lost race is not a hook failure, but it is counted."""
-    import capture_diagnostics
-    import capture_operation
+def test_counter_failure_after_acceptance_is_reported_without_claiming_capture_loss(ingress, monkeypatch):
+    """The replaced state-based dedupe is gone; auxiliary counter failures remain visible."""
+    import user_prompt_capture
 
     recorded: list[tuple] = []
     monkeypatch.setattr(
-        capture_diagnostics,
+        user_prompt_capture,
         "record_capture_failure",
         lambda kind, reason, **fields: recorded.append((kind, reason, fields.get("error"))),
     )
 
-    def refused(_mutate):
+    def refused(_mutate, **_options):
         raise RuntimeError("state lock refused")
 
-    from datetime import datetime
-
-    answer = capture_operation.claim_operation(
-        refused,
-        namespace="capture_operations",
-        key="k",
-        prefix="capture",
-        source_event_id="e",
-        rate_limit_seconds=0,
-        max_entries=8,
-        now=datetime(2026, 9, 10, 23, 0, 0),
-    )
-
-    assert isinstance(answer, str) and answer
-    assert [(kind, reason) for kind, reason, _ in recorded] == [
-        ("capture_operation_state", "RuntimeError: state lock refused")
-    ]
-    assert isinstance(recorded[0][2], RuntimeError)
+    monkeypatch.setattr(memory_state, 'update_state', refused)
+    queue, _coordinator = ingress
+    result = integration_adapter.ingest_event(_ingress_event('user_prompt'))
+    assert result['capture_durable'] is True
+    assert 'state lock refused' in result['post_capture_error']
+    assert recorded == []
+    assert _bundle(queue.state_root, result['capture_intent_ids'][0]).content

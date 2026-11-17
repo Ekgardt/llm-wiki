@@ -58,7 +58,7 @@ sys.path.insert(0, str(REPO / "scripts"))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from bitemporal_claims import BitemporalRefusal, as_of  # noqa: E402
-from claims import _normalize_value  # noqa: E402
+from claims import normalize_value  # noqa: E402
 from factconsolidation_data import (  # noqa: E402
     Conflict,
     fixture_conflicts,
@@ -165,7 +165,7 @@ def _record(
         # an earlier one. The MQUAKE property rides in the qualifiers, which are
         # part of the bitemporal key.
         "relation": "has-value",
-        "value": _normalize_value({"type": "entity", "value": value}),
+        "value": normalize_value({"type": "entity", "value": value}),
         "qualifiers": [
             {"key": "property", "value": {"type": "string", "value": item.prop}}
         ],

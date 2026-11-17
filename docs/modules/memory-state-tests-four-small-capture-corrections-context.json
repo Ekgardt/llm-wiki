@@ -1,0 +1,144 @@
+{
+  "encoding": "o200k_base",
+  "max_tokens": 100000,
+  "serialization": "exact-duplicates/v1",
+  "files": [
+    "AGENTS.md",
+    "CLAUDE.md",
+    "docs/AGENTS.md",
+    "docs/STRUCTURE.md",
+    "docs/modules/context-bundle.md",
+    "docs/modules/context-records.md",
+    "docs/modules/context-tooling.md",
+    "docs/modules/memory-state-tests-four-small-capture-corrections-context.json",
+    "docs/modules/memory-state-tests-four-small-capture-corrections.md",
+    "docs/modules/model-choice.md",
+    "docs/modules/product-structure.md",
+    "docs/modules/project-governance.md",
+    "docs/modules/test-support.md",
+    "rules/development-laws.md",
+    "scripts/__init__.py",
+    "scripts/llm_wiki/__init__.py",
+    "scripts/llm_wiki/context_bundle.py",
+    "tests/__init__.py",
+    "tests/conftest.py",
+    "tests/module_context.py",
+    "tests/module_context_paths.py",
+    "tests/module_interface.py",
+    "tests/module_interface_render.py",
+    "tests/module_qualification.py",
+    "tests/module_record_context.py",
+    "tests/module_records.py",
+    "tests/shared_fixtures.py",
+    "tests/slow_machine.py",
+    "tests/test_four_small_capture_corrections.py"
+  ],
+  "ownership": {
+    "files": [
+      "docs/modules/memory-state-tests-four-small-capture-corrections-context.json",
+      "docs/modules/memory-state-tests-four-small-capture-corrections.md",
+      "tests/test_four_small_capture_corrections.py"
+    ]
+  },
+  "qualified_dependencies": [
+    {
+      "provider": "scripts/integration_adapter.py",
+      "names": [
+        "capture_transcript_text"
+      ],
+      "contract_sha256": "4484dd110571cac7f47281251ef4016d9686b8ed811c7622e63d1de8c980bab2",
+      "integration_tests": [
+        "tests/test_four_small_capture_corrections.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/generation_catalog_store.py",
+      "names": [
+        "GenerationCatalog"
+      ],
+      "contract_sha256": "b18194ebe04bf988b4474379fcb5243516550d43b745a00eaed1453f7844c983",
+      "integration_tests": [
+        "tests/test_a_blocked_task_has_a_way_back.py",
+        "tests/test_a_build_in_flight_is_not_an_orphan.py",
+        "tests/test_a_capacity_refusal_does_not_corrupt_a_generation.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/model_choice.py",
+      "names": [
+        "using_root"
+      ],
+      "contract_sha256": "d45f2655cb61963e77617d1dfd7d617b134ad77cc770b59b335d0856e5d65019",
+      "integration_tests": [
+        "tests/test_four_small_capture_corrections.py"
+      ]
+    },
+    {
+      "provider": "scripts/memory_state.py",
+      "names": [
+        "MAX_STATE_TARGET_BYTES",
+        "load_state",
+        "save_state",
+        "state_bytes"
+      ],
+      "contract_sha256": "54680289a32574538e6bf90ee63e3cb121872c1c926c520a51573e8b94d52a82",
+      "integration_tests": [
+        "tests/test_a_corrupt_state_is_not_replaced_by_an_empty_one.py",
+        "tests/test_a_discarded_receipt_reopens_its_day.py",
+        "tests/test_a_lock_is_released_even_while_somebody_is_reading_it.py"
+      ]
+    },
+    {
+      "provider": "scripts/project_checkpoint.py",
+      "names": [
+        "commit_pending_state",
+        "enqueue_pending_events"
+      ],
+      "contract_sha256": "805afc4c3a5ab4508086e6131aa97b308e5c5883479e7a374e7a50f5dc462b5a",
+      "integration_tests": [
+        "tests/test_four_small_capture_corrections.py"
+      ]
+    },
+    {
+      "provider": "scripts/project_journal.py",
+      "names": [
+        "CheckpointReducer"
+      ],
+      "contract_sha256": "85c5b318e454f72d048c8b3544f4dc48365c23aaff6c836d80b0cb6700237e69",
+      "integration_tests": [
+        "tests/test_four_small_capture_corrections.py"
+      ]
+    },
+    {
+      "provider": "scripts/prompt_capture_followup.py",
+      "names": [
+        "MAX_PROMPT_COUNTERS",
+        "increment_prompt_count"
+      ],
+      "contract_sha256": "5e40c6a98fbf0f5235a3264a3ae85c60e54f7eecf01b44432b074dd54b7cc0b0",
+      "integration_tests": [
+        "tests/test_four_small_capture_corrections.py"
+      ]
+    },
+    {
+      "provider": "scripts/reliable_memory.py",
+      "names": [
+        "validate_state_root"
+      ],
+      "contract_sha256": "8680515cd873056a7c8a36e0057d91f2f83f23c48841263697676ff91f7ff964",
+      "integration_tests": [
+        "tests/test_four_small_capture_corrections.py"
+      ]
+    },
+    {
+      "provider": "scripts/repository_scope.py",
+      "names": [
+        "sanitized_git_environment"
+      ],
+      "contract_sha256": "fd550ae20761afad50b37fa3a71044a162485b0e4d4b3e2af9b5b22e143c2bec",
+      "integration_tests": [
+        "tests/test_four_small_capture_corrections.py"
+      ]
+    }
+  ]
+}

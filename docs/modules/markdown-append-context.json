@@ -1,0 +1,185 @@
+{
+  "encoding": "o200k_base",
+  "max_tokens": 100000,
+  "serialization": "exact-duplicates/v1",
+  "files": [
+    "AGENTS.md",
+    "CLAUDE.md",
+    "docs/AGENTS.md",
+    "docs/STRUCTURE.md",
+    "docs/modules/context-bundle.md",
+    "docs/modules/context-records.md",
+    "docs/modules/context-tooling.md",
+    "docs/modules/formats.md",
+    "docs/modules/markdown-append-context.json",
+    "docs/modules/markdown-append.md",
+    "docs/modules/model-choice.md",
+    "docs/modules/product-structure.md",
+    "docs/modules/project-governance.md",
+    "docs/modules/test-support.md",
+    "rules/development-laws.md",
+    "scripts/__init__.py",
+    "scripts/llm_wiki/__init__.py",
+    "scripts/llm_wiki/context_bundle.py",
+    "scripts/llm_wiki/formats/__init__.py",
+    "scripts/llm_wiki/markdown_append.py",
+    "tests/__init__.py",
+    "tests/conftest.py",
+    "tests/module_context.py",
+    "tests/module_context_paths.py",
+    "tests/module_interface.py",
+    "tests/module_interface_render.py",
+    "tests/module_qualification.py",
+    "tests/module_record_context.py",
+    "tests/module_records.py",
+    "tests/shared_fixtures.py",
+    "tests/slow_machine.py"
+  ],
+  "ownership": {
+    "files": [
+      "docs/modules/markdown-append-context.json",
+      "docs/modules/markdown-append.md",
+      "scripts/llm_wiki/markdown_append.py"
+    ]
+  },
+  "qualified_dependencies": [
+    {
+      "provider": "scripts/bounded_io.py",
+      "names": [
+        "VerifiedByteRange"
+      ],
+      "contract_sha256": "c5903c7bc0646f47f55cc2bab7ab885423d78b38922ff569819aa4314545cb90",
+      "integration_tests": [
+        "tests/modules/breadcrumb_documents/test_contract.py",
+        "tests/test_a_file_being_written_is_a_changed_corpus_on_every_system.py",
+        "tests/test_a_journal_is_readable_by_every_reader.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/formats/canonical.py",
+      "names": [
+        "sha256_bytes"
+      ],
+      "contract_sha256": "7d34a853c5a6f1be8b00805b2e865ac2a5ca5a6fe3ca141de97ebda61d2a85cf",
+      "integration_tests": [
+        "tests/modules/formats/test_primitives.py",
+        "tests/modules/formats/test_queue_payload.py",
+        "tests/modules/pyright_configuration/test_configuration.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/generation_catalog_store.py",
+      "names": [
+        "GenerationCatalog"
+      ],
+      "contract_sha256": "b18194ebe04bf988b4474379fcb5243516550d43b745a00eaed1453f7844c983",
+      "integration_tests": [
+        "tests/test_a_blocked_task_has_a_way_back.py",
+        "tests/test_a_build_in_flight_is_not_an_orphan.py",
+        "tests/test_a_capacity_refusal_does_not_corrupt_a_generation.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/markdown_admission.py",
+      "names": [
+        "default_coordinator",
+        "recover_initial_contention"
+      ],
+      "contract_sha256": "880b62fd836f1dd461579813efa9fc9a93d7922dfb636b6700755375b1df7744",
+      "integration_tests": [
+        "tests/test_a_committed_source_resolves_an_older_compile_plan.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/markdown_coordinator.py",
+      "names": [
+        "MarkdownCoordinator"
+      ],
+      "contract_sha256": "5033973391b97bc338d02eed2a773ad25883e89b8325a9ccc726cd9e537f58ee",
+      "integration_tests": [
+        "tests/test_a_busy_append_repeats_its_attempt.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/markdown_mutation.py",
+      "names": [
+        "relative_target",
+        "settle_operation"
+      ],
+      "contract_sha256": "cc9e94253607a026476b165e2acc39eaf047e073a67796d013c5c1187a2fd5f9",
+      "integration_tests": [
+        "tests/test_breadcrumb_archive_compatibility.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/markdown_records.py",
+      "names": [
+        "MarkdownChange",
+        "MarkdownOperation",
+        "OperationBoundElsewhereError",
+        "PreconditionChangedError",
+        "TransactionFailure",
+        "TransactionRecord",
+        "TransactionStateError",
+        "require_bytes"
+      ],
+      "contract_sha256": "0574c1d3460acde0b1b4935979f8161bcd7ba32236fefeab3ac36779f8fb8e49",
+      "integration_tests": [
+        "tests/modules/markdown_records/test_changes.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/markdown_store.py",
+      "names": [
+        "ABSENT",
+        "MAX_KNOWLEDGE_TARGET_BYTES",
+        "WRITER_WAIT_SECONDS",
+        "image_bytes",
+        "is_transient_writer_contention",
+        "retry_writer_or_raise",
+        "writer_retry_delay"
+      ],
+      "contract_sha256": "95e2f5b6f052cb534538f56f2b9d25e2b2a65772cd6cc0451a3a5ad1457dac90",
+      "integration_tests": [
+        "tests/test_a_missing_file_is_not_a_moved_parent.py",
+        "tests/test_a_stray_candidate_is_retired_where_it_refuses.py",
+        "tests/test_an_append_keeps_only_what_it_added.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/model_choice.py",
+      "names": [
+        "using_root"
+      ],
+      "contract_sha256": "d45f2655cb61963e77617d1dfd7d617b134ad77cc770b59b335d0856e5d65019",
+      "integration_tests": [
+        "tests/test_central_model_selection.py",
+        "tests/test_compile_execution_inventory.py"
+      ]
+    },
+    {
+      "provider": "scripts/reliable_memory.py",
+      "names": [
+        "validate_state_root"
+      ],
+      "contract_sha256": "8680515cd873056a7c8a36e0057d91f2f83f23c48841263697676ff91f7ff964",
+      "integration_tests": [
+        "tests/test_a_backup_image_carries_what_git_does_not.py",
+        "tests/test_a_changed_task_setting_reaches_an_installed_machine.py",
+        "tests/test_a_committed_source_resolves_an_older_compile_plan.py"
+      ]
+    },
+    {
+      "provider": "scripts/repository_scope.py",
+      "names": [
+        "sanitized_git_environment"
+      ],
+      "contract_sha256": "fd550ae20761afad50b37fa3a71044a162485b0e4d4b3e2af9b5b22e143c2bec",
+      "integration_tests": [
+        "tests/test_a_code_generation_is_not_abandoned.py",
+        "tests/test_a_directory_link_inside_the_checkout_does_not_refuse_the_revision.py",
+        "tests/test_a_document_is_opened_in_its_own_language.py"
+      ]
+    }
+  ]
+}

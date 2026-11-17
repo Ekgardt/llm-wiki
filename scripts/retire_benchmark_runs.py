@@ -21,15 +21,15 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from memory_state import ROOT  # noqa: E402
+from llm_wiki import runtime_roots  # noqa: E402
 from settings import setting_value  # noqa: E402
 
 # The `DATASET_DIR` names of `benchmark/*_data.py`; a test keeps them in step.
 DATASET_CACHES = frozenset({"beam", "litragbench", "locomo", "longmemeval", "refusalbench"})
 
 
-def benchmarks_directory(root: Path = ROOT) -> Path:
-    return Path(root) / "cache" / "benchmarks"
+def benchmarks_directory(root: Path | None = None) -> Path:
+    return Path(root or runtime_roots.vault_root()) / "cache" / "benchmarks"
 
 
 def _newest_mtime(directory: Path) -> float:

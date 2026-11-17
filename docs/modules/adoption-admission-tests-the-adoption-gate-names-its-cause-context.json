@@ -1,0 +1,378 @@
+{
+  "encoding": "o200k_base",
+  "max_tokens": 100000,
+  "serialization": "exact-duplicates/v1",
+  "files": [
+    "AGENTS.md",
+    "CLAUDE.md",
+    "docs/AGENTS.md",
+    "docs/STRUCTURE.md",
+    "docs/modules/adoption-admission-tests-the-adoption-gate-names-its-cause-context.json",
+    "docs/modules/adoption-admission-tests-the-adoption-gate-names-its-cause.md",
+    "docs/modules/adoption-admission.md",
+    "docs/modules/context-bundle.md",
+    "docs/modules/context-records.md",
+    "docs/modules/context-tooling.md",
+    "docs/modules/formats.md",
+    "docs/modules/install-models.md",
+    "docs/modules/markdown-store.md",
+    "docs/modules/markdown-transaction-tests-markdown-coordinator-parts.md",
+    "docs/modules/model-choice.md",
+    "docs/modules/product-structure.md",
+    "docs/modules/project-governance.md",
+    "docs/modules/test-support.md",
+    "rules/development-laws.md",
+    "scripts/__init__.py",
+    "scripts/llm_wiki/__init__.py",
+    "scripts/llm_wiki/adoption_admission.py",
+    "scripts/llm_wiki/context_bundle.py",
+    "scripts/llm_wiki/formats/__init__.py",
+    "scripts/llm_wiki/markdown_store.py",
+    "tests/__init__.py",
+    "tests/conftest.py",
+    "tests/doctor_helpers.py",
+    "tests/markdown_coordinator_parts.py",
+    "tests/module_context.py",
+    "tests/module_context_paths.py",
+    "tests/module_interface.py",
+    "tests/module_interface_render.py",
+    "tests/module_qualification.py",
+    "tests/module_record_context.py",
+    "tests/module_records.py",
+    "tests/shared_fixtures.py",
+    "tests/slow_machine.py",
+    "tests/sqlite_errors.py",
+    "tests/test_the_adoption_gate_names_its_cause.py"
+  ],
+  "ownership": {
+    "files": [
+      "docs/modules/adoption-admission-tests-the-adoption-gate-names-its-cause-context.json",
+      "docs/modules/adoption-admission-tests-the-adoption-gate-names-its-cause.md",
+      "tests/test_the_adoption_gate_names_its_cause.py"
+    ]
+  },
+  "qualified_dependencies": [
+    {
+      "provider": "scripts/bounded_io.py",
+      "names": [
+        "IO_CHUNK_BYTES",
+        "VerifiedByteRange"
+      ],
+      "contract_sha256": "4a64646459359fe274897415c63d1191e2685d683e7be7b9ce6e010205a2a266",
+      "integration_tests": [
+        "tests/test_the_adoption_gate_names_its_cause.py"
+      ]
+    },
+    {
+      "provider": "scripts/claims.py",
+      "names": [
+        "ClaimIndex"
+      ],
+      "contract_sha256": "c66d3b1b1d8bfad960288ad5ea53a74adcb686e240fe70cc4bb08d27c96b80b0",
+      "integration_tests": [
+        "tests/test_the_adoption_gate_names_its_cause.py"
+      ]
+    },
+    {
+      "provider": "scripts/corpus_snapshot.py",
+      "names": [
+        "collect_corpus"
+      ],
+      "contract_sha256": "7ea12368f51c070a84b0754260f0a82db5ac44b0395b95eabcb01e5053c9f0bb",
+      "integration_tests": [
+        "tests/test_the_adoption_gate_names_its_cause.py"
+      ]
+    },
+    {
+      "provider": "scripts/evidence_graph_builder.py",
+      "names": [
+        "build_full_generation"
+      ],
+      "contract_sha256": "056e93b70cc341eb253323f95833791e52929a5e343d4f8e53acd37f1b2004cd",
+      "integration_tests": [
+        "tests/test_the_adoption_gate_names_its_cause.py"
+      ]
+    },
+    {
+      "provider": "scripts/generation_maintenance.py",
+      "names": [
+        "maintenance_extractor_identity"
+      ],
+      "contract_sha256": "6155b9fd16203e4406c49671a0456a9248cc335753aafc2e1375508b2b9c75fb",
+      "integration_tests": [
+        "tests/test_the_adoption_gate_names_its_cause.py"
+      ]
+    },
+    {
+      "provider": "scripts/install_models.py",
+      "names": [
+        "hub_library",
+        "pinned_models"
+      ],
+      "contract_sha256": "9a6c3545cdbff6160d81687d42bfb1947647503068382262658d5bc5d97a7e2f",
+      "integration_tests": [
+        "tests/test_the_adoption_gate_names_its_cause.py"
+      ]
+    },
+    {
+      "provider": "scripts/installed_memory_repair.py",
+      "names": [
+        "repair_installed_vault"
+      ],
+      "contract_sha256": "6ab4497d3ed56413bc24ea5ae9e993acf118980056b046072877a80df4f52a18",
+      "integration_tests": [
+        "tests/test_the_adoption_gate_names_its_cause.py"
+      ]
+    },
+    {
+      "provider": "scripts/iso_time.py",
+      "names": [
+        "utc_text"
+      ],
+      "contract_sha256": "b7151d094646f6efb0895d5e32f0237918a40d0f8e12b5eb0af3e60484d51a03",
+      "integration_tests": [
+        "tests/test_the_adoption_gate_names_its_cause.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/coordinator_invariants.py",
+      "names": [
+        "require_v3_invariants"
+      ],
+      "contract_sha256": "faa90f63db4e736666ce2015fb8f4284986825caeb4170332744d3fb0d902179",
+      "integration_tests": [
+        "tests/test_the_adoption_gate_names_its_cause.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/coordinator_schema.py",
+      "names": [
+        "COORDINATOR_V3_SCHEMA_SHA256",
+        "coordinator_v3_schema_complete"
+      ],
+      "contract_sha256": "e18cb78342cf3dbda9c434cfc0729ff2023b756986a6209c843caa3bca89a464",
+      "integration_tests": [
+        "tests/test_the_adoption_gate_names_its_cause.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/formats/canonical.py",
+      "names": [
+        "canonical_json_bytes",
+        "sha256_bytes"
+      ],
+      "contract_sha256": "2e42a7aefcb66ac2515f6665a03feae34e6f7bad4807787a789ce031f9f3a9c1",
+      "integration_tests": [
+        "tests/test_the_adoption_gate_names_its_cause.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/formats/schema.py",
+      "names": [
+        "validate_schema"
+      ],
+      "contract_sha256": "753e4abefcf29389d3fc0c051070bfaa66db14ecb88e1c98fc9b85588a6017cb",
+      "integration_tests": [
+        "tests/test_the_adoption_gate_names_its_cause.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/generation_catalog_store.py",
+      "names": [
+        "GenerationCatalog"
+      ],
+      "contract_sha256": "b18194ebe04bf988b4474379fcb5243516550d43b745a00eaed1453f7844c983",
+      "integration_tests": [
+        "tests/test_a_build_in_flight_is_not_an_orphan.py",
+        "tests/test_a_code_generation_is_not_abandoned.py",
+        "tests/test_a_flow_walk_stops_when_its_caller_has.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/markdown_records.py",
+      "names": [
+        "RefusedOperation",
+        "TargetBoundaryFailure",
+        "TargetPathBoundaryError"
+      ],
+      "contract_sha256": "9706158bdb8a2ff0a0a0b06580e38af57580da44c351394c7e8e41e864cbcb86",
+      "integration_tests": [
+        "tests/test_the_adoption_gate_names_its_cause.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/model_choice.py",
+      "names": [
+        "using_root"
+      ],
+      "contract_sha256": "d45f2655cb61963e77617d1dfd7d617b134ad77cc770b59b335d0856e5d65019",
+      "integration_tests": [
+        "tests/test_the_adoption_gate_names_its_cause.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/queue_database_contract.py",
+      "names": [
+        "QUEUE_COMPILE_CONTRACT",
+        "QUEUE_COMPILE_SCHEMA_SHA256",
+        "QUEUE_V3_SCHEMA_SHA256"
+      ],
+      "contract_sha256": "5797d90f9036764219ebbd8ecb9ced4d000fe0a385b92ca8e113ff490e303ef0",
+      "integration_tests": [
+        "tests/test_the_adoption_gate_names_its_cause.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/queue_schema_operations.py",
+      "names": [
+        "queue_v3_schema_complete"
+      ],
+      "contract_sha256": "db4e115ba61cb917ec7b7ece12ccb0930457a77d2ee885afb7f94c44f73e2eb2",
+      "integration_tests": [
+        "tests/test_the_adoption_gate_names_its_cause.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/queue_v3_readers.py",
+      "names": [
+        "audit_compile_progress",
+        "open_queue_v3_readonly"
+      ],
+      "contract_sha256": "2b9e3618a2c1192056d4afaeeccfe9a721a5665fe076bf154c79a2752d859554",
+      "integration_tests": [
+        "tests/test_the_adoption_gate_names_its_cause.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/reliability_defaults.py",
+      "names": [
+        "DEFAULTS"
+      ],
+      "contract_sha256": "f37296a83c15073e42a6cc8b86b88c2d19c548ac19a4ef6d0ca2f7af925c90c8",
+      "integration_tests": [
+        "tests/test_the_adoption_gate_names_its_cause.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/sqlite_contracts.py",
+      "names": [
+        "OperationalDatabaseContract"
+      ],
+      "contract_sha256": "819cca1e291f921a6fb6e6e90a16fb4a05b0659e020227653689af60d484a1a8",
+      "integration_tests": [
+        "tests/test_the_adoption_gate_names_its_cause.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/sqlite_deadlines.py",
+      "names": [
+        "busy_database",
+        "operational_deadline_active"
+      ],
+      "contract_sha256": "e5a23c97fb2c8cbccce26d650a35805857fb61187952504eb095cc0fd9f6c1be",
+      "integration_tests": [
+        "tests/test_the_adoption_gate_names_its_cause.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/sqlite_io.py",
+      "names": [
+        "open_readonly_operational_db"
+      ],
+      "contract_sha256": "ee94d29558e055bbff68f8247575ed84ab6d84b559eebf24b508977d35bc91db",
+      "integration_tests": [
+        "tests/modules/coordinator_validation/test_database.py",
+        "tests/modules/sqlite_io/test_connections.py",
+        "tests/modules/sqlite_io/test_probe.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/windows_acl.py",
+      "names": [
+        "harden_windows_acl"
+      ],
+      "contract_sha256": "00f5518fe95d49ad1a1cd73f49f5d0a8c78260eccb059bbc0440fe39f8eef9fa",
+      "integration_tests": [
+        "tests/test_the_adoption_gate_names_its_cause.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/windows_native.py",
+      "names": [
+        "windows_kernel32"
+      ],
+      "contract_sha256": "14b51993282554a7a9c7484a32c9a4a0cc4eb28a22d5c9942c166c407fdf1089",
+      "integration_tests": [
+        "tests/test_the_adoption_gate_names_its_cause.py"
+      ]
+    },
+    {
+      "provider": "scripts/markdown_transaction.py",
+      "names": [
+        "MarkdownCoordinator"
+      ],
+      "contract_sha256": "5033973391b97bc338d02eed2a773ad25883e89b8325a9ccc726cd9e537f58ee",
+      "integration_tests": [
+        "tests/test_the_adoption_gate_names_its_cause.py"
+      ]
+    },
+    {
+      "provider": "scripts/operational_ownership.py",
+      "names": [
+        "ProcessIdentity",
+        "parse_timestamp",
+        "process_identity_state"
+      ],
+      "contract_sha256": "732e665dd55a70947e9b63ed49adc59903a70f825107413eafc9a2750910619b",
+      "integration_tests": [
+        "tests/test_the_adoption_gate_names_its_cause.py"
+      ]
+    },
+    {
+      "provider": "scripts/process_liveness.py",
+      "names": [
+        "owner_alive"
+      ],
+      "contract_sha256": "43a93650e5db69f95a022901e1dc186127c6b792e0f8e8f2e13af548be8ebc1b",
+      "integration_tests": [
+        "tests/test_the_adoption_gate_names_its_cause.py"
+      ]
+    },
+    {
+      "provider": "scripts/queue_core.py",
+      "names": [
+        "active_memory_queue"
+      ],
+      "contract_sha256": "11258c8692aee5dfd1b79560234b5b904f6ad67572a2a07c430f063a374f7682",
+      "integration_tests": [
+        "tests/test_the_adoption_gate_names_its_cause.py"
+      ]
+    },
+    {
+      "provider": "scripts/reliable_memory.py",
+      "names": [
+        "DEFAULTS",
+        "capture_operational_database_identity",
+        "capture_runtime_file_identity",
+        "read_runtime_bytes",
+        "set_owner_only",
+        "validate_state_root"
+      ],
+      "contract_sha256": "6534a9346558c52c636f3cf6d0a8a1519f6e29e34c740e68ca1c6dffeb57a08f",
+      "integration_tests": [
+        "tests/test_the_adoption_gate_names_its_cause.py"
+      ]
+    },
+    {
+      "provider": "scripts/repository_scope.py",
+      "names": [
+        "resolve_repository_scope",
+        "sanitized_git_environment"
+      ],
+      "contract_sha256": "983dd096d99bafff98ca0aaa2cd722477333e30eed4bfa9297d1830c635e8d90",
+      "integration_tests": [
+        "tests/test_the_adoption_gate_names_its_cause.py"
+      ]
+    }
+  ]
+}

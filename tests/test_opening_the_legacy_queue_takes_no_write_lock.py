@@ -10,7 +10,9 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 
-from memory_queue import MemoryQueue  # noqa: E402
+from queue_core import (
+    MemoryQueue,
+)
 
 
 def test_a_queue_opens_while_another_connection_holds_the_write_lock(tmp_path):

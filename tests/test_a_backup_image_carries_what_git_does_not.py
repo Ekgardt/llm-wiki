@@ -18,8 +18,8 @@ from pathlib import Path
 import pytest
 from reliable_memory import sha256_bytes
 
+from tests.reliability_v3_adoption_helpers import _vault, build_adopted_reliability_v3
 from tests.slow_machine import LONG_TIMEOUT
-from tests.test_reliability_v3_adoption import _vault, build_adopted_reliability_v3
 
 
 def _git(root: Path, *arguments: str) -> None:

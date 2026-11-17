@@ -16,18 +16,16 @@ from pathlib import Path
 import pytest
 from installer_config import claude_mcp_state
 
+from tests.installer_bootstrap_helpers import _bash, _powershell_functions, _pwsh
 from tests.powershell_literal import ps_literal
 from tests.slow_machine import LONG_TIMEOUT
-from tests.test_the_installer_says_what_it_needs import (
+from tests.the_installer_says_what_it_needs_helpers import (
     INSTALL_PS1,
     INSTALL_SH,
     ROOT,
     STUB_ENV,
     UV_STUB_PS1,
     UV_STUB_SH,
-    _bash,
-    _powershell_functions,
-    _pwsh,
     _shell_function,
     needs_bash,
     needs_pwsh,

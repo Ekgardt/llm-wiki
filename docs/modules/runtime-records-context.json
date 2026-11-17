@@ -1,0 +1,160 @@
+{
+  "encoding": "o200k_base",
+  "max_tokens": 100000,
+  "serialization": "exact-duplicates/v1",
+  "files": [
+    "AGENTS.md",
+    "CLAUDE.md",
+    "docs/AGENTS.md",
+    "docs/STRUCTURE.md",
+    "docs/modules/context-bundle.md",
+    "docs/modules/context-records.md",
+    "docs/modules/context-tooling.md",
+    "docs/modules/model-choice.md",
+    "docs/modules/product-structure.md",
+    "docs/modules/project-governance.md",
+    "docs/modules/runtime-contracts.md",
+    "docs/modules/runtime-records-context.json",
+    "docs/modules/runtime-records.md",
+    "docs/modules/test-support.md",
+    "rules/development-laws.md",
+    "scripts/__init__.py",
+    "scripts/llm_wiki/__init__.py",
+    "scripts/llm_wiki/context_bundle.py",
+    "scripts/llm_wiki/runtime_records.py",
+    "tests/__init__.py",
+    "tests/conftest.py",
+    "tests/module_boundaries.py",
+    "tests/module_context.py",
+    "tests/module_context_paths.py",
+    "tests/module_interface.py",
+    "tests/module_interface_render.py",
+    "tests/module_qualification.py",
+    "tests/module_record_context.py",
+    "tests/module_records.py",
+    "tests/modules/__init__.py",
+    "tests/shared_fixtures.py",
+    "tests/slow_machine.py"
+  ],
+  "directories": [
+    "tests/modules/runtime_records"
+  ],
+  "ownership": {
+    "files": [
+      "docs/modules/runtime-records-context.json",
+      "docs/modules/runtime-records.md",
+      "scripts/llm_wiki/runtime_records.py"
+    ],
+    "directories": [
+      "tests/modules/runtime_records"
+    ]
+  },
+  "qualified_dependencies": [
+    {
+      "provider": "scripts/llm_wiki/generation_catalog_store.py",
+      "names": [
+        "GenerationCatalog"
+      ],
+      "contract_sha256": "b18194ebe04bf988b4474379fcb5243516550d43b745a00eaed1453f7844c983",
+      "integration_tests": [
+        "tests/test_a_blocked_task_has_a_way_back.py",
+        "tests/test_a_build_in_flight_is_not_an_orphan.py",
+        "tests/test_a_capacity_refusal_does_not_corrupt_a_generation.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/model_choice.py",
+      "names": [
+        "using_root"
+      ],
+      "contract_sha256": "d45f2655cb61963e77617d1dfd7d617b134ad77cc770b59b335d0856e5d65019",
+      "integration_tests": [
+        "tests/test_a_block_opens_one_entry.py",
+        "tests/test_a_blocked_task_has_a_way_back.py",
+        "tests/test_a_build_in_flight_is_not_an_orphan.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/runtime_contracts.py",
+      "names": [
+        "RuntimeFileIdentity"
+      ],
+      "contract_sha256": "1d99fc56c5b1377feea8d70bb080ae1489f277f262b43aa07edb2f520d16d2a8",
+      "integration_tests": [
+        "tests/modules/coordinator_validation/test_database.py",
+        "tests/modules/ownership_validation/test_contract.py",
+        "tests/modules/ownership_validation/test_marker_rows.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/runtime_environment.py",
+      "names": [
+        "harden_runtime_owner_only",
+        "require_owner_only_file",
+        "windows_reparse_point"
+      ],
+      "contract_sha256": "aac5a816600a9a7191a4c007c2e3de80163fd1f3c640384540ed31ccc1d322b3",
+      "integration_tests": [
+        "tests/modules/coordinator_validation/test_database.py",
+        "tests/modules/queue_artifacts/test_artifacts.py",
+        "tests/modules/runtime_environment/test_environment.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/runtime_metadata.py",
+      "names": [
+        "contained_runtime_metadata",
+        "require_bounded_regular_file",
+        "require_file_size_budget",
+        "require_nonnegative_file_budget",
+        "require_runtime_parent_containment",
+        "validate_operational_db_file",
+        "validated_runtime_metadata"
+      ],
+      "contract_sha256": "d351cd22fd874d9015e66ad3851db4c9b1236e1884fa4567d76f186db6a60083",
+      "integration_tests": [
+        "tests/modules/coordinator_validation/test_database.py",
+        "tests/modules/runtime_fingerprints/test_fingerprints.py",
+        "tests/modules/runtime_fingerprints/test_windows_metadata.py"
+      ]
+    },
+    {
+      "provider": "scripts/reliable_memory.py",
+      "names": [
+        "validate_state_root"
+      ],
+      "contract_sha256": "8680515cd873056a7c8a36e0057d91f2f83f23c48841263697676ff91f7ff964",
+      "integration_tests": [
+        "tests/test_a_backup_image_carries_what_git_does_not.py",
+        "tests/test_a_backup_snapshots_what_hooks_write.py",
+        "tests/test_a_backup_takes_what_any_installed_vault_holds.py"
+      ]
+    },
+    {
+      "provider": "scripts/repository_scope.py",
+      "names": [
+        "sanitized_git_environment"
+      ],
+      "contract_sha256": "fd550ae20761afad50b37fa3a71044a162485b0e4d4b3e2af9b5b22e143c2bec",
+      "integration_tests": [
+        "tests/modules/cleanup_worktrees/test_git_refusal.py",
+        "tests/test_a_blocked_task_has_a_way_back.py",
+        "tests/test_a_build_in_flight_is_not_an_orphan.py"
+      ]
+    },
+    {
+      "provider": "scripts/windows_workspace.py",
+      "names": [
+        "close_handle",
+        "identity",
+        "open_shared_readonly_runtime_file"
+      ],
+      "contract_sha256": "1fc73e0b1ce8bc9ca61ecf12b7233ec1250e70ee9587cd15f6b4bac0bb8d6739",
+      "integration_tests": [
+        "tests/modules/queue_artifacts/test_artifacts.py",
+        "tests/modules/runtime_fingerprints/test_fingerprints.py",
+        "tests/modules/runtime_fingerprints/test_windows_metadata.py"
+      ]
+    }
+  ]
+}

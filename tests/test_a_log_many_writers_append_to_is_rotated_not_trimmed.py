@@ -7,16 +7,17 @@ from __future__ import annotations
 import ast
 from pathlib import Path
 
-import doctor
 import maintenance_helpers
+from llm_wiki import doctor_capture
 
-from tests.test_hook_failures_reach_health import NOW, _line, _trail
+from tests.hook_failures_reach_health_helpers import NOW, _line, _trail
+from tests.script_sources import script_files
 
 SCRIPTS = Path(__file__).resolve().parents[1] / "scripts"
 
 
 def test_a_long_hook_log_keeps_every_line_it_held(tmp_path: Path, monkeypatch) -> None:
-    monkeypatch.setattr(maintenance_helpers, "REPORTS_DIR", tmp_path / "logs")
+    monkeypatch.setenv("LLM_WIKI_STATE_ROOT", str(tmp_path))
     lines = [f"[2026-09-26T10:00:{second:02d}+00:00] hook: failure {second}" for second in range(60)]
     live = _trail(tmp_path, lines)
     before = live.read_bytes()
@@ -31,7 +32,7 @@ def test_doctor_still_sees_a_failure_the_rotation_moved(tmp_path: Path) -> None:
     live = _trail(tmp_path, [_line(NOW)])
     live.replace(maintenance_helpers.rotated_log_previous(live))
 
-    finding = doctor._hook_error_check(tmp_path, NOW)
+    finding = doctor_capture.hook_error_check(tmp_path, NOW)
 
     assert (finding["status"], finding["details"]["recent"]) == ("degraded", 1)
 
@@ -59,7 +60,7 @@ def _appended_logs(path: Path) -> set[str]:
 
 def test_every_log_a_script_appends_to_is_rotated() -> None:
     """A log opened for append by our own code has writers the trim cannot fence."""
-    appended = set().union(*(_appended_logs(path) for path in SCRIPTS.glob("*.py")))
+    appended = set().union(*(_appended_logs(path) for path in script_files()))
 
     assert appended <= set(maintenance_helpers.ROTATED_LOG_NAMES)
     assert not appended & set(maintenance_helpers.SCHEDULER_LOG_NAMES)

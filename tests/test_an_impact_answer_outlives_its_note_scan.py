@@ -34,11 +34,11 @@ def _changed_repository(tmp_path: Path) -> Path:
 
 
 def _notes(tmp_path: Path, monkeypatch) -> None:
-    notes = tmp_path / "notes"
-    notes.mkdir()
+    notes = tmp_path / "knowledge" / "notes"
+    notes.mkdir(parents=True)
     for name in ("a.md", "b.md"):
         (notes / name).write_text("# Page\n\nUses alpha.\n", encoding="utf-8")
-    monkeypatch.setattr(impact_analysis, "KNOWLEDGE_DIR", notes)
+    monkeypatch.setenv("LLM_WIKI_ROOT", str(tmp_path))
 
 
 def _changed_during_scan(*_arguments):
@@ -50,7 +50,7 @@ def _scan_ceiling(monkeypatch) -> ImpactLimits:
 
 
 def _changed_note(monkeypatch) -> ImpactLimits:
-    monkeypatch.setattr(impact_analysis, "_note_text", _changed_during_scan)
+    monkeypatch.setattr(impact_analysis, "note_text", _changed_during_scan)
     return ImpactLimits()
 
 
@@ -70,7 +70,7 @@ def test_the_computed_answer_survives_a_failed_note_scan(tmp_path, monkeypatch, 
 def test_a_deadline_during_the_scan_still_stops_the_request(tmp_path, monkeypatch):
     root = _changed_repository(tmp_path)
     _notes(tmp_path, monkeypatch)
-    monkeypatch.setattr(impact_analysis, "_note_text", _deadline_reached)
+    monkeypatch.setattr(impact_analysis, "note_text", _deadline_reached)
 
     with pytest.raises(TimeoutError):
         analyze_impact(root=root, graph=None)

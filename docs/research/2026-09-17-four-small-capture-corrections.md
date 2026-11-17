@@ -1,5 +1,7 @@
 # Four small capture corrections
 
+Current change, 2026-09-30: the reducer count policy in item 2 is superseded by the existing state byte budget; see [qualification](2026-09-30-reducer-cache-uses-the-state-byte-budget.md). The historical observations below remain dated evidence.
+
 Dated 2026-09-17. Items of finding C-F15 of the third audit (low, each confirmed by reading and
 checked again here). The research before the fix. The items of C-F15 that are not here are left
 to the owner and listed in the fix report.

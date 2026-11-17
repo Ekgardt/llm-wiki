@@ -13,6 +13,7 @@ import sys
 from pathlib import Path
 
 import pytest
+import queue_core  # noqa: E402
 
 SCRIPTS_DIR = Path(__file__).resolve().parent.parent / "scripts"
 if str(SCRIPTS_DIR) not in sys.path:
@@ -21,9 +22,13 @@ if str(SCRIPTS_DIR) not in sys.path:
 import archive_daily  # noqa: E402
 import doctor  # noqa: E402
 import memory_queue  # noqa: E402
-from memory_queue import MemoryQueue, QueueOperationError  # noqa: E402
+from queue_core import (  # noqa: E402
+    MemoryQueue,
+    QueueOperationError,
+)
 
-from tests.test_doctor import _build_root, _check  # noqa: E402
+from tests.doctor_helpers import _build_root, _check  # noqa: E402
+from tests.slow_machine import LONG_TIMEOUT  # noqa: E402
 
 REPO = Path(__file__).resolve().parent.parent
 
@@ -45,7 +50,7 @@ def _vault(tmp_path: Path) -> Path:
 def test_the_importer_its_marker_and_the_migrate_command_are_gone() -> None:
     removed = ("migrate_legacy_queue", "LegacyBackendDisabled", "MigrationReceipt", "_cli_migrate")
     assert [name for name in removed if hasattr(memory_queue, name)] == []
-    assert "migrate" not in memory_queue._CLI_COMMANDS
+    assert "migrate" not in memory_queue.CLI_COMMANDS
     assert not hasattr(archive_daily.DailyArchiver, "_legacy_queue_references")
     assert not hasattr(doctor, "_repair_leases")
 
@@ -55,7 +60,7 @@ def test_a_json_queue_holding_records_refuses_the_v2_queue(tmp_path: Path) -> No
     _json_queue(state_root, "legacy-1.json")
 
     with pytest.raises(QueueOperationError) as raised:
-        memory_queue.active_or_legacy_memory_queue(_vault(tmp_path), state_root)
+        queue_core.active_or_legacy_memory_queue(_vault(tmp_path), state_root)
 
     assert raised.value.code == "legacy_json_queue_unsupported"
     assert not (state_root / "run" / "queue.sqlite3").exists()
@@ -66,7 +71,7 @@ def test_an_empty_json_queue_directory_is_not_a_refusal(tmp_path: Path) -> None:
     state_root = tmp_path / "state"
     _json_queue(state_root)
 
-    queue = memory_queue.active_or_legacy_memory_queue(_vault(tmp_path), state_root)
+    queue = queue_core.active_or_legacy_memory_queue(_vault(tmp_path), state_root)
 
     assert isinstance(queue, MemoryQueue)
     assert not (state_root / "run" / "queue-migrated-v2").exists()
@@ -76,7 +81,10 @@ def test_doctor_repair_neither_imports_nor_marks_the_json_queue(tmp_path: Path, 
     root, state_root, home = _build_root(tmp_path)
     _json_queue(state_root, "legacy-1.json", "legacy-2.processing")
 
-    report = doctor.run_doctor(root=root, state_root=state_root, home=home, repair=True)
+    report = doctor.run_doctor(
+        root=root, state_root=state_root, home=home, repair=True,
+        time_budget_seconds=LONG_TIMEOUT,
+    )
 
     check = _check(report, "queue")
     assert [item["action"] for item in report["repaired"] if item["action"] in {"migrate_queue", "recover_stale_lease"}] == []

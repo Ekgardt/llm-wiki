@@ -20,12 +20,18 @@ from types import MappingProxyType
 
 import pytest
 
+from tests.codex_counts_the_prepared_invocation_helpers import (
+    codex_executable_alias as codex_executable_alias,
+)
+
 VAULT = Path(__file__).resolve().parent.parent
 SCRIPTS_DIR = VAULT / "scripts"
 if str(SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_DIR))
 
 import llm_client  # noqa: E402
+
+pytestmark = pytest.mark.usefixtures("codex_executable_alias")
 
 
 class _Recorder:
@@ -41,10 +47,10 @@ class _Recorder:
 
 @pytest.fixture
 def recorder(monkeypatch: pytest.MonkeyPatch) -> _Recorder:
-    """Both seams: the CLI backends run through `_run_cli`, the flag probe through run."""
+    """Both seams: the CLI backends run through `run_cli`, the flag probe through run."""
     calls = _Recorder()
     monkeypatch.setattr(llm_client.subprocess, "run", calls)
-    monkeypatch.setattr(llm_client, "_run_cli", calls)
+    monkeypatch.setattr(llm_client, "run_cli", calls)
     return calls
 
 
@@ -81,11 +87,12 @@ def test_the_claude_call_runs_outside_the_vault(
     recorder: _Recorder, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setattr(llm_client.shutil, "which", lambda _name: "/usr/bin/claude")
-    monkeypatch.setattr(llm_client, "_claude_command", lambda *_a: ["claude"])
-    monkeypatch.setattr(llm_client, "_claude_answer", lambda *_a: "")
-    llm_client._probed_claude_flags.cache_clear()
-    llm_client._call_claude(_descriptor(), "prompt", "system")
-    llm_client._probed_claude_flags.cache_clear()
+    monkeypatch.setattr(llm_client, "claude_executable_identity", lambda path: ("fixture",))
+    monkeypatch.setattr(llm_client, "claude_command", lambda *_a: ["claude"])
+    monkeypatch.setattr(llm_client, "claude_answer", lambda *_a: "")
+    llm_client.probed_claude_flags.cache_clear()
+    llm_client.call_claude(_descriptor(), "prompt", "system")
+    llm_client.probed_claude_flags.cache_clear()
     outside = [_is_outside_the_vault(cwd) for cwd in recorder.cwds]
     assert outside and all(outside), recorder.cwds
 
@@ -95,7 +102,7 @@ def test_the_codex_call_runs_outside_the_vault(
 ) -> None:
     prompt = tmp_path / "prompt.txt"
     prompt.write_text("hello", encoding="utf-8")
-    llm_client._codex_last_message(["codex"], str(prompt), str(tmp_path / "out.txt"))
+    llm_client.codex_last_message(["codex"], str(prompt), str(tmp_path / "out.txt"))
     assert [_is_outside_the_vault(cwd) for cwd in recorder.cwds] == [True]
 
 
@@ -103,9 +110,9 @@ def test_the_codex_call_runs_outside_the_vault(
 def test_internal_codex_does_not_capture_its_own_classifier_session(
     recorder: _Recorder, monkeypatch: pytest.MonkeyPatch, model: str | None,
 ) -> None:
-    monkeypatch.setattr(llm_client, "_find_codex_binary", lambda: "/usr/bin/codex")
+    monkeypatch.setattr(llm_client, "find_codex_binary", lambda: "/usr/bin/codex")
     descriptor = replace(_descriptor(), provider="codex", model=model)
-    llm_client._call_codex(descriptor, "Classify this captured session", "Classifier")
+    llm_client.call_codex(descriptor, "Classify this captured session", "Classifier")
     command, = recorder.commands
     offset = command.index("features.hooks=false")
     assert command[offset - 1] == "-c"

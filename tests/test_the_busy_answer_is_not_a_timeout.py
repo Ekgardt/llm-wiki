@@ -6,6 +6,7 @@ Audit 3, K-B4 and K-B5. Research:
 from __future__ import annotations
 
 import asyncio
+import datetime as dt
 import json
 import sys
 import threading
@@ -19,7 +20,7 @@ from tests.slow_machine import SHORT_TIMEOUT  # noqa: E402
 
 
 class _FakeServer:
-    """The shape `_register_tools` needs: two decorator factories."""
+    """The shape `register_tools` needs: two decorator factories."""
 
     def __init__(self) -> None:
         self.callback = None
@@ -37,14 +38,14 @@ class _FakeServer:
 
 def _registered_callback(mcp_server, monkeypatch):
     server = _FakeServer()
-    monkeypatch.setattr(mcp_server, "MCP_CALL_TOOL_RESULT_AVAILABLE", False)
-    monkeypatch.setattr(mcp_server, "MCP_STRUCTURED_OUTPUT_AVAILABLE", False)
-    mcp_server._register_tools(server, [])
+    monkeypatch.setattr("llm_wiki.mcp_server_limits.MCP_CALL_TOOL_RESULT_AVAILABLE", False)
+    monkeypatch.setattr("llm_wiki.mcp_server_limits.MCP_STRUCTURED_OUTPUT_AVAILABLE", False)
+    mcp_server.register_tools(server, [])
     return server.callback
 
 
 def _envelope_text(result) -> str:
-    """The JSON text out of whatever shape `_format_tool_result` returned."""
+    """The JSON text out of whatever shape `format_tool_result` returned."""
     if hasattr(result, "content"):
         return result.content[0].text
     if isinstance(result, tuple):
@@ -64,9 +65,9 @@ def _blocked_tool(release: threading.Event):
 def _busy_envelope(mcp_server, monkeypatch, call) -> dict:
     """Fill every worker slot, then read the answer one more call receives."""
     release = threading.Event()
-    monkeypatch.setattr(mcp_server, "_MCP_WORKERS", set())
-    monkeypatch.setattr(mcp_server, "_MCP_WORKERS_LOCK", threading.Lock())
-    monkeypatch.setattr(mcp_server, "_vault_status", _blocked_tool(release))
+    monkeypatch.setattr("llm_wiki.mcp_server_limits.MCP_WORKERS", set())
+    monkeypatch.setattr("llm_wiki.mcp_server_limits.MCP_WORKERS_LOCK", threading.Lock())
+    monkeypatch.setattr("llm_wiki.mcp_server_vault.vault_status", _blocked_tool(release))
 
     async def exercise():
         held = [
@@ -89,7 +90,7 @@ def test_a_call_that_never_started_is_not_reported_as_a_timeout(monkeypatch):
     import mcp_server
 
     envelope = _busy_envelope(
-        mcp_server, monkeypatch, mcp_server._handle_tool_call
+        mcp_server, monkeypatch, mcp_server.handle_tool_call
     )
 
     assert (envelope["data"]["error"], envelope["warnings"]) == (
@@ -117,11 +118,11 @@ def test_the_registered_callbacks_timeout_answer_is_made_when_it_times_out(monke
 
     callback = _registered_callback(mcp_server, monkeypatch)
     release = threading.Event()
-    monkeypatch.setattr(mcp_server, "MCP_OPERATION_SECONDS", 0.05)
-    monkeypatch.setattr(mcp_server, "_MCP_WORKERS", set())
-    monkeypatch.setattr(mcp_server, "_MCP_WORKERS_LOCK", threading.Lock())
-    monkeypatch.setattr(mcp_server, "_vault_status", _blocked_tool(release))
-    before = mcp_server.dt.datetime.now(mcp_server.dt.timezone.utc).isoformat()
+    monkeypatch.setattr("llm_wiki.mcp_server_limits.MCP_OPERATION_SECONDS", 0.05)
+    monkeypatch.setattr("llm_wiki.mcp_server_limits.MCP_WORKERS", set())
+    monkeypatch.setattr("llm_wiki.mcp_server_limits.MCP_WORKERS_LOCK", threading.Lock())
+    monkeypatch.setattr("llm_wiki.mcp_server_vault.vault_status", _blocked_tool(release))
+    before = dt.datetime.now(dt.UTC).isoformat()
 
     try:
         envelope = json.loads(

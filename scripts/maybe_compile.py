@@ -1,8 +1,8 @@
 """Concurrency-safe compile trigger.
 
 Checks if compile is needed and no other compile is running, then spawns
-compile_memory.py in a detached background process. The caller never
-blocks — this script returns immediately (under 100ms).
+compile_memory.py in a detached background process. Admission reads complete
+context receipts; a caller may provide its deadline for that work.
 
 Lock mechanism:
 - Writes a PID file at $LLM_WIKI_STATE_ROOT/run/compile.pid
@@ -15,8 +15,8 @@ Lock mechanism:
 This is the ONLY entry point that should be called from hooks/wrappers/
 schedulers. It guarantees:
   1. At most one compile runs at any time.
-  2. Never blocks the caller (fire-and-forget).
-  3. Quick exit if nothing to compile (state.json hash check).
+  2. Background compilation begins only after foreground admission succeeds.
+  3. Pending work is determined by canonical source-context receipts.
   4. Clears a stale lock (crashed compile, killed process) by process liveness, never by age.
 
 Usage:
@@ -27,38 +27,42 @@ Usage:
 from __future__ import annotations
 
 import argparse
-import os
-import secrets
 import sys
 import time
-from datetime import datetime
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import process_liveness  # noqa: E402
-from memory_state import (  # noqa: E402
-    ROOT,
-    STATE_ROOT,
-    atomic_write,
-    closed_daily_logs,
-    daily_logs,
-    file_hash,
-    load_state,
-    retire_stale_lock,
-    spawn_detached,
+from compile_lock import (
+    claim_lock,
+    clear_lock,
+    is_compile_running,
+    lock_owner_token,
+    lock_state,
+    process_status,
+    write_lock,
+)
+from llm_wiki import runtime_roots
+from memory_state import closed_daily_logs, daily_logs, spawn_detached
+from memory_state import (
+    file_hash as file_hash,
+)
+from memory_state import (
+    load_state as load_state,
 )
 
-COMPILE_SCRIPT = ROOT / "scripts" / "compile_memory.py"
-LOCK_FILE = STATE_ROOT / "run" / "compile.pid"
-LOG_OUT = STATE_ROOT / "logs" / "maybe-compile-last.log"
-LOG_ERR = STATE_ROOT / "logs" / "maybe-compile-last.err.log"
 
-# A compile holds its lock for as long as its process lives. A lock is stale
-# when its process is dead, when the PID-0 placeholder outlived the spawn
-# window, or when the file cannot be parsed — never because it is old
-# (PostgreSQL's postmaster.pid and flock(2) decide the same way). Research:
-# docs/research/2026-09-10-a-lock-lives-as-long-as-its-process-not-thirty-minutes.md
-_PID0_TTL_SECONDS = 10.0
+def compile_script() -> Path:
+    return runtime_roots.vault_root() / "scripts" / "compile_memory.py"
+
+
+def log_out_path() -> Path:
+    return runtime_roots.state_root() / "logs" / "maybe-compile-last.log"
+
+
+def log_err_path() -> Path:
+    return runtime_roots.state_root() / "logs" / "maybe-compile-last.err.log"
+
 
 def _is_pid_alive(pid: int) -> bool:
     """Cross-platform 'is this PID still running?' check; PID 0 is the placeholder."""
@@ -67,269 +71,83 @@ def _is_pid_alive(pid: int) -> bool:
     return process_liveness.pid_alive(pid)
 
 
-def _lock_bytes() -> bytes | None:
-    try:
-        return LOCK_FILE.read_bytes()
-    except OSError:
-        return None
-
-
-def _read_lock() -> dict | None:
-    """The lock as {pid, started_at, owner, identity}, or None when unreadable.
-
-    The optional third line is a random owner token written by
-    `_write_lock`/`_try_claim_lock`; older 2-line lock files have owner=None.
-    The optional fourth line is the owner's process start identity, so a PID
-    handed on to another process is not mistaken for this compile. Research:
-    docs/research/2026-09-17-a-lock-names-the-process-not-only-its-number.md
-    """
-    payload = _lock_bytes()
-    if payload is None:
-        return None
-    return _parse_lock(payload.decode("utf-8", errors="replace").strip().splitlines())
-
-
-def _parse_lock(lines: list[str]) -> dict | None:
-    if len(lines) < 2:
-        return None
-    try:
-        pid = int(lines[0])
-    except ValueError:
-        return None
-    return {
-        "pid": pid,
-        "started_at": lines[1],
-        "owner": _lock_line(lines, 2) or None,
-        "identity": _lock_line(lines, 3),
-    }
-
-
-def _lock_line(lines: list[str], index: int) -> str:
-    """The optional line at `index`; empty when a shorter lock file has none."""
-    if len(lines) <= index:
-        return ""
-    return lines[index].strip()
-
-
-def _identity_of(pid: int) -> str:
-    """The start identity of a running process, empty when unsettled or gone."""
-    try:
-        return process_liveness.process_start_identity(pid) or ""
-    except (OSError, ValueError):
-        return ""
-
-
-def _file_age(path: Path) -> float:
-    """Seconds since `path` was last written; a missing file is infinitely old."""
-    try:
-        return max(0.0, time.time() - path.stat().st_mtime)
-    except OSError:
-        return float("inf")
-
-
-def _write_lock(pid: int, token: str | None = None) -> None:
-    """Record the lock for `pid`, naming that process and keeping `token` if given.
-
-    The spawner writes the child's PID here, so the identity recorded is the
-    child's; keeping the placeholder token lets the child recognise the lock
-    written for it whichever of the two gets there first.
-    """
-    LOCK_FILE.parent.mkdir(parents=True, exist_ok=True)
-    stamp = datetime.now().isoformat(timespec="seconds")
-    owner = token or secrets.token_hex(8)
-    atomic_write(LOCK_FILE, f"{pid}\n{stamp}\n{owner}\n{_identity_of(pid)}\n")
-
-
-def _try_claim_lock() -> bool:
-    """Create the lock with its content in one step. Returns True if we own it.
-
-    The payload is written to a private file and linked to the lock name, so no
-    reader ever sees an empty lock and retires it as unreadable. See
-    `docs/research/2026-09-14-the-small-integrity-gaps.md`.
-    """
-    LOCK_FILE.parent.mkdir(parents=True, exist_ok=True)
-    payload = f"0\n{datetime.now().isoformat(timespec='seconds')}\n{secrets.token_hex(8)}\n".encode()
-    staged = LOCK_FILE.with_name(f".{LOCK_FILE.name}.{secrets.token_hex(8)}.tmp")
-    staged.write_bytes(payload)
-    try:
-        return _link_lock(staged, payload)
-    finally:
-        staged.unlink(missing_ok=True)
-
-
-def _link_lock(staged: Path, payload: bytes) -> bool:
-    try:
-        os.link(staged, LOCK_FILE)
-    except FileExistsError:
+def has_pending_work(closed_days_only: bool = False, *, deadline: float = float("inf")) -> bool:
+    """A mirror is diagnostic; only context-bound receipt authority can skip work."""
+    _trigger_active(deadline)
+    paths = _candidate_logs(closed_days_only)
+    _trigger_active(deadline)
+    if not paths:
         return False
-    except OSError:
-        return _exclusive_write_lock(payload)
-    return True
+    if not (runtime_roots.vault_root() / "knowledge/daily/receipts").is_dir():
+        return True
+    return _unreceipted_daily_exists(paths, deadline)
 
 
-# Untranslated: the four lines written are the four lines read back.
-_LOCK_WRITE_FLAGS = os.O_CREAT | os.O_EXCL | os.O_WRONLY | getattr(os, "O_BINARY", 0)
+def _trigger_active(deadline: float) -> None:
+    if time.monotonic() >= deadline:
+        raise TimeoutError("compile trigger deadline exceeded")
 
 
-def _exclusive_write_lock(payload: bytes) -> bool:
-    """The fallback where hard links are unsupported: create, then write."""
-    try:
-        fd = os.open(str(LOCK_FILE), _LOCK_WRITE_FLAGS)
-    except OSError:
-        return False
-    try:
-        os.write(fd, payload)
-    finally:
-        os.close(fd)
-    return True
+def _unreceipted_daily_exists(paths: list[Path], deadline: float) -> bool:
+    import compile_receipts
+    from markdown_transaction import active_or_legacy_coordinator
+
+    coordinator = active_or_legacy_coordinator(runtime_roots.vault_root(), runtime_roots.state_root(), deadline=deadline)
+    selection = compile_receipts.receipt_predicate(coordinator, deadline=deadline)
+    return any(not daily_receipted(path, selection) for path in paths)
 
 
-def _lock_age(lock: dict) -> float | None:
-    try:
-        started = datetime.fromisoformat(lock.get("started_at", ""))
-    except (ValueError, TypeError):
-        return None
-    return (datetime.now() - started).total_seconds()
+def daily_receipted(path: Path, selection) -> bool:
+    import compile_receipts
 
-
-def _placeholder_state(lock: dict) -> tuple[str, str]:
-    """A PID-0 placeholder is live only inside its spawn window."""
-    age = _lock_age(lock)
-    if age is None:
-        return ("stale", "stale lock (pid-0, bad timestamp)")
-    if age > _PID0_TTL_SECONDS:
-        return ("stale", f"stale lock (pid-0 placeholder expired, age {int(age)}s)")
-    return ("live", f"spawning since {lock['started_at']}")
-
-
-def _owner_state(lock: dict) -> tuple[str, str]:
-    pid = lock["pid"]
-    if pid == 0:
-        return _placeholder_state(lock)
-    if not process_liveness.owner_alive(pid, lock.get("identity")):
-        return ("stale", f"stale lock (pid {pid} dead)")
-    return ("live", f"running pid={pid} since {lock['started_at']}")
-
-
-def _lock_state() -> tuple[str, str]:
-    """One verdict for every reader: ('absent'|'stale'|'live', reason)."""
-    if not LOCK_FILE.exists():
-        return ("absent", "no lock file")
-    lock = _read_lock()
-    if lock is None:
-        return _unparsed_state()
-    return _owner_state(lock)
-
-
-def _unparsed_state() -> tuple[str, str]:
-    """An empty lock inside the spawn window is a write in progress, not a ruin.
-
-    Where hard links are unsupported the lock is created and then written, so
-    there is a moment in which it is empty and its writer is very much alive.
-    """
-    empty = not (_lock_bytes() or b"").strip()
-    if empty and _file_age(LOCK_FILE) <= _PID0_TTL_SECONDS:
-        return ("live", "lock being written")
-    return ("stale", "stale lock (unreadable)")
-
-
-def lock_owner_token() -> str | None:
-    """The owner token the lock carries now; the claimant keeps it (audit OPS-22)."""
-    lock = _read_lock()
-    return None if lock is None else lock.get("owner")
-
-
-def _clear_lock(owner: str | None = None) -> bool:
-    """Remove the lock unless a live process we do not own holds it.
-
-    `owner` is the token the caller received when it claimed the lock; a
-    live lock with another token belongs to someone else. Returns True when
-    the lock is gone (cleared or absent). The removal retires exactly the
-    bytes that were judged: a lock replaced meanwhile by a fresh owner is
-    left alone (audit OPS-07).
-    """
-    judged = _lock_bytes()
-    if judged is None:
-        return not LOCK_FILE.exists()
-    if _judged_state(judged) == "live" and not _held_with(judged, owner):
-        return False
-    removed = retire_stale_lock(LOCK_FILE, judged)
-    return removed or not LOCK_FILE.exists()
-
-
-def _held_with(judged: bytes, owner: str | None) -> bool:
-    lock = _parse_lock(judged.decode("utf-8", errors="replace").strip().splitlines())
-    return bool(owner) and lock is not None and lock.get("owner") == owner
-
-
-def _judged_state(judged: bytes) -> str:
-    """absent/stale/live for the exact bytes that will be retired; unreadable is stale."""
-    lock = _parse_lock(judged.decode("utf-8", errors="replace").strip().splitlines())
-    if lock is None:
-        return "stale"
-    return _owner_state(lock)[0]
-
-
-def _is_compile_running() -> tuple[bool, str]:
-    """Check the lock. Returns (is_running, reason)."""
-    state, reason = _lock_state()
-    return (state == "live", reason)
-
-
-def _has_pending_work(closed_days_only: bool = False) -> bool:
-    """Quick check: are there daily logs whose hash differs from last compile?
-
-    Reads state.json (cheap) and compares against current daily files.
-    Under 50ms even for 100 daily logs. `closed_days_only` leaves out the day
-    still being appended to (`memory_state.closed_daily_logs`).
-    """
-    state = load_state()
-    compiled_hashes = state.get("compiled_daily_hashes", {}) or {}
-    return any(
-        compiled_hashes.get(p.name) != file_hash(p)
-        for p in _candidate_logs(closed_days_only)
-    )
+    selection._active()
+    with compile_receipts.open_daily_source(path, deadline=selection.deadline) as content:
+        return compile_receipts.daily_is_compiled(path.relative_to(runtime_roots.vault_root()).as_posix(), content, selection)
 
 
 def _candidate_logs(closed_days_only: bool) -> list[Path]:
-    daily_dir = ROOT / "knowledge" / "daily"
+    daily_dir = runtime_roots.vault_root() / "knowledge" / "daily"
     if closed_days_only:
         return closed_daily_logs(daily_dir)
     return daily_logs(daily_dir)
 
 
 def spawn_compile_if_idle(
-    force: bool = False, closed_days_only: bool = False
+    force: bool = False, closed_days_only: bool = False, *, deadline: float = float("inf")
 ) -> tuple[bool, str]:
     """Spawn a detached compile unless one is running or nothing is pending.
 
-    Returns (spawned, reason). Never raises. ``force`` bypasses the
+    Returns (spawned, reason). Admission refusals and expired deadlines remain
+    visible to the caller. ``force`` bypasses the
     "no pending work" gate but never steals a live lock. ``closed_days_only``
     is the session start's: the day still being appended to waits for the
     nightly (`memory_state.closed_daily_logs`).
     """
-    spawned, _skipped, reason = _spawn_outcome(force, closed_days_only)
+    spawned, _skipped, reason = _spawn_outcome(force, closed_days_only, deadline=deadline)
     return (spawned, reason)
 
 
-def _spawn_outcome(force: bool, closed_days_only: bool = False) -> tuple[bool, bool, str]:
+def _spawn_outcome(force: bool, closed_days_only: bool = False, *, deadline: float = float("inf")) -> tuple[bool, bool, str]:
     """(spawned, skipped, reason): a skip is a named refusal, not a failure."""
-    refusal = _refusal_before_claim(force, closed_days_only)
+    _trigger_active(deadline)
+    refusal = _refusal_before_claim(force, closed_days_only, deadline=deadline)
     if refusal is not None:
         return (False, True, refusal)
-    if not _claim_lock():
+    _trigger_active(deadline)
+    if not claim_lock():
         # Another caller took the lock between our check and our claim; name
         # what holds it now rather than a race the reader cannot verify.
-        _state, reason = _lock_state()
+        _state, reason = lock_state()
         return (False, True, f"skipped: {reason}")
     return _spawn_claimed(closed_days_only)
 
 
-def _refusal_before_claim(force: bool, closed_days_only: bool = False) -> str | None:
-    is_running, reason = _is_compile_running()
+def _refusal_before_claim(force: bool, closed_days_only: bool = False, *, deadline: float = float("inf")) -> str | None:
+    _trigger_active(deadline)
+    is_running, reason = is_compile_running()
     if is_running:
         return _live_lock_refusal(force, reason)
-    if not force and not _has_pending_work(closed_days_only):
+    if not force and not has_pending_work(closed_days_only, deadline=deadline):
         return "skipped: no pending work (all daily logs compiled)"
     return None
 
@@ -345,17 +163,10 @@ def _live_lock_refusal(force: bool, reason: str) -> str:
     return f"skipped: live lock (force refused): {reason}"
 
 
-def _claim_lock() -> bool:
-    """Clear a stale lock, then claim atomically; only one caller can create it."""
-    if LOCK_FILE.exists():
-        _clear_lock()
-    return _try_claim_lock()
-
-
-def _compile_command(placeholder: str, closed_days_only: bool) -> list[str]:
+def compile_command(placeholder: str, closed_days_only: bool) -> list[str]:
     command = [
         sys.executable,
-        str(COMPILE_SCRIPT),
+        str(compile_script()),
         "--trigger",
         "auto",
         "--lock-token",
@@ -372,27 +183,25 @@ def _spawn_claimed(closed_days_only: bool = False) -> tuple[bool, bool, str]:
     # looks before or after the PID below is replaced.
     placeholder = lock_owner_token() or ""
     pid = spawn_detached(
-        _compile_command(placeholder, closed_days_only),
-        stdout_path=LOG_OUT,
-        stderr_path=LOG_ERR,
+        compile_command(placeholder, closed_days_only),
+        stdout_path=log_out_path(),
+        stderr_path=log_err_path(),
     )
     if pid is None:
-        _clear_lock(placeholder)
+        clear_lock(placeholder)
         return (False, False, "spawn failed")
     # Replace the placeholder PID (0) with the real one; the child owns it now.
-    _write_lock(pid, token=placeholder)
+    write_lock(pid, token=placeholder)
     return (True, False, f"spawned compile pid={pid}")
 
 
 def status() -> dict:
-    """Snapshot for the metacognitive block."""
-    is_running, reason = _is_compile_running()
-    return {
-        "compile_running": is_running,
-        "reason": reason,
-        "pending_work": _has_pending_work() if not is_running else False,
-        "lock_file": str(LOCK_FILE),
-    }
+    """Full snapshot for the metacognitive block, including pending work."""
+    snapshot = process_status()
+    snapshot["pending_work"] = False
+    if not snapshot["compile_running"]:
+        snapshot["pending_work"] = has_pending_work()
+    return snapshot
 
 
 def main() -> int:

@@ -1,0 +1,378 @@
+{
+  "encoding": "o200k_base",
+  "max_tokens": 100000,
+  "serialization": "exact-duplicates/v1",
+  "files": [
+    "AGENTS.md",
+    "CLAUDE.md",
+    "docs/AGENTS.md",
+    "docs/STRUCTURE.md",
+    "docs/modules/context-bundle.md",
+    "docs/modules/context-records.md",
+    "docs/modules/context-tooling.md",
+    "docs/modules/model-choice.md",
+    "docs/modules/nightly-budget.md",
+    "docs/modules/product-structure.md",
+    "docs/modules/project-governance.md",
+    "docs/modules/scheduled-nightly-tests-nightly-explicit-completion-context.json",
+    "docs/modules/scheduled-nightly-tests-nightly-explicit-completion.md",
+    "docs/modules/scheduled-nightly.md",
+    "docs/modules/session-start-context.md",
+    "docs/modules/test-support.md",
+    "rules/development-laws.md",
+    "scripts/__init__.py",
+    "scripts/llm_wiki/__init__.py",
+    "scripts/llm_wiki/context_bundle.py",
+    "scripts/nightly_budget.py",
+    "scripts/scheduled_nightly.py",
+    "scripts/session_start_context.py",
+    "tests/__init__.py",
+    "tests/conftest.py",
+    "tests/module_context.py",
+    "tests/module_context_paths.py",
+    "tests/module_interface.py",
+    "tests/module_interface_render.py",
+    "tests/module_qualification.py",
+    "tests/module_record_context.py",
+    "tests/module_records.py",
+    "tests/shared_fixtures.py",
+    "tests/slow_machine.py",
+    "tests/test_nightly_explicit_completion.py"
+  ],
+  "ownership": {
+    "files": [
+      "docs/modules/scheduled-nightly-tests-nightly-explicit-completion-context.json",
+      "docs/modules/scheduled-nightly-tests-nightly-explicit-completion.md",
+      "tests/test_nightly_explicit_completion.py"
+    ]
+  },
+  "qualified_dependencies": [
+    {
+      "provider": "scripts/build_advisory.py",
+      "names": [
+        "build_advisory"
+      ],
+      "contract_sha256": "2a214c6d4890af8972f6ebf7130c1f888a6d9b317a025b43a65189fa4e2c6c76",
+      "integration_tests": [
+        "tests/test_nightly_explicit_completion.py"
+      ]
+    },
+    {
+      "provider": "scripts/build_guardrails.py",
+      "names": [
+        "build_guardrails"
+      ],
+      "contract_sha256": "9868de30be8fd25ed36fb6cef1c70c9465033345808af2dfbbc34265e8783c7d",
+      "integration_tests": [
+        "tests/test_nightly_explicit_completion.py"
+      ]
+    },
+    {
+      "provider": "scripts/capture_diagnostics.py",
+      "names": [
+        "capture_failure_line",
+        "record_hook_error"
+      ],
+      "contract_sha256": "c6e70eedde550b687d0ec40e63ae66dc5ba045e550b9613edce9558f397df9fe",
+      "integration_tests": [
+        "tests/test_nightly_explicit_completion.py"
+      ]
+    },
+    {
+      "provider": "scripts/compile_lock.py",
+      "names": [
+        "process_status"
+      ],
+      "contract_sha256": "b343fc3a906094bb9c34d064071b40db89fe023f004e791c90a7ccc337d6233a",
+      "integration_tests": [
+        "tests/test_nightly_explicit_completion.py"
+      ]
+    },
+    {
+      "provider": "scripts/context_budget.py",
+      "names": [
+        "BudgetExceededError",
+        "ContextItem",
+        "DEFAULT_CONTEXT_BUDGET"
+      ],
+      "contract_sha256": "8d6d945b7aa33430fbc4f3f434536a390af63ef89c0c9356bc65a63ea9707579",
+      "integration_tests": [
+        "tests/test_nightly_explicit_completion.py"
+      ]
+    },
+    {
+      "provider": "scripts/context_compiler.py",
+      "names": [
+        "compile_context_items"
+      ],
+      "contract_sha256": "23b1ffbfd102d5b171b6535f6c6997b12c598befccfd3dc0c9d8afaef214fe00",
+      "integration_tests": [
+        "tests/test_nightly_explicit_completion.py"
+      ]
+    },
+    {
+      "provider": "scripts/doctor.py",
+      "names": [
+        "degraded_summary",
+        "run_doctor"
+      ],
+      "contract_sha256": "70eb5162dd90eb33afac7e928ba93eb6c059602e61674971e8caa2d46a405982",
+      "integration_tests": [
+        "tests/test_nightly_explicit_completion.py"
+      ]
+    },
+    {
+      "provider": "scripts/generation_maintenance.py",
+      "names": [
+        "run_generation_maintenance"
+      ],
+      "contract_sha256": "f993c23c1e2b938d88bee02a716a716c4bb2c99dfcb153bbb47aacab7a37f71b",
+      "integration_tests": [
+        "tests/test_nightly_explicit_completion.py"
+      ]
+    },
+    {
+      "provider": "scripts/impact_analysis.py",
+      "names": [
+        "analyze_impact",
+        "format_for_advisory"
+      ],
+      "contract_sha256": "29ef96edce70f7407200bdd870440650f2563bf2e124b50b37170fd69094157a",
+      "integration_tests": [
+        "tests/test_nightly_explicit_completion.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_client.py",
+      "names": [
+        "worst_case_call_seconds"
+      ],
+      "contract_sha256": "304c9d792a66bc00ed489e764d6b3aea19f7e99d6363b507fbf65fdc3bde758f",
+      "integration_tests": [
+        "tests/test_nightly_explicit_completion.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/generation_catalog_store.py",
+      "names": [
+        "GenerationCatalog"
+      ],
+      "contract_sha256": "b18194ebe04bf988b4474379fcb5243516550d43b745a00eaed1453f7844c983",
+      "integration_tests": [
+        "tests/test_a_build_in_flight_is_not_an_orphan.py",
+        "tests/test_a_code_generation_is_not_abandoned.py",
+        "tests/test_a_flow_walk_stops_when_its_caller_has.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/install_scheduler_render.py",
+      "names": [
+        "scheduler_limit_hours"
+      ],
+      "contract_sha256": "44108da9e820dfca12fd159b4238de0b443fd5ee46b9b458a5e24386363a2efc",
+      "integration_tests": [
+        "tests/test_a_scheduled_run_keeps_the_uv_link.py",
+        "tests/test_a_weekly_waits_for_the_nightly.py",
+        "tests/test_an_update_replaces_what_it_owns.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/model_choice.py",
+      "names": [
+        "using_root"
+      ],
+      "contract_sha256": "d45f2655cb61963e77617d1dfd7d617b134ad77cc770b59b335d0856e5d65019",
+      "integration_tests": [
+        "tests/test_nightly_explicit_completion.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/runtime_publication.py",
+      "names": [
+        "write_all"
+      ],
+      "contract_sha256": "0c87cf7b659cca5738ba41c3cc77c42118959b9c2283b24a345d862f8901dcd1",
+      "integration_tests": [
+        "tests/test_nightly_explicit_completion.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/runtime_roots.py",
+      "names": [
+        "daily_dir",
+        "index_file",
+        "notes_dir",
+        "reports_dir",
+        "state_root",
+        "vault_root"
+      ],
+      "contract_sha256": "fede217058cf53714f0d4af2e9e179a599713b69d9b537fa618e2ffe9278a1f3",
+      "integration_tests": [
+        "tests/test_a_continuation_keeps_its_original_entry.py",
+        "tests/test_a_prompt_checkpoint_does_not_outwait_its_host.py",
+        "tests/test_a_session_marker_survives_a_busy_writer.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/step_budgets.py",
+      "names": [
+        "DEFAULT_BUDGET_SECONDS",
+        "RECLAIM_STEP_SECONDS",
+        "REFRESH_ALL_BUDGET_SECONDS",
+        "RETIRE_BUDGET_SECONDS",
+        "WORST_CASE_SECONDS"
+      ],
+      "contract_sha256": "81d34d0cbe87ca49718f334ee40f9623779fcd1f882dea277054c38e80f2a6d7",
+      "integration_tests": [
+        "tests/test_nightly_explicit_completion.py"
+      ]
+    },
+    {
+      "provider": "scripts/maintenance_helpers.py",
+      "names": [
+        "prune_maintenance_output",
+        "run_step",
+        "trim_scheduler_logs",
+        "wait_for_compile_idle"
+      ],
+      "contract_sha256": "9246ac798b2aa3d69baf1311231ed9bbf804349f465c30294b879eedcdaa04e9",
+      "integration_tests": [
+        "tests/test_nightly_explicit_completion.py"
+      ]
+    },
+    {
+      "provider": "scripts/markdown_transaction.py",
+      "names": [
+        "active_or_legacy_coordinator"
+      ],
+      "contract_sha256": "c925a7d2a81ec95533c80abc3906d8b8f0c1422d98e7175814de9a57f0ec45ec",
+      "integration_tests": [
+        "tests/test_nightly_explicit_completion.py"
+      ]
+    },
+    {
+      "provider": "scripts/memory_state.py",
+      "names": [
+        "HOOK_STATE_LOCK_TIMEOUT",
+        "load_state",
+        "retire_stale_lock",
+        "spawn_detached",
+        "update_state"
+      ],
+      "contract_sha256": "c305f1825dc51a9e83448df7ffc88000c1495446b870fbb9e8acf841ef1c923c",
+      "integration_tests": [
+        "tests/test_nightly_explicit_completion.py"
+      ]
+    },
+    {
+      "provider": "scripts/operational_ownership.py",
+      "names": [
+        "OperationalOwnershipError",
+        "OwnerLease",
+        "OwnershipRegistry",
+        "acquire_scheduled_owner",
+        "heartbeat_owner",
+        "release_marker_owner"
+      ],
+      "contract_sha256": "f62e5bbbfd4d022e2e2f3f15dd30848a35a0f823ef4e708397d6f010ecb872f3",
+      "integration_tests": [
+        "tests/test_nightly_explicit_completion.py"
+      ]
+    },
+    {
+      "provider": "scripts/process_liveness.py",
+      "names": [
+        "owner_alive",
+        "process_start_identity"
+      ],
+      "contract_sha256": "53b16fb306b92132ba05d885846e99a49f10bb5c8a92092f2d704b5832b0d804",
+      "integration_tests": [
+        "tests/test_nightly_explicit_completion.py"
+      ]
+    },
+    {
+      "provider": "scripts/python_series.py",
+      "names": [
+        "require_supported_python"
+      ],
+      "contract_sha256": "57bf542fde7c87f26112ffd4e3cfc93a65ece403b34a35a187f50dbc2b98cfaf",
+      "integration_tests": [
+        "tests/test_nightly_explicit_completion.py"
+      ]
+    },
+    {
+      "provider": "scripts/reliable_memory.py",
+      "names": [
+        "validate_runtime_file",
+        "validate_state_root"
+      ],
+      "contract_sha256": "8d6496bf7c816260fcc296ec050a67bb532dbd88e54cd15a47ff34c033488c8d",
+      "integration_tests": [
+        "tests/test_nightly_explicit_completion.py"
+      ]
+    },
+    {
+      "provider": "scripts/repository_scope.py",
+      "names": [
+        "sanitized_git_environment"
+      ],
+      "contract_sha256": "fd550ae20761afad50b37fa3a71044a162485b0e4d4b3e2af9b5b22e143c2bec",
+      "integration_tests": [
+        "tests/test_nightly_explicit_completion.py"
+      ]
+    },
+    {
+      "provider": "scripts/retrieval_telemetry.py",
+      "names": [
+        "compact"
+      ],
+      "contract_sha256": "a2f146900083e884871afbdb1bcd2992e5efd03783349a0bebc7f379ff500923",
+      "integration_tests": [
+        "tests/test_nightly_explicit_completion.py"
+      ]
+    },
+    {
+      "provider": "scripts/secret_redact.py",
+      "names": [
+        "describe_error",
+        "describe_error_chain"
+      ],
+      "contract_sha256": "884e5e05013d225e77560cc5211c6b673e5a2eb93f21415faed38c0cb7c412e2",
+      "integration_tests": [
+        "tests/test_nightly_explicit_completion.py"
+      ]
+    },
+    {
+      "provider": "scripts/self_update.py",
+      "names": [
+        "sync_dependencies",
+        "update_checkout"
+      ],
+      "contract_sha256": "374cc392946658cae7ecc2b00ecc6b1d557e9fec8acd12ac59f2beee5c69766d",
+      "integration_tests": [
+        "tests/test_nightly_explicit_completion.py"
+      ]
+    },
+    {
+      "provider": "scripts/settings.py",
+      "names": [
+        "setting_value"
+      ],
+      "contract_sha256": "ec6d2a43d91dba48c174aad5e9505790a05fd66f1bf1e5292264857f320a9881",
+      "integration_tests": [
+        "tests/test_nightly_explicit_completion.py"
+      ]
+    },
+    {
+      "provider": "scripts/vault_log.py",
+      "names": [
+        "LOG_RELATIVE",
+        "vault_log_path"
+      ],
+      "contract_sha256": "086a356f42414596795ac6c01efceae390b56978f04f1e384b4b9619ded7eb9b",
+      "integration_tests": [
+        "tests/test_nightly_explicit_completion.py"
+      ]
+    }
+  ]
+}

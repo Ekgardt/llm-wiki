@@ -15,14 +15,15 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 
+import generation_search
 import search_memory  # noqa: E402
 
 
 @pytest.fixture
 def _forgotten_model(monkeypatch):
-    monkeypatch.setattr(search_memory, "_embedder_cache", None, raising=False)
-    monkeypatch.setattr(search_memory, "_embedder_unavailable_reason", None, raising=False)
-    monkeypatch.setattr(search_memory, "_embedder_announced", set(), raising=False)
+    monkeypatch.setattr(generation_search, "embedder_cache", None, raising=False)
+    monkeypatch.setattr(generation_search, "embedder_failure_reason", None, raising=False)
+    monkeypatch.setattr(generation_search, "embedder_announced", set(), raising=False)
 
 
 def _cache_only_hub(lookups: list, found: dict) -> types.ModuleType:
@@ -41,8 +42,8 @@ def test_weights_that_are_not_on_disk_degrade_to_no_dense_signal(monkeypatch, _f
     monkeypatch.setitem(sys.modules, "huggingface_hub", _cache_only_hub(lookups, {}))
     monkeypatch.setitem(sys.modules, "onnxruntime", types.ModuleType("onnxruntime"))
 
-    assert search_memory._get_embedder() is None
+    assert generation_search.get_embedder() is None
     assert search_memory.embedder_unavailable_reason().startswith("model_unavailable")
     assert lookups == [
-        (search_memory.EMBEDDING_MODEL, "onnx/model.onnx", search_memory.EMBEDDING_MODEL_REVISION)
+        (generation_search.EMBEDDING_MODEL, "onnx/model.onnx", generation_search.EMBEDDING_MODEL_REVISION)
     ]

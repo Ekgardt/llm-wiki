@@ -1,0 +1,280 @@
+{
+  "encoding": "o200k_base",
+  "max_tokens": 100000,
+  "serialization": "exact-duplicates/v1",
+  "files": [
+    "AGENTS.md",
+    "CLAUDE.md",
+    "docs/AGENTS.md",
+    "docs/STRUCTURE.md",
+    "docs/modules/breadcrumb-adoption-helpers.md",
+    "docs/modules/breadcrumb-storage-context.json",
+    "docs/modules/breadcrumb-storage.md",
+    "docs/modules/capture-publication-with-busy-writer-helpers.md",
+    "docs/modules/context-bundle.md",
+    "docs/modules/context-records.md",
+    "docs/modules/context-tooling.md",
+    "docs/modules/formats.md",
+    "docs/modules/markdown-transaction-tests-queue-v3-capture-links-helpers.md",
+    "docs/modules/model-choice.md",
+    "docs/modules/product-structure.md",
+    "docs/modules/project-governance.md",
+    "docs/modules/test-support.md",
+    "rules/development-laws.md",
+    "scripts/__init__.py",
+    "scripts/breadcrumb_storage.py",
+    "scripts/llm_wiki/__init__.py",
+    "scripts/llm_wiki/context_bundle.py",
+    "scripts/llm_wiki/formats/__init__.py",
+    "tests/__init__.py",
+    "tests/breadcrumb_adoption_helpers.py",
+    "tests/breadcrumb_storage_helpers.py",
+    "tests/capture_publication_with_busy_writer_helpers.py",
+    "tests/conftest.py",
+    "tests/module_context.py",
+    "tests/module_context_paths.py",
+    "tests/module_interface.py",
+    "tests/module_interface_render.py",
+    "tests/module_qualification.py",
+    "tests/module_record_context.py",
+    "tests/module_records.py",
+    "tests/queue_v3_capture_links_helpers.py",
+    "tests/shared_fixtures.py",
+    "tests/slow_machine.py",
+    "tests/test_breadcrumb_recovery.py",
+    "tests/test_breadcrumb_storage.py",
+    "tests/test_capture_inspection_recognizes_runtime_staging.py"
+  ],
+  "ownership": {
+    "files": [
+      "docs/modules/breadcrumb-storage-context.json",
+      "docs/modules/breadcrumb-storage.md",
+      "scripts/breadcrumb_storage.py",
+      "tests/breadcrumb_storage_helpers.py",
+      "tests/test_breadcrumb_recovery.py",
+      "tests/test_breadcrumb_storage.py",
+      "tests/test_capture_inspection_recognizes_runtime_staging.py"
+    ]
+  },
+  "qualified_dependencies": [
+    {
+      "provider": "scripts/bounded_io.py",
+      "names": [
+        "check_deadline"
+      ],
+      "contract_sha256": "58d4ac619d84b79f170ee361032a9b619aa73a4839c4517a9015e762e2ea44b5",
+      "integration_tests": [
+        "tests/test_breadcrumb_recovery.py",
+        "tests/test_breadcrumb_storage.py",
+        "tests/test_capture_inspection_recognizes_runtime_staging.py"
+      ]
+    },
+    {
+      "provider": "scripts/breadcrumb_bundle.py",
+      "names": [
+        "HANDLER_VERSION",
+        "anchor_path",
+        "load_bundle",
+        "part_path",
+        "read",
+        "stored_manifest"
+      ],
+      "contract_sha256": "8afc2f181026ae81f5d31cbaec241d0bed7ad57b2acde0fefbd138b6a5934208",
+      "integration_tests": [
+        "tests/test_breadcrumb_recovery.py",
+        "tests/test_breadcrumb_storage.py",
+        "tests/test_capture_inspection_recognizes_runtime_staging.py"
+      ]
+    },
+    {
+      "provider": "scripts/breadcrumb_protocol.py",
+      "names": [
+        "BreadcrumbBundle",
+        "encode_parts",
+        "make_anchor",
+        "make_manifest",
+        "occurrence_identity",
+        "read_anchor",
+        "read_manifest",
+        "require_digest"
+      ],
+      "contract_sha256": "b1fa7c0f22283088c36835e497f0412552277dd33e49a919fa18c8928bdda042",
+      "integration_tests": [
+        "tests/test_breadcrumb_storage.py"
+      ]
+    },
+    {
+      "provider": "scripts/capture_diagnostics.py",
+      "names": [
+        "is_contention"
+      ],
+      "contract_sha256": "e40312d1a63ce2c510bcd19fc21c61b584c02ffaa1f3af117f89a634a632d057",
+      "integration_tests": [
+        "tests/test_breadcrumb_recovery.py",
+        "tests/test_breadcrumb_storage.py",
+        "tests/test_capture_inspection_recognizes_runtime_staging.py"
+      ]
+    },
+    {
+      "provider": "scripts/capture_handler_identity.py",
+      "names": [
+        "verified_capture_handler"
+      ],
+      "contract_sha256": "4aef29bc825c979508265e12eee0aae8e4703615b59abad9b7022e001beb98e3",
+      "integration_tests": [
+        "tests/test_breadcrumb_recovery.py",
+        "tests/test_breadcrumb_storage.py",
+        "tests/test_capture_inspection_recognizes_runtime_staging.py"
+      ]
+    },
+    {
+      "provider": "scripts/capture_publication.py",
+      "names": [
+        "capture_publication_fence",
+        "capture_relative_paths",
+        "ensure_capture_intent_directories",
+        "publish_capture_files_and_task",
+        "validate_capture_directory"
+      ],
+      "contract_sha256": "6e0d62ac9ae486d16bd5a4068578171de16f0832e913f96cdd7149f570834305",
+      "integration_tests": [
+        "tests/test_capture_inspection_recognizes_runtime_staging.py"
+      ]
+    },
+    {
+      "provider": "scripts/installed_memory_repair.py",
+      "names": [
+        "repair_installed_vault"
+      ],
+      "contract_sha256": "6ab4497d3ed56413bc24ea5ae9e993acf118980056b046072877a80df4f52a18",
+      "integration_tests": [
+        "tests/test_breadcrumb_recovery.py",
+        "tests/test_breadcrumb_storage.py",
+        "tests/test_capture_inspection_recognizes_runtime_staging.py"
+      ]
+    },
+    {
+      "provider": "scripts/integration_adapter.py",
+      "names": [
+        "normalize_occurrence_event"
+      ],
+      "contract_sha256": "f2b6ecc72a98a62b0cee749889749e03cba1d2174cb214677a8c000eeafe95fb",
+      "integration_tests": [
+        "tests/test_breadcrumb_storage.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/formats/canonical.py",
+      "names": [
+        "canonical_json_bytes",
+        "sha256_bytes"
+      ],
+      "contract_sha256": "2e42a7aefcb66ac2515f6665a03feae34e6f7bad4807787a789ce031f9f3a9c1",
+      "integration_tests": [
+        "tests/test_breadcrumb_recovery.py",
+        "tests/test_breadcrumb_storage.py",
+        "tests/test_capture_inspection_recognizes_runtime_staging.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/generation_catalog_store.py",
+      "names": [
+        "GenerationCatalog"
+      ],
+      "contract_sha256": "b18194ebe04bf988b4474379fcb5243516550d43b745a00eaed1453f7844c983",
+      "integration_tests": [
+        "tests/test_a_blocked_task_has_a_way_back.py",
+        "tests/test_a_build_in_flight_is_not_an_orphan.py",
+        "tests/test_a_capacity_refusal_does_not_corrupt_a_generation.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/model_choice.py",
+      "names": [
+        "using_root"
+      ],
+      "contract_sha256": "d45f2655cb61963e77617d1dfd7d617b134ad77cc770b59b335d0856e5d65019",
+      "integration_tests": [
+        "tests/test_breadcrumb_recovery.py",
+        "tests/test_breadcrumb_storage.py",
+        "tests/test_capture_inspection_recognizes_runtime_staging.py"
+      ]
+    },
+    {
+      "provider": "scripts/markdown_transaction.py",
+      "names": [
+        "MarkdownCoordinator",
+        "initialize_coordinator_v3_candidate"
+      ],
+      "contract_sha256": "c90f28cb4198a1b4e5731bc79a575ed3196c6d31c90e6a45902938a1a2cdabb3",
+      "integration_tests": [
+        "tests/test_breadcrumb_recovery.py",
+        "tests/test_breadcrumb_storage.py",
+        "tests/test_capture_inspection_recognizes_runtime_staging.py"
+      ]
+    },
+    {
+      "provider": "scripts/model_dlp.py",
+      "names": [
+        "require_safe_publication"
+      ],
+      "contract_sha256": "cd9c5ff609eb5d9ed4e6beb41598fc822f87ad3469244c433860100eb7f3d541",
+      "integration_tests": [
+        "tests/test_breadcrumb_recovery.py",
+        "tests/test_breadcrumb_storage.py",
+        "tests/test_capture_inspection_recognizes_runtime_staging.py"
+      ]
+    },
+    {
+      "provider": "scripts/queue_core.py",
+      "names": [
+        "MemoryQueue",
+        "initialize_queue_v3_candidate"
+      ],
+      "contract_sha256": "c97a06080973ae3b314fb5227fa32342387600c7954e4de1e5bc9b7f0a575168",
+      "integration_tests": [
+        "tests/test_breadcrumb_recovery.py",
+        "tests/test_breadcrumb_storage.py"
+      ]
+    },
+    {
+      "provider": "scripts/reliable_memory.py",
+      "names": [
+        "canonical_json_bytes",
+        "publish_runtime_file",
+        "validate_state_root",
+        "write_staged_bytes"
+      ],
+      "contract_sha256": "1437dd5fb9f19a56cc0620ed2a8c75db3fe0c2312a9c29e4d606a549da240dd3",
+      "integration_tests": [
+        "tests/test_breadcrumb_recovery.py",
+        "tests/test_breadcrumb_storage.py",
+        "tests/test_capture_inspection_recognizes_runtime_staging.py"
+      ]
+    },
+    {
+      "provider": "scripts/repository_scope.py",
+      "names": [
+        "sanitized_git_environment"
+      ],
+      "contract_sha256": "fd550ae20761afad50b37fa3a71044a162485b0e4d4b3e2af9b5b22e143c2bec",
+      "integration_tests": [
+        "tests/test_breadcrumb_recovery.py",
+        "tests/test_breadcrumb_storage.py",
+        "tests/test_capture_inspection_recognizes_runtime_staging.py"
+      ]
+    },
+    {
+      "provider": "scripts/secret_redact.py",
+      "names": [
+        "describe_error"
+      ],
+      "contract_sha256": "fb304f29eb5f060ccb0503f24561dd6ee4cfb07e2c36b130c00ad9e1c9000eaf",
+      "integration_tests": [
+        "tests/test_breadcrumb_recovery.py",
+        "tests/test_breadcrumb_storage.py",
+        "tests/test_capture_inspection_recognizes_runtime_staging.py"
+      ]
+    }
+  ]
+}

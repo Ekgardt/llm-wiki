@@ -9,6 +9,8 @@ import json
 import os
 import shlex
 import shutil
+import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -18,8 +20,14 @@ from pathlib import Path
 from typing import Any
 
 from bounded_io import IO_CHUNK_BYTES  # the one read chunk, shared with every bounded reader
-from integration_hook_config import MAX_CONFIG_BYTES  # one bound for the hook configuration
+from integration_hook_config import (
+    MAX_CONFIG_BYTES,  # one bound for the hook configuration
+    plugin_with_embedded_root,
+)
 from lsp_process_tree import ProcessTree
+from self_update import (
+    DEFAULT_EXTRAS,
+)
 
 # Output of `opencode debug config`, read when the installer checks the entry OpenCode sees; a
 # larger output is not parsed and the entry reads `configured_unverified`. Basis unknown: value
@@ -228,7 +236,7 @@ def _cron_environment(root: Path, state_root: Path, uv_path: Path) -> list[str]:
     values = {
         "LLM_WIKI_ROOT": str(root),
         "LLM_WIKI_STATE_ROOT": str(state_root),
-        **dict(sorted(provider_environment().items())),
+        **dict(sorted(provider_environment(root).items())),
         "PATH": scheduled_path(uv_path, CRON_DEFAULT_PATH),
     }
     return [f"{key}={cron_quote(value)}" for key, value in values.items()]
@@ -303,6 +311,10 @@ def _ignored_environment(root: Path, override: str | None) -> str | None:
     return str(chosen)
 
 
+def _extra_arguments(extras: Sequence[str]) -> list[str]:
+    return [argument for extra in extras for argument in ("--extra", extra)]
+
+
 def uv_sync_arguments(root: Path, override: str | None) -> tuple[Path, list[str]]:
     root = Path(root).resolve()
     environment = resolve_uv_project_environment(root, override)
@@ -310,17 +322,55 @@ def uv_sync_arguments(root: Path, override: str | None) -> tuple[Path, list[str]
         raise ValueError(
             f"Selected uv project environment is not a virtual environment: {environment}"
         )
-    arguments = [
-        "--directory",
-        str(root),
-        "sync",
-        "--locked",
-        "--no-default-groups",
-        "--quiet",
-    ]
-    if (environment / "pyvenv.cfg").is_file():
-        arguments.append("--inexact")
-    return environment, arguments
+    arguments = ["--directory", str(root), "sync", "--locked", "--no-default-groups", "--quiet"]
+    return environment, [*arguments, *_selection_arguments(root, environment)]
+
+
+def _selection_arguments(root: Path, environment: Path) -> list[str]:
+    """A new environment gets the defaults; an existing one its whole selection, exactly.
+
+    An exact sync removes what the lock no longer names (2.7 GB of CUDA wheels on
+    the owner's vault), so it must name every extra and group the environment has;
+    only that environment's interpreter can see them. When it cannot answer, the
+    sync stays inexact and removes nothing it cannot account for.
+    See docs/research/2026-09-29-a-sync-removes-what-the-lock-no-longer-names.md.
+    """
+    if not (environment / "pyvenv.cfg").is_file():
+        return _extra_arguments(DEFAULT_EXTRAS)
+    named = _environment_selection(root, environment)
+    if named is None:
+        return [*_extra_arguments(DEFAULT_EXTRAS), "--inexact"]
+    return named
+
+
+# One interpreter start and one read of the installed distributions; measured under
+# a second on this machine (2026-09-29), so a minute only bounds a hung interpreter.
+SELECTION_TIMEOUT_SECONDS = 60
+
+
+def _environment_interpreter(environment: Path) -> Path:
+    windows = environment / "Scripts" / "python.exe"
+    return windows if windows.is_file() else environment / "bin" / "python"
+
+
+def _environment_selection(root: Path, environment: Path) -> list[str] | None:
+    """Inspect the selected environment; parse project choices in the caller."""
+    inventory_script = (
+        "import sys,json;sys.path.insert(0,sys.argv[1]);"
+        "from self_update import installed_distributions;"
+        "print(json.dumps(installed_distributions(),default=sorted))"
+    )
+    command = [str(_environment_interpreter(environment)), "-c", inventory_script, str(root / "scripts")]
+    try:
+        completed = subprocess.run(command, capture_output=True, text=True, timeout=SELECTION_TIMEOUT_SECONDS, check=True)
+        from self_update import sync_selection
+
+        installed = {name: set(requires) for name, requires in json.loads(completed.stdout).items()}
+        return sync_selection(root, installed)["arguments"]
+    except (OSError, subprocess.SubprocessError, ValueError, KeyError, TypeError, ImportError) as error:
+        print(f"installer_config: the environment could not name its extras ({type(error).__name__}); "
+              "the sync keeps what is installed", file=sys.stderr)
+        return None
 
 
 def selected_global_file(config_dir: Path) -> Path:
@@ -643,7 +693,7 @@ def _require_process_bounds(timeout_seconds: float, max_bytes: int) -> None:
         raise ValueError("process bounds must be positive")
 
 
-def _bounded_process_output(
+def bounded_process_output(
     command: Sequence[str],
     *,
     cwd: Path,
@@ -686,7 +736,7 @@ def probe_effective_entry(
     child_environment = os.environ.copy()
     child_environment.update(environment)
     try:
-        completed = _bounded_process_output(
+        completed = bounded_process_output(
             command,
             cwd=cwd,
             environment=child_environment,
@@ -711,29 +761,6 @@ def _probe_document(completed: tuple[int, bytes] | None) -> dict[str, Any] | Non
     if not isinstance(document, dict):
         return None
     return document
-
-
-EMBEDDED_ROOT_MARKER = "// llm-wiki:embedded-root"
-
-
-def plugin_with_embedded_root(source_text: str, vault_root: Path) -> str:
-    """Bake the vault root into the plugin the installer publishes.
-
-    OpenCode started from a desktop launcher inherits no shell environment, so
-    a plugin that only reads `LLM_WIKI_ROOT` captured nothing and said so only
-    on a console nobody reads.
-    """
-    lines = source_text.splitlines(keepends=True)
-    marked = [
-        index
-        for index, line in enumerate(lines)
-        if line.rstrip("\r\n").endswith(EMBEDDED_ROOT_MARKER)
-    ]
-    if len(marked) != 1:
-        raise ValueError("OpenCode plugin source has no single embedded-root marker")
-    value = json.dumps(str(vault_root))
-    lines[marked[0]] = f"const _EMBEDDED_ROOT = {value}; {EMBEDDED_ROOT_MARKER}\n"
-    return "".join(lines)
 
 
 def _copy_plugin(source: Path, destination: Path, vault_root: Path) -> None:

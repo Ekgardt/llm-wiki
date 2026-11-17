@@ -1,0 +1,10 @@
+# Tests of `scripts/lsp_process_tree.py`
+
+- `tests/test_lsp_windows_tree_helpers_through_seams.py`
+
+`scripts/lsp_process_tree.py` itself belongs to another module: this packet carries its whole source, and these tests exercise it.
+
+The owned files and the complete maintenance context are listed in the `-context.json`
+manifest next to this guide.
+
+Run `uv run pytest tests/test_lsp_windows_tree_helpers_through_seams.py -q`.

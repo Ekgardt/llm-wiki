@@ -4,10 +4,8 @@ See `docs/research/2026-09-10-the-weights-arrive-with-the-install.md`.
 """
 from __future__ import annotations
 
-import hashlib
 import sys
 from pathlib import Path
-from types import ModuleType
 
 import pytest
 
@@ -17,51 +15,7 @@ if str(SCRIPTS) not in sys.path:
 
 import install_models  # noqa: E402
 
-
-class _FakeHub(ModuleType):
-    """A Hub whose cache and downloads are directories under tmp_path."""
-
-    def __init__(self, root: Path, contents: dict[str, bytes]) -> None:
-        super().__init__("huggingface_hub")
-        self.root = root
-        self.contents = contents
-        self.downloads: list[tuple[str, str, list[str]]] = []
-
-    def _snapshot(self, repo_id: str, revision: str) -> Path:
-        return self.root / repo_id.replace("/", "--") / "snapshots" / revision
-
-    def try_to_load_from_cache(self, repo_id, filename, *, revision):
-        path = self._snapshot(repo_id, revision) / filename
-        if path.is_file():
-            return str(path)
-        return None
-
-    def snapshot_download(self, repo_id, *, revision, allow_patterns):
-        self.downloads.append((repo_id, revision, list(allow_patterns)))
-        snapshot = self._snapshot(repo_id, revision)
-        for name in allow_patterns:
-            (snapshot / name).parent.mkdir(parents=True, exist_ok=True)
-            (snapshot / name).write_bytes(self.contents[repo_id] if name == WEIGHTS else b"companion")
-        return str(snapshot)
-
-
-WEIGHTS = "onnx/model.onnx"
-COMPANION = "tokenizer.json"
-
-
-def _pinned_to(contents: dict[str, bytes]) -> tuple[install_models.PinnedModel, ...]:
-    return tuple(
-        install_models.PinnedModel(
-            repo_id,
-            "f" * 40,
-            WEIGHTS,
-            hashlib.sha256(blob).hexdigest(),
-            len(blob),
-            (WEIGHTS, COMPANION),
-            ("model.safetensors",),
-        )
-        for repo_id, blob in contents.items()
-    )
+from tests.install_models_helpers import COMPANION, WEIGHTS, _FakeHub, _pinned_to  # noqa: E402
 
 
 @pytest.fixture
@@ -140,7 +94,7 @@ def test_the_pins_name_the_two_models_the_read_path_loads():
 
 
 def test_doctor_names_the_missing_weights_and_the_command(monkeypatch):
-    import doctor
+    from llm_wiki import doctor_capture
 
     hub = object()
     monkeypatch.setattr(install_models, "hub_library", lambda: hub)
@@ -148,7 +102,7 @@ def test_doctor_names_the_missing_weights_and_the_command(monkeypatch):
         install_models, "missing_models", lambda _hub: [install_models.pinned_models()[1]]
     )
 
-    finding = doctor._models_check()
+    finding = doctor_capture.models_check()
 
     assert finding["status"] == "degraded"
     assert "BAAI/bge-reranker-v2-m3@953dc6f6f85a" in finding["message"]
@@ -157,17 +111,17 @@ def test_doctor_names_the_missing_weights_and_the_command(monkeypatch):
 
 
 def test_doctor_expects_no_weights_without_the_semantic_extra(monkeypatch):
-    import doctor
+    from llm_wiki import doctor_capture
 
     monkeypatch.setattr(install_models, "hub_library", lambda: None)
 
-    assert doctor._models_check()["status"] == "ok"
+    assert doctor_capture.models_check()["status"] == "ok"
 
 
 def test_the_nightly_fetches_missing_weights_after_its_index_work():
-    import scheduled_nightly
+    import nightly_budget
 
-    steps = {step.label: step for step in scheduled_nightly._post_compile_steps()}
+    steps = {step.label: step for step in nightly_budget.post_compile_steps()}
     labels = list(steps)
 
     assert (labels.index("models") > labels.index("lint"), steps["models"].command[-1].endswith("install_models.py")) == (

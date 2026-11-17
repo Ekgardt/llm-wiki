@@ -1,7 +1,7 @@
 # LLM Wiki
 
 [![Tests](https://github.com/Ekgardt/llm-wiki/actions/workflows/tests.yml/badge.svg)](https://github.com/Ekgardt/llm-wiki/actions/workflows/tests.yml)
-[![Python](https://img.shields.io/badge/python-3.10%2B-blue.svg)](https://www.python.org)
+[![Python](https://img.shields.io/badge/python-3.14-blue.svg)](https://www.python.org)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Version](https://img.shields.io/badge/version-5.0.0-blue.svg)](CHANGELOG.md)
 
@@ -54,7 +54,7 @@ A day at work, as the system sees it:
 
 ### Prerequisites
 
-- Python 3.10+ and git
+- Python 3.14 and git. The installer selects this Python series explicitly; `uv python install 3.14` provisions it.
 - [uv](https://docs.astral.sh/uv/) 0.12.3 exactly — both installers refuse any other version
 - An agent you already use: Claude Code, Codex or OpenCode
 - Node 22 only if you want precise TypeScript or Python navigation (see below)
@@ -106,10 +106,12 @@ what is healthy, degraded or broken, and what to run.
 ### Dependency profiles
 
 MCP is part of the production baseline; `mcp-server` remains a compatibility alias.
-The installer does this for you; by hand:
+The installer brings every component (the `full` extra: vector search, reranker,
+code index) with Pyright for Python code; on Linux torch comes from PyTorch's CPU
+build. By hand:
 
 ```bash
-uv sync --locked --no-default-groups
+uv sync --locked --no-default-groups --inexact --extra full
 uv run --locked --no-sync python scripts/install_smoke.py --deadline-seconds 120
 uv run --locked --no-sync python scripts/repair_installed_memory.py --check --json
 ```
@@ -119,11 +121,26 @@ runs it with `--apply --adopt-ownership-v3 --confirm-all-agents-stopped` to move
 runtime to its current database format; on a vault that already holds work it asks you
 to confirm that no agent is running first. It never deletes knowledge or `run/`.
 
-Optional extras add to what is installed and keep what you already chose:
+Model selection is stored once in `llm-wiki.toml`, shared by manual calls, hooks,
+MCP and scheduled maintenance. The installer uses the same chooser. Catalog entries
+are candidates; saving a model requires one successful short subscription request.
 
 ```bash
-uv sync --locked --no-default-groups --inexact --extra hybrid      # vectors + reranker
-uv sync --locked --no-default-groups --inexact --extra code-graph  # code index
+uv run python scripts/choose_model.py show
+uv run python scripts/choose_model.py list --provider codex
+uv run python scripts/choose_model.py set codex/gpt-6.1-sol --reasoning medium
+```
+
+Use `select` for the interactive menu. A failed check leaves the previous choice
+intact. The saved choice overrides old model/provider environment copies; endpoint
+and DLP configuration remain separate. During this format upgrade, stop old background jobs first. Standard MCP clients
+reload their worker automatically on the next idle request; unsupervised clients
+need a restart.
+
+Code navigation for another language is one command each, when you need it:
+
+```bash
+uv run --locked --no-sync python scripts/install_language_server.py --profile typescript     # or gopls, rust-analyzer
 ```
 
 Contributors install the development group and run the full regression suite:

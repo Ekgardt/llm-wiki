@@ -22,11 +22,7 @@ from datetime import datetime
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from memory_state import REPORTS_DIR, ROOT  # noqa: E402
-
-PROJECTS_DIR = ROOT / "knowledge" / "projects"
-KNOWLEDGE = ROOT / "knowledge" / "notes"
-DAILY_DIR = ROOT / "knowledge" / "daily"
+from llm_wiki import runtime_roots  # noqa: E402
 
 FRONTMATTER_RE = re.compile(r"^---\s*\n(.*?)\n---\s*\n?", re.DOTALL)
 TIMESTAMP_RE = re.compile(r"^timestamp:\s*(.+?)\s*$", re.MULTILINE)
@@ -72,7 +68,7 @@ def _read_open_threads(slug: str) -> list[str]:
     """Extract open threads from project state.md."""
     # Validate by containment rather than ASCII slug format —
     # session_start_project_state.py may generate Unicode slugs.
-    state_path = (PROJECTS_DIR / slug / "state.md").resolve()
+    state_path = (runtime_roots.projects_dir() / slug / "state.md").resolve()
     content = _contained_state_text(state_path)
     if content is None:
         return []
@@ -82,7 +78,7 @@ def _read_open_threads(slug: str) -> list[str]:
 def _contained_state_text(state_path: Path) -> str | None:
     """The state file's text when it stays inside the projects directory and can be read."""
     try:
-        state_path.relative_to(PROJECTS_DIR.resolve())
+        state_path.relative_to(runtime_roots.projects_dir().resolve())
     except ValueError:
         return None
     if not state_path.exists():
@@ -106,7 +102,7 @@ def _thread_line(line: str) -> bool:
     return line.startswith("- ") and len(line) > 3
 
 
-def _find_last_decision(slug: str | None = None) -> dict | None:
+def find_last_decision(slug: str | None = None) -> dict | None:
     """Find the most recent decision page (optionally filtered by project).
 
     The compiler writes decisions FLAT under knowledge/notes/ (not in a
@@ -117,7 +113,7 @@ def _find_last_decision(slug: str | None = None) -> dict | None:
     callers (e.g. L1 tier lookup) can key caches by source hash per the
     Task 15 cache contract.
     """
-    if not KNOWLEDGE.exists():
+    if not runtime_roots.notes_dir().exists():
         return None
     candidates = _decision_entries(slug)
     if not candidates:
@@ -128,7 +124,7 @@ def _find_last_decision(slug: str | None = None) -> dict | None:
 
 def _decision_entries(slug: str | None) -> list[dict]:
     entries = []
-    for md in KNOWLEDGE.rglob("*.md"):
+    for md in runtime_roots.notes_dir().rglob("*.md"):
         entry = _decision_entry(md, slug)
         if entry is not None:
             entries.append(entry)
@@ -172,9 +168,9 @@ def _decision_record(md: Path, content: str, timestamp: str) -> dict:
         "title": _h1_title(content, md.stem),
         "summary": _summary(content, 100),
         "timestamp": timestamp[:10],
-        "path": md.relative_to(ROOT).as_posix(),
+        "path": md.relative_to(runtime_roots.vault_root()).as_posix(),
         "slug": md.stem,
-        "logical_path": md.relative_to(KNOWLEDGE).as_posix(),
+        "logical_path": md.relative_to(runtime_roots.notes_dir()).as_posix(),
         "source_sha256": source_sha256,
     }
 
@@ -186,7 +182,7 @@ def _source_digest(md: Path) -> str | None:
         return None
 
 
-def _find_contradictions() -> list[str]:
+def find_contradictions() -> list[str]:
     """Check lint report for contradiction findings."""
     report = _latest_lint_report()
     if report is None:
@@ -197,9 +193,9 @@ def _find_contradictions() -> list[str]:
 
 
 def _latest_lint_report() -> str | None:
-    if not REPORTS_DIR.exists():
+    if not runtime_roots.reports_dir().exists():
         return None
-    reports = sorted(REPORTS_DIR.glob("lint-*.md"), reverse=True)
+    reports = sorted(runtime_roots.reports_dir().glob("lint-*.md"), reverse=True)
     if not reports:
         return None
     return _read_text_or_none(reports[0])
@@ -228,7 +224,7 @@ _STOP_WORDS = frozenset({"the", "a", "an", "for", "of", "to", "in", "and", "with
 
 def _find_cross_project_insights(slug: str) -> list[str]:
     """Find knowledge pages in OTHER projects that share concepts with this project."""
-    if not KNOWLEDGE.exists():
+    if not runtime_roots.notes_dir().exists():
         return []
     project_titles, other_pages = _project_pages(slug)
     insights = [_shared_title_insight(other, project_titles) for other in other_pages[:20]]  # limit scan
@@ -239,7 +235,7 @@ def _project_pages(slug: str) -> tuple[set[str], list[dict]]:
     """(lower-cased H1 titles of this project's pages, title and project of other projects' pages)."""
     project_titles: set[str] = set()
     other_pages: list[dict] = []
-    for md in sorted(KNOWLEDGE.rglob("*.md")):
+    for md in sorted(runtime_roots.notes_dir().rglob("*.md")):
         content = _read_text_or_none(md)
         if content is not None:
             _classify_page(md, content, slug, project_titles, other_pages)
@@ -266,12 +262,12 @@ def _shared_title_insight(other: dict, project_titles: set[str]) -> str | None:
     return None
 
 
-def _find_stale_pages() -> int:
+def find_stale_pages() -> int:
     """Count pages older than 90 days without supersede."""
     cutoff = (datetime.now().timestamp()) - (90 * 86400)
-    if not KNOWLEDGE.exists():
+    if not runtime_roots.notes_dir().exists():
         return 0
-    return sum(1 for md in KNOWLEDGE.rglob("*.md") if _stale(md, cutoff))
+    return sum(1 for md in runtime_roots.notes_dir().rglob("*.md") if _stale(md, cutoff))
 
 
 def _stale(md: Path, cutoff: float) -> bool:
@@ -296,7 +292,7 @@ def build_advisory(slug: str | None = None, max_chars: int = 800, use_llm: bool 
         use_llm: If True and LLM available, generate a richer insight paragraph.
     """
     # Always build the rule-based advisory first (fast, reliable)
-    rule_based = _build_rule_based_advisory(slug, max_chars)
+    rule_based = build_rule_based_advisory(slug, max_chars)
     if not use_llm:
         return rule_based
     return _llm_advisory(slug, rule_based, max_chars)
@@ -306,15 +302,15 @@ def _llm_advisory(slug: str | None, rule_based: str, max_chars: int) -> str:
     """The rule-based advisory with an LLM insight paragraph on top, when one comes back."""
     try:
         sys.path.insert(0, str(Path(__file__).resolve().parent))
-        from llm_client import call_llm
+        import llm_client
     except ImportError:
         return rule_based
     if not rule_based:
         return ""
-    return _with_insight(_llm_insight(call_llm, slug, rule_based), rule_based, max_chars)
+    return _with_insight(_llm_insight(llm_client.call_llm_result, slug, rule_based), rule_based, max_chars)
 
 
-def _llm_insight(call_llm, slug: str | None, rule_based: str) -> str | None:
+def _llm_insight(call_llm_result, slug: str | None, rule_based: str) -> str | None:
     # Ask LLM to synthesize the advisory data into actionable insight
     prompt = f"""You are an advisory engine for a solo developer's memory vault.
 Below is structured data about the current state of project '{slug or 'unknown'}'.
@@ -328,13 +324,14 @@ thread, call it out.
 
 Respond with only the insight paragraph (2-3 sentences). No preamble."""
     try:
-        return call_llm(
+        result = call_llm_result(
             prompt,
             system_prompt="You are a concise technical advisor. 2-3 sentences max. No filler.",
             max_tokens=200,
         )
     except Exception:  # noqa: BLE001
         return None
+    return result.text if result is not None else None
 
 
 def _with_insight(llm_insight: str | None, rule_based: str, max_chars: int) -> str:
@@ -353,7 +350,7 @@ def _clipped(text: str, max_chars: int) -> str:
 def build_advisory_refresh() -> str:
     """Return a roughly 50-token mid-session vault health refresh."""
     pages = _active_page_count()
-    stale = _find_stale_pages()
+    stale = find_stale_pages()
     return (
         f"Memory refresh: {pages} pages indexed; {stale} stale. "
         "Use durable pages first and verify stale claims before relying on them."
@@ -361,9 +358,9 @@ def build_advisory_refresh() -> str:
 
 
 def _active_page_count() -> int:
-    if not KNOWLEDGE.exists():
+    if not runtime_roots.notes_dir().exists():
         return 0
-    return sum(1 for path in KNOWLEDGE.rglob("*.md") if _active_page(path))
+    return sum(1 for path in runtime_roots.notes_dir().rglob("*.md") if _active_page(path))
 
 
 def _active_page(path: Path) -> bool:
@@ -371,7 +368,7 @@ def _active_page(path: Path) -> bool:
     return content is not None and _fm_field(content, STATUS_RE) != "superseded"
 
 
-def _build_rule_based_advisory(slug: str | None, max_chars: int) -> str:
+def build_rule_based_advisory(slug: str | None, max_chars: int) -> str:
     """Build the fast rule-based advisory (no LLM)."""
     parts = [
         *_open_threads_section(slug),  # 1. Open threads (most actionable)
@@ -399,7 +396,7 @@ def _open_threads_section(slug: str | None) -> list[str]:
 
 
 def _last_decision_section(slug: str | None) -> list[str]:
-    last = _find_last_decision(slug)
+    last = find_last_decision(slug)
     if not last:
         return []
     return [f"**Last decision** ({last['timestamp']}):", _decision_line(last), ""]
@@ -428,7 +425,7 @@ def _decision_line(last: dict) -> str:
 
 
 def _lint_section() -> list[str]:
-    contradictions = _find_contradictions()
+    contradictions = find_contradictions()
     return _bullet_section(f"**Lint alerts ({len(contradictions)}):**", contradictions)
 
 
@@ -439,7 +436,7 @@ def _insights_section(slug: str | None) -> list[str]:
 
 
 def _stale_section() -> list[str]:
-    stale = _find_stale_pages()
+    stale = find_stale_pages()
     if stale > 5:
         return [f"**Vault health:** {stale} pages older than 90 days — consider archiving."]
     return []

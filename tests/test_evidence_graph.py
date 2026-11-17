@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import hashlib
 import json
 import sqlite3
 import sys
@@ -13,9 +12,7 @@ from pathlib import Path
 
 import pytest
 
-from tests.code_kernel_helpers import (
-    basic_graph_records,
-)
+from tests.evidence_graph_records import basic_graph_records, create_graph, graph_records, sha
 
 V3_EXTENSION_NAMES = frozenset(
     {
@@ -58,136 +55,6 @@ if str(SCRIPTS) not in sys.path:
     sys.path.insert(0, str(SCRIPTS))
 
 
-def _sha(data: bytes) -> str:
-    return hashlib.sha256(data).hexdigest()
-
-
-def _records(source: bytes = b"def caller():\n    callee()\n# [[Decision]]\n"):
-    decision_start = source.index(b"[[Decision]]")
-    return {
-        "sources": [
-            {
-                "source_id": "src-code",
-                "relative_path": "src/app.py",
-                "sha256": _sha(source),
-                "size": len(source),
-                "media_type": "text/x-python",
-                "language": "python",
-                "git_oid": None,
-            }
-        ],
-        "source_bytes": {"src-code": source},
-        "nodes": [
-            {
-                "node_id": "caller",
-                "kind": "function",
-                "identity_scheme": "python-qualified-name/v1",
-                "identity_key": "src.app:caller",
-                "metadata": {"name": "caller"},
-            },
-            {
-                "node_id": "callee",
-                "kind": "function",
-                "identity_scheme": "python-qualified-name/v1",
-                "identity_key": "src.app:callee",
-                "metadata": {"name": "callee"},
-            },
-            {
-                "node_id": "decision",
-                "kind": "decision",
-                "identity_scheme": "wiki-slug/v1",
-                "identity_key": "decision",
-                "metadata": {},
-            },
-        ],
-        "occurrences": [
-            {
-                "occurrence_id": "occ-caller",
-                "node_id": "caller",
-                "source_id": "src-code",
-                "role": "definition",
-                "byte_start": 0,
-                "byte_end": 13,
-                "line_start": 1,
-                "line_end": 1,
-            }
-        ],
-        "assertions": [
-            {
-                "assertion_id": "call",
-                "source_node_id": "caller",
-                "edge_type": "CALLS",
-                "target_node_id": "callee",
-                "literal": None,
-                "confidence": "high",
-                "authority": "ai-derived",
-                "resolution": "resolved",
-                "extractor": "python/v1",
-            },
-            {
-                "assertion_id": "documents",
-                "source_node_id": "decision",
-                "edge_type": "DOCUMENTS",
-                "target_node_id": "caller",
-                "literal": None,
-                "confidence": "high",
-                "authority": "user",
-                "resolution": "resolved",
-                "extractor": "wiki/v1",
-            },
-        ],
-        "observations": [
-            {
-                "observation_id": "dynamic-call",
-                "source_node_id": "caller",
-                "edge_type": "CALLS",
-                "target_text": "runtime_target",
-                "reason": "dynamic_dispatch",
-                "extractor": "python/v1",
-            }
-        ],
-        "evidence": [
-            {
-                "evidence_id": "ev-call",
-                "assertion_id": "call",
-                "observation_id": None,
-                "source_id": "src-code",
-                "byte_start": 18,
-                "byte_end": 26,
-                "span_sha256": _sha(source[18:26]),
-            },
-            {
-                "evidence_id": "ev-documents",
-                "assertion_id": "documents",
-                "observation_id": None,
-                "source_id": "src-code",
-                "byte_start": decision_start,
-                "byte_end": decision_start + len(b"[[Decision]]"),
-                "span_sha256": _sha(b"[[Decision]]"),
-            },
-        ],
-        "dependencies": [
-            {
-                "dependency_id": "dep-code",
-                "dependent_node_id": "decision",
-                "dependency_node_id": "caller",
-                "kind": "documents",
-                "source_id": "src-code",
-            }
-        ],
-    }
-
-
-def _create(tmp_path: Path, **overrides):
-    import evidence_graph
-
-    records = _records()
-    records.update(overrides)
-    path = tmp_path / "evidence.sqlite3"
-    evidence_graph.create_generation_database(path, **records)
-    return evidence_graph.EvidenceGraph(path, state_root=tmp_path)
-
-
 def test_omitted_database_schema_remains_v2_for_legacy_callers(tmp_path: Path) -> None:
     from evidence_graph import GraphSchema, create_generation_database
 
@@ -201,7 +68,7 @@ def test_omitted_database_schema_remains_v2_for_legacy_callers(tmp_path: Path) -
 def test_database_construction_cancellation_stops_lazy_records_without_publish(tmp_path):
     import evidence_graph
 
-    records = _records()
+    records = graph_records()
     checks = 0
 
     def cancelled():
@@ -218,7 +85,7 @@ def test_database_construction_cancellation_stops_lazy_records_without_publish(t
 
 
 def test_bounded_node_and_edge_lookup_supports_store_facades(tmp_path):
-    graph = _create(tmp_path)
+    graph = create_graph(tmp_path)
 
     assert [item["node_id"] for item in graph.find_nodes(kinds=("function",), name="caller")] == [
         "caller"
@@ -231,7 +98,7 @@ def test_bounded_node_and_edge_lookup_supports_store_facades(tmp_path):
 def test_manifest_schema_is_closed_and_bounded():
     from reliable_memory import validate_schema
 
-    schema = json.loads((SCRIPTS / "schemas/evidence-graph-manifest-v1.json").read_text())
+    schema = json.loads((SCRIPTS / "schemas/evidence-graph-manifest-v1.json").read_text(encoding='utf-8'))
     valid = {
         "generation_id": "gen-1",
         "schema_version": "corpus-generation/v1",
@@ -388,11 +255,11 @@ def test_manifest_schema_rejects_invalid_repository_scope(mutate):
 def test_graph_source_rows_use_shared_corpus_manifest_contract():
     import corpus_snapshot
 
-    sources = _records()["sources"]
+    sources = graph_records()["sources"]
     second = {
         "source_id": "src-doc",
         "relative_path": "knowledge/notes/decision.md",
-        "sha256": _sha(b"decision"),
+        "sha256": sha(b"decision"),
         "size": len(b"decision"),
         "media_type": "text/markdown",
         "language": "markdown",
@@ -415,7 +282,7 @@ def test_graph_source_rows_use_shared_corpus_manifest_contract():
 
 
 def test_generation_database_has_canonical_tables_indexes_and_pragmas(tmp_path):
-    graph = _create(tmp_path)
+    graph = create_graph(tmp_path)
     graph.close()
 
     with closing(sqlite3.connect(tmp_path / "evidence.sqlite3")) as database:
@@ -488,7 +355,7 @@ def _plan_mentions(steps: list[str], text: str) -> bool:
 
 
 def test_logical_nodes_are_separate_from_occurrences_and_metadata_is_canonical(tmp_path):
-    graph = _create(tmp_path)
+    graph = create_graph(tmp_path)
 
     node = graph.node("caller")
     occurrences = graph.occurrences("caller")
@@ -501,7 +368,7 @@ def test_logical_nodes_are_separate_from_occurrences_and_metadata_is_canonical(t
             "node_id": "caller",
             "source_id": "src-code",
             "relative_path": "src/app.py",
-            "source_sha256": _records()["sources"][0]["sha256"],
+            "source_sha256": graph_records()["sources"][0]["sha256"],
             "role": "definition",
             "byte_start": 0,
             "byte_end": 13,
@@ -540,7 +407,7 @@ _RECORD_DAMAGES = {
 def test_create_fails_closed_on_invalid_sources_evidence_and_records(tmp_path, damage):
     import evidence_graph
 
-    records = _records()
+    records = graph_records()
     _RECORD_DAMAGES.get(damage, _add_unknown_field)(records)
 
     with pytest.raises((TypeError, ValueError), match="hash|range|unknown|closed"):
@@ -551,36 +418,36 @@ def test_create_fails_closed_on_invalid_sources_evidence_and_records(tmp_path, d
 def test_every_resolved_assertion_requires_nonempty_half_open_evidence(tmp_path):
     import evidence_graph
 
-    records = _records()
+    records = graph_records()
     records["evidence"] = records["evidence"][:1]
     with pytest.raises(ValueError, match="resolved assertion.*evidence"):
         evidence_graph.create_generation_database(tmp_path / "missing.sqlite3", **records)
 
-    graph = _create(tmp_path)
+    graph = create_graph(tmp_path)
     graph.close()
     with closing(sqlite3.connect(tmp_path / "evidence.sqlite3")) as database:
         database.row_factory = sqlite3.Row
         database.execute("DELETE FROM evidence WHERE assertion_id='documents'")
         with pytest.raises(ValueError, match="integrity"):
-            evidence_graph._validate_connection(database)
+            evidence_graph.validate_connection(database)
 
-    records = _records()
+    records = graph_records()
     records["evidence"][0].update(
-        byte_end=records["evidence"][0]["byte_start"], span_sha256=_sha(b"")
+        byte_end=records["evidence"][0]["byte_start"], span_sha256=sha(b"")
     )
     with pytest.raises(ValueError, match="non-empty|range"):
         evidence_graph.create_generation_database(tmp_path / "empty.sqlite3", **records)
 
-    records = _records()
+    records = graph_records()
     records["evidence"][0]["byte_end"] += 1
-    records["evidence"][0]["span_sha256"] = _sha(b"callee()\n")
+    records["evidence"][0]["span_sha256"] = sha(b"callee()\n")
     evidence_graph.create_generation_database(tmp_path / "half-open.sqlite3", **records)
 
 
 def test_resolved_literal_assertion_is_valid(tmp_path):
     import evidence_graph
 
-    records = _records()
+    records = graph_records()
     records["assertions"].append(
         {
             "assertion_id": "literal",
@@ -602,7 +469,7 @@ def test_resolved_literal_assertion_is_valid(tmp_path):
             "source_id": "src-code",
             "byte_start": 0,
             "byte_end": 3,
-            "span_sha256": _sha(records["source_bytes"]["src-code"][:3]),
+            "span_sha256": sha(records["source_bytes"]["src-code"][:3]),
         }
     )
 
@@ -614,7 +481,7 @@ def test_resolved_literal_assertion_is_valid(tmp_path):
 def test_resolved_node_assertion_requires_a_concrete_target(tmp_path):
     import evidence_graph
 
-    records = _records()
+    records = graph_records()
     records["assertions"][0].update(target_node_id=None, literal=None)
 
     with pytest.raises(ValueError, match="target node or literal"):
@@ -625,7 +492,7 @@ def test_unresolved_or_ambiguous_assertions_use_observations_instead(tmp_path):
     import evidence_graph
 
     for resolution in ("unresolved", "ambiguous"):
-        records = _records()
+        records = graph_records()
         records["assertions"][0].update(
             resolution=resolution,
             target_node_id=None,
@@ -647,7 +514,7 @@ def test_unresolved_or_ambiguous_assertions_use_observations_instead(tmp_path):
 def test_occurrence_lines_must_exactly_match_nonempty_source_byte_span(tmp_path, occurrence):
     import evidence_graph
 
-    records = _records()
+    records = graph_records()
     records["occurrences"][0].update(occurrence)
 
     with pytest.raises(ValueError, match="occurrence.*line|non-empty|range"):
@@ -657,7 +524,7 @@ def test_occurrence_lines_must_exactly_match_nonempty_source_byte_span(tmp_path,
 def test_multiline_occurrence_uses_exact_half_open_byte_line_mapping(tmp_path):
     import evidence_graph
 
-    records = _records()
+    records = graph_records()
     records["occurrences"][0].update(
         byte_start=4,
         byte_end=20,
@@ -667,7 +534,7 @@ def test_multiline_occurrence_uses_exact_half_open_byte_line_mapping(tmp_path):
 
     evidence_graph.create_generation_database(tmp_path / "multiline.sqlite3", **records)
 
-    records = _records()
+    records = graph_records()
     records["occurrences"][0].update(byte_end=14, line_start=1, line_end=2)
     evidence_graph.create_generation_database(tmp_path / "newline-end.sqlite3", **records)
 
@@ -675,13 +542,13 @@ def test_multiline_occurrence_uses_exact_half_open_byte_line_mapping(tmp_path):
 def test_evidence_source_binding_is_verified(tmp_path):
     import evidence_graph
 
-    records = _records()
+    records = graph_records()
     other = b"XXXXXXXX"
     records["sources"].append(
         {
             "source_id": "other",
             "relative_path": "other.py",
-            "sha256": _sha(other),
+            "sha256": sha(other),
             "size": len(other),
             "media_type": "text/x-python",
             "language": "python",
@@ -701,7 +568,7 @@ def test_generation_publication_is_exclusive_under_concurrent_destination_race(t
 
     def publish():
         try:
-            evidence_graph.create_generation_database(destination, **_records())
+            evidence_graph.create_generation_database(destination, **graph_records())
         except FileExistsError:
             return "lost"
         return "won"
@@ -716,7 +583,7 @@ def test_generation_publication_is_exclusive_under_concurrent_destination_race(t
 
 
 def test_unresolved_observations_use_controlled_reasons_without_fake_nodes(tmp_path):
-    graph = _create(tmp_path)
+    graph = create_graph(tmp_path)
 
     assert graph.unresolved() == [
         {
@@ -730,7 +597,7 @@ def test_unresolved_observations_use_controlled_reasons_without_fake_nodes(tmp_p
     ]
     graph.close()
 
-    records = _records()
+    records = graph_records()
     records["observations"][0]["reason"] = "made_up"
     with pytest.raises(ValueError, match="reason"):
         import evidence_graph
@@ -743,7 +610,7 @@ def _ids(rows) -> list[str]:
 
 
 def test_bounded_queries_cover_both_directions_paths_dependencies_and_evidence(tmp_path):
-    graph = _create(tmp_path)
+    graph = create_graph(tmp_path)
 
     assert _ids(graph.neighbors("caller", direction="out")) == ["callee"]
     assert _ids(graph.neighbors("callee", direction="in")) == ["caller"]
@@ -753,14 +620,14 @@ def test_bounded_queries_cover_both_directions_paths_dependencies_and_evidence(t
     assert _ids(graph.dependencies("decision")) == ["caller"]
     assert _ids(graph.neighbors("caller", direction="in", edge_types=("DOCUMENTS",))) == ["decision"]
     assert _ids(graph.neighbors("decision", direction="out", edge_types=("DOCUMENTS",))) == ["caller"]
-    assert graph.evidence(assertion_id="call")[0]["span_sha256"] == _sha(b"callee()")
+    assert graph.evidence(assertion_id="call")[0]["span_sha256"] == sha(b"callee()")
     graph.close()
 
 
 def test_evidence_spans_return_hash_bindings_without_selecting_source_content(
     tmp_path, monkeypatch
 ):
-    graph = _create(tmp_path)
+    graph = create_graph(tmp_path)
     statements = []
     execute = graph._execute
 
@@ -780,9 +647,9 @@ def test_evidence_spans_return_hash_bindings_without_selecting_source_content(
             "source_id": "src-code",
             "byte_start": 18,
             "byte_end": 26,
-            "span_sha256": _sha(b"callee()"),
+            "span_sha256": sha(b"callee()"),
             "relative_path": "src/app.py",
-            "source_sha256": _records()["sources"][0]["sha256"],
+            "source_sha256": graph_records()["sources"][0]["sha256"],
         }
     ]
     assert statements
@@ -791,7 +658,7 @@ def test_evidence_spans_return_hash_bindings_without_selecting_source_content(
 
 
 def test_dependencies_walk_transitively_with_a_depth_bound(tmp_path):
-    records = _records()
+    records = graph_records()
     records["nodes"].append(
         {
             "node_id": "package",
@@ -810,7 +677,7 @@ def test_dependencies_walk_transitively_with_a_depth_bound(tmp_path):
             "source_id": "src-code",
         }
     )
-    graph = _create(tmp_path, **records)
+    graph = create_graph(tmp_path, **records)
 
     assert [row["node_id"] for row in graph.dependencies("decision", max_depth=1)] == ["caller"]
     assert [row["node_id"] for row in graph.dependencies("decision", max_depth=2)] == [
@@ -821,7 +688,7 @@ def test_dependencies_walk_transitively_with_a_depth_bound(tmp_path):
 
 
 def test_query_limits_depth_rows_deadlines_and_closed_enums(tmp_path):
-    graph = _create(tmp_path)
+    graph = create_graph(tmp_path)
 
     with pytest.raises(ValueError, match="direction"):
         graph.neighbors("caller", direction="sideways")
@@ -839,7 +706,7 @@ def test_query_limits_depth_rows_deadlines_and_closed_enums(tmp_path):
 def test_recursive_traversal_is_deterministic_delimiter_safe_and_work_bounded(tmp_path):
     import evidence_graph
 
-    records = _records()
+    records = graph_records()
     records["nodes"].extend(
         {
             "node_id": identifier,
@@ -880,10 +747,10 @@ def test_recursive_traversal_is_deterministic_delimiter_safe_and_work_bounded(tm
                 "source_id": "src-code",
                 "byte_start": 18,
                 "byte_end": 26,
-                "span_sha256": _sha(b"callee()"),
+                "span_sha256": sha(b"callee()"),
             }
         )
-    graph = _create(tmp_path, **records)
+    graph = create_graph(tmp_path, **records)
 
     first = graph.neighbors("caller", max_depth=3, max_rows=10, max_work=20)
     second = graph.neighbors("caller", max_depth=3, max_rows=10, max_work=20)
@@ -893,14 +760,14 @@ def test_recursive_traversal_is_deterministic_delimiter_safe_and_work_bounded(tm
         graph.neighbors("caller", max_depth=3, max_rows=10, max_work=2)
     graph.close()
 
-    bad = _records()
+    bad = graph_records()
     bad["nodes"][0]["node_id"] = "caller,alias"
     with pytest.raises(ValueError, match="node_id"):
         evidence_graph.create_generation_database(tmp_path / "unsafe-id.sqlite3", **bad)
 
 
 def test_database_is_opened_query_only_and_path_must_remain_in_state_root(tmp_path):
-    graph = _create(tmp_path)
+    graph = create_graph(tmp_path)
     assert graph._database.execute("PRAGMA query_only").fetchone()[0] == 1
     with pytest.raises(sqlite3.OperationalError):
         graph._database.execute("DELETE FROM node")
@@ -916,10 +783,10 @@ def test_the_closed_format_pass_is_decided_once_per_exact_artifact(monkeypatch, 
     import evidence_graph
 
     calls: list[str] = []
-    monkeypatch.setattr(evidence_graph, "_FORMAT_VALIDATED", set())
+    monkeypatch.setattr(evidence_graph, "FORMAT_VALIDATED", set())
     monkeypatch.setattr(
         evidence_graph,
-        "_validate_connection",
+        "validate_connection",
         lambda database, **kwargs: calls.append("ran"),
     )
     generations = tmp_path / "generations" / "gen-1"
@@ -933,7 +800,7 @@ def test_the_closed_format_pass_is_decided_once_per_exact_artifact(monkeypatch, 
     schema = evidence_graph.GraphSchema.V2
 
     def validate(current: dict) -> None:
-        evidence_graph._validate_connection_once(
+        evidence_graph.validate_connection_once(
             None, current, generations, schema=schema, deadline=None,
             monotonic=lambda: 0.0, cancelled=None,
         )
@@ -951,6 +818,6 @@ def test_the_closed_format_pass_is_decided_once_per_exact_artifact(monkeypatch, 
 
     # A fresh process starts with an empty memo and must not pay for the pass
     # again, which is what the receipt beside the generations is for.
-    monkeypatch.setattr(evidence_graph, "_FORMAT_VALIDATED", set())
+    monkeypatch.setattr(evidence_graph, "FORMAT_VALIDATED", set())
     validate(manifest)
     assert len(calls) == 2

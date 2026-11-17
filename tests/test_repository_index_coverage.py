@@ -58,7 +58,7 @@ def _collect(repository: Path, roots: tuple[str, ...]):
 
 def test_a_tracked_file_at_the_repository_root_is_a_code_root(tmp_path):
     """Seven names in the neighbouring repository were invisible; this is why."""
-    import repository_index
+    import repository_indexing
 
     repository = _repository(
         tmp_path / "repo",
@@ -69,19 +69,19 @@ def test_a_tracked_file_at_the_repository_root_is_a_code_root(tmp_path):
         },
     )
 
-    roots = repository_index.selected_code_roots(repository, None)
+    roots = repository_indexing.selected_code_roots(repository, None)
 
     assert roots.selected == ("README.md", "pyproject.toml", "src")
 
 
 def test_a_root_file_reaches_the_corpus_and_is_retrievable(tmp_path):
     """Selection is not the claim; the bytes arriving in the corpus are."""
-    import repository_index
+    import repository_indexing
 
     repository = _repository(
         tmp_path / "repo", {"src/alpha.py": ALPHA, "README.md": README}
     )
-    roots = repository_index.selected_code_roots(repository, None)
+    roots = repository_indexing.selected_code_roots(repository, None)
 
     snapshot = _collect(repository, roots.selected)
 
@@ -95,14 +95,14 @@ def test_a_root_file_reaches_the_corpus_and_is_retrievable(tmp_path):
 
 def test_a_hidden_root_file_is_excluded_by_name_not_dropped(tmp_path):
     """`.gitignore` is pruned by the same rule as `.github`, and is named for it."""
-    import repository_index
+    import repository_indexing
 
     repository = _repository(
         tmp_path / "repo",
         {"src/alpha.py": ALPHA, ".gitignore": "*.pyc\n", "README.md": README},
     )
 
-    roots = repository_index.selected_code_roots(repository, None)
+    roots = repository_indexing.selected_code_roots(repository, None)
 
     assert roots.selected == ("README.md", "src")
     assert roots.excluded == (".gitignore",)
@@ -110,13 +110,13 @@ def test_a_hidden_root_file_is_excluded_by_name_not_dropped(tmp_path):
 
 def test_a_root_file_may_be_requested_explicitly(tmp_path):
     """A narrow index of one file is a legitimate request, not a missing root."""
-    import repository_index
+    import repository_indexing
 
     repository = _repository(
         tmp_path / "repo", {"src/alpha.py": ALPHA, "README.md": README}
     )
 
-    roots = repository_index.selected_code_roots(repository, ["README.md"])
+    roots = repository_indexing.selected_code_roots(repository, ["README.md"])
 
     assert roots.selected == ("README.md",)
 
@@ -129,29 +129,29 @@ def test_a_tracked_root_symlink_is_excluded_rather_than_refusing_the_repository(
     Excluding it by name costs one entry; admitting it would cost the whole
     repository, and admitting it silently is the failure this module is about.
     """
-    import repository_index
+    import repository_indexing
 
     repository = _repository(tmp_path / "repo", {"src/alpha.py": ALPHA})
     (repository / "link.md").symlink_to(repository / "src/alpha.py")
     _git(repository, "add", "-A")
     _git(repository, "commit", "-qm", "link")
 
-    roots = repository_index.selected_code_roots(repository, None)
+    roots = repository_indexing.selected_code_roots(repository, None)
 
     assert roots.selected == ("src",)
     assert roots.excluded == ("link.md",)
 
 
 def test_a_symlink_requested_explicitly_is_refused_by_name(tmp_path):
-    import repository_index
+    import repository_indexing
 
     repository = _repository(tmp_path / "repo", {"src/alpha.py": ALPHA})
     (repository / "link.md").symlink_to(repository / "src/alpha.py")
     _git(repository, "add", "-A")
     _git(repository, "commit", "-qm", "link")
 
-    with pytest.raises(repository_index.RepositoryIndexRefused) as refusal:
-        repository_index.selected_code_roots(repository, ["link.md"])
+    with pytest.raises(repository_indexing.RepositoryIndexRefused) as refusal:
+        repository_indexing.selected_code_roots(repository, ["link.md"])
 
     assert refusal.value.reason == "repository_root_not_collectable"
     assert refusal.value.details["refused_roots"] == ["link.md"]
@@ -162,7 +162,7 @@ def test_a_symlink_requested_explicitly_is_refused_by_name(tmp_path):
 
 def test_a_foreign_directory_named_gaps_is_indexed_not_silently_lost(tmp_path):
     """`gaps` is an OKF page type in this vault and a directory name elsewhere."""
-    import repository_index
+    import repository_indexing
 
     repository = _repository(
         tmp_path / "repo",
@@ -172,7 +172,7 @@ def test_a_foreign_directory_named_gaps_is_indexed_not_silently_lost(tmp_path):
             "src/_template/gamma.py": ALPHA,
         },
     )
-    roots = repository_index.selected_code_roots(repository, None)
+    roots = repository_indexing.selected_code_roots(repository, None)
 
     assert roots.selected == ("gaps", "src")
     assert roots.excluded == ()
@@ -189,13 +189,13 @@ def test_a_foreign_directory_named_gaps_is_indexed_not_silently_lost(tmp_path):
 
 def test_generated_and_hidden_directories_still_prune_everywhere(tmp_path):
     """The universal half of the old set does not move."""
-    import repository_index
+    import repository_indexing
 
     repository = _repository(
         tmp_path / "repo",
         {"src/alpha.py": ALPHA, "src/__pycache__/alpha.pyc": "x", ".github/ci.yml": "on: push\n"},
     )
-    roots = repository_index.selected_code_roots(repository, None)
+    roots = repository_indexing.selected_code_roots(repository, None)
 
     assert roots.selected == ("src",)
     assert roots.excluded == (".github",)
@@ -211,44 +211,44 @@ def test_generated_and_hidden_directories_still_prune_everywhere(tmp_path):
 
 def test_the_untracked_census_counts_what_git_does_not_track(tmp_path):
     """"Indexed" is not "tracked", and the difference is now a number."""
-    import repository_index
+    import repository_indexing
 
     repository = _repository(tmp_path / "repo", {"src/alpha.py": ALPHA})
     (repository / "src/stray.py").write_text("z = 3\n", encoding="utf-8")
-    roots = repository_index.selected_code_roots(repository, None)
+    roots = repository_indexing.selected_code_roots(repository, None)
     snapshot = _collect(repository, roots.selected)
 
-    untracked = repository_index._untracked_sources(  # noqa: SLF001
+    untracked = repository_indexing.untracked_sources(  # noqa: SLF001
         repository, snapshot
     )
 
     assert untracked == ("src/stray.py",)
-    assert repository_index._untracked_source_count(  # noqa: SLF001
+    assert repository_indexing.untracked_source_count(  # noqa: SLF001
         repository, snapshot
     ) == 1
 
 
 def test_the_census_is_zero_when_the_walk_and_git_agree(tmp_path):
     """Zero is an answer, and telling it apart from "not counted" is the point."""
-    import repository_index
+    import repository_indexing
 
     repository = _repository(tmp_path / "repo", {"src/alpha.py": ALPHA})
-    roots = repository_index.selected_code_roots(repository, None)
+    roots = repository_indexing.selected_code_roots(repository, None)
     snapshot = _collect(repository, roots.selected)
 
-    assert repository_index._untracked_source_count(  # noqa: SLF001
+    assert repository_indexing.untracked_source_count(  # noqa: SLF001
         repository, snapshot
     ) == 0
 
 
 def test_the_census_says_not_counted_rather_than_failing_the_build(tmp_path):
     """A build that already succeeded must not be failed by its own census."""
-    import repository_index
+    import repository_indexing
 
     repository = _repository(tmp_path / "repo", {"src/alpha.py": ALPHA})
-    roots = repository_index.selected_code_roots(repository, None)
+    roots = repository_indexing.selected_code_roots(repository, None)
     snapshot = _collect(repository, roots.selected)
 
-    assert repository_index._untracked_source_count(  # noqa: SLF001
+    assert repository_indexing.untracked_source_count(  # noqa: SLF001
         tmp_path / "not-a-repository", snapshot
     ) is None

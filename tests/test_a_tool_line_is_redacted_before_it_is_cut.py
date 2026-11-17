@@ -13,6 +13,6 @@ def test_a_token_across_the_bound_leaves_nothing_of_itself() -> None:
     command = "x" * (session_evidence.MAX_TOOL_LINE_CHARS - 10) + " " + TOKEN
     block = {"name": "Bash", "input": {"command": command}}
 
-    line = session_evidence._tool_line(block)
+    line = session_evidence.tool_line(block)
 
     assert "ghp_" not in line

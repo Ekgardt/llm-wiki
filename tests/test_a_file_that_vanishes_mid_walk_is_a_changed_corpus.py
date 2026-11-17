@@ -24,7 +24,7 @@ for directory in (TESTS.parent / "scripts", TESTS):
 def _discovery(vault: Path):
     import corpus_snapshot
 
-    return corpus_snapshot._Discovery(
+    return corpus_snapshot.Discovery(
         vault,
         max_files=100,
         max_entries=1000,

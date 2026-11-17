@@ -20,7 +20,7 @@ if str(SCRIPTS_DIR) not in sys.path:
 
 import mcp_server  # noqa: E402
 
-REQUIRED, ALLOWED = mcp_server._ARCHITECTURE_CONTRACTS["community"]
+REQUIRED, ALLOWED = mcp_server.ARCHITECTURE_CONTRACTS["community"]
 
 
 def test_the_anchor_is_allowed() -> None:
@@ -39,10 +39,9 @@ def test_the_handler_passes_the_anchor_through(monkeypatch) -> None:
         seen.update(directory=directory, symbol=symbol, live=live)
         return {"communities": []}
 
-    import code_graph
 
-    monkeypatch.setattr(code_graph, "detect_communities", _fake)
-    mcp_server._architecture_community(
+    monkeypatch.setattr("llm_wiki.code_graph_communities.detect_communities", _fake)
+    mcp_server.architecture_community(
         {"resolved": Path("/tmp"), "live": False, "symbol": "fuse_rrf"}
     )
     assert seen["symbol"] == "fuse_rrf"
@@ -55,8 +54,7 @@ def test_an_unanchored_request_still_works(monkeypatch) -> None:
         seen.update(symbol=symbol)
         return {"communities": []}
 
-    import code_graph
 
-    monkeypatch.setattr(code_graph, "detect_communities", _fake)
-    mcp_server._architecture_community({"resolved": Path("/tmp"), "live": False})
+    monkeypatch.setattr("llm_wiki.code_graph_communities.detect_communities", _fake)
+    mcp_server.architecture_community({"resolved": Path("/tmp"), "live": False})
     assert seen["symbol"] is None

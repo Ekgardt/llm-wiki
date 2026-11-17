@@ -97,8 +97,8 @@ def test_unknown_signals_are_refused() -> None:
 def test_recall_reports_the_dense_component_a_planned_graph_run_used() -> None:
     trace = {"requested_mode": "GRAPH", "signals_used": ["lexical", "dense", "graph"]}
 
-    assert mcp_server._requested_signals(trace) == ("lexical", "graph", "dense")
+    assert mcp_server.requested_signals(trace) == ("lexical", "graph", "dense")
 
 
 def test_an_unreported_trace_names_the_mode_the_search_would_run() -> None:
-    assert mcp_server._unreported_trace("capture queue retry")["requested_mode"] == "HYBRID"
+    assert mcp_server.unreported_trace("capture queue retry")["requested_mode"] == "HYBRID"

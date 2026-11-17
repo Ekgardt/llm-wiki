@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Retire a task that used every attempt and was left looking ready.
 
-`_failure_state` used to send an ordinary failure back to `ready` whatever the
+`failure_state` used to send an ordinary failure back to `ready` whatever the
 attempt count was, so a task that failed on its last allowed attempt kept the
 state of work still to do and the attempt count of work already given up on.
 The worker will not claim it, because the budget is spent. `redrive` will not
@@ -30,9 +30,12 @@ SCRIPTS_DIR = Path(__file__).resolve().parent
 if str(SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_DIR))
 
-from memory_queue import active_or_legacy_memory_queue  # noqa: E402
-from memory_state import ROOT, STATE_ROOT  # noqa: E402
-from reliable_memory import DEFAULTS, begin_immediate  # noqa: E402
+from llm_wiki import runtime_roots  # noqa: E402
+from llm_wiki.reliability_defaults import DEFAULTS  # noqa: E402
+from llm_wiki.sqlite_transactions import begin_immediate  # noqa: E402
+from queue_core import (  # noqa: E402
+    active_or_legacy_memory_queue,
+)
 
 STRANDED = (
     "SELECT id, kind, attempts, error_code, updated_at FROM tasks "
@@ -91,7 +94,7 @@ def main(argv: list[str] | None = None) -> int:
         "--max-attempts", type=int, default=DEFAULTS.queue_max_attempts
     )
     args = parser.parse_args(argv)
-    queue = active_or_legacy_memory_queue(Path(ROOT), Path(STATE_ROOT))
+    queue = active_or_legacy_memory_queue(Path(runtime_roots.vault_root()), Path(runtime_roots.state_root()))
     with _opened(queue) as database:
         database.row_factory = sqlite3.Row
         rows = stranded_tasks(database, args.max_attempts)

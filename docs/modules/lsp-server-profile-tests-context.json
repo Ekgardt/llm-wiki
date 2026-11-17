@@ -1,0 +1,176 @@
+{
+  "encoding": "o200k_base",
+  "max_tokens": 100000,
+  "serialization": "exact-duplicates/v1",
+  "files": [
+    "AGENTS.md",
+    "CLAUDE.md",
+    "docs/AGENTS.md",
+    "docs/STRUCTURE.md",
+    "docs/modules/context-bundle.md",
+    "docs/modules/context-records.md",
+    "docs/modules/context-tooling.md",
+    "docs/modules/go-source-build.md",
+    "docs/modules/lsp-server-profile-tests-context.json",
+    "docs/modules/lsp-server-profile-tests.md",
+    "docs/modules/model-choice.md",
+    "docs/modules/product-structure.md",
+    "docs/modules/project-governance.md",
+    "docs/modules/test-support.md",
+    "rules/development-laws.md",
+    "scripts/__init__.py",
+    "scripts/llm_wiki/__init__.py",
+    "scripts/llm_wiki/context_bundle.py",
+    "tests/__init__.py",
+    "tests/conftest.py",
+    "tests/module_context.py",
+    "tests/module_context_paths.py",
+    "tests/module_interface.py",
+    "tests/module_interface_render.py",
+    "tests/module_qualification.py",
+    "tests/module_record_context.py",
+    "tests/module_records.py",
+    "tests/modules/__init__.py",
+    "tests/modules/go_source_build/__init__.py",
+    "tests/modules/go_source_build/fixtures.py",
+    "tests/process_identity_fixture.py",
+    "tests/shared_fixtures.py",
+    "tests/slow_machine.py",
+    "tests/test_native_language_server.py",
+    "tests/test_the_second_installer_gets_the_first_ones_guarantees.py"
+  ],
+  "ownership": {
+    "files": [
+      "docs/modules/lsp-server-profile-tests-context.json",
+      "docs/modules/lsp-server-profile-tests.md",
+      "tests/test_native_language_server.py",
+      "tests/test_the_second_installer_gets_the_first_ones_guarantees.py"
+    ]
+  },
+  "qualified_dependencies": [
+    {
+      "provider": "scripts/install_language_server.py",
+      "names": [
+        "InstallError",
+        "Placement",
+        "acquire_lock",
+        "archive_mode",
+        "install_language_server",
+        "release_lock",
+        "time"
+      ],
+      "contract_sha256": "e06f4c1509006ff2b77660558b4577671a684d3599687616ffb7c4dfc9d1abce",
+      "integration_tests": [
+        "tests/test_native_language_server.py",
+        "tests/test_the_second_installer_gets_the_first_ones_guarantees.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/generation_catalog_store.py",
+      "names": [
+        "GenerationCatalog"
+      ],
+      "contract_sha256": "b18194ebe04bf988b4474379fcb5243516550d43b745a00eaed1453f7844c983",
+      "integration_tests": [
+        "tests/test_a_blocked_task_has_a_way_back.py",
+        "tests/test_a_build_in_flight_is_not_an_orphan.py",
+        "tests/test_a_capacity_refusal_does_not_corrupt_a_generation.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/model_choice.py",
+      "names": [
+        "using_root"
+      ],
+      "contract_sha256": "d45f2655cb61963e77617d1dfd7d617b134ad77cc770b59b335d0856e5d65019",
+      "integration_tests": [
+        "tests/test_central_model_selection.py",
+        "tests/test_compile_execution_inventory.py"
+      ]
+    },
+    {
+      "provider": "scripts/lsp_process.py",
+      "names": [
+        "GenerationLaunch",
+        "require_same_program"
+      ],
+      "contract_sha256": "825aa06cbea6db014bf189aa783b0734e5163670f43aba624a3db664ca7bac1b",
+      "integration_tests": [
+        "tests/test_native_language_server.py"
+      ]
+    },
+    {
+      "provider": "scripts/lsp_profiles.py",
+      "names": [
+        "REGISTRY"
+      ],
+      "contract_sha256": "590d43df875323bd3412ceffb97e87aae3ccf8c496529a6f1b893187bbccf78d",
+      "integration_tests": [
+        "tests/test_native_language_server.py"
+      ]
+    },
+    {
+      "provider": "scripts/lsp_server_profile.py",
+      "names": [
+        "LanguageServerProfile",
+        "PlatformArtifact",
+        "ProfileError",
+        "READINESS_INITIALIZED",
+        "ServerComponent",
+        "SourceBuild",
+        "freeze_profile_value",
+        "normalized_platform"
+      ],
+      "contract_sha256": "64b010e7dda9cb5855c42b3854f166b60460227e70166b135a342e72d13173cb",
+      "integration_tests": [
+        "tests/test_native_language_server.py",
+        "tests/test_the_second_installer_gets_the_first_ones_guarantees.py"
+      ]
+    },
+    {
+      "provider": "scripts/pinned_download.py",
+      "names": [
+        "CHUNK_BYTES",
+        "open_pinned_url",
+        "time"
+      ],
+      "contract_sha256": "86e785e73c8b84fe166f9dab2da83e2529038ce5c24987885c2f31fe1617959a",
+      "integration_tests": [
+        "tests/test_the_second_installer_gets_the_first_ones_guarantees.py"
+      ]
+    },
+    {
+      "provider": "scripts/process_liveness.py",
+      "names": [
+        "process_start_identity"
+      ],
+      "contract_sha256": "3e25c06692d8eef5b137513f3c245e70e797601d4f844fd0d8cf3d6c0ad96d68",
+      "integration_tests": [
+        "tests/test_native_language_server.py",
+        "tests/test_the_second_installer_gets_the_first_ones_guarantees.py"
+      ]
+    },
+    {
+      "provider": "scripts/reliable_memory.py",
+      "names": [
+        "canonical_json_bytes",
+        "validate_state_root"
+      ],
+      "contract_sha256": "7bba4b535d3f0a73445fece541c540939989b41456c9a79a67f82634748be36b",
+      "integration_tests": [
+        "tests/test_the_second_installer_gets_the_first_ones_guarantees.py"
+      ]
+    },
+    {
+      "provider": "scripts/repository_scope.py",
+      "names": [
+        "sanitized_git_environment"
+      ],
+      "contract_sha256": "fd550ae20761afad50b37fa3a71044a162485b0e4d4b3e2af9b5b22e143c2bec",
+      "integration_tests": [
+        "tests/test_native_language_server.py",
+        "tests/test_the_second_installer_gets_the_first_ones_guarantees.py"
+      ]
+    }
+  ]
+}

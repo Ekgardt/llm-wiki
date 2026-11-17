@@ -53,7 +53,7 @@ def _module_argument(build: SourceBuild) -> str:
     return f"{build.module}@{build.version}"
 
 
-def _run(command: list[str], environment: dict[str, str], cwd: Path, timeout: float):
+def run(command: list[str], environment: dict[str, str], cwd: Path, timeout: float):
     try:
         return subprocess.run(
             command,
@@ -142,7 +142,7 @@ def build_source_server(staging: Path, build: SourceBuild) -> Path:
     toolchain = _require_toolchain(staging, build)
     environment = build_environment(staging)
     Path(environment["HOME"]).mkdir(parents=True, exist_ok=True)
-    completed = _run(
+    completed = run(
         [str(toolchain), "install", _module_argument(build)],
         environment,
         staging,

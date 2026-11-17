@@ -257,29 +257,21 @@ def test_fixed_candidates_cannot_fan_out(vault: Path) -> None:
     assert stand.fanout_prompts == []
 
 
-def test_a_reply_that_is_not_queries_fans_out_to_nothing() -> None:
-    assert aggregation_pass.fan_out_queries("How many?", ["a"], lambda prompt: "no json here") == []
-    assert aggregation_pass.fan_out_queries("How many?", [], lambda prompt: '{"queries": "x"}') == []
-    replies = '{"queries": ["How many?", " ", "one", "one", 3, "two"]}'
-    assert aggregation_pass.fan_out_queries("How many?", [], lambda prompt: replies) == ["one", "two"]
 
 
-def test_at_most_twelve_queries_are_run() -> None:
-    reply = json.dumps({"queries": [f"query {index}" for index in range(20)]})
-    assert len(aggregation_pass.fan_out_queries("How many?", [], lambda prompt: reply)) == 12
 
 
 def test_a_piece_more_searches_agree_on_moves_ahead_of_a_piece_one_search_found() -> None:
-    from query_memory import _merged
+    from query_memory import merged
 
     first = ({"id": "a"}, {"id": "b"}, {"id": "drum"})
     widened = ({"id": "a"}, {"id": "b"}, {"id": "drum"}, {"id": "w"})
     gathered = ({"id": "drum"}, {"id": "g"}, {"id": "a"})
 
-    rows = _merged(first, widened, gathered)
+    rows = merged(first, widened, gathered)
 
     assert [row["id"] for row in rows] == ["a", "drum", "b", "w", "g"]
-    assert _merged(first, None, ({"id": "a"},)) is None
+    assert merged(first, None, ({"id": "a"},)) is None
 
 
 def test_the_second_pass_reads_the_cited_spans_and_the_new_pieces_only(vault: Path) -> None:

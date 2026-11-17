@@ -30,8 +30,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from memory_state import ROOT, STATE_ROOT  # noqa: E402
-from project_journal import ProjectLeaseBusy, ProjectStore, _timestamp  # noqa: E402
+from llm_wiki import runtime_roots  # noqa: E402
+from project_journal import ProjectLeaseBusy, ProjectStore, timestamp  # noqa: E402
 
 
 def journal_sequences(store: ProjectStore, project: str) -> set[int]:
@@ -77,7 +77,7 @@ def _append_under_lease(store: ProjectStore, project: str, sequence: int, lease)
             "project": project,
             "lease_token": lease.token,
             "fencing_epoch": lease.epoch,
-            "expires_at": _timestamp(lease.expires_at),
+            "expires_at": timestamp(lease.expires_at),
         },
         include_committed=True,
     )
@@ -121,8 +121,8 @@ def _survey(store: ProjectStore, project: str | None) -> dict[str, list[int]]:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--vault", default=str(ROOT))
-    parser.add_argument("--state-root", default=str(STATE_ROOT))
+    parser.add_argument("--vault", default=str(runtime_roots.vault_root()))
+    parser.add_argument("--state-root", default=str(runtime_roots.state_root()))
     parser.add_argument("--project", default=None)
     parser.add_argument(
         "--list-only", action="store_true", help="name the gaps and change nothing"

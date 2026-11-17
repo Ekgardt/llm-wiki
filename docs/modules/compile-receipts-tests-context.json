@@ -1,0 +1,219 @@
+{
+  "encoding": "o200k_base",
+  "max_tokens": 100000,
+  "serialization": "exact-duplicates/v1",
+  "files": [
+    "AGENTS.md",
+    "CLAUDE.md",
+    "docs/AGENTS.md",
+    "docs/STRUCTURE.md",
+    "docs/modules/compile-receipts-tests-context.json",
+    "docs/modules/compile-receipts-tests.md",
+    "docs/modules/context-bundle.md",
+    "docs/modules/context-records.md",
+    "docs/modules/context-tooling.md",
+    "docs/modules/model-choice.md",
+    "docs/modules/product-structure.md",
+    "docs/modules/project-governance.md",
+    "docs/modules/reliable-memory-tests-llm-descriptors-helpers.md",
+    "docs/modules/test-support.md",
+    "rules/development-laws.md",
+    "scripts/__init__.py",
+    "scripts/llm_wiki/__init__.py",
+    "scripts/llm_wiki/context_bundle.py",
+    "tests/__init__.py",
+    "tests/compile_binds_the_protected_source_view_helpers.py",
+    "tests/compile_receipt_source_lifetime_helpers.py",
+    "tests/conftest.py",
+    "tests/llm_descriptors_helpers.py",
+    "tests/module_context.py",
+    "tests/module_context_paths.py",
+    "tests/module_interface.py",
+    "tests/module_interface_render.py",
+    "tests/module_qualification.py",
+    "tests/module_record_context.py",
+    "tests/module_records.py",
+    "tests/shared_fixtures.py",
+    "tests/slow_machine.py"
+  ],
+  "ownership": {
+    "files": [
+      "docs/modules/compile-receipts-tests-context.json",
+      "docs/modules/compile-receipts-tests.md",
+      "tests/compile_binds_the_protected_source_view_helpers.py",
+      "tests/compile_receipt_source_lifetime_helpers.py"
+    ]
+  },
+  "qualified_dependencies": [
+    {
+      "provider": "scripts/compile_pipeline.py",
+      "names": [
+        "sha256_bytes"
+      ],
+      "contract_sha256": "7d34a853c5a6f1be8b00805b2e865ac2a5ca5a6fe3ca141de97ebda61d2a85cf",
+      "integration_tests": [
+        "tests/compile_binds_the_protected_source_view_helpers.py",
+        "tests/compile_daily_part_lifetime_helpers.py",
+        "tests/compile_keeps_physically_overlapping_existing_context_helpers.py"
+      ]
+    },
+    {
+      "provider": "scripts/compile_receipts.py",
+      "names": [
+        "DailySnapshot",
+        "SourceSnapshot",
+        "receipt_predicate"
+      ],
+      "contract_sha256": "0615c3bd963c8c309afb2e8e61d0bdffe89294abdfd3299ea2fe12ee70e9d69e",
+      "integration_tests": [
+        "tests/a_continuation_keeps_its_original_entry_helpers.py",
+        "tests/compile_archive_daily_sharing_helpers.py",
+        "tests/compile_binds_the_protected_source_view_helpers.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/compile_pipeline_sources.py",
+      "names": [
+        "CompileInputs"
+      ],
+      "contract_sha256": "c1a75c8212e623985185c7a6f7f88831a486d3323a117f38ebae6fc6db249bcd",
+      "integration_tests": [
+        "tests/test_compile_binding_cache_tracks_all_parts_of_its_day.py",
+        "tests/test_compile_binds_the_protected_source_view.py",
+        "tests/test_compile_choice_menu_has_one_output_address.py",
+        "tests/test_compile_context_reuses_exact_source_choices.py",
+        "tests/test_compile_entry_overlap_is_reused_only_in_sizing_scope.py",
+        "tests/test_compile_measure_reuses_only_immutable_line_bindings.py",
+        "tests/test_compile_one_layout_protects_its_base_once.py",
+        "tests/test_compile_prompt_explains_decision_immutability.py",
+        "tests/test_compile_receipt_source_lifetime.py",
+        "tests/test_compile_reuses_raw_row_positions_within_one_layout.py",
+        "tests/test_compile_source_line_choices.py",
+        "tests/test_current_native_receipts_match_captured_parts.py",
+        "tests/test_native_source_choices_resolve_exact_verified_lines.py",
+        "tests/test_receipt_scoped_source_parts.py",
+        "tests/test_redaction_literal_prerequisites.py",
+        "tests/test_source_choice_addresses_distinguish_output_ids_from_locators.py",
+        "tests/test_source_choices_reject_unmodified_ambiguous_lines_once.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/generation_catalog_store.py",
+      "names": [
+        "GenerationCatalog"
+      ],
+      "contract_sha256": "b18194ebe04bf988b4474379fcb5243516550d43b745a00eaed1453f7844c983",
+      "integration_tests": [
+        "tests/test_a_blocked_task_has_a_way_back.py",
+        "tests/test_a_build_in_flight_is_not_an_orphan.py",
+        "tests/test_a_capacity_refusal_does_not_corrupt_a_generation.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/model_choice.py",
+      "names": [
+        "using_root"
+      ],
+      "contract_sha256": "d45f2655cb61963e77617d1dfd7d617b134ad77cc770b59b335d0856e5d65019",
+      "integration_tests": [
+        "tests/test_compile_binding_cache_tracks_all_parts_of_its_day.py",
+        "tests/test_compile_binds_the_protected_source_view.py",
+        "tests/test_compile_choice_menu_has_one_output_address.py",
+        "tests/test_compile_context_reuses_exact_source_choices.py",
+        "tests/test_compile_entry_overlap_is_reused_only_in_sizing_scope.py",
+        "tests/test_compile_measure_reuses_only_immutable_line_bindings.py",
+        "tests/test_compile_one_layout_protects_its_base_once.py",
+        "tests/test_compile_prompt_explains_decision_immutability.py",
+        "tests/test_compile_receipt_source_lifetime.py",
+        "tests/test_compile_reuses_raw_row_positions_within_one_layout.py",
+        "tests/test_compile_source_line_choices.py",
+        "tests/test_current_native_receipts_match_captured_parts.py",
+        "tests/test_native_source_choices_resolve_exact_verified_lines.py",
+        "tests/test_receipt_scoped_source_parts.py",
+        "tests/test_redaction_literal_prerequisites.py",
+        "tests/test_source_choice_addresses_distinguish_output_ids_from_locators.py",
+        "tests/test_source_choices_reject_unmodified_ambiguous_lines_once.py"
+      ]
+    },
+    {
+      "provider": "scripts/markdown_transaction.py",
+      "names": [
+        "MarkdownCoordinator"
+      ],
+      "contract_sha256": "5033973391b97bc338d02eed2a773ad25883e89b8325a9ccc726cd9e537f58ee",
+      "integration_tests": [
+        "tests/test_compile_binding_cache_tracks_all_parts_of_its_day.py",
+        "tests/test_compile_binds_the_protected_source_view.py",
+        "tests/test_compile_choice_menu_has_one_output_address.py",
+        "tests/test_compile_context_reuses_exact_source_choices.py",
+        "tests/test_compile_entry_overlap_is_reused_only_in_sizing_scope.py",
+        "tests/test_compile_measure_reuses_only_immutable_line_bindings.py",
+        "tests/test_compile_one_layout_protects_its_base_once.py",
+        "tests/test_compile_prompt_explains_decision_immutability.py",
+        "tests/test_compile_receipt_source_lifetime.py",
+        "tests/test_compile_reuses_raw_row_positions_within_one_layout.py",
+        "tests/test_compile_source_line_choices.py",
+        "tests/test_current_native_receipts_match_captured_parts.py",
+        "tests/test_native_source_choices_resolve_exact_verified_lines.py",
+        "tests/test_receipt_scoped_source_parts.py",
+        "tests/test_redaction_literal_prerequisites.py",
+        "tests/test_source_choice_addresses_distinguish_output_ids_from_locators.py",
+        "tests/test_source_choices_reject_unmodified_ambiguous_lines_once.py"
+      ]
+    },
+    {
+      "provider": "scripts/reliable_memory.py",
+      "names": [
+        "canonical_json_bytes",
+        "sha256_bytes",
+        "validate_state_root"
+      ],
+      "contract_sha256": "4243e32fa6ecab88fca1a2d2b3214c0a36944fc23129138102dfaebf6d99457f",
+      "integration_tests": [
+        "tests/test_compile_binding_cache_tracks_all_parts_of_its_day.py",
+        "tests/test_compile_binds_the_protected_source_view.py",
+        "tests/test_compile_choice_menu_has_one_output_address.py",
+        "tests/test_compile_context_reuses_exact_source_choices.py",
+        "tests/test_compile_entry_overlap_is_reused_only_in_sizing_scope.py",
+        "tests/test_compile_measure_reuses_only_immutable_line_bindings.py",
+        "tests/test_compile_one_layout_protects_its_base_once.py",
+        "tests/test_compile_prompt_explains_decision_immutability.py",
+        "tests/test_compile_receipt_source_lifetime.py",
+        "tests/test_compile_reuses_raw_row_positions_within_one_layout.py",
+        "tests/test_compile_source_line_choices.py",
+        "tests/test_current_native_receipts_match_captured_parts.py",
+        "tests/test_native_source_choices_resolve_exact_verified_lines.py",
+        "tests/test_receipt_scoped_source_parts.py",
+        "tests/test_redaction_literal_prerequisites.py",
+        "tests/test_source_choice_addresses_distinguish_output_ids_from_locators.py",
+        "tests/test_source_choices_reject_unmodified_ambiguous_lines_once.py"
+      ]
+    },
+    {
+      "provider": "scripts/repository_scope.py",
+      "names": [
+        "sanitized_git_environment"
+      ],
+      "contract_sha256": "fd550ae20761afad50b37fa3a71044a162485b0e4d4b3e2af9b5b22e143c2bec",
+      "integration_tests": [
+        "tests/test_compile_binding_cache_tracks_all_parts_of_its_day.py",
+        "tests/test_compile_binds_the_protected_source_view.py",
+        "tests/test_compile_choice_menu_has_one_output_address.py",
+        "tests/test_compile_context_reuses_exact_source_choices.py",
+        "tests/test_compile_entry_overlap_is_reused_only_in_sizing_scope.py",
+        "tests/test_compile_measure_reuses_only_immutable_line_bindings.py",
+        "tests/test_compile_one_layout_protects_its_base_once.py",
+        "tests/test_compile_prompt_explains_decision_immutability.py",
+        "tests/test_compile_receipt_source_lifetime.py",
+        "tests/test_compile_reuses_raw_row_positions_within_one_layout.py",
+        "tests/test_compile_source_line_choices.py",
+        "tests/test_current_native_receipts_match_captured_parts.py",
+        "tests/test_native_source_choices_resolve_exact_verified_lines.py",
+        "tests/test_receipt_scoped_source_parts.py",
+        "tests/test_redaction_literal_prerequisites.py",
+        "tests/test_source_choice_addresses_distinguish_output_ids_from_locators.py",
+        "tests/test_source_choices_reject_unmodified_ambiguous_lines_once.py"
+      ]
+    }
+  ]
+}

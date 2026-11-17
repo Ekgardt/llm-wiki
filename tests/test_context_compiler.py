@@ -9,8 +9,8 @@ The compiler must:
 - keep LLM-generated contextual text disabled by default,
 - prefix chunks deterministically with page title, heading ancestry, project,
   type, status, aliases, and validity metadata,
-- expand small parent pages in full; expand large pages to the matched heading
-  subtree plus bounded adjacent context,
+- preserve selected spans by default and support explicit parent/heading
+  expansion within caller bounds,
 - return a retrieval trace and a materialization trace with every package.
 """
 from __future__ import annotations
@@ -216,7 +216,7 @@ def test_producer_guard_requires_facade_or_explicit_structured_api():
 def test_session_start_producers_have_one_final_context_compiler_boundary():
     scripts = Path(__file__).resolve().parent.parent / "scripts"
     producers = (
-        "integration_adapter.py",
+        "llm_wiki/integration_session_start.py",
         "build_context.py",
         "project_journal.py",
         "session_start_context.py",
@@ -321,6 +321,34 @@ def _snapshot(
     return CorpusSnapshot(sources, chunks, digest, policy)
 
 
+class _UnrequestedChunks:
+    def __iter__(self):
+        raise AssertionError("L0 metadata must not materialize unrequested chunks")
+
+
+def test_metadata_context_does_not_materialize_unrequested_chunks():
+    source = _source("knowledge/notes/example.md", b"# Example\nUseful context\n")
+    snapshot = _snapshot((source,))
+    object.__setattr__(snapshot, "chunks", _UnrequestedChunks())
+    compilation = context_compiler.Compilation(snapshot, set(), ())
+    assert len(compilation.parents) == 1
+    assert compilation.chunks_by_id == {}
+
+
+def _stop_requested():
+    return True
+
+
+@pytest.mark.parametrize("stop", ["deadline", "cancelled"])
+def test_context_stops_before_materializing_requested_source(stop):
+    source = _source("knowledge/notes/example.md", b"# Example\nUseful context\n")
+    snapshot = _snapshot((source,))
+    object.__setattr__(snapshot, "chunks", _UnrequestedChunks())
+    options = {"deadline": time.monotonic() - 1} if stop == "deadline" else {"cancelled": _stop_requested}
+    with pytest.raises(TimeoutError):
+        compile_context(snapshot, evidence_chunk_ids=("requested",), **options)
+
+
 def _page(
     relative_path: str,
     title: str,
@@ -412,6 +440,7 @@ def test_l2_source_span_materialized_for_final_evidence():
         snapshot,
         shortlist=(page.record.logical_id,),
         evidence_chunk_ids=(chunk.id,),
+        small_parent_chars=len(page.content),  # explicit whole-page expansion
     )
 
     l2_items = [i for i in compiled.items if i.representation == "l2"]
@@ -857,7 +886,7 @@ def _representation_bytes(result, *representations: str) -> list[int]:
 def test_compiler_enforces_default_budget_even_when_budget_omitted(monkeypatch):
     import context_compiler
 
-    monkeypatch.setattr(context_compiler, "DEFAULT_BUDGET", ContextBudget(None, 10, 0, 0))
+    monkeypatch.setattr(context_compiler, "DEFAULT_CONTEXT_BUDGET", ContextBudget(None, 10, 0, 0))
     page = _page("large.md", "Large", "summary", "body " * 100)
 
     compiled = context_compiler.compile_context(_snapshot((page,)))
@@ -933,11 +962,10 @@ def test_build_tiers_get_l1_keys_legacy_cache_by_source_hash(tmp_path, monkeypat
     """Task 15: legacy L1 cache must invalidate on source byte changes."""
     import build_tiers
 
-    notes = tmp_path / "notes"
-    notes.mkdir()
-    tiers = tmp_path / "tiers"
-    monkeypatch.setattr(build_tiers, "KNOWLEDGE_DIR", notes)
-    monkeypatch.setattr(build_tiers, "TIERS_DIR", tiers)
+    notes = tmp_path / "knowledge" / "notes"
+    notes.mkdir(parents=True)
+    monkeypatch.setenv("LLM_WIKI_ROOT", str(tmp_path))
+    monkeypatch.setenv("LLM_WIKI_STATE_ROOT", str(tmp_path))
 
     page = notes / "auth.md"
     page.write_text(
@@ -966,8 +994,8 @@ def test_hash_qualified_tier_reader_uses_logical_path_for_duplicate_stems(
 ):
     import build_tiers
 
-    tiers = tmp_path / "tiers"
-    monkeypatch.setattr(build_tiers, "TIERS_DIR", tiers)
+    monkeypatch.setenv("LLM_WIKI_STATE_ROOT", str(tmp_path))
+    tiers = build_tiers.tiers_dir()
     digest = "a" * 64
     build_tiers.write_l1(
         "shared",
@@ -996,8 +1024,8 @@ def test_build_advisory_last_decision_returns_slug_and_source_hash(tmp_path, mon
     KeyError that previously forced the L1 fallback on every call)."""
     import build_advisory
 
-    notes = tmp_path / "notes"
-    notes.mkdir()
+    notes = tmp_path / "knowledge" / "notes"
+    notes.mkdir(parents=True)
     decision = notes / "auth.md"
     decision.write_text(
         "---\n"
@@ -1009,10 +1037,9 @@ def test_build_advisory_last_decision_returns_slug_and_source_hash(tmp_path, mon
         "One-sentence summary: Chose JWT.\n",
         encoding="utf-8",
     )
-    monkeypatch.setattr(build_advisory, "KNOWLEDGE", notes)
-    monkeypatch.setattr(build_advisory, "ROOT", tmp_path)
+    monkeypatch.setenv("LLM_WIKI_ROOT", str(tmp_path))
 
-    last = build_advisory._find_last_decision(None)
+    last = build_advisory.find_last_decision(None)
 
     assert last is not None
     assert last["slug"] == "auth"
@@ -1035,17 +1062,16 @@ def test_build_advisory_passes_logical_path_to_hash_qualified_l1_reader(
         encoding="utf-8",
     )
     calls = []
-    monkeypatch.setattr(build_advisory, "ROOT", tmp_path)
-    monkeypatch.setattr(build_advisory, "KNOWLEDGE", notes)
-    monkeypatch.setattr(build_advisory, "_find_contradictions", lambda: [])
-    monkeypatch.setattr(build_advisory, "_find_stale_pages", lambda: 0)
+    monkeypatch.setenv("LLM_WIKI_ROOT", str(tmp_path))
+    monkeypatch.setattr(build_advisory, "find_contradictions", lambda: [])
+    monkeypatch.setattr(build_advisory, "find_stale_pages", lambda: 0)
     monkeypatch.setattr(
         build_tiers,
         "get_l1",
         lambda slug, **kwargs: calls.append((slug, kwargs)) or "NESTED L1",
     )
 
-    assert "NESTED L1" in build_advisory._build_rule_based_advisory(None, 800)
+    assert "NESTED L1" in build_advisory.build_rule_based_advisory(None, 800)
     assert calls == [
         (
             "auth",

@@ -1,0 +1,449 @@
+{
+  "encoding": "o200k_base",
+  "max_tokens": 100000,
+  "serialization": "exact-duplicates/v1",
+  "files": [
+    "AGENTS.md",
+    "CLAUDE.md",
+    "docs/AGENTS.md",
+    "docs/STRUCTURE.md",
+    "docs/modules/breadcrumb-decision-tests.md",
+    "docs/modules/breadcrumb-documents.md",
+    "docs/modules/compile-claims-producer-helpers.md",
+    "docs/modules/compile-paths.md",
+    "docs/modules/compile-pipeline-apply-tests.md",
+    "docs/modules/compile-pipeline-sources-tests-native-compile-companion-adopted-helpers.md",
+    "docs/modules/compile-pipeline-tests-doctor-current-v4-exact-historical-work-helpers.md",
+    "docs/modules/compile-pipeline-tests-doctor-exact-legacy-source-outcome-helpers.md",
+    "docs/modules/context-bundle.md",
+    "docs/modules/context-records.md",
+    "docs/modules/context-tooling.md",
+    "docs/modules/doctor-transactions-tests-historical-work-owned-sources-context.json",
+    "docs/modules/doctor-transactions-tests-historical-work-owned-sources.md",
+    "docs/modules/doctor-transactions.md",
+    "docs/modules/formats.md",
+    "docs/modules/historical-work-captures-each-physical-layout-once-helpers.md",
+    "docs/modules/installed-memory-repair-tests.md",
+    "docs/modules/model-choice.md",
+    "docs/modules/native-event-reader.md",
+    "docs/modules/product-structure.md",
+    "docs/modules/project-governance.md",
+    "docs/modules/script-sources.md",
+    "docs/modules/test-support.md",
+    "rules/development-laws.md",
+    "scripts/__init__.py",
+    "scripts/llm_wiki/__init__.py",
+    "scripts/llm_wiki/context_bundle.py",
+    "scripts/llm_wiki/doctor_transactions.py",
+    "scripts/llm_wiki/formats/__init__.py",
+    "tests/__init__.py",
+    "tests/adopted_vault.py",
+    "tests/compile_claims_producer_helpers.py",
+    "tests/compile_paths.py",
+    "tests/conftest.py",
+    "tests/doctor_current_v4_exact_historical_work_helpers.py",
+    "tests/doctor_exact_legacy_source_outcome_helpers.py",
+    "tests/historical_work_captures_each_physical_layout_once_helpers.py",
+    "tests/module_context.py",
+    "tests/module_context_paths.py",
+    "tests/module_interface.py",
+    "tests/module_interface_render.py",
+    "tests/module_qualification.py",
+    "tests/module_record_context.py",
+    "tests/module_records.py",
+    "tests/modules/__init__.py",
+    "tests/modules/breadcrumb_documents/__init__.py",
+    "tests/modules/breadcrumb_documents/contract_helpers.py",
+    "tests/modules/native_event_reader/__init__.py",
+    "tests/modules/native_event_reader/contract_helpers.py",
+    "tests/native_compile_companion_adopted_helpers.py",
+    "tests/native_compile_uses_whole_container_helpers.py",
+    "tests/native_user_frames_keep_their_physical_evidence_helpers.py",
+    "tests/script_sources.py",
+    "tests/shared_fixtures.py",
+    "tests/slow_machine.py",
+    "tests/test_historical_work_owned_sources.py"
+  ],
+  "ownership": {
+    "files": [
+      "docs/modules/doctor-transactions-tests-historical-work-owned-sources-context.json",
+      "docs/modules/doctor-transactions-tests-historical-work-owned-sources.md",
+      "tests/test_historical_work_owned_sources.py"
+    ]
+  },
+  "qualified_dependencies": [
+    {
+      "provider": "scripts/bounded_io.py",
+      "names": [
+        "SourceChangedDuringRead",
+        "immutable_source_digest",
+        "open_stable_range",
+        "read_stable_bytes"
+      ],
+      "contract_sha256": "94957b269bbda8816572efae506a8e7c7081abd196bc788c2ef9c5d2dba7610f",
+      "integration_tests": [
+        "tests/test_historical_work_owned_sources.py"
+      ]
+    },
+    {
+      "provider": "scripts/breadcrumb_decision.py",
+      "names": [
+        "journal_block"
+      ],
+      "contract_sha256": "d9c930484c634bdb57dbd893d182a3cb86d6d5b4893041035de163552c86eebc",
+      "integration_tests": [
+        "tests/test_historical_work_owned_sources.py"
+      ]
+    },
+    {
+      "provider": "scripts/breadcrumb_evidence.py",
+      "names": [
+        "read_head"
+      ],
+      "contract_sha256": "ed6e789206b293b2cd7ca3cc716daa242835e10bc7a60103b33b2431c133913f",
+      "integration_tests": [
+        "tests/test_historical_work_owned_sources.py"
+      ]
+    },
+    {
+      "provider": "scripts/breadcrumb_protocol.py",
+      "names": [
+        "RecordParsing",
+        "encode_parts",
+        "make_anchor",
+        "make_manifest",
+        "using_record_parsing"
+      ],
+      "contract_sha256": "45d31be2910a37dadcb3f13f6db40ddc04eb9a8e4102f82537fbfd3af4ccacd0",
+      "integration_tests": [
+        "tests/test_historical_work_owned_sources.py"
+      ]
+    },
+    {
+      "provider": "scripts/compile_pipeline.py",
+      "names": [
+        "canonical_json_bytes",
+        "compile_context_source_identity",
+        "compile_operation_id",
+        "compile_source_identity",
+        "daily_is_compiled"
+      ],
+      "contract_sha256": "4d65e3c5a0647cb50ccf3483676c5cad3cf94a6806a06f25f93a46d923f4fc07",
+      "integration_tests": [
+        "tests/test_historical_work_owned_sources.py"
+      ]
+    },
+    {
+      "provider": "scripts/compile_receipts.py",
+      "names": [
+        "daily_part_record",
+        "receipt_predicate"
+      ],
+      "contract_sha256": "b0e399d7af0a6abfb0cb342646db0404ab33740e46e71cbd99860e0636e26b2e",
+      "integration_tests": [
+        "tests/test_historical_work_owned_sources.py"
+      ]
+    },
+    {
+      "provider": "scripts/corpus_snapshot.py",
+      "names": [
+        "collect_corpus"
+      ],
+      "contract_sha256": "7ea12368f51c070a84b0754260f0a82db5ac44b0395b95eabcb01e5053c9f0bb",
+      "integration_tests": [
+        "tests/test_historical_work_owned_sources.py"
+      ]
+    },
+    {
+      "provider": "scripts/evidence_resolver.py",
+      "names": [
+        "daily_entries",
+        "daily_part_bounds"
+      ],
+      "contract_sha256": "d05caea774f1d01ee1e7c3f690ddc6e980b40caa3d87b556c0e4f6f76b4ba30b",
+      "integration_tests": [
+        "tests/test_historical_work_owned_sources.py"
+      ]
+    },
+    {
+      "provider": "scripts/generation_maintenance.py",
+      "names": [
+        "database_table_columns",
+        "live_owner",
+        "owner_pid_live",
+        "parse_utc",
+        "result",
+        "row_value",
+        "safe_kind"
+      ],
+      "contract_sha256": "68f08e7c6a0e070967c195a6bcb569cc4ca06cc8ea943d8b43b0b6e5bff24333",
+      "integration_tests": [
+        "tests/test_historical_work_owned_sources.py"
+      ]
+    },
+    {
+      "provider": "scripts/installed_memory_repair.py",
+      "names": [
+        "repair_installed_vault"
+      ],
+      "contract_sha256": "6ab4497d3ed56413bc24ea5ae9e993acf118980056b046072877a80df4f52a18",
+      "integration_tests": [
+        "tests/test_historical_work_owned_sources.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/adoption_admission.py",
+      "names": [
+        "adopted_database_path"
+      ],
+      "contract_sha256": "e2fa7715f1f31467e16bd8fc3b02bbda788b78444dd329c0009a39a3382828b2",
+      "integration_tests": [
+        "tests/test_historical_work_owned_sources.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/breadcrumb_documents.py",
+      "names": [
+        "source_documents",
+        "source_path"
+      ],
+      "contract_sha256": "9c32d29ba0229ab4fd59256dd23d9ea9fb8fde486cddde3ce431f64e296ab907",
+      "integration_tests": [
+        "tests/test_historical_work_owned_sources.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/compile_pipeline_apply.py",
+      "names": [
+        "apply_compile_plan"
+      ],
+      "contract_sha256": "129ecd76764fbd203f197468ec01d03833729ef205c00c26dd60fb67025303bb",
+      "integration_tests": [
+        "tests/test_historical_work_owned_sources.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/compile_pipeline_base.py",
+      "names": [
+        "MAX_AFTER_IMAGE_BYTES"
+      ],
+      "contract_sha256": "d7a2b4c5599ab95b981fd54cde05a1f8776138e7a52d7eca9f8eb1c491fc5a0e",
+      "integration_tests": [
+        "tests/test_historical_work_owned_sources.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/compile_pipeline_batches.py",
+      "names": [
+        "pack_compile_batches"
+      ],
+      "contract_sha256": "42879fb77545b262126891bf818efcf8a9307f66323329e8e70bef806a53fc39",
+      "integration_tests": [
+        "tests/test_historical_work_owned_sources.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/compile_pipeline_operations.py",
+      "names": [
+        "with_derived_claims"
+      ],
+      "contract_sha256": "930269ecbb09f9c38ace6e7f6a5cf3b2ecf6eecf7604d6b372849c21e950e0e5",
+      "integration_tests": [
+        "tests/test_historical_work_owned_sources.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/compile_pipeline_prompts.py",
+      "names": [
+        "normalize_plan"
+      ],
+      "contract_sha256": "6a1628410ab3b24594514a7c1929bdfaaec3757378cec4d93166f8fd9ead5e8c",
+      "integration_tests": [
+        "tests/test_historical_work_owned_sources.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/compile_pipeline_receipts.py",
+      "names": [
+        "context_receipt_document",
+        "v4_source_descriptor"
+      ],
+      "contract_sha256": "c4dd933bb7bda8a5ec5d34a54c0ee45dc250bf17b0c1eee338237c233d9f6f89",
+      "integration_tests": [
+        "tests/test_historical_work_owned_sources.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/compile_pipeline_sources.py",
+      "names": [
+        "daily_parts",
+        "native_daily_frames",
+        "native_part_units",
+        "native_unit_source",
+        "snapshot_compile_inputs",
+        "source_descriptor",
+        "subset_compile_inputs"
+      ],
+      "contract_sha256": "e92e7b22d402a52201d999a230b48c41c5b38d077bc79484e8a9c400e1cc4080",
+      "integration_tests": [
+        "tests/test_historical_work_owned_sources.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/compile_receipt_authority.py",
+      "names": [
+        "require_operation_integrity"
+      ],
+      "contract_sha256": "9c5fb3bffa5117ebcdd1ef334999b3e960289dffc32899b2cc2b052a77a15157",
+      "integration_tests": [
+        "tests/test_historical_work_owned_sources.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/doctor_base.py",
+      "names": [
+        "MAX_OPERATIONAL_ROWS",
+        "TRANSACTION_STATES",
+        "database_sidecar_present",
+        "database_tables",
+        "owner_row_known",
+        "readonly_database"
+      ],
+      "contract_sha256": "aa1d2667df0a6eebe0ea32e4fe20a7bf6d545b18b68587e7cd70bdc58fb29f95",
+      "integration_tests": [
+        "tests/test_historical_work_owned_sources.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/evidence_reference.py",
+      "names": [
+        "MAX_DAILY_BYTES"
+      ],
+      "contract_sha256": "67bdf6c1a8f32fcf2f7d79b17ad45deed31ece6af1fbd94c3aeb0c3003073943",
+      "integration_tests": [
+        "tests/test_historical_work_owned_sources.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/formats/receipts.py",
+      "names": [
+        "parse_compile_receipt_v4",
+        "parse_compile_receipt_version",
+        "receipt_source_fields"
+      ],
+      "contract_sha256": "5b009fc585046860731f5cffb8d6de3dd062715885cf856de37c0a11afd8ffcf",
+      "integration_tests": [
+        "tests/test_historical_work_owned_sources.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/generation_catalog_store.py",
+      "names": [
+        "GenerationCatalog"
+      ],
+      "contract_sha256": "b18194ebe04bf988b4474379fcb5243516550d43b745a00eaed1453f7844c983",
+      "integration_tests": [
+        "tests/test_a_blocked_task_has_a_way_back.py",
+        "tests/test_a_build_in_flight_is_not_an_orphan.py",
+        "tests/test_a_capacity_refusal_does_not_corrupt_a_generation.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/model_choice.py",
+      "names": [
+        "using_root"
+      ],
+      "contract_sha256": "d45f2655cb61963e77617d1dfd7d617b134ad77cc770b59b335d0856e5d65019",
+      "integration_tests": [
+        "tests/test_historical_work_owned_sources.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/monotonic_deadline.py",
+      "names": [
+        "deadline_reached"
+      ],
+      "contract_sha256": "780a284b7c14768802bc81209d0e77dcd0f7a79885a4888eaaca663eda331414",
+      "integration_tests": [
+        "tests/test_a_backup_image_carries_what_git_does_not.py",
+        "tests/test_a_backup_snapshots_what_hooks_write.py",
+        "tests/test_a_backup_takes_what_any_installed_vault_holds.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/runtime_roots.py",
+      "names": [
+        "index_file",
+        "vault_root"
+      ],
+      "contract_sha256": "4a4180231b218b8c89cfb204414a696dd6ce8303a32b19d4a729aad2e1e84792",
+      "integration_tests": [
+        "tests/test_a_continuation_keeps_its_original_entry.py",
+        "tests/test_a_prompt_checkpoint_does_not_outwait_its_host.py",
+        "tests/test_a_session_marker_survives_a_busy_writer.py"
+      ]
+    },
+    {
+      "provider": "scripts/markdown_transaction.py",
+      "names": [
+        "MarkdownChange",
+        "MarkdownCoordinator",
+        "TransactionFailure",
+        "UNDO_RETENTION_DAYS",
+        "active_markdown_coordinator",
+        "decoded_image_bytes"
+      ],
+      "contract_sha256": "4554010e4c626026e53b41651930c9be4cdca801f708c2caa6c32e9f8f52e10f",
+      "integration_tests": [
+        "tests/test_historical_work_owned_sources.py"
+      ]
+    },
+    {
+      "provider": "scripts/reliable_memory.py",
+      "names": [
+        "OPERATIONAL_SCAN_BATCH_ROWS",
+        "read_runtime_bytes",
+        "validate_state_root"
+      ],
+      "contract_sha256": "61b0ed3c7c9f9f8afa342ee9ee15aa33ac672588a565285fff26266be687e49c",
+      "integration_tests": [
+        "tests/test_historical_work_owned_sources.py"
+      ]
+    },
+    {
+      "provider": "scripts/repository_scope.py",
+      "names": [
+        "sanitized_git_environment"
+      ],
+      "contract_sha256": "fd550ae20761afad50b37fa3a71044a162485b0e4d4b3e2af9b5b22e143c2bec",
+      "integration_tests": [
+        "tests/test_historical_work_owned_sources.py"
+      ]
+    },
+    {
+      "provider": "scripts/transaction_lineage.py",
+      "names": [
+        "base_operation_identity",
+        "committed_created_paths",
+        "outcome_was_written",
+        "resolved_by_lineage"
+      ],
+      "contract_sha256": "63a7bac412f8d57cc925fefd35d7e9e25b666ea5e3caddc4c77aa59b45773722",
+      "integration_tests": [
+        "tests/test_historical_work_owned_sources.py"
+      ]
+    },
+    {
+      "provider": "scripts/vault_log.py",
+      "names": [
+        "vault_log_path"
+      ],
+      "contract_sha256": "7b821b683156be07052675b491ca6624f66a752aa0fb02f5458024890c33685b",
+      "integration_tests": [
+        "tests/modules/vault_editorial/test_policy.py",
+        "tests/modules/vault_editorial/test_publication.py",
+        "tests/test_the_vault_log_is_private.py"
+      ]
+    }
+  ]
+}

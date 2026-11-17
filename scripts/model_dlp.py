@@ -8,11 +8,12 @@ import hmac
 import json
 import os
 import re
+from collections import Counter
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
-from reliable_memory import canonical_json_bytes
+from llm_wiki.formats.canonical import canonical_json_bytes
 from secret_redact import redact_secrets
 
 # The external DLP policy file is operator-written JSON of literals and fingerprints; 256 KiB
@@ -37,6 +38,10 @@ class DLPPolicyError(ValueError):
 
 class DLPContentBlocked(ValueError):
     """Sensitive model output must not cross the durable boundary."""
+
+
+class _ModelOutputFinding(DLPContentBlocked):
+    """A completed scan found protected output, distinct from scanner failure."""
 
 
 @dataclass(frozen=True)
@@ -182,11 +187,11 @@ def _validated_policy(document: dict) -> DLPPolicy:
     )
 
 
-def _fingerprint(text: str) -> str:
+def fingerprint(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8", errors="surrogatepass")).hexdigest()
 
 
-def _scrubbed(text: str, policy: DLPPolicy) -> str:
+def scrubbed_text(text: str, policy: DLPPolicy) -> str:
     """The text with every built-in finding and configured literal replaced."""
     redacted = redact_secrets(text)
     for literal in policy.literals:
@@ -196,12 +201,12 @@ def _scrubbed(text: str, policy: DLPPolicy) -> str:
 
 def redact_for_transport(text: str, policy: DLPPolicy) -> str:
     """Redact built-in findings and configured literals before transport."""
-    if _fingerprint(text) in policy.allow_fingerprints:
+    if fingerprint(text) in policy.allow_fingerprints:
         return text
-    return _scrubbed(text, policy)
+    return scrubbed_text(text, policy)
 
 
-def _finding_spans(text: str, scrubbed: str) -> list[str]:
+def finding_spans(text: str, scrubbed: str) -> list[str]:
     """The exact input spans the scrubber replaced, recovered by alignment.
 
     The redactor exposes no findings API, so the spans are read off the diff
@@ -254,11 +259,11 @@ def _findings_allowlisted(text: str, scrubbed: str, policy: DLPPolicy) -> bool:
     """
     if not policy.allow_finding_fingerprints:
         return False
-    spans = _finding_spans(text, scrubbed)
+    spans = finding_spans(text, scrubbed)
     if not spans:
         return False
     return all(
-        _fingerprint(span) in policy.allow_finding_fingerprints for span in spans
+        fingerprint(span) in policy.allow_finding_fingerprints for span in spans
     )
 
 
@@ -292,11 +297,26 @@ def redact_transport_value(value: object, policy: DLPPolicy) -> object:
 
 def require_safe_model_output(text: str, policy: DLPPolicy) -> None:
     """Reject sensitive provider output unless the payload or every finding is allowlisted."""
-    if _fingerprint(text) in policy.allow_fingerprints:
+    if fingerprint(text) in policy.allow_fingerprints:
         return
-    scrubbed = _scrubbed(text, policy)
+    scrubbed = scrubbed_text(text, policy)
     if scrubbed != text and not _findings_allowlisted(text, scrubbed, policy):
-        raise DLPContentBlocked("model output contains protected content")
+        raise _ModelOutputFinding(
+            f"model output contains protected content ({_finding_kinds(text, scrubbed)})"
+        )
+
+
+_MARKER_RE = re.compile(r"\[REDACTED[A-Z_]*\]")
+
+
+def _finding_kinds(text: str, scrubbed: str) -> str:
+    """Which rules fired, by their markers and counts, never the content they matched.
+
+    A refusal that named nothing left 72 captures on the live vault blocked on
+    every retry with no way to tell a real secret from a false positive.
+    """
+    counts = Counter(_MARKER_RE.findall(scrubbed)) - Counter(_MARKER_RE.findall(text))
+    return ", ".join(f"{marker.strip('[]')} x{counts[marker]}" for marker in sorted(counts)) or "unnamed"
 
 
 def require_safe_content(content: bytes, policy: DLPPolicy) -> None:
@@ -312,6 +332,25 @@ def require_safe_content(content: bytes, policy: DLPPolicy) -> None:
         raise DLPContentBlocked("content scan failed") from exc
 
 
-def require_safe_publication(content: bytes) -> None:
-    """Recheck exact after-image bytes immediately before durable publication."""
-    require_safe_content(content, load_policy())
+def _only_preserved_findings(content: bytes, prefix: bytes | None, policy: DLPPolicy) -> bool:
+    """Accept only findings confined to an authenticated unchanged byte prefix."""
+    if prefix is None or not content.startswith(prefix):
+        return False
+    try:
+        text = content.decode("utf-8", errors="surrogateescape")
+        before = prefix.decode("utf-8", errors="surrogateescape")
+        appended = content[len(prefix):].decode("utf-8", errors="surrogateescape")
+        return scrubbed_text(text, policy) == scrubbed_text(before, policy) + appended
+    except Exception as error:
+        raise DLPContentBlocked("preserved publication scan failed") from error
+
+
+def require_safe_publication(content: bytes, *, preserved_prefix: bytes | None = None) -> None:
+    """Scan exact after bytes; authenticated unchanged history is not new output."""
+    policy = load_policy()
+    try:
+        require_safe_content(content, policy)
+    except DLPContentBlocked as error:
+        if isinstance(error.__cause__, _ModelOutputFinding) and _only_preserved_findings(content, preserved_prefix, policy):
+            return
+        raise

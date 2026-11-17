@@ -1,0 +1,205 @@
+{
+  "encoding": "o200k_base",
+  "max_tokens": 100000,
+  "serialization": "exact-duplicates/v1",
+  "files": [
+    "AGENTS.md",
+    "CLAUDE.md",
+    "docs/AGENTS.md",
+    "docs/STRUCTURE.md",
+    "docs/modules/compile-controller-publication-context.json",
+    "docs/modules/compile-controller-publication.md",
+    "docs/modules/context-bundle.md",
+    "docs/modules/context-records.md",
+    "docs/modules/context-tooling.md",
+    "docs/modules/model-choice.md",
+    "docs/modules/product-structure.md",
+    "docs/modules/project-governance.md",
+    "docs/modules/test-support.md",
+    "rules/development-laws.md",
+    "scripts/__init__.py",
+    "scripts/llm_wiki/__init__.py",
+    "scripts/llm_wiki/compile_controller_publication.py",
+    "scripts/llm_wiki/context_bundle.py",
+    "tests/__init__.py",
+    "tests/conftest.py",
+    "tests/module_context.py",
+    "tests/module_context_paths.py",
+    "tests/module_interface.py",
+    "tests/module_interface_render.py",
+    "tests/module_qualification.py",
+    "tests/module_record_context.py",
+    "tests/module_records.py",
+    "tests/shared_fixtures.py",
+    "tests/slow_machine.py"
+  ],
+  "ownership": {
+    "files": [
+      "docs/modules/compile-controller-publication-context.json",
+      "docs/modules/compile-controller-publication.md",
+      "scripts/llm_wiki/compile_controller_publication.py"
+    ]
+  },
+  "qualified_dependencies": [
+    {
+      "provider": "scripts/compile_progress.py",
+      "names": [
+        "ProgressConflict",
+        "ProgressCorrupt",
+        "event_digest",
+        "require_digest"
+      ],
+      "contract_sha256": "418ed0b6c228665aebfc077b1b03a50b055f94693c2daaba0a46ad650cd62fde",
+      "integration_tests": [
+        "tests/test_compile_archive_json_views.py",
+        "tests/test_compile_artifact_retention.py",
+        "tests/test_compile_atomic_capture.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/compile_call_runtime.py",
+      "names": [
+        "require_checkpoint"
+      ],
+      "contract_sha256": "ad6074651c493b7a9886864c340735573344e3c13ed184ac9b5a9fa42f3b4908",
+      "integration_tests": [
+        "tests/modules/compile_call_runtime/test_lifecycle.py",
+        "tests/test_compile_call_controller.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/compile_controller_archive.py",
+      "names": [
+        "snapshot_json"
+      ],
+      "contract_sha256": "49a7e85d70a0d7b9b4cc8a45f47d18666fca4f7e8cb13568e3750351e20ae644",
+      "integration_tests": [
+        "tests/test_compile_streamed_json_metadata.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/compile_controller_base.py",
+      "names": [
+        "compile_identity_digest"
+      ],
+      "contract_sha256": "d74b1ae2ebdd3ee1ab2a2033ee4e34c1e21ec1a202d2464cb69c4a2bd3be3cf2",
+      "integration_tests": [
+        "tests/test_a_blocked_task_has_a_way_back.py",
+        "tests/test_an_answer_says_how_old_its_index_is.py",
+        "tests/test_answer_budget.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/compile_controller_preflight.py",
+      "names": [
+        "preflight_batch_details",
+        "preflight_source_records",
+        "save_verified_compile_artifact"
+      ],
+      "contract_sha256": "fe7863a6313f9cd0c21f4d42d3d3b047f250a3986fec6e0c497954f9e994f676",
+      "integration_tests": [
+        "tests/test_a_blocked_task_has_a_way_back.py",
+        "tests/test_an_answer_says_how_old_its_index_is.py",
+        "tests/test_answer_budget.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/compile_pipeline_apply.py",
+      "names": [
+        "apply_compile_plan",
+        "compile_batch_completion"
+      ],
+      "contract_sha256": "2a827f09106c6d1e8983e1986b81b40eb69f4d9840d32c61462d5bca9193dc80",
+      "integration_tests": [
+        "tests/test_a_blank_line_before_the_next_section.py",
+        "tests/test_a_committed_source_resolves_an_older_compile_plan.py",
+        "tests/test_a_journal_is_readable_by_every_reader.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/compile_pipeline_receipts.py",
+      "names": [
+        "compile_writer_gate",
+        "require_apply_arguments",
+        "utc_now"
+      ],
+      "contract_sha256": "e0ab05f40a624ddf594972d6696298bc3138bd7548555878f260e035ce512e28",
+      "integration_tests": [
+        "tests/test_a_continuation_keeps_its_original_entry.py",
+        "tests/test_a_derived_field_is_derived_again.py",
+        "tests/test_compile_hardening.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/generation_catalog_store.py",
+      "names": [
+        "GenerationCatalog"
+      ],
+      "contract_sha256": "b18194ebe04bf988b4474379fcb5243516550d43b745a00eaed1453f7844c983",
+      "integration_tests": [
+        "tests/test_a_blocked_task_has_a_way_back.py",
+        "tests/test_a_build_in_flight_is_not_an_orphan.py",
+        "tests/test_a_capacity_refusal_does_not_corrupt_a_generation.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/model_choice.py",
+      "names": [
+        "using_root"
+      ],
+      "contract_sha256": "d45f2655cb61963e77617d1dfd7d617b134ad77cc770b59b335d0856e5d65019",
+      "integration_tests": [
+        "tests/test_central_model_selection.py",
+        "tests/test_compile_execution_inventory.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/runtime_roots.py",
+      "names": [
+        "vault_root"
+      ],
+      "contract_sha256": "35ea768c9fd09097366a2ded61783ec66ac8997f3f02255c744c8443405a706b",
+      "integration_tests": [
+        "tests/test_a_continuation_keeps_its_original_entry.py",
+        "tests/test_a_prompt_checkpoint_does_not_outwait_its_host.py",
+        "tests/test_a_session_marker_survives_a_busy_writer.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/sqlite_deadlines.py",
+      "names": [
+        "operational_deadline_active"
+      ],
+      "contract_sha256": "b6a31ad07e6c587aeabfc49f66f512ca222ed88ce0bd8a29eafe6eaca6ed4838",
+      "integration_tests": [
+        "tests/modules/sqlite_deadlines/test_deadlines.py",
+        "tests/test_a_check_names_its_cause.py",
+        "tests/test_compile_publication_writer_contention.py"
+      ]
+    },
+    {
+      "provider": "scripts/reliable_memory.py",
+      "names": [
+        "validate_state_root"
+      ],
+      "contract_sha256": "8680515cd873056a7c8a36e0057d91f2f83f23c48841263697676ff91f7ff964",
+      "integration_tests": [
+        "tests/test_a_backup_image_carries_what_git_does_not.py",
+        "tests/test_a_changed_task_setting_reaches_an_installed_machine.py",
+        "tests/test_a_committed_source_resolves_an_older_compile_plan.py"
+      ]
+    },
+    {
+      "provider": "scripts/repository_scope.py",
+      "names": [
+        "sanitized_git_environment"
+      ],
+      "contract_sha256": "fd550ae20761afad50b37fa3a71044a162485b0e4d4b3e2af9b5b22e143c2bec",
+      "integration_tests": [
+        "tests/test_a_code_generation_is_not_abandoned.py",
+        "tests/test_a_directory_link_inside_the_checkout_does_not_refuse_the_revision.py",
+        "tests/test_a_document_is_opened_in_its_own_language.py"
+      ]
+    }
+  ]
+}

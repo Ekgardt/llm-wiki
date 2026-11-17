@@ -3,73 +3,65 @@
 from __future__ import annotations
 
 import contextlib
-import json
 import os
 import re
 import sqlite3
-import stat
-import time
-from collections.abc import Callable, Iterator
-from datetime import datetime, timedelta, timezone
+from collections.abc import Callable
+from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal, NamedTuple
 
 import markdown_transaction
-import memory_queue
+import queue_core
 from bounded_io import read_stable_bytes
-from install_control import validate_install_state
+from llm_wiki import sqlite_io
+from llm_wiki.formats.canonical import canonical_json_bytes, sha256_bytes
+from llm_wiki.formats.schema import validate_schema
+from llm_wiki.sqlite_deadlines import (
+    busy_database,
+)
 from reliable_memory import (
-    OperationalDatabaseContract,
-    canonical_json_bytes,
     capture_runtime_file_identity,
     durable_publish_file,
-    open_readonly_operational_db,
     publish_runtime_file,
     read_runtime_bytes,
-    sha256_bytes,
-    streamed_rows,
     sync_runtime_directory,
-    validate_schema,
     validate_state_root,
 )
+from secret_redact import describe_error_chain
 
 if TYPE_CHECKING:
-    from operational_ownership import OwnerLease
+    pass
 
-_SCHEMA_DIR = Path(__file__).with_name("schemas")
-_TOMBSTONE_SCHEMA = _SCHEMA_DIR / "operational-db-tombstone-v1.json"
-_MIGRATION_SCHEMA = _SCHEMA_DIR / "reliability-v3-migration-v1.json"
-_ADOPTION_SCHEMA = _SCHEMA_DIR / "reliability-v3-adoption-v1.json"
-# Bounded reads of the adoption's own JSON records; each is refused past its bound,
-# never cut. Measured 2026-09-27 on the installed vault: a tombstone is 487-541
-# bytes, the migration record 1 333 and the adoption record 2 507, so 4 KiB and
-# 64 KiB leave about 8 and 25 times room. Review if a schema version adds fields.
-_MAX_TOMBSTONE_BYTES = 4 * 1024
-_MAX_RECORD_BYTES = 64 * 1024
-# In-flight adoption artifacts named in a report; one adoption leaves at most one
-# candidate and one retired file per database (four), so 32 means a broken run
-# directory. Past it the listing sets its overflow flag and the check refuses.
-_MAX_OPERATION_ARTIFACTS = 32
-# The same bounds as doctor.MAX_OPERATIONAL_DB_BYTES and MAX_RUNTIME_ENTRIES, whose
-# comments give their basis: both read the same databases and directories. Repeated
-# because doctor imports this module lazily to stay importable without the queue and
-# transaction modules; keep the pairs equal. A scan past a bound raises, never judges
-# from entries unseen. Table rows have no count cap: they are streamed (`_scanned_rows`).
-_MAX_OPERATIONAL_DB_BYTES = 256 * 1024 * 1024
-_MAX_RUNTIME_ENTRIES = 10_000
-# The same bound as memory_state.MAX_CAPTURE_INTENT_BYTES (the hook writes intents
-# under it); not imported because memory_state resolves the live state root at
-# import time. The largest intent on the installed vault on 2026-09-27 was 977 392
-# bytes — 93% of this bound; review the pair if intents approach it.
-_MAX_CAPTURE_INTENT_BYTES = 1024 * 1024
-from markdown_transaction import UNDO_RETENTION_DAYS as _UNDO_RETENTION_DAYS  # noqa: E402
-
-_QUEUE_CONTRACT = OperationalDatabaseContract(application_id=0x4C575133)
-_COORDINATOR_CONTRACT = OperationalDatabaseContract(application_id=0x4C575433)
-_OPERATION_ARTIFACT_RE = re.compile(
-    r"^\.reliability-v3-[0-9a-f]{64}-(?:queue|coordinator)"
-    r"\.(?:candidate\.sqlite3|retired\.tmp)$"
+from llm_wiki import adoption_admission
+from llm_wiki.adoption_admission import (  # noqa: E402
+    MAX_OPERATIONAL_DB_BYTES,
+    MAX_RECORD_BYTES,
+    MAX_TOMBSTONE_BYTES,
+    MIGRATION_SCHEMA,
+    STRAY_SPECS,
+    TOMBSTONE_SCHEMA,
+    adoption_paths,
+    adoption_schema,
+    current_schema_digests,
+    expected_migration_record,
+    expected_tombstone,
+    identity_value,
+    listed_operation_artifacts,
+    named_database_records,
+    read_adoption_record,
+    read_record,
+    require_reliability_v3_adopted,
+    validate_complete_adoption,
+    validated_schema_digests,
 )
+from llm_wiki.adoption_admission import (
+    kind as _kind,
+)
+from reliability_v3_validation import (
+    artifact_record,
+)
+
 _LEGACY_EVIDENCE = (
     "queue",
     "queue-migrated-v2",
@@ -107,8 +99,8 @@ _DATABASE_SPECS = (
         "run/queue.sqlite3",
         "run/queue-v3.sqlite3",
         "run/queue-v2-retired.sqlite3",
-        memory_queue.initialize_queue_v3_candidate,
-        memory_queue.validate_queue_v3_database,
+        queue_core.initialize_queue_v3_candidate,
+        queue_core.validate_queue_v3_database,
     ),
     _DatabaseSpec(
         "coordinator",
@@ -122,51 +114,6 @@ _DATABASE_SPECS = (
         markdown_transaction.validate_coordinator_v3_database,
     ),
 )
-
-
-def _install_deletion_blockers(state_root: Path) -> list[str]:
-    result = validate_install_state(state_root)
-    codes = result.get("deletion_codes")
-    if not isinstance(codes, list):
-        return ["install_state_corrupt"]
-    if any(not isinstance(code, str) for code in codes):
-        return ["install_state_corrupt"]
-    return codes
-
-
-def _paths(state_root: Path) -> dict[str, Path]:
-    run = state_root / "run"
-    return {
-        "run": run,
-        "queue_legacy": run / "queue.sqlite3",
-        "coordinator_legacy": run / "markdown-transactions.sqlite3",
-        "queue_active": run / "queue-v3.sqlite3",
-        "coordinator_active": run / "markdown-transactions-v3.sqlite3",
-        "queue_candidate": run / "queue-v3.candidate.sqlite3",
-        "coordinator_candidate": run / "markdown-transactions-v3.candidate.sqlite3",
-        "queue_retired": run / "queue-v2-retired.sqlite3",
-        "coordinator_retired": run / "markdown-transactions-v2-retired.sqlite3",
-        "migration": run / "reliability-v3-migration.json",
-        "adoption": run / "reliability-v3-adopted.json",
-    }
-
-
-_STAT_KINDS = (
-    (stat.S_ISLNK, "link"),
-    (stat.S_ISREG, "file"),
-    (stat.S_ISDIR, "directory"),
-)
-
-
-def _kind(path: Path) -> str:
-    try:
-        metadata = path.lstat()
-    except FileNotFoundError:
-        return "missing"
-    for predicate, name in _STAT_KINDS:
-        if predicate(metadata.st_mode):
-            return name
-    return "other"
 
 
 def _nonempty_directory(path: Path) -> bool:
@@ -191,1358 +138,18 @@ def _legacy_evidence_item(run: Path, name: str) -> str | None:
     return f"run/{name}" if kind == "file" else f"run/{name}:{kind}"
 
 
-def _operation_artifacts(run: Path) -> tuple[list[str], bool]:
-    if _kind(run) != "directory":
-        return [], False
-    with os.scandir(run) as entries:
-        names = [
-            entry.name
-            for entry in entries
-            if _OPERATION_ARTIFACT_RE.fullmatch(entry.name)
-        ]
-    names.sort()
-    return names[:_MAX_OPERATION_ARTIFACTS], len(names) > _MAX_OPERATION_ARTIFACTS
 
+def _current_initialization(record):
+    return record.get("schemas") == current_schema_digests()
 
-def _unique_object(pairs: list[tuple[str, object]]) -> dict[str, object]:
-    result: dict[str, object] = {}
-    for key, value in pairs:
-        if key in result:
-            raise ValueError("duplicate JSON key")
-        result[key] = value
-    return result
 
+def _initial_adoption_version(migration):
+    if _current_initialization(migration):
+        return "reliability-v3-adoption/v3"
+    return "reliability-v3-adoption/v1"
 
-def _reject_constant(value: str) -> object:
-    raise ValueError(f"invalid JSON constant: {value}")
 
-
-def _read_record(
-    path: Path,
-    state_root: Path,
-    *,
-    schema: Path,
-    max_bytes: int,
-) -> dict[str, object]:
-    raw = read_runtime_bytes(
-        path,
-        state_root,
-        max_bytes=max_bytes,
-        owner_only=True,
-    )
-    try:
-        value = json.loads(
-            raw,
-            object_pairs_hook=_unique_object,
-            parse_constant=_reject_constant,
-        )
-    except (UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
-        raise ValueError("runtime record is not strict JSON") from exc
-    if not isinstance(value, dict) or canonical_json_bytes(value) != raw:
-        raise ValueError("runtime record is not canonical JSON")
-    validate_schema(value, schema)
-    return value
-
-
-class ReliabilityV3ValidationError(RuntimeError):
-    """Stable closed failure from Reliability V3 read-only validation.
-
-    `detail` is what the validation saw, for the operator; `code` stays the
-    stable name callers match on (2026-09-23, an invalid record read the same
-    as a database held by a hook for a moment).
-    """
-
-    def __init__(self, code: str, detail: str = "") -> None:
-        self.code = code
-        self.detail = detail
-        super().__init__(f"{code}: {detail}" if detail else code)
-
-
-def _identity_value(identity: object) -> dict[str, object]:
-    return {
-        "platform": getattr(identity, "platform"),
-        "volume": getattr(identity, "volume"),
-        "file_id": getattr(identity, "file_id"),
-        "size": getattr(identity, "size"),
-        "mtime_ns": getattr(identity, "mtime_ns"),
-    }
-
-
-def _validate_artifact_reference(
-    record: object,
-    *,
-    expected_path: Path,
-    state_root: Path,
-    mutable: bool,
-    max_bytes: int,
-) -> bytes | None:
-    artifact = _require_artifact_record(record, expected_path, state_root)
-    actual_identity = capture_runtime_file_identity(expected_path, state_root=state_root)
-    _validate_artifact_identity(artifact, actual_identity, mutable)
-    if mutable:
-        return None
-    return _validate_immutable_artifact(
-        artifact,
-        expected_path=expected_path,
-        state_root=state_root,
-        max_bytes=max_bytes,
-    )
-
-
-def _require_artifact_record(
-    record: object, expected_path: Path, state_root: Path
-) -> dict[str, object]:
-    if not isinstance(record, dict):
-        raise ValueError("artifact reference is not an object")
-    relative = expected_path.relative_to(state_root).as_posix()
-    if record.get("path") != relative:
-        raise ValueError("artifact path differs from the fixed runtime path")
-    return record
-
-
-def _validate_artifact_identity(
-    record: dict[str, object], actual_identity: object, mutable: bool
-) -> None:
-    expected_identity = record.get("identity")
-    if not isinstance(expected_identity, dict):
-        raise ValueError("artifact identity is missing")
-    actual_value = _identity_value(actual_identity)
-    identity_fields = _identity_fields(actual_value, mutable)
-    if any(expected_identity.get(field) != actual_value[field] for field in identity_fields):
-        raise ValueError("artifact identity changed")
-
-
-def _identity_fields(actual_value: dict[str, object], mutable: bool) -> tuple[str, ...]:
-    """A mutable artifact is identified by its file, not by its contents."""
-    return ("platform", "volume", "file_id") if mutable else tuple(actual_value)
-
-
-def _validate_immutable_artifact(
-    record: dict[str, object],
-    *,
-    expected_path: Path,
-    state_root: Path,
-    max_bytes: int,
-) -> bytes:
-    payload = read_runtime_bytes(
-        expected_path,
-        state_root,
-        max_bytes=max_bytes,
-        owner_only=True,
-    )
-    if record.get("sha256") != sha256_bytes(payload):
-        raise ValueError("artifact digest changed")
-    return payload
-
-
-def _validate_active_database_reference(
-    record: dict[str, object],
-    *,
-    database_name: str,
-    path: Path,
-    state_root: Path,
-) -> None:
-    _validate_artifact_reference(
-        record.get("active"),
-        expected_path=path,
-        state_root=state_root,
-        mutable=True,
-        max_bytes=_MAX_OPERATIONAL_DB_BYTES,
-    )
-    contract = _database_contract(database_name)
-    with contextlib.closing(
-        open_readonly_operational_db(
-            path,
-            state_root,
-            max_bytes=_MAX_OPERATIONAL_DB_BYTES,
-            owner_only=True,
-            contract=contract,
-        )
-    ) as database:
-        complete = _database_schema_complete(database_name, database)
-        integrity = database.execute("PRAGMA integrity_check").fetchall()
-        foreign_keys = database.execute("PRAGMA foreign_key_check").fetchall()
-        observed = {
-            "application_id": database.execute("PRAGMA application_id").fetchone()[0],
-            "user_version": database.execute("PRAGMA user_version").fetchone()[0],
-            "journal_mode": database.execute("PRAGMA journal_mode").fetchone()[0],
-            "synchronous": database.execute("PRAGMA synchronous").fetchone()[0],
-            "foreign_keys": database.execute("PRAGMA foreign_keys").fetchone()[0],
-            "trusted_schema": database.execute("PRAGMA trusted_schema").fetchone()[0],
-        }
-    _require_database_health(complete, integrity, foreign_keys)
-    _require_database_metadata(record, observed)
-
-
-def _database_contract(database_name: str) -> OperationalDatabaseContract:
-    if database_name == "queue":
-        return _QUEUE_CONTRACT
-    if database_name == "coordinator":
-        return _COORDINATOR_CONTRACT
-    raise ValueError("unknown operational database")
-
-
-def _database_schema_complete(database_name: str, database: sqlite3.Connection) -> bool:
-    if database_name == "queue":
-        return memory_queue._queue_v3_schema_complete(database)
-    if database_name == "coordinator":
-        return markdown_transaction._coordinator_v3_schema_complete(database)
-    raise ValueError("unknown operational database")
-
-
-def _require_database_health(
-    complete: bool, integrity: list[sqlite3.Row], foreign_keys: list[sqlite3.Row]
-) -> None:
-    failures = (
-        (not complete, "active database schema is incomplete"),
-        (
-            len(integrity) != 1 or integrity[0][0] != "ok",
-            "active database integrity check failed",
-        ),
-        (bool(foreign_keys), "active database foreign key check failed"),
-    )
-    for failed, message in failures:
-        if failed:
-            raise ValueError(message)
-
-
-def _require_database_metadata(
-    record: dict[str, object], observed: dict[str, object]
-) -> None:
-    if record.get("application_id") != observed["application_id"]:
-        raise ValueError("active database application ID changed")
-    if record.get("user_version") != observed["user_version"]:
-        raise ValueError("active database version changed")
-    _require_database_pragmas(record.get("pragmas"), observed)
-
-
-def _require_database_pragmas(pragmas: object, observed: dict[str, object]) -> None:
-    if not isinstance(pragmas, dict):
-        raise ValueError("active database PRAGMAs are missing")
-    if any(pragmas.get(key) != observed[key] for key in pragmas):
-        raise ValueError("active database contract changed")
-
-
-def _validate_complete_adoption(
-    *,
-    root: Path,
-    state_root: Path,
-    paths: dict[str, Path],
-    migration: dict[str, object],
-    adoption: dict[str, object],
-    operation_artifacts: list[str],
-) -> dict[str, object]:
-    _require_adoption_artifacts_complete(paths, operation_artifacts)
-    _require_adoption_header(adoption, migration)
-    _require_migration_reference(adoption, paths, state_root)
-    migration_by_name = _named_database_records(migration.get("databases"))
-    adoption_by_name = _named_database_records(adoption.get("databases"))
-    schemas = _require_adoption_sources(root, adoption)
-    for database_name in ("queue", "coordinator"):
-        _validate_adopted_database(
-            database_name=database_name,
-            source_state=str(adoption["source_state"]),
-            operation_id=str(adoption["operation_id"]),
-            schemas=schemas,
-            paths=paths,
-            state_root=state_root,
-            migration_record=migration_by_name[database_name],
-            adoption_record=adoption_by_name[database_name],
-        )
-    return adoption
-
-
-def _require_adoption_artifacts_complete(
-    paths: dict[str, Path], operation_artifacts: list[str]
-) -> None:
-    if operation_artifacts:
-        raise ValueError("operation artifacts remain after adoption")
-    if any(
-        _kind(paths[name]) != "missing"
-        for name in ("queue_candidate", "coordinator_candidate")
-    ):
-        raise ValueError("candidate artifacts remain after adoption")
-
-
-def _require_adoption_header(
-    adoption: dict[str, object], migration: dict[str, object]
-) -> None:
-    fields = ("operation_id", "source_state", "schemas", "installed_integration_sha256")
-    if any(adoption.get(field) != migration.get(field) for field in fields):
-        raise ValueError("adoption and migration records differ")
-
-
-def _require_migration_reference(
-    adoption: dict[str, object], paths: dict[str, Path], state_root: Path
-) -> None:
-    migration_bytes = read_runtime_bytes(
-        paths["migration"], state_root, max_bytes=_MAX_RECORD_BYTES, owner_only=True
-    )
-    expected = {
-        "path": "run/reliability-v3-migration.json",
-        "sha256": sha256_bytes(migration_bytes),
-    }
-    if adoption.get("migration") != expected:
-        raise ValueError("adoption migration reference changed")
-
-
-def _named_database_records(value: object) -> dict[str, dict[str, object]]:
-    if not isinstance(value, list):
-        raise ValueError("adoption database records are missing")
-    result: dict[str, dict[str, object]] = {}
-    for item in value:
-        name, record = _named_database_record(item, result)
-        result[name] = record
-    if set(result) != {"queue", "coordinator"}:
-        raise ValueError("adoption database pair is incomplete")
-    return result
-
-
-def _named_database_record(
-    item: object, existing: dict[str, dict[str, object]]
-) -> tuple[str, dict[str, object]]:
-    name = _database_record_name(item)
-    if name in existing:
-        raise ValueError("adoption database name is duplicated")
-    return name, item
-
-
-def _database_record_name(item: object) -> str:
-    if not isinstance(item, dict):
-        raise ValueError("adoption database record is invalid")
-    name = item.get("database")
-    if not isinstance(name, str):
-        raise ValueError("adoption database name is invalid")
-    return name
-
-
-def _expected_schema_digests() -> dict[str, str]:
-    return {
-        "queue_schema_sha256": memory_queue.QUEUE_V3_SCHEMA_SHA256,
-        "coordinator_schema_sha256": markdown_transaction.COORDINATOR_V3_SCHEMA_SHA256,
-        "adoption_schema_sha256": sha256_bytes(_ADOPTION_SCHEMA.read_bytes()),
-    }
-
-
-def _require_adoption_sources(
-    root: Path, adoption: dict[str, object]
-) -> dict[str, object]:
-    """Validate what an adopted record must still agree with on every read.
-
-    The schema digests stay fail-closed. A v3 database whose shape no longer
-    matches the code about to read it is a real incompatibility, and the check
-    costs one comparison of two recorded constants.
-
-    ``installed_integration_sha256`` is deliberately *not* re-checked here. It
-    is provenance -- which producer performed the cutover -- and it is bound
-    where that binding decides something: `_validate_migration_context` refuses
-    an adoption whose plan was made against different adapter bytes, so the
-    window between `--plan` and `--apply` is still closed. Re-checking it on
-    every validation turned any later edit of `scripts/integration_adapter.py`
-    into a total outage of the memory write path -- capture, queue and every
-    Markdown transaction -- because `require_reliability_v3_adopted` guards all
-    of them. The nightly fast-forward the owner approved on 2026-08-23 updates
-    this checkout unattended, so the first update touching the adapter would
-    have disabled memory silently. A digest can say "different"; it cannot say
-    "incompatible", and the incompatibility that matters is the schema, which
-    is checked above. See
-    `knowledge/notes/adoption-digest-is-provenance-decision.md`.
-
-    What replaces it is the property that is actually checkable and actionable:
-    the producer must still be installed. An absent adapter is a broken
-    installation and fails closed; a changed one is an ordinary update.
-    """
-    schemas = adoption.get("schemas")
-    if not isinstance(schemas, dict) or schemas != _expected_schema_digests():
-        raise ValueError("adoption schema digests changed")
-    if _kind(root / "scripts" / "integration_adapter.py") != "file":
-        raise ValueError("installed integration is missing")
-    return schemas
-
-
-def _database_spec(database_name: str) -> tuple[str, str, str, str, str, str]:
-    if database_name == "queue":
-        return (
-            "run/queue.sqlite3",
-            "run/queue-v3.sqlite3",
-            "run/queue-v2-retired.sqlite3",
-            "queue_legacy",
-            "queue_active",
-            "queue_retired",
-        )
-    if database_name == "coordinator":
-        return (
-            "run/markdown-transactions.sqlite3",
-            "run/markdown-transactions-v3.sqlite3",
-            "run/markdown-transactions-v2-retired.sqlite3",
-            "coordinator_legacy",
-            "coordinator_active",
-            "coordinator_retired",
-        )
-    raise ValueError("unknown operational database")
-
-
-def adopted_database_path(*, database_name: str, state_root: Path) -> Path:
-    """The database a reader should open for ``database_name``.
-
-    After adoption the legacy path is a JSON tombstone, not a database. A
-    reader that opens it anyway reports the runtime as unreadable -- which is
-    exactly what doctor did on a healthy adopted vault: `queue_state_unreadable`
-    and `transaction_state_unreadable`, both of which also block deleting
-    `run/`. The tombstone already names its replacement, so follow it.
-
-    Anything that is not a valid tombstone for this database -- a real v2
-    database, a partly written record, an unreadable file -- returns the legacy
-    path unchanged, so an un-adopted or damaged runtime keeps the verdict it
-    had instead of silently being judged from somewhere else.
-    """
-    legacy, active = _database_spec(database_name)[:2]
-    state = Path(state_root).absolute()
-    tombstone = _tombstone_document(state / legacy, state)
-    if tombstone is None:
-        return state / legacy
-    names_this_database = (
-        tombstone.get("database") == database_name
-        and tombstone.get("legacy_path") == legacy
-        and tombstone.get("replacement_path") == active
-    )
-    return state / active if names_this_database else state / legacy
-
-
-def _tombstone_document(path: Path, state_root: Path) -> dict[str, object] | None:
-    """The tombstone at ``path``, or None when it is not one or cannot be read."""
-    if _kind(path) != "file":
-        return None
-    try:
-        payload = read_runtime_bytes(
-            path, state_root, max_bytes=_MAX_TOMBSTONE_BYTES, owner_only=True
-        )
-        document = json.loads(payload)
-    except (OSError, ValueError):
-        return None
-    if not isinstance(document, dict):
-        return None
-    expected = "operational-db-tombstone/v1"
-    return document if document.get("schema_version") == expected else None
-
-
-def _expected_migration_record(
-    *, database_name: str, source_state: str, migration_record: dict[str, object]
-) -> dict[str, object]:
-    legacy, active, retired, _legacy_key, _active_key, _retired_key = _database_spec(
-        database_name
-    )
-    expected = {
-        "database": database_name,
-        "legacy_path": legacy,
-        "replacement_path": active,
-    }
-    if source_state == "upgrade":
-        expected.update(
-            {
-                "retired_path": retired,
-                "source_identity": migration_record.get("source_identity"),
-                "source_sha256": migration_record.get("source_sha256"),
-            }
-        )
-    return expected
-
-
-def _expected_tombstone(
-    *,
-    database_name: str,
-    source_state: str,
-    operation_id: str,
-    adoption_schema_sha256: object,
-    migration_record: dict[str, object],
-) -> dict[str, object]:
-    legacy, active, retired, _legacy_key, _active_key, _retired_key = _database_spec(
-        database_name
-    )
-    expected = {
-        "schema_version": "operational-db-tombstone/v1",
-        "database": database_name,
-        "source_state": source_state,
-        "legacy_path": legacy,
-        "replacement_path": active,
-        "operation_id": operation_id,
-        "adoption_schema_sha256": adoption_schema_sha256,
-    }
-    if source_state == "upgrade":
-        expected["retired_path"] = retired
-        expected["retired_sha256"] = migration_record.get("source_sha256")
-    return expected
-
-
-def _validate_adopted_database(
-    *,
-    database_name: str,
-    source_state: str,
-    operation_id: str,
-    schemas: dict[str, object],
-    paths: dict[str, Path],
-    state_root: Path,
-    migration_record: dict[str, object],
-    adoption_record: dict[str, object],
-) -> None:
-    expected_migration = _expected_migration_record(
-        database_name=database_name,
-        source_state=source_state,
-        migration_record=migration_record,
-    )
-    if migration_record != expected_migration:
-        raise ValueError("migration database descriptor changed")
-    _validate_adopted_tombstone(
-        database_name=database_name,
-        source_state=source_state,
-        operation_id=operation_id,
-        schemas=schemas,
-        paths=paths,
-        state_root=state_root,
-        migration_record=migration_record,
-        adoption_record=adoption_record,
-    )
-    _validate_adopted_active(database_name, paths, state_root, adoption_record)
-    _validate_adopted_retired(
-        database_name, source_state, paths, state_root, migration_record, adoption_record
-    )
-
-
-def _validate_adopted_tombstone(
-    *,
-    database_name: str,
-    source_state: str,
-    operation_id: str,
-    schemas: dict[str, object],
-    paths: dict[str, Path],
-    state_root: Path,
-    migration_record: dict[str, object],
-    adoption_record: dict[str, object],
-) -> None:
-    _legacy, _active, _retired, legacy_key, _active_key, _retired_key = _database_spec(
-        database_name
-    )
-    tombstone_bytes = _validate_artifact_reference(
-        adoption_record.get("tombstone"),
-        expected_path=paths[legacy_key],
-        state_root=state_root,
-        mutable=False,
-        max_bytes=_MAX_TOMBSTONE_BYTES,
-    )
-    tombstone = _read_record(
-        paths[legacy_key], state_root, schema=_TOMBSTONE_SCHEMA, max_bytes=_MAX_TOMBSTONE_BYTES
-    )
-    if tombstone_bytes != canonical_json_bytes(tombstone):
-        raise ValueError("tombstone bytes are not canonical")
-    expected = _expected_tombstone(
-        database_name=database_name,
-        source_state=source_state,
-        operation_id=operation_id,
-        adoption_schema_sha256=schemas.get("adoption_schema_sha256"),
-        migration_record=migration_record,
-    )
-    if tombstone != expected:
-        raise ValueError("tombstone does not match adoption")
-
-
-def _validate_adopted_active(
-    database_name: str,
-    paths: dict[str, Path],
-    state_root: Path,
-    adoption_record: dict[str, object],
-) -> None:
-    _legacy, _active, _retired, _legacy_key, active_key, _retired_key = _database_spec(
-        database_name
-    )
-    _validate_active_database_reference(
-        adoption_record,
-        database_name=database_name,
-        path=paths[active_key],
-        state_root=state_root,
-    )
-
-
-def _validate_adopted_retired(
-    database_name: str,
-    source_state: str,
-    paths: dict[str, Path],
-    state_root: Path,
-    migration_record: dict[str, object],
-    adoption_record: dict[str, object],
-) -> None:
-    _legacy, _active, _retired, _legacy_key, _active_key, retired_key = _database_spec(
-        database_name
-    )
-    if source_state == "upgrade":
-        _validate_upgrade_retired(
-            paths[retired_key], state_root, migration_record, adoption_record
-        )
-        return
-    if "retired" in adoption_record or _kind(paths[retired_key]) != "missing":
-        raise ValueError("fresh adoption contains retired database evidence")
-
-
-def _validate_upgrade_retired(
-    path: Path,
-    state_root: Path,
-    migration_record: dict[str, object],
-    adoption_record: dict[str, object],
-) -> None:
-    retired_bytes = _validate_artifact_reference(
-        adoption_record.get("retired"),
-        expected_path=path,
-        state_root=state_root,
-        mutable=False,
-        max_bytes=_MAX_OPERATIONAL_DB_BYTES,
-    )
-    if sha256_bytes(retired_bytes or b"") != migration_record.get("source_sha256"):
-        raise ValueError("retired database differs from migration source")
-
-
-class _StraySpec(NamedTuple):
-    """One pre-adoption candidate: where it lives and what makes it stray."""
-
-    key: str
-    contract: OperationalDatabaseContract
-    data_tables: tuple[str, ...]
-    owner_table: str
-    owner_label: str
-    quarantine: str
-
-
-# A candidate is stray when none of these holds a row and no owner is live. The
-# epoch tables only count and are left out, as `doctor` always left them out.
-_STRAY_SPECS = (
-    _StraySpec(
-        "coordinator_candidate",
-        _COORDINATOR_CONTRACT,
-        (
-            "transaction",
-            "operation",
-            "intent_fences",
-            "project_leases",
-            "writer_owners",
-            "project_checkpoints",
-            "blackboard_claims",
-            "capture_binding_projections",
-        ),
-        "maintenance_owners",
-        "maintenance owner",
-        "coordinator-quarantine",
-    ),
-    _StraySpec(
-        "queue_candidate",
-        _QUEUE_CONTRACT,
-        (
-            "tasks",
-            "attempt_history",
-            "capture_intents",
-            "capture_task_links",
-            "semantic_decisions",
-            "source_fences",
-            "task_fences",
-            "task_source_links",
-        ),
-        "queue_ownership",
-        "queue owner",
-        "queue-quarantine",
-    ),
-)
-STRAY_CANDIDATE_NAMES = (
-    "markdown-transactions-v3.candidate.sqlite3",
-    "queue-v3.candidate.sqlite3",
-)
-QUARANTINE_DIRECTORIES = tuple(spec.quarantine for spec in _STRAY_SPECS)
-
-
-class StrayRetirement(NamedTuple):
-    """What `retire_stray_candidates` moved, and why it left anything in place."""
-
-    retired: tuple[str, ...]
-    kept: tuple[str, ...]
-
-
-def _adoption_in_flight(paths: dict[str, Path]) -> str | None:
-    """Why no candidate may be retired now, or None when adoption is complete."""
-    if _kind(paths["adoption"]) != "file":
-        return "no complete adoption record"
-    artifacts, _overflow = _operation_artifacts(paths["run"])
-    if artifacts:
-        return "an adoption operation is in flight: " + ", ".join(artifacts)
-    return None
-
-
-def _first_held_table(database: sqlite3.Connection, spec: _StraySpec) -> str | None:
-    for table in spec.data_tables:
-        if database.execute(f'SELECT 1 FROM "{table}" LIMIT 1').fetchone() is not None:
-            return f"holds a row in {table}"
-    return None
-
-
-def _live_owner(database: sqlite3.Connection, spec: _StraySpec, now: datetime) -> str | None:
-    from operational_ownership import _parse_timestamp
-
-    for actor, expires in database.execute(
-        f'SELECT actor_id, expires_at FROM "{spec.owner_table}"'
-    ):
-        if expires is not None and _parse_timestamp(expires) > now:
-            return f"{spec.owner_label} {actor} is live until {expires}"
-    return None
-
-
-def _content_reason(candidate: Path, state_root: Path, spec: _StraySpec, now: datetime) -> str | None:
-    """Why the candidate's contents forbid retiring it, or None when it is empty."""
-    if _kind(candidate.with_name(candidate.name + "-journal")) != "missing":
-        return "a rollback journal is beside it"
-    try:
-        with contextlib.closing(
-            open_readonly_operational_db(
-                candidate, state_root, max_bytes=_MAX_OPERATIONAL_DB_BYTES, contract=spec.contract
-            )
-        ) as database:
-            return _first_held_table(database, spec) or _live_owner(database, spec, now)
-    except Exception as exc:  # noqa: BLE001 - unreadable means keep, and say why
-        return f"its contents could not be read: {type(exc).__name__}: {exc}"
-
-
-def _quarantined(candidate: Path, directory: Path, now: datetime) -> Path:
-    """Rename the candidate into an owner-only quarantine directory; never delete it."""
-    directory.mkdir(mode=0o700, parents=True, exist_ok=True)
-    os.chmod(directory, 0o700)
-    destination = directory / f"{now.strftime('%Y%m%dT%H%M%SZ')}-{candidate.name}"
-    candidate.rename(destination)
-    return destination
-
-
-def _retire_one(
-    paths: dict[str, Path], spec: _StraySpec, now: datetime, blocker: str | None
-) -> tuple[str, str]:
-    candidate = paths[spec.key]
-    if _kind(candidate) != "file":
-        return "kept", f"{candidate.name}: not a regular file"
-    reason = blocker or _content_reason(candidate, paths["run"].parent, spec, now)
-    if reason is not None:
-        return "kept", f"{candidate.name}: {reason}"
-    try:
-        destination = _quarantined(candidate, paths["run"] / spec.quarantine, now)
-    except FileNotFoundError:
-        return "gone", candidate.name
-    return "retired", destination.relative_to(paths["run"].parent).as_posix()
-
-
-def retire_stray_candidates(state_root: Path, now: datetime) -> StrayRetirement:
-    """Quarantine every pre-adoption candidate that is provably stray.
-
-    A stray candidate refuses every writer; on 2026-09-17 one left by a test run
-    stopped capture, the nightly and the weekly for six days, and the repair ran
-    only when a person ran `doctor --repair`. The rule here is the one doctor
-    applied, for both candidates, and it runs where the refusal happens. See
-    `docs/research/2026-09-24-a-stray-candidate-is-retired-where-it-refuses.md`.
-    """
-    paths = _paths(Path(state_root).absolute())
-    present = _present_candidates(paths)
-    if not present:
-        return StrayRetirement((), ())
-    blocker = _adoption_in_flight(paths)
-    outcomes = [_retire_one(paths, spec, now, blocker) for spec in present]
-    return StrayRetirement(_details(outcomes, "retired"), _details(outcomes, "kept"))
-
-
-def _present_candidates(paths: dict[str, Path]) -> list[_StraySpec]:
-    return [spec for spec in _STRAY_SPECS if _kind(paths[spec.key]) != "missing"]
-
-
-def _details(outcomes: list[tuple[str, str]], wanted: str) -> tuple[str, ...]:
-    return tuple(detail for kind, detail in outcomes if kind == wanted)
-
-
-def require_reliability_v3_adopted(
-    *, root: Path, state_root: Path
-) -> dict[str, object]:
-    """Return the validated complete adoption record or a stable closed error."""
-    try:
-        return _load_complete_adoption(root=Path(root), state_root=Path(state_root))
-    except ReliabilityV3ValidationError:
-        raise
-    except Exception as exc:
-        raise ReliabilityV3ValidationError(
-            "reliability_v3_record_invalid", f"{type(exc).__name__}: {exc}"
-        ) from exc
-
-
-def _load_complete_adoption(*, root: Path, state_root: Path) -> dict[str, object]:
-    vault = root.resolve(strict=True)
-    state = state_root.absolute()
-    paths = _paths(state)
-    operation_artifacts, overflow = _operation_artifacts(paths["run"])
-    if overflow:
-        raise ValueError("operation artifact scan exceeded its bound")
-    if _kind(paths["migration"]) != "file" or _kind(paths["adoption"]) != "file":
-        raise ReliabilityV3ValidationError("legacy_protocol_unquiesced")
-    migration = _read_record(
-        paths["migration"], state, schema=_MIGRATION_SCHEMA, max_bytes=_MAX_RECORD_BYTES
-    )
-    adoption = _read_record(
-        paths["adoption"], state, schema=_ADOPTION_SCHEMA, max_bytes=_MAX_RECORD_BYTES
-    )
-    return _validate_complete_adoption(
-        root=vault,
-        state_root=state,
-        paths=paths,
-        migration=migration,
-        adoption=adoption,
-        operation_artifacts=operation_artifacts,
-    )
-
-
-def _deadline_reached(deadline: float) -> bool:
-    return time.monotonic() >= deadline
-
-
-def _check_deadline(deadline: float) -> None:
-    if _deadline_reached(deadline):
-        raise TimeoutError("Reliability V3 validation deadline expired")
-
-
-def _scanned_rows(
-    database: sqlite3.Connection, query: str, *, deadline: float
-) -> Iterator[sqlite3.Row]:
-    """Every row, streamed within the deadline; a table that grows with use is never refused by count.
-
-    A 10 000-row cap raised here and reported `transaction_state_unreadable`, which
-    refuses a backup; the unpruned transactions are the two-day undo window, whose
-    size is activity (6 834 on the busiest two days on record). See
-    `docs/research/2026-09-27-doctor-reads-every-transaction.md`.
-    """
-    _check_deadline(deadline)
-    return streamed_rows(database, query, stop=lambda: _check_deadline(deadline))
-
-
-def _holds_a_row(database: sqlite3.Connection, table: str, *, deadline: float) -> bool:
-    _check_deadline(deadline)
-    return database.execute(f'SELECT 1 FROM "{table}" LIMIT 1').fetchone() is not None
-
-
-def _parse_timestamp(value: object) -> datetime:
-    if not isinstance(value, str):
-        raise ValueError("operational timestamp is not a string")
-    parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
-    if parsed.tzinfo is None:
-        raise ValueError("operational timestamp lacks a timezone")
-    return parsed.astimezone(timezone.utc)
-
-
-def _owner_matches(row: sqlite3.Row, owner: OwnerLease | None) -> bool:
-    return owner is not None and (
-        row["role"],
-        row["scope"],
-        row["actor_id"],
-        row["owner_token"],
-        row["fencing_epoch"],
-        row["process_id"],
-        row["process_start_identity"],
-    ) == (
-        owner.role,
-        owner.scope,
-        owner.actor_id,
-        owner.token,
-        owner.epoch,
-        owner.process.pid,
-        owner.process.start_identity,
-    )
-
-
-def _bounded_entries(
-    directory: Path,
-    *,
-    state_root: Path,
-    deadline: float,
-) -> list[Path]:
-    _check_deadline(deadline)
-    kind = _kind(directory)
-    if kind == "missing":
-        return []
-    if kind != "directory":
-        raise ValueError("runtime artifact root is not a directory")
-    return _scan_bounded_entries(directory, state_root=state_root, deadline=deadline)
-
-
-def _scan_bounded_entries(
-    directory: Path, *, state_root: Path, deadline: float
-) -> list[Path]:
-    entries: list[Path] = []
-    with os.scandir(directory) as scanned:
-        for entry in scanned:
-            _check_deadline(deadline)
-            if len(entries) >= _MAX_RUNTIME_ENTRIES:
-                raise ValueError("runtime artifact scan exceeded its bound")
-            entries.append(_contained_runtime_entry(entry.path, state_root))
-    return entries
-
-
-def _contained_runtime_entry(value: str, state_root: Path) -> Path:
-    path = Path(value)
-    try:
-        path.resolve(strict=True).relative_to(state_root.resolve(strict=True))
-    except (OSError, ValueError) as exc:
-        raise PermissionError("runtime artifact escaped the state root") from exc
-    return path
-
-
-_QUEUE_TABLE_CODES = {
-    "attempt_history": "queue_attempt_history_retained",
-    "source_fences": "queue_source_fence_retained",
-    "source_failures": "queue_source_failure_retained",
-    "task_source_links": "queue_source_link_retained",
-    "capture_task_links": "capture_link_retained",
-    "capture_task_link_resolutions": "capture_link_resolution_retained",
-    "capture_task_link_seals": "capture_link_seal_retained",
-    "semantic_decisions": "capture_semantic_decision_retained",
-    "task_fences": "queue_task_fence_orphan",
-    "task_purge_authorizations": "queue_purge_authorization_retained",
-    "corrupt_export_operations": "queue_corrupt_export_retained",
-    "corrupt_export_pages": "queue_corrupt_export_retained",
-    "corrupt_dispositions": "queue_corrupt_disposition_retained",
-    "corrupt_package_supersession_operations": "queue_corrupt_package_retained",
-    "corrupt_package_supersession_pages": "queue_corrupt_package_retained",
-    "corrupt_package_supersessions": "queue_corrupt_package_retained",
-    "corrupt_purge_operations": "queue_corrupt_purge_retained",
-    "corrupt_purge_pages": "queue_corrupt_purge_retained",
-}
-
-
-def validate_queue_v3_runtime(
-    *,
-    state_root: Path,
-    now: datetime,
-    deadline: float,
-    excluded_owner: OwnerLease | None,
-) -> list[str]:
-    """Return bounded queue-v3 retention and consistency blockers."""
-    del now, excluded_owner
-    blockers: set[str] = set()
-    try:
-        blockers.update(_queue_database_blockers(Path(state_root), deadline))
-        blockers.update(_queue_artifact_blockers(Path(state_root), deadline))
-    except TimeoutError:
-        raise
-    except (OSError, PermissionError, sqlite3.Error, ValueError):
-        blockers.add("queue_state_unreadable")
-    return sorted(blockers)
-
-
-def _queue_database_blockers(state_root: Path, deadline: float) -> set[str]:
-    path = state_root / "run" / "queue-v3.sqlite3"
-    with contextlib.closing(
-        open_readonly_operational_db(
-            path,
-            state_root,
-            max_bytes=_MAX_OPERATIONAL_DB_BYTES,
-            owner_only=True,
-            contract=_QUEUE_CONTRACT,
-        )
-    ) as database:
-        blockers = _queue_task_blockers(database, deadline)
-        blockers.update(_queue_table_blockers(database, deadline))
-        blockers.update(_capture_intent_blockers(database, state_root, deadline))
-        if _holds_a_row(database, "queue_ownership", deadline=deadline):
-            blockers.add("queue_owner_projection_orphan")
-    return blockers
-
-
-def _queue_task_blockers(
-    database: sqlite3.Connection, deadline: float
-) -> set[str]:
-    blockers: set[str] = set()
-    for row in _scanned_rows(database, "SELECT * FROM tasks", deadline=deadline):
-        blockers.add("queue_task_retained")
-        _validate_queue_task(row)
-    return blockers
-
-
-def _validate_queue_task(row: sqlite3.Row) -> None:
-    _require_task_id(row["id"])
-    validation = memory_queue.validate_payload_blob(
-        bytes(row["payload_blob"]), row["input_hash"], parse=True
-    )
-    if validation.code is None:
-        return
-    _require_expected_hash_failure(row)
-
-
-def _require_task_id(value: object) -> None:
-    if not isinstance(value, str):
-        raise ValueError("queue task ID is invalid")
-    if not value:
-        raise ValueError("queue task ID is invalid")
-
-
-def _require_expected_hash_failure(row: sqlite3.Row) -> None:
-    if row["state"] != "dead":
-        raise ValueError("queue task payload is invalid")
-    if row["error_code"] != "payload_hash_mismatch":
-        raise ValueError("queue task payload is invalid")
-
-
-_COORDINATOR_TABLE_CODES = (
-    ("project_leases", "project_lease_orphan"),
-    ("writer_owners", "writer_owner_orphan"),
-    ("intent_fences", "intent_fence_orphan"),
-    ("capture_binding_projections", "capture_binding_projection_retained"),
-)
-
-_TRANSACTION_STATE_CODES = {
-    "preparing": "transaction_nonterminal",
-    "prepared": "transaction_nonterminal",
-    "applying": "transaction_nonterminal",
-    "aborting": "transaction_nonterminal",
-    "conflicted": "transaction_conflicted",
-    "quarantined": "transaction_quarantined",
-}
-
-
-def _queue_table_blockers(
-    database: sqlite3.Connection, deadline: float
-) -> set[str]:
-    blockers: set[str] = set()
-    for table, code in _QUEUE_TABLE_CODES.items():
-        if _holds_a_row(database, table, deadline=deadline):
-            blockers.add(code)
-    return blockers
-
-
-def _capture_intent_blockers(
-    database: sqlite3.Connection, state_root: Path, deadline: float
-) -> set[str]:
-    blockers: set[str] = set()
-    for row in _scanned_rows(database, "SELECT * FROM capture_intents", deadline=deadline):
-        blockers.add("capture_intent_retained")
-        _validate_capture_intent(row, state_root)
-    return blockers
-
-
-def _validate_capture_intent(row: sqlite3.Row, state_root: Path) -> None:
-    relative = row["relative_path"]
-    if not _valid_capture_path(relative):
-        raise ValueError("capture intent path is invalid")
-    payload = read_runtime_bytes(
-        state_root / relative,
-        state_root,
-        max_bytes=_MAX_CAPTURE_INTENT_BYTES,
-        owner_only=True,
-    )
-    _require_capture_payload(payload, row)
-
-
-def _require_capture_payload(payload: bytes, row: sqlite3.Row) -> None:
-    if len(payload) != row["byte_size"]:
-        raise ValueError("capture intent size changed")
-    if sha256_bytes(payload) != row["intent_sha256"]:
-        raise ValueError("capture intent digest changed")
-
-
-def _valid_capture_path(value: object) -> bool:
-    if not isinstance(value, str) or not value.startswith("run/capture-intents/"):
-        return False
-    if "\\" in value or ".." in Path(value).parts:
-        return False
-    return True
-
-
-def _queue_artifact_blockers(state_root: Path, deadline: float) -> set[str]:
-    blockers: set[str] = set()
-    for relative, code in (
-        ("run/capture-intents", "capture_intent_retained"),
-        ("run/queue-results", "queue_result_retained"),
-        ("run/queue-quarantine", "queue_quarantine_retained"),
-    ):
-        if _bounded_entries(
-            state_root / relative, state_root=state_root, deadline=deadline
-        ):
-            blockers.add(code)
-    return blockers
-
-
-def validate_coordinator_v3_runtime(
-    *,
-    state_root: Path,
-    now: datetime,
-    deadline: float,
-    excluded_owner: OwnerLease | None,
-) -> list[str]:
-    """Return bounded coordinator-v3 retention and consistency blockers."""
-    blockers: set[str] = set()
-    try:
-        state = Path(state_root)
-        database_blockers, known, retained = _coordinator_database_blockers(
-            state, now, deadline, excluded_owner
-        )
-        blockers.update(database_blockers)
-        blockers.update(_transaction_artifact_blockers(state, deadline, known, retained))
-    except TimeoutError:
-        raise
-    except (OSError, PermissionError, sqlite3.Error, ValueError):
-        blockers.add("transaction_state_unreadable")
-    return sorted(blockers)
-
-
-def _coordinator_database_blockers(
-    state_root: Path,
-    now: datetime,
-    deadline: float,
-    excluded_owner: OwnerLease | None,
-) -> tuple[set[str], set[str], set[str]]:
-    path = state_root / "run" / "markdown-transactions-v3.sqlite3"
-    with contextlib.closing(
-        open_readonly_operational_db(
-            path,
-            state_root,
-            max_bytes=_MAX_OPERATIONAL_DB_BYTES,
-            owner_only=True,
-            contract=_COORDINATOR_CONTRACT,
-        )
-    ) as database:
-        blockers = _coordinator_owner_blockers(database, deadline, excluded_owner)
-        blockers.update(_coordinator_table_blockers(database, deadline))
-        transaction_blockers, known, retained = _transaction_blockers(
-            database, state_root, now, deadline
-        )
-        blockers.update(transaction_blockers)
-        known |= _recorded_transactions(database, _artifact_ids(state_root, deadline) - known)
-    return blockers, known, retained
-
-
-def _artifact_ids(state_root: Path, deadline: float) -> set[str]:
-    return {_transaction_artifact_id(entry) for entry in _artifact_entries(state_root, deadline) if not _staged_prune(entry)}
-
-
-def _artifact_entries(state_root: Path, deadline: float) -> list[Path]:
-    return _bounded_entries(state_root / "run" / "transactions", state_root=state_root, deadline=deadline)
-
-
-def _staged_prune(entry: Path) -> bool:
-    """`.<id>.pruning-<uuid>`: images a prune set aside and did not finish removing.
-
-    It read as an invalid artifact name, so an interrupted prune reported the whole
-    transaction state unreadable (audit 2026-09-26 B-22). It is named instead, and
-    the next prune or `doctor --repair` settles it.
-    """
-    return entry.name.startswith(".") and ".pruning-" in entry.name
-
-
-def _recorded_transactions(database: sqlite3.Connection, ids: set[str]) -> set[str]:
-    """Which of `ids` the ledger names, asked in slices under SQLite's variable limit."""
-    ordered = sorted(ids)
-    found: set[str] = set()
-    for start in range(0, len(ordered), 500):
-        chunk = ordered[start : start + 500]
-        marks = ",".join("?" * len(chunk))
-        rows = database.execute(f'SELECT id FROM "transaction" WHERE id IN ({marks})', chunk).fetchall()
-        found.update(str(row[0]) for row in rows)
-    return found
-
-
-def _coordinator_owner_blockers(
-    database: sqlite3.Connection,
-    deadline: float,
-    excluded_owner: OwnerLease | None,
-) -> set[str]:
-    blockers: set[str] = set()
-    for row in _scanned_rows(database, "SELECT * FROM maintenance_owners", deadline=deadline):
-        if not _owner_matches(row, excluded_owner):
-            blockers.add("canonical_owner_retained")
-    return blockers
-
-
-def _coordinator_table_blockers(
-    database: sqlite3.Connection, deadline: float
-) -> set[str]:
-    blockers: set[str] = set()
-    for table, code in _COORDINATOR_TABLE_CODES:
-        if _holds_a_row(database, table, deadline=deadline):
-            blockers.add(code)
-    return blockers
-
-
-def _transaction_blockers(
-    database: sqlite3.Connection, state_root: Path, now: datetime, deadline: float
-) -> tuple[set[str], set[str], set[str]]:
-    # A committed row whose artifacts were pruned holds nothing: it produces no
-    # blocker and no retention. Reading all of them hit the 10 000-row bound on
-    # a vault with 23 664 rows and reported the state unreadable (audit
-    # 2026-09-26 A-11, docs/research/2026-09-26-a-backup-takes-what-any-installed-vault-holds.md).
-    rows = _scanned_rows(
-        database,
-        'SELECT * FROM "transaction" WHERE state <> \'committed\' OR artifacts_pruned_at IS NULL',
-        deadline=deadline,
-    )
-    cutoff = now.astimezone(timezone.utc) - timedelta(days=_UNDO_RETENTION_DAYS)
-    blockers: set[str] = set()
-    known: set[str] = set()
-    retained: set[str] = set()
-    for row in rows:
-        transaction_id, code, keep = _transaction_retention(row, state_root, cutoff)
-        known.add(transaction_id)
-        if code is not None:
-            blockers.add(code)
-        if keep:
-            retained.add(transaction_id)
-    return blockers, known, retained
-
-
-def _transaction_retention(
-    row: sqlite3.Row, state_root: Path, cutoff: datetime
-) -> tuple[str, str | None, bool]:
-    transaction_id = _transaction_id(row["id"])
-    state = row["state"]
-    code = _TRANSACTION_STATE_CODES.get(state)
-    if code is not None:
-        return transaction_id, code, True
-    return _settled_transaction_retention(row, state_root, cutoff, transaction_id, state)
-
-
-def _settled_transaction_retention(
-    row: sqlite3.Row,
-    state_root: Path,
-    cutoff: datetime,
-    transaction_id: str,
-    state: object,
-) -> tuple[str, str | None, bool]:
-    if state in {"committed", "aborted"}:
-        return _terminal_transaction_retention(row, state_root, cutoff, transaction_id)
-    if state == "discarded":
-        return transaction_id, None, False
-    raise ValueError("transaction state is unknown")
-
-
-def _transaction_id(value: object) -> str:
-    if not isinstance(value, str):
-        raise ValueError("transaction ID is invalid")
-    if not value:
-        raise ValueError("transaction ID is invalid")
-    return value
-
-
-def _terminal_transaction_retention(
-    row: sqlite3.Row, state_root: Path, cutoff: datetime, transaction_id: str
-) -> tuple[str, str | None, bool]:
-    if row["state"] == "aborted":
-        _validate_abort_receipt(row, state_root, transaction_id)
-    updated = _parse_timestamp(row["updated_at"])
-    if updated >= cutoff and row["artifacts_pruned_at"] is None:
-        return transaction_id, "transaction_undo_retained", True
-    return transaction_id, None, False
-
-
-def _validate_abort_receipt(
-    row: sqlite3.Row, state_root: Path, transaction_id: str
-) -> None:
-    receipt = state_root / "run" / "transactions" / transaction_id / "abort-receipt.json"
-    payload = read_runtime_bytes(
-        receipt, state_root, max_bytes=_MAX_RECORD_BYTES, owner_only=True
-    )
-    if sha256_bytes(payload) != row["abort_receipt_sha256"]:
-        raise ValueError("aborted transaction receipt changed")
-
-
-def _transaction_artifact_blockers(
-    state_root: Path,
-    deadline: float,
-    known: set[str],
-    retained: set[str],
-) -> set[str]:
-    artifact_ids = _artifact_ids(state_root, deadline)
-    staged = any(_staged_prune(entry) for entry in _artifact_entries(state_root, deadline))
-    findings = (
-        (staged, "transaction_prune_interrupted"),
-        (bool(retained & artifact_ids), "transaction_artifact_retained"),
-        (bool(artifact_ids - known), "transaction_artifact_state_unknown"),
-    )
-    return {code for present, code in findings if present}
-
-
-def _transaction_artifact_id(entry: Path) -> str:
-    if _kind(entry) != "directory":
-        raise ValueError("transaction artifact is not a directory")
-    if re.fullmatch(r"[0-9a-z_-]{1,128}", entry.name) is None:
-        raise ValueError("transaction artifact name is invalid")
-    return entry.name
-
-
-def _blackboard_claim_blockers(
-    *, state_root: Path, now: datetime, deadline: float
-) -> list[str]:
-    path = Path(state_root) / "run" / "markdown-transactions-v3.sqlite3"
-    blockers: set[str] = set()
-    try:
-        with contextlib.closing(
-            open_readonly_operational_db(
-                path,
-                state_root,
-                max_bytes=_MAX_OPERATIONAL_DB_BYTES,
-                owner_only=True,
-                contract=_COORDINATOR_CONTRACT,
-            )
-        ) as database:
-            rows = _scanned_rows(
-                database,
-                "SELECT expires_at FROM blackboard_claims",
-                deadline=deadline,
-            )
-            if any(_parse_timestamp(row["expires_at"]) > now for row in rows):
-                blockers.add("blackboard_claim_retained")
-    except TimeoutError:
-        raise
-    except (OSError, PermissionError, sqlite3.Error, ValueError):
-        blockers.add("transaction_state_unreadable")
-    return sorted(blockers)
-
-
-def validate_reliability_v3_runtime(
-    *,
-    root: Path,
-    state_root: Path,
-    now: datetime,
-    deadline: float,
-    excluded_owner: OwnerLease | None,
-) -> list[str]:
-    """Validate adopted operational state without mutating or acquiring ownership."""
-    del root
-    blockers = set(
-        validate_queue_v3_runtime(
-            state_root=state_root,
-            now=now,
-            deadline=deadline,
-            excluded_owner=excluded_owner,
-        )
-    )
-    blockers.update(
-        validate_coordinator_v3_runtime(
-            state_root=state_root,
-            now=now,
-            deadline=deadline,
-            excluded_owner=excluded_owner,
-        )
-    )
-    blockers.update(
-        _blackboard_claim_blockers(
-            state_root=state_root,
-            now=now,
-            deadline=deadline,
-        )
-    )
-    blockers.update(_install_deletion_blockers(Path(state_root)))
-    paths = _paths(Path(state_root))
-    if any(_kind(paths[name]) != "missing" for name in ("queue_retired", "coordinator_retired")):
-        blockers.add("retired_operational_database_retained")
-    for path, code in (
-        (Path(state_root) / "run" / "compile.pid", "compile_marker_retained"),
-        (Path(state_root) / "run" / "maintenance.lock", "maintenance_marker_retained"),
-    ):
-        if _kind(path) != "missing":
-            blockers.add(code)
-    _check_deadline(deadline)
-    return sorted(blockers)
+QUARANTINE_DIRECTORIES = tuple(spec.quarantine for spec in STRAY_SPECS)
 
 
 def _read_legacy_schema(path: Path) -> None:
@@ -1577,12 +184,12 @@ def _validate_legacy_database(path: Path, state_root: Path) -> None:
     another's helper is a smaller debt than that, and it is named here rather
     than hidden.
     """
-    from reliable_memory import _require_replayed_journal
+    from reliable_memory import require_replayed_journal
 
     try:
         _read_legacy_schema(path)
     except sqlite3.OperationalError as error:
-        _require_replayed_journal(Path(path), error)
+        require_replayed_journal(Path(path), error)
         _read_legacy_schema(path)
     if not path.resolve(strict=True).is_relative_to(state_root.resolve(strict=True)):
         raise PermissionError("legacy database is outside the state root")
@@ -1633,11 +240,11 @@ def _validate_partial_legacy(path: Path, state_root: Path, source_state: str) ->
 def _validate_legacy_record(path: Path, state_root: Path, source_state: str) -> None:
     """A tombstone, or on an upgrade the legacy database itself."""
     try:
-        _read_record(
+        read_record(
             path,
             state_root,
-            schema=_TOMBSTONE_SCHEMA,
-            max_bytes=_MAX_TOMBSTONE_BYTES,
+            schema=TOMBSTONE_SCHEMA,
+            max_bytes=MAX_TOMBSTONE_BYTES,
         )
     except (PermissionError, ValueError):
         if source_state != "upgrade":
@@ -1651,7 +258,7 @@ def _validate_partial_retired(path: Path, state_root: Path, source_state: str) -
         return
     _require_retired_evidence_kind(kind, source_state)
     read_runtime_bytes(
-        path, state_root, max_bytes=_MAX_OPERATIONAL_DB_BYTES, owner_only=True
+        path, state_root, max_bytes=MAX_OPERATIONAL_DB_BYTES, owner_only=True
     )
 
 
@@ -1671,10 +278,10 @@ def _operation_artifact_spec(name: str) -> _DatabaseSpec:
 
 def _prepare_adoption_root(state_root: Path) -> dict[str, Path]:
     validate_state_root(state_root)
-    paths = _paths(state_root)
+    paths = adoption_paths(state_root)
     created = _kind(paths["run"]) == "missing"
     paths["run"].mkdir(parents=True, exist_ok=True)
-    memory_queue._harden_owner_only(paths["run"], 0o700)
+    queue_core.harden_owner_only(paths["run"], 0o700)
     if created:
         sync_runtime_directory(state_root)
     return paths
@@ -1702,14 +309,14 @@ def _upgrade_migration_descriptor(
 ) -> tuple[dict[str, object], bytes]:
     _preflight_upgrade_source(spec, path, state_root)
     payload = read_runtime_bytes(
-        path, state_root, max_bytes=_MAX_OPERATIONAL_DB_BYTES, owner_only=True
+        path, state_root, max_bytes=MAX_OPERATIONAL_DB_BYTES, owner_only=True
     )
     identity = capture_runtime_file_identity(path, state_root=state_root)
     record = _base_migration_descriptor(spec)
     record.update(
         {
             "retired_path": spec.retired_path,
-            "source_identity": _identity_value(identity),
+            "source_identity": identity_value(identity),
             "source_sha256": sha256_bytes(payload),
         }
     )
@@ -1738,7 +345,7 @@ def _require_legacy_markers_quiescent(run: Path, state_root: Path) -> None:
     ):
         owner = _read_marker_owner(run / name, state_root, parser)
         if owner is not None:
-            _require_process_absent(*owner)
+            require_process_absent(*owner)
 
 
 def _read_marker_owner(
@@ -1794,21 +401,22 @@ def _positive_pid(value: str) -> int:
     return pid
 
 
-def _require_process_absent(pid: int, identity: str) -> None:
+def require_process_absent(pid: int, identity: str) -> None:
     """A marker's PID given to another process since is not its owner (C-12)."""
-    from operational_ownership import process_start_identity
+    from process_liveness import recorded_process_state
 
-    observed = process_start_identity(pid)
-    if observed is not None and (not identity or observed == identity):
-        raise ValueError("live legacy owner blocks offline adoption")
+    state = recorded_process_state(pid, identity)
+    if state != "dead":
+        label = {"alive": "live", "unknown": "unknown"}[state]
+        raise ValueError(f"{label} legacy owner blocks offline adoption")
 
 
 def _reject_leased_v2_tasks(path: Path, state_root: Path) -> None:
     with contextlib.closing(
-        open_readonly_operational_db(
+        sqlite_io.open_readonly_operational_db(
             path,
             state_root,
-            max_bytes=_MAX_OPERATIONAL_DB_BYTES,
+            max_bytes=MAX_OPERATIONAL_DB_BYTES,
             owner_only=True,
         )
     ) as database:
@@ -1822,12 +430,12 @@ def _reject_leased_v2_tasks(path: Path, state_root: Path) -> None:
 def _new_migration_record(
     *, root: Path, state_root: Path, source_state: str
 ) -> tuple[dict[str, object], dict[str, bytes]]:
-    paths = _paths(state_root)
+    paths = adoption_paths(state_root)
     databases, sources = _migration_descriptors(paths, state_root, source_state)
     body = {
         "source_state": source_state,
         "databases": databases,
-        "schemas": _expected_schema_digests(),
+        "schemas": adoption_admission.initial_schema_digests(source_state),
         "installed_integration_sha256": _integration_digest(root),
     }
     operation_hash = sha256_bytes(canonical_json_bytes(body))
@@ -1836,7 +444,7 @@ def _new_migration_record(
         "operation_id": f"reliability-v3:{operation_hash}",
         **body,
     }
-    _validate_canonical_record(migration, _MIGRATION_SCHEMA, _MAX_RECORD_BYTES)
+    _validate_canonical_record(migration, MIGRATION_SCHEMA, MAX_RECORD_BYTES)
     return migration, sources
 
 
@@ -1881,22 +489,21 @@ def _publish_immutable_record(
 
 
 def _load_migration(paths: dict[str, Path], state_root: Path) -> dict[str, object]:
-    return _read_record(
+    return read_record(
         paths["migration"],
         state_root,
-        schema=_MIGRATION_SCHEMA,
-        max_bytes=_MAX_RECORD_BYTES,
+        schema=MIGRATION_SCHEMA,
+        max_bytes=MAX_RECORD_BYTES,
     )
 
 
 def _validate_migration_context(
     migration: dict[str, object], root: Path
 ) -> dict[str, dict[str, object]]:
-    if migration.get("schemas") != _expected_schema_digests():
-        raise ValueError("migration schema digests changed")
+    validated_schema_digests(migration)
     if migration.get("installed_integration_sha256") != _integration_digest(root):
         raise ValueError("installed integration changed during adoption")
-    records = _named_database_records(migration.get("databases"))
+    records = named_database_records(migration.get("databases"))
     _validate_migration_database_paths(migration, records)
     _validate_migration_operation_id(migration)
     return records
@@ -1907,7 +514,7 @@ def _validate_migration_database_paths(
 ) -> None:
     source_state = str(migration["source_state"])
     for spec in _DATABASE_SPECS:
-        expected = _expected_migration_record(
+        expected = expected_migration_record(
             database_name=spec.name,
             source_state=source_state,
             migration_record=records[spec.name],
@@ -1966,7 +573,7 @@ def _verified_source_bytes(
     check_identity: bool,
 ) -> bytes:
     payload = read_runtime_bytes(
-        path, state_root, max_bytes=_MAX_OPERATIONAL_DB_BYTES, owner_only=True
+        path, state_root, max_bytes=MAX_OPERATIONAL_DB_BYTES, owner_only=True
     )
     if sha256_bytes(payload) != record.get("source_sha256"):
         raise ValueError("migration source digest changed")
@@ -1979,7 +586,7 @@ def _require_source_identity(
     path: Path, state_root: Path, record: dict[str, object]
 ) -> None:
     identity = capture_runtime_file_identity(path, state_root=state_root)
-    if _identity_value(identity) != record.get("source_identity"):
+    if identity_value(identity) != record.get("source_identity"):
         raise ValueError("migration source identity changed")
 
 
@@ -1998,17 +605,27 @@ def _ensure_retired_database(
     return retired
 
 
-def _prepare_candidate(
+def prepare_candidate(
     spec: _DatabaseSpec,
     candidate: Path,
     source: Path | None,
     state_root: Path,
+    migration: dict[str, object],
 ) -> None:
     kind = _kind(candidate)
     if kind not in {"missing", "file"}:
         raise ValueError("Reliability V3 candidate path has the wrong kind")
-    spec.initialize(candidate, source_v2=source)
+    _initialize_adoption_candidate(spec, candidate, source, state_root, migration)
     spec.validate(candidate, state_root=state_root)
+
+
+def _initialize_adoption_candidate(spec, candidate, source, state_root, migration):
+    if spec.name == "queue" and _current_initialization(migration):
+        from compile_progress_migration import initialize_fresh_candidate
+
+        initialize_fresh_candidate(candidate, state_root=state_root)
+        return
+    spec.initialize(candidate, source_v2=source)
 
 
 def _publish_candidate(
@@ -2018,14 +635,14 @@ def _publish_candidate(
     state_root: Path,
 ) -> None:
     payload = read_runtime_bytes(
-        candidate, state_root, max_bytes=_MAX_OPERATIONAL_DB_BYTES, owner_only=True
+        candidate, state_root, max_bytes=MAX_OPERATIONAL_DB_BYTES, owner_only=True
     )
     durable_publish_file(
         candidate,
         active,
         replace=False,
         expected_sha256=sha256_bytes(payload),
-        max_bytes=_MAX_OPERATIONAL_DB_BYTES,
+        max_bytes=MAX_OPERATIONAL_DB_BYTES,
     )
     _remove_matching_candidate(candidate, active, state_root)
     spec.validate(active, state_root=state_root)
@@ -2035,10 +652,10 @@ def _remove_matching_candidate(candidate: Path, active: Path, state_root: Path) 
     if _kind(candidate) == "missing":
         return
     candidate_bytes = read_runtime_bytes(
-        candidate, state_root, max_bytes=_MAX_OPERATIONAL_DB_BYTES, owner_only=True
+        candidate, state_root, max_bytes=MAX_OPERATIONAL_DB_BYTES, owner_only=True
     )
     active_bytes = read_runtime_bytes(
-        active, state_root, max_bytes=_MAX_OPERATIONAL_DB_BYTES, owner_only=True
+        active, state_root, max_bytes=MAX_OPERATIONAL_DB_BYTES, owner_only=True
     )
     if candidate_bytes != active_bytes:
         raise ValueError("active and candidate databases conflict")
@@ -2052,11 +669,11 @@ def _matching_tombstone(
     if _kind(path) != "file":
         return False
     try:
-        observed = _read_record(
+        observed = read_record(
             path,
             state_root,
-            schema=_TOMBSTONE_SCHEMA,
-            max_bytes=_MAX_TOMBSTONE_BYTES,
+            schema=TOMBSTONE_SCHEMA,
+            max_bytes=MAX_TOMBSTONE_BYTES,
         )
     except (PermissionError, ValueError):
         return False
@@ -2072,7 +689,7 @@ def _publish_tombstone(
     migration_record: dict[str, object],
 ) -> None:
     payload = _validate_canonical_record(
-        expected, _TOMBSTONE_SCHEMA, _MAX_TOMBSTONE_BYTES
+        expected, TOMBSTONE_SCHEMA, MAX_TOMBSTONE_BYTES
     )
     if _matching_tombstone(path, state_root, expected):
         return
@@ -2128,8 +745,8 @@ def _adopt_database(
     if _kind(active) == "file":
         _resume_active_database(spec, candidate, active, state_root)
         return
-    _prepare_candidate(spec, candidate, source, state_root)
-    tombstone = _expected_tombstone(
+    prepare_candidate(spec, candidate, source, state_root, migration)
+    tombstone = expected_tombstone(
         database_name=spec.name,
         source_state=source_state,
         operation_id=str(migration["operation_id"]),
@@ -2165,18 +782,6 @@ def _resume_active_database(
     _remove_matching_candidate(candidate, active, state_root)
 
 
-def _artifact_record(path: Path, state_root: Path, max_bytes: int) -> dict[str, object]:
-    payload = read_runtime_bytes(
-        path, state_root, max_bytes=max_bytes, owner_only=True
-    )
-    identity = capture_runtime_file_identity(path, state_root=state_root)
-    return {
-        "path": path.relative_to(state_root).as_posix(),
-        "sha256": sha256_bytes(payload),
-        "identity": _identity_value(identity),
-    }
-
-
 def _adoption_database_record(
     spec: _DatabaseSpec,
     paths: dict[str, Path],
@@ -2186,11 +791,11 @@ def _adoption_database_record(
     validation = spec.validate(paths[spec.active_key], state_root=state_root)
     record: dict[str, object] = {
         "database": spec.name,
-        "active": _artifact_record(
-            paths[spec.active_key], state_root, _MAX_OPERATIONAL_DB_BYTES
+        "active": artifact_record(
+            paths[spec.active_key], state_root, None
         ),
-        "tombstone": _artifact_record(
-            paths[spec.legacy_key], state_root, _MAX_TOMBSTONE_BYTES
+        "tombstone": artifact_record(
+            paths[spec.legacy_key], state_root, MAX_TOMBSTONE_BYTES
         ),
         "application_id": validation["application_id"],
         "user_version": validation["user_version"],
@@ -2202,8 +807,8 @@ def _adoption_database_record(
         },
     }
     if source_state == "upgrade":
-        record["retired"] = _artifact_record(
-            paths[spec.retired_key], state_root, _MAX_OPERATIONAL_DB_BYTES
+        record["retired"] = artifact_record(
+            paths[spec.retired_key], state_root, None
         )
     return record
 
@@ -2212,11 +817,11 @@ def _build_adoption_record(
     migration: dict[str, object], paths: dict[str, Path], state_root: Path
 ) -> dict[str, object]:
     migration_bytes = read_runtime_bytes(
-        paths["migration"], state_root, max_bytes=_MAX_RECORD_BYTES, owner_only=True
+        paths["migration"], state_root, max_bytes=MAX_RECORD_BYTES, owner_only=True
     )
     source_state = str(migration["source_state"])
     return {
-        "schema_version": "reliability-v3-adoption/v1",
+        "schema_version": _initial_adoption_version(migration),
         "operation_id": migration["operation_id"],
         "source_state": source_state,
         "migration": {
@@ -2235,7 +840,7 @@ def _build_adoption_record(
 def _complete_adoption(
     *, root: Path, state_root: Path, migration: dict[str, object]
 ) -> dict[str, object]:
-    paths = _paths(state_root)
+    paths = adoption_paths(state_root)
     records = _validate_migration_context(migration, root)
     for spec in _DATABASE_SPECS:
         _adopt_database(
@@ -2250,8 +855,8 @@ def _complete_adoption(
         paths["adoption"],
         adoption,
         state_root=state_root,
-        schema=_ADOPTION_SCHEMA,
-        limit=_MAX_RECORD_BYTES,
+        schema=adoption_schema(adoption),
+        limit=MAX_RECORD_BYTES,
     )
     return require_reliability_v3_adopted(root=root, state_root=state_root)
 
@@ -2294,17 +899,60 @@ def _report(
     }
 
 
+# Failures that say the state could not be read at this moment, not that a record is
+# wrong: a live writer's lock, an interrupted read. On 2026-09-28 one of them during an
+# install was reported as `conflict` with no cause, and the installer told the owner
+# capture was off while a second read found the vault adopted. SQLite says busy or
+# locked by its result code (`SQLITE_BUSY` 5, `SQLITE_LOCKED` 6; the primary code is
+# the low byte of an extended one).
+_UNREADABLE_NOW = (TimeoutError, BlockingIOError, InterruptedError)
+# Absolute paths in a cause name private directories; the report is printed and
+# pasted, so they are replaced, and the class and the rest of the message stay.
+# A quoted path (as `OSError` prints one) is taken whole, spaces included.
+_QUOTED_PATH = re.compile(r"'(?:[A-Za-z]:[\\/]|/)[^']*'")
+_ABSOLUTE_PATH = re.compile(r"(?:[A-Za-z]:[\\/]|(?<![\w.])/)[^\s'\"]+")
+# How much of the cause a report carries: one readable line of `Class: message <- Cause`,
+# redacted; the full chain of two causes fits well inside it.
+MAX_INSPECTION_ERROR_CHARS = 600
+
+
 def inspect_installed_vault(*, root: Path, state_root: Path) -> dict[str, object]:
-    """Run bounded Reliability V3 validation without creating or mutating state."""
+    """Run bounded Reliability V3 validation without creating or mutating state.
+
+    A failure is reported with its cause, and a state that could not be read now
+    (`unreadable`) is told apart from records that disagree (`conflict`).
+    See docs/research/2026-09-28-a-check-names-its-cause.md.
+    """
     try:
         return _inspect_installed_vault(root=Path(root), state_root=Path(state_root))
-    except Exception:  # noqa: BLE001 - closed read-only inspection envelope
-        return _report(
-            mode="check",
-            status="error",
-            state="conflict",
-            blockers=["reliability_v3_record_invalid"],
-        )
+    except Exception as exc:  # noqa: BLE001 - read-only inspection reports its cause
+        return _failed_inspection(exc)
+
+
+def describe_failure(exc: BaseException) -> str:
+    """The redacted cause chain without absolute paths, bounded for a report line."""
+    quoted = _QUOTED_PATH.sub("'<path>'", describe_error_chain(exc))
+    described = _ABSOLUTE_PATH.sub("<path>", quoted)
+    return described[:MAX_INSPECTION_ERROR_CHARS]
+
+
+def _unreadable_now(exc: Exception) -> bool:
+    """Busy or locked now, as opposed to a record that is wrong."""
+    if isinstance(exc, _UNREADABLE_NOW):
+        return True
+    return busy_database(exc)
+
+
+def _failed_inspection(exc: Exception) -> dict[str, object]:
+    unreadable = _unreadable_now(exc)
+    report = _report(
+        mode="check",
+        status="error",
+        state="unreadable" if unreadable else "conflict",
+        blockers=["reliability_v3_state_unreadable" if unreadable else "reliability_v3_record_invalid"],
+    )
+    report["details"]["error"] = describe_failure(exc)
+    return report
 
 
 def _inspect_installed_vault(*, root: Path, state_root: Path) -> dict[str, object]:
@@ -2312,9 +960,9 @@ def _inspect_installed_vault(*, root: Path, state_root: Path) -> dict[str, objec
     if not vault.is_dir():
         raise ValueError("vault root is not a directory")
     state = state_root.absolute()
-    paths = _paths(state)
+    paths = adoption_paths(state)
     kinds = _present_path_kinds(paths)
-    operation_artifacts, overflow = _operation_artifacts(paths["run"])
+    operation_artifacts, overflow = listed_operation_artifacts(paths["run"])
     if not _v3_evidence_present(kinds, operation_artifacts, overflow):
         return _inspect_legacy_pair(paths, state, kinds)
     return _inspect_v3_state(
@@ -2404,8 +1052,8 @@ def _inspect_v3_state(
     conflict = _v3_conflict_report(paths, overflow, artifacts)
     if conflict is not None:
         return conflict
-    migration = _read_record(
-        paths["migration"], state, schema=_MIGRATION_SCHEMA, max_bytes=_MAX_RECORD_BYTES
+    migration = read_record(
+        paths["migration"], state, schema=MIGRATION_SCHEMA, max_bytes=MAX_RECORD_BYTES
     )
     _validate_partial_artifacts(paths, state, migration, operation_artifacts)
     if _kind(paths["adoption"]) == "missing":
@@ -2452,10 +1100,8 @@ def _inspect_adopted(
 ) -> dict[str, object]:
     if _kind(paths["adoption"]) != "file":
         raise ValueError("adoption record path has the wrong kind")
-    adoption = _read_record(
-        paths["adoption"], state, schema=_ADOPTION_SCHEMA, max_bytes=_MAX_RECORD_BYTES
-    )
-    _validate_complete_adoption(
+    adoption = read_adoption_record(paths["adoption"], state)
+    validate_complete_adoption(
         root=vault,
         state_root=state,
         paths=paths,
@@ -2463,9 +1109,15 @@ def _inspect_adopted(
         adoption=adoption,
         operation_artifacts=operation_artifacts,
     )
-    return _report(
+    report = _report(
         mode="check", status="ok", state="adopted", blockers=[], artifacts=artifacts
     )
+    report["details"]["compile_progress"] = {
+        "reliability-v3-adoption/v1": "upgrade-required",
+        "reliability-v3-adoption/v2": "upgraded",
+        "reliability-v3-adoption/v3": "upgraded",
+    }[adoption["schema_version"]]
+    return report
 
 
 def repair_installed_vault(
@@ -2489,7 +1141,7 @@ def repair_installed_vault(
             blockers=["reliability_v3_offline_confirmation_required"],
         )
     try:
-        changed = _apply_reliability_v3_adoption(
+        changed = apply_reliability_v3_adoption(
             root=Path(root), state_root=Path(state_root)
         )
     except Exception as error:  # noqa: BLE001 - stable redacted repair boundary
@@ -2505,12 +1157,20 @@ def repair_installed_vault(
     )
 
 
-def _apply_reliability_v3_adoption(*, root: Path, state_root: Path) -> bool:
+def _inspection_failure(inspection: dict[str, object]) -> str:
+    """The failed inspection's blockers and cause, so the adoption refusal says why."""
+    details = inspection.get("details", {})
+    codes = ", ".join(str(item.get("code")) for item in inspection.get("blockers", []))
+    cause = details.get("error") if isinstance(details, dict) else None
+    return f"Reliability V3 inspection failed: {codes}" + (f" ({cause})" if cause else "")
+
+
+def apply_reliability_v3_adoption(*, root: Path, state_root: Path) -> bool:
     inspection = inspect_installed_vault(root=root, state_root=state_root)
     status = inspection.get("overall_status")
     state = inspection.get("details", {}).get("adoption_state")
     if status == "error":
-        raise ValueError("Reliability V3 inspection failed")
+        raise ValueError(_inspection_failure(inspection))
     if state == "adopted":
         return False
     _require_adoptable_state(state)
@@ -2538,7 +1198,7 @@ def _migration_for_apply(
         paths["migration"],
         migration,
         state_root=state_root,
-        schema=_MIGRATION_SCHEMA,
-        limit=_MAX_RECORD_BYTES,
+        schema=MIGRATION_SCHEMA,
+        limit=MAX_RECORD_BYTES,
     )
     return migration

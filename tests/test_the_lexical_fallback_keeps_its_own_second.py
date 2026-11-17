@@ -17,13 +17,13 @@ def test_the_lexical_pass_runs_in_the_reserved_second(monkeypatch) -> None:
         seen.append((semantic, deadline))
         if semantic:
             raise TimeoutError("hybrid ran out of time")
-        mcp_server._check_deadline(deadline)
+        mcp_server.check_deadline(deadline)
         return [{"path": "knowledge/notes/a.md", "score": 1.0}]
 
-    monkeypatch.setattr(mcp_server, "_run_vault_search", run)
+    monkeypatch.setattr("llm_wiki.mcp_server_vault.run_vault_search", run)
     deadline = time.monotonic() + 5.0
 
-    rows = mcp_server._search_vault("question", 3, deadline=deadline)
+    rows = mcp_server.search_vault("question", 3, deadline=deadline)
 
     hybrid, lexical = seen
     assert (len(rows), hybrid[1], lexical[1]) == (

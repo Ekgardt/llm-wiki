@@ -54,11 +54,20 @@ def _covered(value: str) -> bool:
 
 
 _TRANSACTION_MODULES = frozenset({"markdown_transaction", "scripts.markdown_transaction"})
-_DAILY_APPENDERS = frozenset({"locked_append", "locked_append_once", "append_daily"})
-_APPLY_FUNCTIONS = frozenset({"_apply_operation", "_apply_windows_operation"})
-_APPLY_WRITES = frozenset({"unlink", "replace", "durable_publish_file", "_delete_windows_handle"})
+DAILY_APPENDERS = frozenset({"locked_append", "locked_append_once", "append_daily"})
+APPLY_FUNCTIONS = frozenset({"_apply_operation", "_apply_windows_operation"})
+TRANSACTION_APPLY_FILE = "markdown_operations.py"
+# The apply step delegates each write to a helper; the inventory names the helper
+# that performs it, not only the step that calls it.
+_APPLY_STEP_FUNCTIONS = APPLY_FUNCTIONS | {
+    "_link_or_replace",
+    "_unlink_at_parent",
+    "_publish_at_parent",
+    "_delete_windows_target",
+}
+APPLY_WRITES = frozenset({"unlink", "replace", "durable_publish_file", "delete_windows_handle"})
 _ARCHIVE_OPERATIONS = frozenset({"write_bytes", "unlink", "replace", "rename", "move", "mkdir"})
-_ARCHIVE_PUBLISHERS = frozenset({"_recover_hidden_builds", "_publish_build"})
+ARCHIVE_PUBLISHERS = frozenset({"_recover_hidden_builds", "_publish_build"})
 _HIDDEN_BUILD_WRITES = frozenset({"write_bytes", "unlink", "mkdir"})
 _BUILD_PARAMETERS = frozenset({"build", "publish_build", "hidden_build"})
 _PATH_DERIVATIONS = frozenset({"absolute", "resolve", "with_name", "with_suffix"})
@@ -125,7 +134,7 @@ class _ModuleBindings:
 def _canonical_import(module: str | None, name: str) -> bool:
     if module in _TRANSACTION_MODULES:
         return name in _BOUNDARIES
-    return module == "daily_log_append" and name in _DAILY_APPENDERS
+    return module == "daily_log_append" and name in DAILY_APPENDERS
 
 
 def _module_boundary(value: ast.AST, canonical_modules: set[str]) -> bool:
@@ -404,7 +413,7 @@ def _archive_operation(function: str, name: str) -> bool:
 
 
 def _archive_targets(resolved: list[str], function: str, archive_operation: bool) -> list[str]:
-    if archive_operation and not resolved and function in _ARCHIVE_PUBLISHERS:
+    if archive_operation and not resolved and function in ARCHIVE_PUBLISHERS:
         return [".bag-building"]
     return resolved
 
@@ -412,7 +421,7 @@ def _archive_targets(resolved: list[str], function: str, archive_operation: bool
 def _archive_allowed(resolved: list[str], function: str, name: str) -> bool:
     hidden = _hidden_build_targets(resolved)
     return (hidden and name in _HIDDEN_BUILD_WRITES) or (
-        function in _ARCHIVE_PUBLISHERS and name in _RENAME_METHODS
+        function in ARCHIVE_PUBLISHERS and name in _RENAME_METHODS
     )
 
 
@@ -431,7 +440,7 @@ def _finding_approval(
 ) -> bool:
     if archive_operation:
         return archive_allowed
-    if function in _APPLY_FUNCTIONS:
+    if function in APPLY_FUNCTIONS:
         return True
     return binding_approved
 
@@ -471,7 +480,7 @@ def _transaction_binding(name: str) -> str | None:
 
 
 def _library_binding(module: str | None, name: str) -> str | None:
-    if module == "daily_log_append" and name in _DAILY_APPENDERS:
+    if module == "daily_log_append" and name in DAILY_APPENDERS:
         return f"<canonical:{name}>"
     if module == "pathlib" and name == "Path":
         return "<path-constructor>"
@@ -989,7 +998,7 @@ def _python_findings(path: Path, source: str) -> list[WriterFinding]:
         WriterFinding(path, line, api, approved, function)
         for line, api, approved, function in _python_write_calls(source)
     ]
-    if path.name == "markdown_transaction.py":
+    if path.name == TRANSACTION_APPLY_FILE:
         findings.extend(_transaction_apply_findings(path, ast.parse(source)))
     return findings
 
@@ -1000,7 +1009,7 @@ def _transaction_apply_findings(path: Path, tree: ast.Module) -> list[WriterFind
         WriterFinding(path, call.lineno, _call_name(call), True)
         for function in _apply_functions(tree)
         for call in _calls_in(function)
-        if _call_name(call) in _APPLY_WRITES
+        if _call_name(call) in APPLY_WRITES
     ]
 
 
@@ -1008,7 +1017,7 @@ def _apply_functions(tree: ast.Module) -> list[ast.FunctionDef]:
     return [
         node
         for node in ast.walk(tree)
-        if isinstance(node, ast.FunctionDef) and node.name in _APPLY_FUNCTIONS
+        if isinstance(node, ast.FunctionDef) and node.name in _APPLY_STEP_FUNCTIONS
     ]
 
 

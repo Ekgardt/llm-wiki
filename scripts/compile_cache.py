@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import json
 import os
-import re
 import stat
 import tempfile
 from collections.abc import Mapping
@@ -12,24 +11,31 @@ from pathlib import Path, PurePosixPath
 from typing import Protocol
 
 from bounded_io import FileIdentity, file_identity, settled_lstat
-from markdown_transaction import (
-    _acl_output_text,
-    _run_acl_command,
-    _windows_acl_identity,
+from llm_wiki import runtime_roots
+from llm_wiki.formats.canonical import canonical_json_bytes, sha256_bytes
+from llm_wiki.formats.source import (
+    SourceDescriptor as SourceDescriptor,
 )
-from reliable_memory import (
-    _known_network_path,
-    _windows_reparse_point,
-    canonical_json_bytes,
-    fsync_directory,
-    sha256_bytes,
+from llm_wiki.formats.source import (
+    SourceOccurrenceBounds as SourceOccurrenceBounds,
 )
+from llm_wiki.formats.source import (
+    validate_digest as validate_digest,
+)
+from llm_wiki.formats.source import (
+    validate_logical_path as validate_logical_path,
+)
+from llm_wiki.windows_acl import (  # noqa: E402
+    acl_output_text,
+    run_acl_command,
+    windows_acl_identity,
+)
+from reliable_memory import fsync_directory, known_network_path, windows_reparse_point
 
 CACHE_SCHEMA_VERSION = 1
 # One cached compile plan; the largest on the live vault is 22.6 KB (2026-09-27), so 16 MiB only
 # refuses a corrupted or foreign entry before it is parsed.
 MAX_CACHE_ENTRY_BYTES = 16 * 1024 * 1024
-_SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 _COMPILE_PLAN_SCHEMA_PATH = Path(__file__).resolve().parent / "schemas" / "compile-plan-v2.json"
 _COMPILE_PLAN_SCHEMA_BYTES = _COMPILE_PLAN_SCHEMA_PATH.read_bytes()
 _COMPILE_PLAN_SCHEMA = json.loads(_COMPILE_PLAN_SCHEMA_BYTES.decode("utf-8"))
@@ -39,51 +45,6 @@ COMPILE_PLAN_SCHEMA_HASH = sha256_bytes(canonical_json_bytes(_COMPILE_PLAN_SCHEM
 
 class PlanValidator(Protocol):
     def __call__(self, plan: dict[str, object]) -> bool: ...
-
-
-@dataclass(frozen=True, order=True)
-class SourceOccurrenceBounds:
-    first_event_id: str
-    last_event_id: str
-
-    def canonical(self) -> dict[str, str]:
-        for value in (self.first_event_id, self.last_event_id):
-            if not isinstance(value, str) or not 1 <= len(value.encode()) <= 256:
-                raise ValueError("source event ID is invalid")
-        return {
-            "first_event_id": self.first_event_id,
-            "last_event_id": self.last_event_id,
-        }
-
-
-@dataclass(frozen=True, order=True)
-class SourceDescriptor:
-    logical_path: str
-    byte_length: int
-    sha256: str
-    occurrence_bounds: SourceOccurrenceBounds | None = None
-
-    def canonical(self) -> list[object]:
-        _validate_logical_path(self.logical_path)
-        if not isinstance(self.byte_length, int) or isinstance(self.byte_length, bool):
-            raise TypeError("source byte length must be an integer")
-        if self.byte_length < 0:
-            raise ValueError("source byte length must be non-negative")
-        _validate_digest(self.sha256, "source SHA-256")
-        return [self.logical_path, self.byte_length, self.sha256]
-
-    def receipt_descriptor(self) -> dict[str, object]:
-        self.canonical()
-        return {
-            "logical_path": self.logical_path,
-            "sha256": self.sha256,
-            "byte_size": self.byte_length,
-            "occurrence_bounds": (
-                None
-                if self.occurrence_bounds is None
-                else self.occurrence_bounds.canonical()
-            ),
-        }
 
 
 @dataclass(frozen=True)
@@ -97,7 +58,7 @@ class CompileCallDescriptor:
     fallback_from: tuple[str, ...]
 
     def canonical(self) -> dict[str, object]:
-        _validate_digest(self.prompt_program_hash, "prompt program hash")
+        validate_digest(self.prompt_program_hash, "prompt program hash")
         self._validate_identity()
         self._validate_modes()
         capabilities = _restricted_mapping(self.capabilities, "capabilities")
@@ -160,7 +121,7 @@ class CompileActionDescriptor:
     def _validate_versions(self) -> None:
         _require_text(self.compiler_version, "compiler version is required")
         _require_text(self.schema_version, "schema version is required")
-        _validate_digest(self.schema_hash, "schema hash")
+        validate_digest(self.schema_hash, "schema hash")
         _require_text(self.normalization_version, "normalization version is required")
 
     @property
@@ -198,8 +159,7 @@ class CompileCache:
 
     def __init__(self, state_root: Path | None = None) -> None:
         if state_root is None:
-            configured = os.environ.get("LLM_WIKI_STATE_ROOT") or os.environ.get("LLM_WIKI_ROOT")
-            state_root = Path(configured) if configured else Path(__file__).resolve().parent.parent
+            state_root = runtime_roots.state_root()
         self.state_root = Path(state_root).resolve(strict=False)
         self.cache_dir = self.state_root / "cache" / "compile"
 
@@ -227,7 +187,7 @@ class CompileCache:
             return None
         _validate_action_schema(action)
         self._validate_location(create=False)
-        raw = _read_cache_entry(self.cache_dir / f"{key}.json")
+        raw = read_cache_entry(self.cache_dir / f"{key}.json")
         return _accepted_payload(_cached_payload(raw, key), validator)
 
     def put(
@@ -265,11 +225,11 @@ class CompileCache:
             _discard_staging(temporary)
             raise
         fsync_directory(self.cache_dir)
-        _verify_owner_only(target, 0o600)
+        verify_owner_only(target, 0o600)
         return target
 
     def _validate_location(self, *, create: bool) -> None:
-        if _known_network_path(self.state_root) or _windows_reparse_point(self.state_root):
+        if known_network_path(self.state_root) or windows_reparse_point(self.state_root):
             raise PermissionError("compile cache requires a local state root")
         current = self.state_root
         for part in ("cache", "compile"):
@@ -337,7 +297,7 @@ def _write_staged_entry(descriptor: int, temporary: Path, data: bytes) -> None:
         handle.write(data)
         handle.flush()
         os.fsync(handle.fileno())
-    _restrict_owner_only(temporary, 0o600)
+    restrict_owner_only(temporary, 0o600)
     if temporary.is_symlink() or not temporary.is_file():
         raise PermissionError("cache staging file is not secure")
 
@@ -376,8 +336,8 @@ def _require_private_directory(path: Path, *, create: bool) -> None:
     if path.is_symlink() or not path.is_dir():
         raise PermissionError("compile cache directory is not secure")
     if create:
-        _restrict_owner_only(path, 0o700)
-    _verify_owner_only(path, 0o700)
+        restrict_owner_only(path, 0o700)
+    verify_owner_only(path, 0o700)
 
 
 def _require_inside_state_root(cache_dir: Path, state_root: Path) -> None:
@@ -385,25 +345,6 @@ def _require_inside_state_root(cache_dir: Path, state_root: Path) -> None:
         cache_dir.resolve(strict=True).relative_to(state_root)
     except (OSError, ValueError) as exc:
         raise PermissionError("compile cache escaped the state root") from exc
-
-
-def _validate_digest(value: str, label: str) -> None:
-    if not isinstance(value, str) or _SHA256_RE.fullmatch(value) is None:
-        raise ValueError(f"{label} must be a lowercase SHA-256 digest")
-
-
-def _validate_logical_path(value: str) -> None:
-    if not isinstance(value, str) or not value or "\\" in value:
-        raise ValueError("source logical path must be relative POSIX syntax")
-    if _escapes_vault(value):
-        raise ValueError("source logical path must remain inside the vault")
-
-
-def _escapes_vault(value: str) -> bool:
-    path = PurePosixPath(value)
-    if not path.parts or value == "." or path.is_absolute():
-        return True
-    return ".." in path.parts or re.match(r"^[A-Za-z]:", value) is not None
 
 
 def _restricted_mapping(value: Mapping[str, object], label: str) -> dict[str, object]:
@@ -440,18 +381,18 @@ def _validate_operation_path(index: int, operation: object, seen_paths: set[str]
 
 def _require_normalized_operation_path(index: int, path: str) -> None:
     try:
-        _validate_logical_path(path)
+        validate_logical_path(path)
     except (TypeError, ValueError) as exc:
         raise ValueError(f"compile plan operation {index} has an unsafe path") from exc
     if str(PurePosixPath(path)) != path or "\x00" in path:
         raise ValueError(f"compile plan operation {index} path is not normalized")
 
 
-def _read_cache_entry(path: Path) -> bytes:
+def read_cache_entry(path: Path) -> bytes:
     metadata = settled_lstat(path, label="cache entry")
     if path.is_symlink() or not stat.S_ISREG(metadata.st_mode):
         raise PermissionError("cache entry must be a regular non-symlink file")
-    _verify_owner_only(path, 0o600)
+    verify_owner_only(path, 0o600)
     flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
     descriptor = os.open(path, flags)
     try:
@@ -472,7 +413,7 @@ def _read_verified_descriptor(
     _require_owner_only_descriptor(opened)
     raw = _read_bounded_entry(descriptor)
     _require_unchanged_during_read(path, descriptor, opened_identity)
-    _verify_owner_only(path, 0o600)
+    verify_owner_only(path, 0o600)
     verified = path.lstat()
     if opened_identity[:2] != (verified.st_dev, verified.st_ino):
         raise PermissionError("cache entry changed during permission verification")
@@ -591,22 +532,22 @@ _TYPE_VALIDATORS = {
 }
 
 
-def _restrict_owner_only(path: Path, mode: int) -> None:
+def restrict_owner_only(path: Path, mode: int) -> None:
     if os.name == "posix":
         path.chmod(mode)
-        _verify_owner_only(path, mode)
+        verify_owner_only(path, mode)
         return
     if os.name != "nt":
         raise PermissionError("owner-only cache permissions are unsupported")
     _harden_cache_windows_acl(path)
-    _verify_owner_only(path, mode)
+    verify_owner_only(path, mode)
 
 
-def _verify_owner_only(path: Path, mode: int) -> None:
+def verify_owner_only(path: Path, mode: int) -> None:
     if path.is_symlink():
         raise PermissionError("cache path must not be a symlink")
     _require_cache_path_type(path)
-    if not _is_owner_only(path, mode):
+    if not is_owner_only(path, mode):
         raise PermissionError("cache path is not owner-only")
 
 
@@ -617,21 +558,21 @@ def _require_cache_path_type(path: Path) -> None:
         raise PermissionError("cache path has an invalid type")
 
 
-def _is_owner_only(path: Path, mode: int) -> bool:
+def is_owner_only(path: Path, mode: int) -> bool:
     if os.name == "nt":
-        return _windows_acl_is_owner_only(path)
+        return windows_acl_is_owner_only(path)
     return os.name == "posix" and stat.S_IMODE(path.stat().st_mode) == mode
 
 
-def _windows_acl_is_owner_only(path: Path) -> bool:
+def windows_acl_is_owner_only(path: Path) -> bool:
     try:
-        verified = _run_acl_command(["icacls", str(path)])
+        verified = run_acl_command(["icacls", str(path)])
     except Exception:  # noqa: BLE001 - ACL validation is fail-closed
         return False
     if verified.returncode != 0:
         return False
-    identity = _windows_acl_identity()
-    return _sole_full_owner_entry(path, identity, _acl_output_text(verified.stdout))
+    identity = windows_acl_identity()
+    return _sole_full_owner_entry(path, identity, acl_output_text(verified.stdout))
 
 
 def _sole_full_owner_entry(path: Path, identity: str, output: str) -> bool:
@@ -643,12 +584,12 @@ def _sole_full_owner_entry(path: Path, identity: str, output: str) -> bool:
 
 
 def _full_owner_entry(path: Path, identity: str, line: str) -> bool:
-    if _acl_principal(path, line).casefold() != identity.casefold():
+    if acl_principal(path, line).casefold() != identity.casefold():
         return False
     return "(F)" in line and "(I)" not in line
 
 
-def _acl_principal(path: Path, line: str) -> str:
+def acl_principal(path: Path, line: str) -> str:
     principal = line.split(":(", 1)[0].strip()
     path_text = str(path)
     if principal.casefold().startswith(path_text.casefold()):
@@ -669,7 +610,7 @@ _BROAD_SIDS = (
 
 
 def _harden_cache_windows_acl(path: Path) -> None:
-    identity = _windows_acl_identity()
+    identity = windows_acl_identity()
     permission = f"{identity}:(OI)(CI)(F)" if path.is_dir() else f"{identity}:(F)"
     commands = [
         ["icacls", str(path), "/inheritance:r", "/grant:r", permission],
@@ -677,12 +618,12 @@ def _harden_cache_windows_acl(path: Path) -> None:
         ["icacls", str(path), "/remove:d", *_BROAD_SIDS],
     ]
     try:
-        results = [_run_acl_command(command) for command in commands]
+        results = [run_acl_command(command) for command in commands]
     except Exception as exc:  # noqa: BLE001 - ACL enforcement is fail-closed
         raise PermissionError("owner-only cache permissions are unavailable") from exc
     _require_hardened_acl(path, results)
 
 
 def _require_hardened_acl(path: Path, results: list) -> None:
-    if any(result.returncode != 0 for result in results) or not _windows_acl_is_owner_only(path):
+    if any(result.returncode != 0 for result in results) or not windows_acl_is_owner_only(path):
         raise PermissionError("owner-only cache ACL enforcement failed")

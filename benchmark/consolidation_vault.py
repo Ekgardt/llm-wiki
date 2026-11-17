@@ -150,7 +150,7 @@ def _answered(question: dict, root: Path, snapshot: object, rows: list[dict], pr
 
 
 def active_generation_id(state: Path) -> str | None:
-    from generation_catalog import GenerationCatalog
+    from llm_wiki.generation_catalog_store import GenerationCatalog
 
     active = GenerationCatalog(state).get_active() or {}
     identifier = active.get("generation_id")
@@ -176,15 +176,15 @@ def build_generation(root: Path, state: Path, daily_files: list[str]) -> tuple[o
     started from. The MEM-10 worker is not edited: it is correct for one arm.
     """
     from corpus_snapshot import collect_corpus
-    from doctor import (
-        _corpus_policy,
-        _fresh_generation_id,
-        _generation_source_bytes,
-        _generation_source_extractor,
-        _generation_source_rows,
-    )
     from evidence_graph_builder import build_incremental_generation
-    from generation_catalog import GenerationCatalog
+    from generation_maintenance import (
+        corpus_policy,
+        fresh_generation_id,
+        generation_source_bytes,
+        generation_source_extractor,
+        generation_source_rows,
+    )
+    from llm_wiki.generation_catalog_store import GenerationCatalog
     from repository_scope import resolve_repository_scope
 
     deadline = time.monotonic() + vault_harness.BUILD_DEADLINE_SECONDS
@@ -194,13 +194,13 @@ def build_generation(root: Path, state: Path, daily_files: list[str]) -> tuple[o
     expected_active = active_generation_id(state)
     built = build_incremental_generation(
         catalog,
-        sources=_generation_source_rows(snapshot),
-        source_bytes=_generation_source_bytes(snapshot),
-        extractor=_generation_source_extractor(snapshot, scope.repository_id),
+        sources=generation_source_rows(snapshot),
+        source_bytes=generation_source_bytes(snapshot),
+        extractor=generation_source_extractor(snapshot, scope.repository_id),
         reuse_config=_reuse_config(snapshot),
-        generation_id=_fresh_generation_id(catalog),
+        generation_id=fresh_generation_id(catalog),
         parent_generation_id=None,
-        policy=_corpus_policy(snapshot),
+        policy=corpus_policy(snapshot),
         expected_active=expected_active,
         deadline=deadline,
         cancelled=None,

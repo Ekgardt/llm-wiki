@@ -8,24 +8,26 @@ from __future__ import annotations
 
 import json
 import re
-import shutil
-import subprocess
 import sys
 import textwrap
 from pathlib import Path
 
-import pytest
+from tests.a_changed_task_setting_reaches_an_installed_machine_helpers import ROOT
 
-ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT / "scripts") not in sys.path:
     sys.path.insert(0, str(ROOT / "scripts"))
 
-import install_control  # noqa: E402
+import install_state
+from llm_wiki import install_v2_transactions, install_windows  # noqa: E402
 from reliable_memory import canonical_json_bytes  # noqa: E402
 
+from tests.a_changed_task_setting_reaches_an_installed_machine_helpers import (
+    SCRIPT,
+    STUBS,
+    _run,
+)
 from tests.powershell_literal import ps_literal  # noqa: E402
 
-SCRIPT = ROOT / "scripts" / "install-scheduled-tasks.ps1"
 RELEASE = {
     "commit_oid": "a" * 40,
     "project_version": "0.0.0",
@@ -84,8 +86,8 @@ class _Machine:
         return 0, b""
 
 
-def _resource(tmp_path: Path, machine: _Machine) -> install_control.ManagedResource:
-    return install_control.windows_task_scheduler_resource(
+def _resource(tmp_path: Path, machine: _Machine) -> install_state.ManagedResource:
+    return install_windows.windows_task_scheduler_resource(
         root=tmp_path / "vault",
         state_root=tmp_path / "state",
         uv_path=tmp_path / "uv.exe",
@@ -95,8 +97,8 @@ def _resource(tmp_path: Path, machine: _Machine) -> install_control.ManagedResou
     )
 
 
-def _install(tmp_path: Path, resource: install_control.ManagedResource) -> None:
-    install_control.install_resources(
+def _install(tmp_path: Path, resource: install_state.ManagedResource) -> None:
+    install_v2_transactions.install_resources(
         state_root=tmp_path / "state",
         vault_root=tmp_path / "vault",
         release=RELEASE,
@@ -110,7 +112,7 @@ def test_an_update_registers_the_tasks_again_under_the_new_contract(tmp_path, mo
     (tmp_path / "state").mkdir()
     machine = _Machine()
     with monkeypatch.context() as earlier_release:
-        earlier_release.setattr(install_control, "render_windows_task_spec", _legacy_spec)
+        earlier_release.setattr(install_windows, "render_windows_task_spec", _legacy_spec)
         _install(tmp_path, _resource(tmp_path, machine))
     before = machine.registered
     machine.calls.clear()
@@ -122,7 +124,7 @@ def test_an_update_registers_the_tasks_again_under_the_new_contract(tmp_path, mo
 
 
 def test_the_specification_names_the_limits_the_script_registers() -> None:
-    from tests.test_the_scheduler_outlasts_the_pass import script_limit_hours
+    from tests.the_scheduler_outlasts_the_pass_helpers import script_limit_hours
 
     script = SCRIPT.read_text(encoding="utf-8")
     registered = re.findall(r"-ExecutionTimeLimit \(New-TimeSpan -Hours \$LimitHours\.(\w+)\)", script)
@@ -131,24 +133,7 @@ def test_the_specification_names_the_limits_the_script_registers() -> None:
     assert (registered, checked, script_limit_hours()) == (
         ["nightly", "weekly"],
         ["nightly", "weekly"],
-        install_control.WINDOWS_TASK_LIMIT_HOURS,
-    )
-
-
-def _pwsh() -> str:
-    path = shutil.which("pwsh")
-    if path is None:
-        pytest.skip("PowerShell 7 is unavailable")
-    return path
-
-
-def _run(command: str) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(
-        [_pwsh(), "-NoProfile", "-NonInteractive", "-Command", command],
-        capture_output=True,
-        text=True,
-        timeout=120,
-        check=False,
+        install_windows.WINDOWS_TASK_LIMIT_HOURS,
     )
 
 
@@ -187,24 +172,6 @@ def test_the_two_contracts_never_both_claim_the_same_task() -> None:
     ]
 
 
-STUBS = """
-$script:registered = @()
-function Get-ScheduledTask { param($TaskName, $ErrorAction) $null }
-function New-ScheduledTaskAction { param($Execute, $Argument) 'action' }
-function New-ScheduledTaskTrigger { param([switch]$Daily, [switch]$Weekly, $DaysOfWeek, $At) 'trigger' }
-function New-ScheduledTaskPrincipal { param($UserId, $LogonType, $RunLevel) 'principal' }
-function New-ScheduledTaskSettingsSet {
-    param([switch]$AllowStartIfOnBatteries, [switch]$DontStopIfGoingOnBatteries,
-        [switch]$StartWhenAvailable, $ExecutionTimeLimit, $RestartCount, $RestartInterval)
-    $ExecutionTimeLimit.TotalHours
-}
-function Register-ScheduledTask {
-    param($TaskName, $Action, $Trigger, $Settings, $Principal, $Description)
-    $script:registered += ,@($Settings, $Description.EndsWith('[llm-wiki-task-spec:2]'))
-}
-"""
-
-
 def _specified_limit_hours() -> list[float]:
     """The hour limits the product promises, nightly then weekly.
 
@@ -214,7 +181,7 @@ def _specified_limit_hours() -> list[float]:
     written. `test_the_specification_names_the_limits_the_script_registers`
     holds the script to the same constant.
     """
-    return [float(hours) for hours in install_control.WINDOWS_TASK_LIMIT_HOURS.values()]
+    return [float(hours) for hours in install_windows.WINDOWS_TASK_LIMIT_HOURS.values()]
 
 
 def test_a_registration_carries_the_marker_and_the_limits(tmp_path) -> None:

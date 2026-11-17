@@ -24,6 +24,8 @@ import lsp_profiles
 import mcp_server
 import pytest
 import workspace_revision
+from llm_wiki.pyright_session_core import LanguageServerSession
+from llm_wiki.pyright_session_manager import LanguageServerSessionManager
 from lsp_profiles import PYRIGHT_PROFILE, TYPESCRIPT_PROFILE
 from lsp_server_profile import (
     READINESS_WORK_DONE_PROGRESS,
@@ -35,7 +37,6 @@ from pyright_profile import (
     PYRIGHT_INITIALIZATION_OPTIONS_SHA256,
     PyrightIdentity,
 )
-from pyright_session import LanguageServerSession, LanguageServerSessionManager
 from repository_scope import resolve_repository_scope
 
 
@@ -83,7 +84,7 @@ def _identity(codes: tuple[str, ...] = ()) -> PyrightIdentity:
 def test_the_boundary_routes_a_file_to_the_server_that_owns_its_suffix(
     path: str, expected: str
 ) -> None:
-    assert mcp_server._navigation_profile(path).name == expected
+    assert mcp_server.navigation_profile(path).name == expected
 
 
 def test_an_unclaimed_suffix_keeps_the_behaviour_it_had_before_profiles() -> None:
@@ -92,8 +93,8 @@ def test_an_unclaimed_suffix_keeps_the_behaviour_it_had_before_profiles() -> Non
     `.go` and `.rs` were unclaimed suffixes until gopls and rust-analyzer
     became managed profiles on 2026-09-12; `.rb` is an unclaimed one now.
     """
-    assert mcp_server._navigation_profile("README.md") is PYRIGHT_PROFILE
-    assert mcp_server._navigation_profile("lib.rb") is PYRIGHT_PROFILE
+    assert mcp_server.navigation_profile("README.md") is PYRIGHT_PROFILE
+    assert mcp_server.navigation_profile("lib.rb") is PYRIGHT_PROFILE
 
 
 def _claimed_suffixes() -> dict[str, str]:
@@ -291,7 +292,7 @@ class _StubSession:
 
 def test_the_answer_names_the_server_that_produced_it() -> None:
     data = {"provider": {"name": "pyright", "version": "6.0.0"}, "warnings": ()}
-    named = mcp_server._navigation_named_by_session(
+    named = mcp_server.navigation_named_by_session(
         dict(data), _StubSession(TYPESCRIPT_PROFILE, ())
     )
     assert named["provider"] == {"name": "typescript", "version": "6.0.0"}
@@ -302,7 +303,7 @@ def test_the_answer_carries_the_capability_limits_by_name() -> None:
         "provider": {"name": "typescript", "version": None},
         "warnings": ("structural fallback appended",),
     }
-    named = mcp_server._navigation_named_by_session(
+    named = mcp_server.navigation_named_by_session(
         data, _StubSession(TYPESCRIPT_PROFILE, ("typescript_missing",))
     )
     assert named["warnings"] == (
@@ -314,7 +315,7 @@ def test_the_answer_carries_the_capability_limits_by_name() -> None:
 def test_a_qualified_session_adds_no_warning_of_its_own() -> None:
     """Python with a working Pyright must be byte-for-byte what it always was."""
     data = {"provider": {"name": "pyright", "version": "1.1.411"}, "warnings": ()}
-    named = mcp_server._navigation_named_by_session(
+    named = mcp_server.navigation_named_by_session(
         dict(data), _StubSession(PYRIGHT_PROFILE, ())
     )
     assert named == {
@@ -325,7 +326,7 @@ def test_a_qualified_session_adds_no_warning_of_its_own() -> None:
 
 def test_a_structural_answer_keeps_its_absent_provider() -> None:
     data = {"provider": {"name": None, "version": None}, "warnings": ()}
-    named = mcp_server._navigation_named_by_session(
+    named = mcp_server.navigation_named_by_session(
         dict(data), _StubSession(TYPESCRIPT_PROFILE, ())
     )
     assert named["provider"]["name"] is None
@@ -352,7 +353,7 @@ def test_the_transport_carries_every_profiles_own_notifications() -> None:
 
 # --- The freshness contract knows more than one language (CODE-08 blocker 2) ---
 #
-# `workspace_revision._is_relevant_path` was `suffix in {".py", ".pyi"}`, so
+# `workspace_revision.is_relevant_path` was `suffix in {".py", ".pyi"}`, so
 # `compute_workspace_revision` returned no entries at all on a TypeScript
 # checkout and the source document could not be validated. The answer failed
 # with `source document validation failed` before the server was reached, which
@@ -369,7 +370,7 @@ def test_the_relevant_suffixes_come_from_the_profile_registry() -> None:
 def test_a_typescript_source_is_a_relevant_path() -> None:
     """The exact predicate that returned False and emptied the revision."""
     for path in _RELEVANT_TYPESCRIPT_PATHS:
-        assert workspace_revision._is_relevant_path(path), path
+        assert workspace_revision.is_relevant_path(path), path
 
 
 # Read as tables: the managed complexity gate counts every `assert` as a branch,
@@ -381,9 +382,9 @@ _IRRELEVANT_PATHS = ("README.md", "docs/notes.txt", "nested/pyproject.toml")
 
 def test_python_relevance_is_unchanged() -> None:
     for path in _RELEVANT_PYTHON_PATHS:
-        assert workspace_revision._is_relevant_path(path), path
+        assert workspace_revision.is_relevant_path(path), path
     for path in _IRRELEVANT_PATHS:
-        assert not workspace_revision._is_relevant_path(path), path
+        assert not workspace_revision.is_relevant_path(path), path
 
 
 def test_a_profile_declares_its_own_configuration_at_any_depth() -> None:
@@ -394,8 +395,8 @@ def test_a_profile_declares_its_own_configuration_at_any_depth() -> None:
     docs/research/2026-09-25-a-revision-holds-only-what-it-proves.md). Python's
     names stay root-only; `_IRRELEVANT_PATHS` holds that case.
     """
-    assert workspace_revision._is_relevant_path("tsconfig.json")
-    assert workspace_revision._is_relevant_path("nested/tsconfig.json")
+    assert workspace_revision.is_relevant_path("tsconfig.json")
+    assert workspace_revision.is_relevant_path("nested/tsconfig.json")
 
 
 def test_a_typescript_checkout_produces_revision_entries(tmp_path: Path) -> None:
@@ -460,7 +461,7 @@ def test_provenance_names_the_server_that_answered() -> None:
         ],
         "warnings": (),
     }
-    named = mcp_server._navigation_named_by_session(
+    named = mcp_server.navigation_named_by_session(
         data, _StubSession(TYPESCRIPT_PROFILE, ())
     )
     assert named["provenance"][0]["provider"] == "typescript"
@@ -474,7 +475,29 @@ def test_provenance_names_the_server_that_answered() -> None:
 def test_an_answer_without_provenance_keeps_its_shape() -> None:
     """Adding an empty key would change every Python envelope that had none."""
     data = {"provider": {"name": "pyright", "version": "1.1.411"}, "warnings": ()}
-    named = mcp_server._navigation_named_by_session(
+    named = mcp_server.navigation_named_by_session(
         dict(data), _StubSession(PYRIGHT_PROFILE, ())
     )
     assert "provenance" not in named
+
+
+@pytest.mark.parametrize('name', [
+    'INSTALL_MANIFEST_NAME', 'ManifestError', 'build_install_manifest',
+    'validate_install_manifest', 'profile_configuration_sha256',
+    'profile_initialization_options_sha256',
+])
+def test_install_manifest_facade_retains_identical_objects(name):
+    from llm_wiki import lsp_install_manifest
+
+    assert getattr(lsp_identity, name) is getattr(lsp_install_manifest, name)
+
+
+def test_install_manifest_public_serialization_paths_are_preserved():
+    import pickle
+
+    for value in (lsp_identity.ManifestError, lsp_identity.build_install_manifest,
+                  lsp_identity.validate_install_manifest,
+                  lsp_identity.profile_initialization_options_sha256,
+                  lsp_identity.profile_configuration_sha256):
+        assert value.__module__ == 'lsp_identity'
+        assert pickle.loads(pickle.dumps(value)) is value

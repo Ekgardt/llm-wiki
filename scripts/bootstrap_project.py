@@ -24,12 +24,13 @@ from datetime import datetime
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from markdown_transaction import mutate_knowledge, stable_operation_id  # noqa: E402
-from memory_state import ROOT  # noqa: E402
+from llm_wiki import runtime_roots  # noqa: E402
+from markdown_transaction import ABSENT, mutate_knowledge, stable_operation_id  # noqa: E402
 from secret_redact import redact_secrets  # noqa: E402
 
-PROJECTS_DIR = ROOT / "knowledge" / "projects"
-TEMPLATE = PROJECTS_DIR / "_template" / "state.md"
+
+def template_path() -> Path:
+    return runtime_roots.projects_dir() / "_template" / "state.md"
 
 
 def _run_git(cwd: str, *args: str) -> str:
@@ -48,12 +49,12 @@ def _run_git(cwd: str, *args: str) -> str:
         return ""
 
 
-def _compute_slug(cwd: str) -> str:
+def compute_slug(cwd: str) -> str:
     """Compute the project slug using the existing 5-step algorithm."""
     sys.path.insert(0, str(Path(__file__).resolve().parent))
     try:
-        from session_start_project_state import _compute_slug as _slug
-        return _slug(Path(cwd).resolve(), PROJECTS_DIR)
+        from session_start_project_state import compute_slug as _slug
+        return _slug(Path(cwd).resolve(), runtime_roots.projects_dir())
     except Exception:
         return Path(cwd).resolve().name.lower().replace(" ", "-")
 
@@ -188,19 +189,29 @@ def _extract_docs_structure(cwd: str) -> list[str]:
     return files[:15]
 
 
-def bootstrap(cwd: str, apply: bool = False) -> str:
+def bootstrap(cwd: str, apply: bool = False, *, if_missing: bool = False) -> str:
     """Generate a bootstrap context for a new project."""
-    slug = _compute_slug(cwd)
-    project_dir = PROJECTS_DIR / slug
-    content = _bootstrap_content(cwd, slug)
+    slug = compute_slug(cwd)
+    project_dir = runtime_roots.projects_dir() / slug
+    content = bootstrap_content(cwd, slug)
     if not apply:
         return content
     bootstrap_path = project_dir / "bootstrap.md"
-    encoded = _bootstrap_page(slug, content).encode("utf-8")
-    mutate_knowledge(
-        stable_operation_id("bootstrap", slug, encoded), {bootstrap_path: encoded}
+    if if_missing and bootstrap_path.exists():
+        return f"Exists: {bootstrap_path.relative_to(runtime_roots.vault_root())}"
+    encoded = bootstrap_page(slug, content).encode("utf-8")
+    expected = {bootstrap_path.relative_to(runtime_roots.vault_root()).as_posix(): ABSENT} if if_missing else None
+    record = mutate_knowledge(
+        stable_operation_id("bootstrap", slug, encoded), {bootstrap_path: encoded},
+        preconditions=expected,
     )
-    return f"Written: {bootstrap_path.relative_to(ROOT)}"
+    _require_bootstrap_commit(record)
+    return f"Written: {bootstrap_path.relative_to(runtime_roots.vault_root())}"
+
+
+def _require_bootstrap_commit(record) -> None:
+    if record.state != "committed":
+        raise RuntimeError(f"bootstrap publication did not commit: {record.state}")
 
 
 def _redacted(items: list[str]) -> list[str]:
@@ -225,7 +236,7 @@ def _last_commit_line(last_commit: str) -> list[str]:
     return [f"## Last commit: {last_commit}"]
 
 
-def _bootstrap_content(cwd: str, slug: str) -> str:
+def bootstrap_content(cwd: str, slug: str) -> str:
     # Collect information — redact every field before it lands in a vault
     # file that may later be exported or shared (mirrors the secret_redact
     # pass that all capture hooks run).
@@ -252,7 +263,7 @@ def _bootstrap_content(cwd: str, slug: str) -> str:
     return "\n".join(parts)
 
 
-def _bootstrap_page(slug: str, content: str) -> str:
+def bootstrap_page(slug: str, content: str) -> str:
     return (
         "---\n"
         f"type: bootstrap-context\ntitle: \"{slug} bootstrap\"\n"
@@ -268,9 +279,10 @@ def main() -> int:
     p = argparse.ArgumentParser(description="Bootstrap a project into the vault.")
     p.add_argument("--cwd", required=True, help="Project directory")
     p.add_argument("--apply", action="store_true", help="Write to vault (default: dry-run)")
+    p.add_argument("--if-missing", action="store_true", help="With --apply, preserve an existing bootstrap.")
     args = p.parse_args()
 
-    result = bootstrap(args.cwd, args.apply)
+    result = bootstrap(args.cwd, args.apply, if_missing=args.if_missing)
     print(result)
     return 0
 

@@ -19,7 +19,10 @@ SCRIPTS_DIR = Path(__file__).resolve().parent.parent / "scripts"
 if str(SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_DIR))
 
-from tests.test_flow_and_service_edges import _service, indexed_flows  # noqa: E402,F401
+from tests.flow_and_service_edges_helpers import (  # noqa: E402
+    _service,  # noqa: E402,F401
+    indexed_flows,  # noqa: E402,F401
+)
 
 SHARED_NAME_MODULES = 7
 
@@ -54,14 +57,13 @@ def shared_name(tmp_path_factory):
     patch.setenv("LLM_WIKI_ROOT", str(root))
     patch.setenv("MEMORY_LLM_PROVIDER", "fake")
     import evidence_reader_cache
-    import memory_state
-    import repository_index
+    import repository_indexing
 
-    patch.setattr(memory_state, "ROOT", root, raising=False)
-    patch.setattr(memory_state, "STATE_ROOT", state, raising=False)
+    patch.setenv("LLM_WIKI_ROOT", str(root))
+    patch.setenv("LLM_WIKI_STATE_ROOT", str(state))
     evidence_reader_cache.clear()
     repository = _shared_name_repository(base / "repo")
-    answer = repository_index.index_repository(repository, state_root=state)
+    answer = repository_indexing.index_repository(repository, state_root=state)
     assert answer["status"] == "indexed", answer
     yield repository
     evidence_reader_cache.clear()
@@ -84,15 +86,14 @@ def test_the_architecture_answer_carries_the_definitions_left_out(shared_name) -
 
     request = {"resolved": shared_name, "symbol": "frob", "deadline": time.monotonic() + 30}
 
-    answer = mcp_server._architecture_definition(request)
+    answer = mcp_server.architecture_definition(request)
 
     assert answer["definition_omitted"] == SHARED_NAME_MODULES - len(answer["definition"])
 
 
 def test_a_service_walk_says_when_it_was_cut(indexed_flows, monkeypatch) -> None:  # noqa: F811 - the fixture
-    import code_graph
 
-    monkeypatch.setattr(code_graph, "FLOW_MAX_ROWS", 1)
+    monkeypatch.setattr("llm_wiki.code_graph_flows.FLOW_MAX_ROWS", 1)
 
     answer = _service(indexed_flows, "fetch", depth=2)
 

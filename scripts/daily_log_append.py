@@ -13,7 +13,6 @@ from __future__ import annotations
 
 import hashlib
 import io
-import os
 import re
 import sys
 import time
@@ -28,6 +27,8 @@ if hasattr(sys.stdout, "reconfigure"):
         pass
 
 from iso_time import local_now  # noqa: E402
+from llm_wiki import runtime_roots  # noqa: E402
+from llm_wiki.markdown_store import WRITER_LEASE_SECONDS  # noqa: E402
 from markdown_transaction import append_knowledge, stable_operation_id  # noqa: E402
 from secret_redact import redact_secrets  # noqa: E402
 
@@ -41,6 +42,12 @@ from secret_redact import redact_secrets  # noqa: E402
 # the adapter itself (audit 2026-09-26 C-1).
 BREADCRUMB_APPEND_BUDGET_SECONDS = 2.5
 LIFECYCLE_APPEND_BUDGET_SECONDS = 7.0
+# A tool breadcrumb whose hook the host runs in the background (Claude Code
+# `async: true`) has no host limit, so it waits out one full writer lease (the
+# longest a live writer may hold the gate) and then gets one breadcrumb append.
+# On 2026-09-28 the 2.5 s budget lost 738 breadcrumbs to gate holds and a busy
+# CPU; see docs/research/2026-09-29-a-tool-breadcrumb-waits-in-the-background.md.
+BACKGROUND_APPEND_BUDGET_SECONDS = WRITER_LEASE_SECONDS + BREADCRUMB_APPEND_BUDGET_SECONDS
 
 
 def append_deadline(budget_seconds: float) -> float:
@@ -185,10 +192,7 @@ def append_daily(
     Returns:
         Path to the daily log file that was written.
     """
-    root = Path(
-        os.environ.get("LLM_WIKI_ROOT", str(Path(__file__).resolve().parent.parent))
-    ).resolve()
-    daily_dir = root / "knowledge" / "daily"
+    daily_dir = runtime_roots.daily_dir()
     day = local_now().strftime("%Y-%m-%d")
     path = daily_dir / f"{day}.md"
     text = "\n" + block if not block.startswith("\n") else block

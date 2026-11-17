@@ -29,8 +29,8 @@ def _wrapped() -> RuntimeError:
 
 def test_a_worker_failure_is_deferred_whatever_it_raised():
     outcomes = (
-        capture_diagnostics._outcome_of(_wrapped(), "adapter_capture_worker"),
-        capture_diagnostics._outcome_of(_wrapped(), "adapter_session_end"),
+        capture_diagnostics.outcome_of(_wrapped(), "adapter_capture_worker"),
+        capture_diagnostics.outcome_of(_wrapped(), "adapter_session_end"),
     )
 
     assert outcomes == ("deferred", "lost")

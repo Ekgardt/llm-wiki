@@ -1,0 +1,459 @@
+{
+  "encoding": "o200k_base",
+  "max_tokens": 100000,
+  "serialization": "exact-duplicates/v1",
+  "files": [
+    "AGENTS.md",
+    "CLAUDE.md",
+    "docs/AGENTS.md",
+    "docs/STRUCTURE.md",
+    "docs/modules/context-bundle.md",
+    "docs/modules/context-records.md",
+    "docs/modules/context-tooling.md",
+    "docs/modules/doctor-tests-doctor-operational-scope-context.json",
+    "docs/modules/doctor-tests-doctor-operational-scope.md",
+    "docs/modules/doctor.md",
+    "docs/modules/install-models.md",
+    "docs/modules/model-choice.md",
+    "docs/modules/product-structure.md",
+    "docs/modules/project-governance.md",
+    "docs/modules/session-start-context.md",
+    "docs/modules/test-support.md",
+    "rules/development-laws.md",
+    "scripts/__init__.py",
+    "scripts/doctor.py",
+    "scripts/llm_wiki/__init__.py",
+    "scripts/llm_wiki/context_bundle.py",
+    "scripts/session_start_context.py",
+    "tests/__init__.py",
+    "tests/conftest.py",
+    "tests/doctor_helpers.py",
+    "tests/module_context.py",
+    "tests/module_context_paths.py",
+    "tests/module_interface.py",
+    "tests/module_interface_render.py",
+    "tests/module_qualification.py",
+    "tests/module_record_context.py",
+    "tests/module_records.py",
+    "tests/shared_fixtures.py",
+    "tests/slow_machine.py",
+    "tests/test_doctor_operational_scope.py"
+  ],
+  "ownership": {
+    "files": [
+      "docs/modules/doctor-tests-doctor-operational-scope-context.json",
+      "docs/modules/doctor-tests-doctor-operational-scope.md",
+      "tests/test_doctor_operational_scope.py"
+    ]
+  },
+  "qualified_dependencies": [
+    {
+      "provider": "scripts/build_advisory.py",
+      "names": [
+        "build_advisory"
+      ],
+      "contract_sha256": "2a214c6d4890af8972f6ebf7130c1f888a6d9b317a025b43a65189fa4e2c6c76",
+      "integration_tests": [
+        "tests/test_doctor_operational_scope.py"
+      ]
+    },
+    {
+      "provider": "scripts/build_guardrails.py",
+      "names": [
+        "build_guardrails"
+      ],
+      "contract_sha256": "9868de30be8fd25ed36fb6cef1c70c9465033345808af2dfbbc34265e8783c7d",
+      "integration_tests": [
+        "tests/test_doctor_operational_scope.py"
+      ]
+    },
+    {
+      "provider": "scripts/capture_diagnostics.py",
+      "names": [
+        "capture_failure_line",
+        "record_hook_error"
+      ],
+      "contract_sha256": "c6e70eedde550b687d0ec40e63ae66dc5ba045e550b9613edce9558f397df9fe",
+      "integration_tests": [
+        "tests/test_doctor_operational_scope.py"
+      ]
+    },
+    {
+      "provider": "scripts/claims.py",
+      "names": [
+        "ClaimIndex"
+      ],
+      "contract_sha256": "c66d3b1b1d8bfad960288ad5ea53a74adcb686e240fe70cc4bb08d27c96b80b0",
+      "integration_tests": [
+        "tests/test_doctor_operational_scope.py"
+      ]
+    },
+    {
+      "provider": "scripts/context_budget.py",
+      "names": [
+        "BudgetExceededError",
+        "ContextItem",
+        "DEFAULT_CONTEXT_BUDGET"
+      ],
+      "contract_sha256": "8d6d945b7aa33430fbc4f3f434536a390af63ef89c0c9356bc65a63ea9707579",
+      "integration_tests": [
+        "tests/test_doctor_operational_scope.py"
+      ]
+    },
+    {
+      "provider": "scripts/context_compiler.py",
+      "names": [
+        "compile_context_items"
+      ],
+      "contract_sha256": "23b1ffbfd102d5b171b6535f6c6997b12c598befccfd3dc0c9d8afaef214fe00",
+      "integration_tests": [
+        "tests/test_doctor_operational_scope.py"
+      ]
+    },
+    {
+      "provider": "scripts/corpus_snapshot.py",
+      "names": [
+        "collect_corpus"
+      ],
+      "contract_sha256": "7ea12368f51c070a84b0754260f0a82db5ac44b0395b95eabcb01e5053c9f0bb",
+      "integration_tests": [
+        "tests/test_doctor_operational_scope.py"
+      ]
+    },
+    {
+      "provider": "scripts/evidence_graph_builder.py",
+      "names": [
+        "build_full_generation"
+      ],
+      "contract_sha256": "056e93b70cc341eb253323f95833791e52929a5e343d4f8e53acd37f1b2004cd",
+      "integration_tests": [
+        "tests/test_doctor_operational_scope.py"
+      ]
+    },
+    {
+      "provider": "scripts/generation_maintenance.py",
+      "names": [
+        "DEFAULT_TIME_BUDGET_SECONDS",
+        "as_utc",
+        "filesystem_check",
+        "maintenance_extractor_identity",
+        "result",
+        "validated_doctor_deadline"
+      ],
+      "contract_sha256": "612af4d43cf8757bd94d182d29793227f4ec85cfb18cba642a069230c0879d06",
+      "integration_tests": [
+        "tests/test_doctor_operational_scope.py"
+      ]
+    },
+    {
+      "provider": "scripts/impact_analysis.py",
+      "names": [
+        "analyze_impact",
+        "format_for_advisory"
+      ],
+      "contract_sha256": "29ef96edce70f7407200bdd870440650f2563bf2e124b50b37170fd69094157a",
+      "integration_tests": [
+        "tests/test_doctor_operational_scope.py"
+      ]
+    },
+    {
+      "provider": "scripts/install_models.py",
+      "names": [
+        "hub_library",
+        "pinned_models"
+      ],
+      "contract_sha256": "9a6c3545cdbff6160d81687d42bfb1947647503068382262658d5bc5d97a7e2f",
+      "integration_tests": [
+        "tests/test_doctor_operational_scope.py"
+      ]
+    },
+    {
+      "provider": "scripts/installed_memory_repair.py",
+      "names": [
+        "repair_installed_vault"
+      ],
+      "contract_sha256": "6ab4497d3ed56413bc24ea5ae9e993acf118980056b046072877a80df4f52a18",
+      "integration_tests": [
+        "tests/test_doctor_operational_scope.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/adoption_admission.py",
+      "names": [
+        "require_reliability_v3_admission"
+      ],
+      "contract_sha256": "1c466e598bd348d7753da22f7f3b234ed9cad7df42f4f876902c92d0043fdcb3",
+      "integration_tests": [
+        "tests/test_doctor_operational_scope.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/doctor_base.py",
+      "names": [
+        "QUEUE_STATES",
+        "SCHEMA_VERSION",
+        "SUMMARY_LIMIT",
+        "TRANSACTION_STATES",
+        "VALID_STATUSES",
+        "environment_check",
+        "readonly_database",
+        "runtime_check"
+      ],
+      "contract_sha256": "a68dea51816f0ad381437c2d76fdb9f43cd6bab22b3a6f7aa3c7069945e36575",
+      "integration_tests": [
+        "tests/test_doctor_operational_scope.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/doctor_capture.py",
+      "names": [
+        "capture_check",
+        "checkpoint_check",
+        "hook_error_check",
+        "models_check",
+        "scheduler_check",
+        "settings_check",
+        "tool_failure_check"
+      ],
+      "contract_sha256": "8421c9975fad81dadceda9bbda2113da935a41138d990e9a84e5aef8839e8229",
+      "integration_tests": [
+        "tests/test_doctor_operational_scope.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/doctor_deletion.py",
+      "names": [
+        "claim_check",
+        "deletion_snapshot",
+        "run_deletion_check"
+      ],
+      "contract_sha256": "6030d2b6c99fec7578e19961f7b622300cbe9a36d1c0ee1d9153545b57edf6d6",
+      "integration_tests": [
+        "tests/test_doctor_operational_scope.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/doctor_generation.py",
+      "names": [
+        "generation_check"
+      ],
+      "contract_sha256": "a70963d500c2568d3102cfcc494c9be19be2bf20f7b5e844e9dffc0ebb71b806",
+      "integration_tests": [
+        "tests/test_doctor_operational_scope.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/doctor_integrations.py",
+      "names": [
+        "DEFERRED_BY_ACTION",
+        "RepairContext",
+        "integration_check"
+      ],
+      "contract_sha256": "f1a2c30dfeca157b2800ed76640b7603df484d644a06bf1139ac97c50249f50d",
+      "integration_tests": [
+        "tests/test_doctor_operational_scope.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/doctor_lsp.py",
+      "names": [
+        "derived_deletion_codes",
+        "lsp_runtime_check",
+        "pyright_check"
+      ],
+      "contract_sha256": "f90b22cff09f55e5ea5857966ad4fd6af387aae07856b220cf05a4b0e1798e37",
+      "integration_tests": [
+        "tests/test_doctor_operational_scope.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/doctor_queue.py",
+      "names": [
+        "archive_check",
+        "queue_check"
+      ],
+      "contract_sha256": "f2eb275805708ac9c28c5eff7c5f80c5a1a5e6571b83f347f4cd595cd1966e6a",
+      "integration_tests": [
+        "tests/test_doctor_operational_scope.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/doctor_repair.py",
+      "names": [
+        "BACKUP_FRESH_SECONDS",
+        "BACKUP_GIT_TIMEOUT_SECONDS",
+        "adoption_check",
+        "resolved_doctor_paths",
+        "run_repairs",
+        "unfinished_result",
+        "validated_repairs"
+      ],
+      "contract_sha256": "cc743490fcbd70fe7febe69ef10908cd62d6b5d9d2da33f406f7e48d5d273595",
+      "integration_tests": [
+        "tests/test_doctor_operational_scope.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/doctor_schedule.py",
+      "names": [
+        "mcp_check"
+      ],
+      "contract_sha256": "49334703961ffab875922c21be6a214c101e56f0aff9577bcd3b2d3bbeeb129f",
+      "integration_tests": [
+        "tests/test_doctor_operational_scope.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/doctor_transactions.py",
+      "names": [
+        "operational_database_path",
+        "transaction_check"
+      ],
+      "contract_sha256": "ce788f2717cd081676407da3afe2d881f5a7953918d73cc86a8c80f73a4e0c2d",
+      "integration_tests": [
+        "tests/test_doctor_operational_scope.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/generation_catalog_store.py",
+      "names": [
+        "GenerationCatalog"
+      ],
+      "contract_sha256": "b18194ebe04bf988b4474379fcb5243516550d43b745a00eaed1453f7844c983",
+      "integration_tests": [
+        "tests/test_a_build_in_flight_is_not_an_orphan.py",
+        "tests/test_a_code_generation_is_not_abandoned.py",
+        "tests/test_a_flow_walk_stops_when_its_caller_has.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/install_inspection.py",
+      "names": [
+        "installed_at"
+      ],
+      "contract_sha256": "ef8ad5aadce4d2d54db68f1600455a109f91b7412837b2258db118a3ae777001",
+      "integration_tests": [
+        "tests/test_an_uninstall_names_what_it_leaves.py",
+        "tests/test_codex_provider_bundle_manifest_proves_desired.py",
+        "tests/test_install_control.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/model_choice.py",
+      "names": [
+        "using_root"
+      ],
+      "contract_sha256": "d45f2655cb61963e77617d1dfd7d617b134ad77cc770b59b335d0856e5d65019",
+      "integration_tests": [
+        "tests/test_doctor_operational_scope.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/monotonic_deadline.py",
+      "names": [
+        "deadline_reached"
+      ],
+      "contract_sha256": "780a284b7c14768802bc81209d0e77dcd0f7a79885a4888eaaca663eda331414",
+      "integration_tests": [
+        "tests/test_a_backup_image_carries_what_git_does_not.py",
+        "tests/test_a_backup_snapshots_what_hooks_write.py",
+        "tests/test_a_backup_takes_what_any_installed_vault_holds.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/runtime_roots.py",
+      "names": [
+        "daily_dir",
+        "index_file",
+        "notes_dir",
+        "reports_dir",
+        "state_root",
+        "vault_root"
+      ],
+      "contract_sha256": "fede217058cf53714f0d4af2e9e179a599713b69d9b537fa618e2ffe9278a1f3",
+      "integration_tests": [
+        "tests/test_a_continuation_keeps_its_original_entry.py",
+        "tests/test_a_prompt_checkpoint_does_not_outwait_its_host.py",
+        "tests/test_a_session_marker_survives_a_busy_writer.py"
+      ]
+    },
+    {
+      "provider": "scripts/markdown_transaction.py",
+      "names": [
+        "active_or_legacy_coordinator",
+        "reliability_v3_records_present"
+      ],
+      "contract_sha256": "6cc1b03660ac36af1365481deff9996724077fac6a8a9461ca220313d4b96138",
+      "integration_tests": [
+        "tests/test_doctor_operational_scope.py"
+      ]
+    },
+    {
+      "provider": "scripts/memory_state.py",
+      "names": [
+        "HOOK_STATE_LOCK_TIMEOUT",
+        "load_state",
+        "spawn_detached",
+        "update_state"
+      ],
+      "contract_sha256": "0440f4a497ee6b2dec42dd8a39a4feceff265b9f19de4a896d5337363822ed30",
+      "integration_tests": [
+        "tests/test_doctor_operational_scope.py"
+      ]
+    },
+    {
+      "provider": "scripts/reliable_memory.py",
+      "names": [
+        "validate_runtime_file",
+        "validate_state_root"
+      ],
+      "contract_sha256": "8d6496bf7c816260fcc296ec050a67bb532dbd88e54cd15a47ff34c033488c8d",
+      "integration_tests": [
+        "tests/test_doctor_operational_scope.py"
+      ]
+    },
+    {
+      "provider": "scripts/repository_scope.py",
+      "names": [
+        "resolve_repository_scope",
+        "sanitized_git_environment"
+      ],
+      "contract_sha256": "983dd096d99bafff98ca0aaa2cd722477333e30eed4bfa9297d1830c635e8d90",
+      "integration_tests": [
+        "tests/test_doctor_operational_scope.py"
+      ]
+    },
+    {
+      "provider": "scripts/secret_redact.py",
+      "names": [
+        "describe_error"
+      ],
+      "contract_sha256": "fb304f29eb5f060ccb0503f24561dd6ee4cfb07e2c36b130c00ad9e1c9000eaf",
+      "integration_tests": [
+        "tests/test_doctor_operational_scope.py"
+      ]
+    },
+    {
+      "provider": "scripts/snapshot_knowledge.py",
+      "names": [
+        "last_checked_at",
+        "snapshot_root"
+      ],
+      "contract_sha256": "793bbdeb26e142db64a98da3888440339690517444693de5ff6a730f3f4eab97",
+      "integration_tests": [
+        "tests/test_doctor_operational_scope.py"
+      ]
+    },
+    {
+      "provider": "scripts/vault_log.py",
+      "names": [
+        "LOG_RELATIVE",
+        "vault_log_path"
+      ],
+      "contract_sha256": "086a356f42414596795ac6c01efceae390b56978f04f1e384b4b9619ded7eb9b",
+      "integration_tests": [
+        "tests/test_doctor_operational_scope.py"
+      ]
+    }
+  ]
+}

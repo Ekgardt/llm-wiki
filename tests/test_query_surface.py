@@ -14,6 +14,8 @@ from pathlib import Path
 
 import pytest
 
+from tests.slow_machine import SHORT_TIMEOUT
+
 SCRIPTS_DIR = Path(__file__).resolve().parent.parent / "scripts"
 if str(SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_DIR))
@@ -46,6 +48,8 @@ def _write(path: Path, text: str) -> None:
     """Exact bytes with LF: `write_text` would give a Windows runner CRLF, and
     the byte offsets and diff lines the tests assert are those of these bytes."""
     path.write_bytes(text.encode("utf-8"))
+
+
 BAD_PY = "def f(:\n    pass\n"
 EMPTY_AFFECTED = {"decisions": [], "pages": [], "tests": [], "checkpoints": []}
 
@@ -83,18 +87,15 @@ def indexed(tmp_path_factory):
     patch.setenv("LLM_WIKI_ROOT", str(root))
     patch.setenv("MEMORY_LLM_PROVIDER", "fake")
     import evidence_reader_cache
-    import impact_analysis
-    import memory_state
-    import repository_index
+    import repository_indexing
 
-    patch.setattr(memory_state, "ROOT", root, raising=False)
-    patch.setattr(memory_state, "STATE_ROOT", state, raising=False)
+    patch.setenv("LLM_WIKI_ROOT", str(root))
+    patch.setenv("LLM_WIKI_STATE_ROOT", str(state))
     # `impact_analysis` binds STATE_ROOT at import; in the full suite it is
     # imported long before this fixture runs, so it is rebound here too.
-    patch.setattr(impact_analysis, "STATE_ROOT", state, raising=False)
     evidence_reader_cache.clear()
     repository = _make_repository(base / "repo")
-    answer = repository_index.index_repository(repository, state_root=state)
+    answer = repository_indexing.index_repository(repository, state_root=state)
     assert answer["status"] == "indexed", answer
     yield repository
     evidence_reader_cache.clear()
@@ -102,7 +103,7 @@ def indexed(tmp_path_factory):
 
 
 def _deadline() -> float:
-    return time.monotonic() + 10
+    return time.monotonic() + SHORT_TIMEOUT
 
 
 def _picked(mapping: dict, expected: dict) -> dict:
@@ -206,21 +207,21 @@ def test_coverage_reports_a_stale_file_from_the_stored_hash(indexed):
 def test_parse_report_refuses_what_it_cannot_parse():
     import path_coverage
 
-    assert path_coverage._parse_report(None, b"x")["status"] == "unsupported_language"
-    assert path_coverage._parse_report("cobol", b"x")["status"] == "unsupported_language"
-    too_big = path_coverage._parse_report("python", b"x" * (path_coverage.MAX_PARSE_BYTES + 1))
+    assert path_coverage.parse_report(None, b"x")["status"] == "unsupported_language"
+    assert path_coverage.parse_report("cobol", b"x")["status"] == "unsupported_language"
+    too_big = path_coverage.parse_report("python", b"x" * (path_coverage.MAX_PARSE_BYTES + 1))
     assert too_big == {"status": "not_parsed", "language": "python", "reason": "source over 4 MiB"}
 
 
 def test_error_ranges_are_bounded_in_count():
     import path_coverage
-    from code_graph import _get_parser
+    from code_graph import parser_attempt
 
-    parser = _get_parser("javascript")
+    parser, _cause = parser_attempt("javascript")
     if parser is None:
         pytest.skip("tree-sitter javascript grammar unavailable")
     source = "".join(f"function f{i}( {{\n" for i in range(path_coverage.PARSE_ERROR_LIMIT + 5))
-    errors, truncated = path_coverage._error_ranges(parser.parse(source.encode()).root_node)
+    errors, truncated = path_coverage.error_ranges(parser.parse(source.encode()).root_node)
     assert 1 <= len(errors) <= path_coverage.PARSE_ERROR_LIMIT
     assert isinstance(truncated, bool)
 
@@ -267,13 +268,13 @@ def test_search_narrows_by_path_prefix_and_names_a_miss(indexed):
 
 
 def test_search_patterns_escape_like_wildcards():
-    from evidence_graph import _like_escaped, _search_patterns
+    from evidence_graph import like_escaped, search_patterns
 
-    assert _search_patterns("top_level") == ("%top\\_level%", "top_level", "top\\_level%")
-    assert _search_patterns("get_*") == ("get\\_%", "get_*", "get\\_%")
-    assert _like_escaped("a_b%c\\d*") == "a\\_b\\%c\\\\d*"
+    assert search_patterns("top_level") == ("%top\\_level%", "top_level", "top\\_level%")
+    assert search_patterns("get_*") == ("get\\_%", "get_*", "get\\_%")
+    assert like_escaped("a_b%c\\d*") == "a\\_b\\%c\\\\d*"
     with pytest.raises(ValueError):
-        _search_patterns("")
+        search_patterns("")
 
 
 # --------------------------------------------------------------------------
@@ -344,14 +345,14 @@ def test_snippet_says_when_the_working_tree_moved_on(indexed):
     assert "value + 1" in snippet["source"]
 
 
-def test_exact_block_cuts_long_definitions_and_keeps_the_true_end():
+def test_exact_block_keeps_the_complete_recorded_span():
     import symbol_snippet
 
     lines = [f"line {index}" for index in range(1, 301)]
-    block = symbol_snippet._exact_block(lines, {"line_start": 10, "line_end": 250})
-    expected = {"start_line": 10, "end_line": 250, "truncated": True}
+    block = symbol_snippet.exact_block(lines, {"line_start": 10, "line_end": 250})
+    expected = {"start_line": 10, "end_line": 250, "truncated": False}
     assert _picked(block, expected) == expected
-    assert block["source"].count("\n") + 1 == symbol_snippet.MAX_SNIPPET_LINES
+    assert block["source"] == "\n".join(lines[9:250])
 
 
 # --------------------------------------------------------------------------
@@ -439,7 +440,9 @@ def _dirty_reach(repository: Path) -> tuple[dict, dict]:
     import impact_analysis
     from impact_symbols import affected_symbols
 
-    impact = impact_analysis.analyze_impact(root=repository, comparison="dirty", deadline=_deadline())
+    impact = impact_analysis.analyze_impact(
+        root=repository, comparison="dirty", deadline=_deadline()
+    )
     return impact, affected_symbols(repository, impact["changed_symbols"], _deadline())
 
 
@@ -473,7 +476,7 @@ def test_no_changed_symbol_means_an_empty_reach_with_a_reason(tmp_path):
 def test_search_and_depth_are_declared_on_get_architecture():
     import mcp_server
 
-    validate = mcp_server._validate_architecture_arguments
+    validate = mcp_server.validate_architecture_arguments
     accepted = [
         validate({"directory": "x", "mode": "search", "symbol": "top", "path": "pkg/", "limit": 5}),
         validate({"directory": "x", "mode": "callers", "symbol": "top", "depth": 3}),
@@ -482,13 +485,15 @@ def test_search_and_depth_are_declared_on_get_architecture():
     assert accepted == [None, None, None]
     assert "depth" in validate({"directory": "x", "mode": "snippet", "symbol": "top", "depth": 3})
     assert "symbol" in validate({"directory": "x", "mode": "search"})
-    assert "search" in mcp_server.TOOL_INPUT_SCHEMAS["get_architecture"]["properties"]["mode"]["enum"]
+    assert (
+        "search" in mcp_server.TOOL_INPUT_SCHEMAS["get_architecture"]["properties"]["mode"]["enum"]
+    )
 
 
 def _architecture(directory: str, **arguments) -> dict:
     import mcp_server
 
-    data, _ = mcp_server._tool_get_architecture({"directory": directory, **arguments}, _deadline())
+    data, _ = mcp_server.tool_get_architecture({"directory": directory, **arguments}, _deadline())
     return data
 
 
@@ -497,7 +502,7 @@ def _rows(answer: dict, key: str) -> list[dict]:
     cols = answer.get(f"{key}_cols")
     if cols is None:
         return answer[key]
-    return [dict(zip(cols, row)) for row in answer[key]]
+    return [dict(zip(cols, row, strict=True)) for row in answer[key]]
 
 
 def test_get_architecture_serves_search_and_snippet(indexed):

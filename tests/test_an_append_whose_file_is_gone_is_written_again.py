@@ -31,7 +31,7 @@ def _coordinator(tmp_path: Path) -> MarkdownCoordinator:
 
 
 def _append(coordinator: MarkdownCoordinator, block: bytes) -> str:
-    record = markdown_transaction._append_until_committed(
+    record = markdown_transaction.append_until_committed(
         coordinator,
         "daily-header:2026-09-18",
         _LOG,
@@ -70,7 +70,7 @@ def test_other_writers_appending_to_the_file_do_not_make_it_write_again(
     coordinator = _coordinator(tmp_path)
     target = coordinator.vault / _LOG
     _append(coordinator, b"# header\n")
-    markdown_transaction._append_until_committed(
+    markdown_transaction.append_until_committed(
         coordinator,
         "another-writer",
         _LOG,

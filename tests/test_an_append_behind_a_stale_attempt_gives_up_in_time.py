@@ -32,7 +32,7 @@ def _die_after_preparing(name: str, _parent: str | None = None) -> None:
 
 def _append(coordinator: MarkdownCoordinator, outcome: list[object], **bounds) -> None:
     try:
-        markdown_transaction._append_until_committed(
+        markdown_transaction.append_until_committed(
             coordinator, "op-1", _LOG, b"line\n", cancelled=None, **bounds
         )
     except (TimeoutError, _Crash) as error:

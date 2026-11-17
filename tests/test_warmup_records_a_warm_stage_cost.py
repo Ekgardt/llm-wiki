@@ -85,7 +85,7 @@ def test_the_pass_deadline_clears_the_unknown_cost_ceiling() -> None:
     """A window below the ceiling is refused, so the first pass records nothing."""
     window = mcp_server.WARMUP_LIMIT_SECONDS
 
-    assert retrieval._unknown_cost_stage_fits(window) is True
+    assert retrieval.unknown_cost_stage_fits(window) is True
 
 
 def test_a_failing_pass_is_never_fatal(monkeypatch) -> None:
@@ -102,6 +102,6 @@ def test_a_failing_pass_is_never_fatal(monkeypatch) -> None:
 def test_the_opt_out_still_skips_the_warm_up(monkeypatch, recorded_passes) -> None:
     monkeypatch.setenv("LLMWIKI_NO_ENCODER_WARMUP", "1")
 
-    mcp_server._start_encoder_warmup()
+    mcp_server.start_encoder_warmup()
 
     assert recorded_passes == []

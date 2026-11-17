@@ -1,0 +1,81 @@
+{
+  "checkpoint": {
+    "work_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "task_id": "fixture-task",
+    "sequence": 1,
+    "source_digest": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+    "stage": "snapshot_ready",
+    "outcome": "ready",
+    "details": {
+      "source_scope": {
+        "schema": "compile-source-scope/v1",
+        "sources": [
+          {
+            "logical_path": "knowledge/daily/2000-01-01.md",
+            "byte_start": 0,
+            "byte_end": 7,
+            "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+          }
+        ]
+      },
+      "artifact": {
+        "reference": "run/queue-results/dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd.result",
+        "sha256": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+      }
+    }
+  },
+  "dispatch": {
+    "work_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "task_id": "delivery-task",
+    "sequence": 2,
+    "source_digest": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+    "stage": "snapshot_ready",
+    "outcome": "running",
+    "details": {
+      "model_call": {
+        "schema": "compile-model-call/v1",
+        "request_digest": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+        "checkpoint_sequence": 1,
+        "checkpoint_digest": "7f50d72647f53a5c0714c2922a3ae652fa3f3704941d039f32d77012a305f058",
+        "phase": "dispatch"
+      }
+    }
+  },
+  "authorization": {
+    "dispatch_digest": "e8cd09e1f0ea36b4d89f250cf64273fb97862e04e42d633ea453e7d48b0df67f",
+    "actor": "fixture operator",
+    "reason": "explicit fixture consent"
+  },
+  "repeat": {
+    "work_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "task_id": "delivery-task",
+    "sequence": 3,
+    "source_digest": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+    "stage": "snapshot_ready",
+    "outcome": "ready",
+    "details": {
+      "artifact": {
+        "reference": "run/queue-results/dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd.result",
+        "sha256": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+      },
+      "repeat_authorization": {
+        "actor": "fixture operator",
+        "dispatch_digest": "e8cd09e1f0ea36b4d89f250cf64273fb97862e04e42d633ea453e7d48b0df67f",
+        "reason": "explicit fixture consent",
+        "request_digest": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+      },
+      "source_scope": {
+        "schema": "compile-source-scope/v1",
+        "sources": [
+          {
+            "byte_end": 7,
+            "byte_start": 0,
+            "logical_path": "knowledge/daily/2000-01-01.md",
+            "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+          }
+        ]
+      }
+    }
+  },
+  "request_digest": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+}

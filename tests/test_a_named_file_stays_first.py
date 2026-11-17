@@ -54,7 +54,7 @@ def test_a_raw_file_named_by_its_date_leads_the_compiled_pages() -> None:
     result = _retrieved("2026-09-01")
 
     assert result.candidates[0].relative_path == NAMED
-    assert retrieval._reported_mode(result, "2026-09-01") == "EXACT"
+    assert retrieval.reported_mode(result, "2026-09-01") == "EXACT"
 
 
 def test_a_question_that_names_no_file_keeps_the_compiled_page_first() -> None:

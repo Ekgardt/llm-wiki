@@ -1,0 +1,137 @@
+{
+  "encoding": "o200k_base",
+  "max_tokens": 100000,
+  "serialization": "exact-duplicates/v1",
+  "files": [
+    "AGENTS.md",
+    "CLAUDE.md",
+    "docs/AGENTS.md",
+    "docs/STRUCTURE.md",
+    "docs/modules/claims-helpers.md",
+    "docs/modules/claims-tests-contradiction-pipeline-helpers.md",
+    "docs/modules/claims-tests-the-contradiction-check-compares-what-can-matter-context.json",
+    "docs/modules/claims-tests-the-contradiction-check-compares-what-can-matter.md",
+    "docs/modules/context-bundle.md",
+    "docs/modules/context-records.md",
+    "docs/modules/context-tooling.md",
+    "docs/modules/model-choice.md",
+    "docs/modules/product-structure.md",
+    "docs/modules/project-governance.md",
+    "docs/modules/reliable-memory-tests-compile-transactions-helpers.md",
+    "docs/modules/test-support.md",
+    "rules/development-laws.md",
+    "scripts/__init__.py",
+    "scripts/llm_wiki/__init__.py",
+    "scripts/llm_wiki/context_bundle.py",
+    "tests/__init__.py",
+    "tests/claims_helpers.py",
+    "tests/compile_transactions_helpers.py",
+    "tests/conftest.py",
+    "tests/contradiction_pipeline_helpers.py",
+    "tests/module_context.py",
+    "tests/module_context_paths.py",
+    "tests/module_interface.py",
+    "tests/module_interface_render.py",
+    "tests/module_qualification.py",
+    "tests/module_record_context.py",
+    "tests/module_records.py",
+    "tests/shared_fixtures.py",
+    "tests/slow_machine.py",
+    "tests/test_the_contradiction_check_compares_what_can_matter.py"
+  ],
+  "ownership": {
+    "files": [
+      "docs/modules/claims-tests-the-contradiction-check-compares-what-can-matter-context.json",
+      "docs/modules/claims-tests-the-contradiction-check-compares-what-can-matter.md",
+      "tests/test_the_contradiction_check_compares_what_can_matter.py"
+    ]
+  },
+  "qualified_dependencies": [
+    {
+      "provider": "scripts/claims.py",
+      "names": [
+        "ClaimIndex",
+        "IndexedClaim",
+        "NormalizedClaim"
+      ],
+      "contract_sha256": "cda34510575f6649041962b0cc37c41d86c18deeca5698ab921ba5f7bb109e46",
+      "integration_tests": [
+        "tests/test_the_contradiction_check_compares_what_can_matter.py"
+      ]
+    },
+    {
+      "provider": "scripts/contradiction_pipeline.py",
+      "names": [
+        "intervals_overlap"
+      ],
+      "contract_sha256": "c69ce2d593a6135dcd4f1655df91c86c55f29e9151a17a0135a5af67052361b6",
+      "integration_tests": [
+        "tests/test_the_contradiction_check_compares_what_can_matter.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_client.py",
+      "names": [
+        "call_candidate"
+      ],
+      "contract_sha256": "664ee5c93a03f4e5778ec387ca6505baba682f94348a99f6bd779d2471ac2f54",
+      "integration_tests": [
+        "tests/test_the_contradiction_check_compares_what_can_matter.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/compile_pipeline_apply.py",
+      "names": [
+        "ApplyPlan"
+      ],
+      "contract_sha256": "701524bb111ff03901d4935bd0742b4009eddbb0873cce85d26b01eacffecf30",
+      "integration_tests": [
+        "tests/test_the_contradiction_check_compares_what_can_matter.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/generation_catalog_store.py",
+      "names": [
+        "GenerationCatalog"
+      ],
+      "contract_sha256": "b18194ebe04bf988b4474379fcb5243516550d43b745a00eaed1453f7844c983",
+      "integration_tests": [
+        "tests/test_a_blocked_task_has_a_way_back.py",
+        "tests/test_a_build_in_flight_is_not_an_orphan.py",
+        "tests/test_a_capacity_refusal_does_not_corrupt_a_generation.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/model_choice.py",
+      "names": [
+        "using_root"
+      ],
+      "contract_sha256": "d45f2655cb61963e77617d1dfd7d617b134ad77cc770b59b335d0856e5d65019",
+      "integration_tests": [
+        "tests/test_the_contradiction_check_compares_what_can_matter.py"
+      ]
+    },
+    {
+      "provider": "scripts/reliable_memory.py",
+      "names": [
+        "canonical_json_bytes",
+        "sha256_bytes",
+        "validate_state_root"
+      ],
+      "contract_sha256": "4243e32fa6ecab88fca1a2d2b3214c0a36944fc23129138102dfaebf6d99457f",
+      "integration_tests": [
+        "tests/test_the_contradiction_check_compares_what_can_matter.py"
+      ]
+    },
+    {
+      "provider": "scripts/repository_scope.py",
+      "names": [
+        "sanitized_git_environment"
+      ],
+      "contract_sha256": "fd550ae20761afad50b37fa3a71044a162485b0e4d4b3e2af9b5b22e143c2bec",
+      "integration_tests": [
+        "tests/test_the_contradiction_check_compares_what_can_matter.py"
+      ]
+    }
+  ]
+}

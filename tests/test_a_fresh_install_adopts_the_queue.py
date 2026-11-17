@@ -7,6 +7,7 @@ state became two lines, and no fresh install ever adopted the queue. Research:
 from __future__ import annotations
 
 import os
+import shlex
 import stat
 import subprocess
 import sys
@@ -18,7 +19,10 @@ TESTS = Path(__file__).resolve().parent
 if str(TESTS) not in sys.path:
     sys.path.insert(0, str(TESTS))
 
-from test_installer_bootstrap import _bash, _shell_function  # noqa: E402
+from tests.installer_bootstrap_helpers import (  # noqa: E402
+    _bash,  # noqa: E402
+    _shell_function,  # noqa: E402
+)
 
 ROOT = TESTS.parent
 FAKE_UV = "#!/bin/sh\nprintf '%s' \"$FAKE_REPORT\"\nexit \"$FAKE_EXIT\"\n"
@@ -31,7 +35,7 @@ def _state(tmp_path: Path, report: str, exit_code: int) -> str:
     uv.write_text(FAKE_UV, encoding="utf-8")
     uv.chmod(uv.stat().st_mode | stat.S_IEXEC)
     function = _shell_function((ROOT / "install.sh").read_text(encoding="utf-8"), "adoption_state_of")
-    script = f"set -euo pipefail\nVAULT_ROOT=/nowhere\nADOPTION_ERR={tmp_path / 'err.log'}\n{function}\nadoption_state_of\n"
+    script = f"set -euo pipefail\nBOOTSTRAP_PYTHON={shlex.quote(sys.executable)}\nVAULT_ROOT=/nowhere\nADOPTION_ERR={tmp_path / 'err.log'}\n{function}\nadoption_state_of\n"
     env = {**os.environ, "PATH": f"{fake_bin}{os.pathsep}{os.environ['PATH']}",
            "FAKE_REPORT": report, "FAKE_EXIT": str(exit_code)}
     result = subprocess.run([_bash(), "-c", script], capture_output=True, text=True, env=env, check=False)

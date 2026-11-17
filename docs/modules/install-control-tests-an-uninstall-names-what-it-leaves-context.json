@@ -1,0 +1,158 @@
+{
+  "encoding": "o200k_base",
+  "max_tokens": 100000,
+  "serialization": "exact-duplicates/v1",
+  "files": [
+    "AGENTS.md",
+    "CLAUDE.md",
+    "docs/AGENTS.md",
+    "docs/STRUCTURE.md",
+    "docs/modules/context-bundle.md",
+    "docs/modules/context-records.md",
+    "docs/modules/context-tooling.md",
+    "docs/modules/install-control-tests-an-uninstall-names-what-it-leaves-context.json",
+    "docs/modules/install-control-tests-an-uninstall-names-what-it-leaves.md",
+    "docs/modules/model-choice.md",
+    "docs/modules/product-structure.md",
+    "docs/modules/project-governance.md",
+    "docs/modules/test-support.md",
+    "rules/development-laws.md",
+    "scripts/__init__.py",
+    "scripts/llm_wiki/__init__.py",
+    "scripts/llm_wiki/context_bundle.py",
+    "tests/__init__.py",
+    "tests/conftest.py",
+    "tests/module_context.py",
+    "tests/module_context_paths.py",
+    "tests/module_interface.py",
+    "tests/module_interface_render.py",
+    "tests/module_qualification.py",
+    "tests/module_record_context.py",
+    "tests/module_records.py",
+    "tests/shared_fixtures.py",
+    "tests/slow_machine.py",
+    "tests/test_an_uninstall_names_what_it_leaves.py"
+  ],
+  "ownership": {
+    "files": [
+      "docs/modules/install-control-tests-an-uninstall-names-what-it-leaves-context.json",
+      "docs/modules/install-control-tests-an-uninstall-names-what-it-leaves.md",
+      "tests/test_an_uninstall_names_what_it_leaves.py"
+    ]
+  },
+  "qualified_dependencies": [
+    {
+      "provider": "scripts/install_control.py",
+      "names": [
+        "uninstall_from_args"
+      ],
+      "contract_sha256": "710067f66ab8f05d0b5218815b30654a518f6a1e1bab0ffc04ed5a43a69c633b",
+      "integration_tests": [
+        "tests/test_an_uninstall_names_what_it_leaves.py",
+        "tests/test_an_update_replaces_what_it_owns.py",
+        "tests/test_install_control.py"
+      ]
+    },
+    {
+      "provider": "scripts/install_state.py",
+      "names": [
+        "ManagedResource"
+      ],
+      "contract_sha256": "2f5e800dda2d5ee72c5dcb8abf9ed7707c1c748f37bc5b2e735c87559cfc3d16",
+      "integration_tests": [
+        "tests/test_an_uninstall_names_what_it_leaves.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/generation_catalog_store.py",
+      "names": [
+        "GenerationCatalog"
+      ],
+      "contract_sha256": "b18194ebe04bf988b4474379fcb5243516550d43b745a00eaed1453f7844c983",
+      "integration_tests": [
+        "tests/test_a_build_in_flight_is_not_an_orphan.py",
+        "tests/test_a_code_generation_is_not_abandoned.py",
+        "tests/test_a_flow_walk_stops_when_its_caller_has.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/install_inspection.py",
+      "names": [
+        "unowned_agent_registrations"
+      ],
+      "contract_sha256": "19c011d4090dffda4f5d68967eb54a0f12a3e3abb4b03eeadbe4bc72754585c8",
+      "integration_tests": [
+        "tests/test_an_uninstall_names_what_it_leaves.py",
+        "tests/test_codex_provider_bundle_manifest_proves_desired.py",
+        "tests/test_install_control.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/install_release.py",
+      "names": [
+        "build_release_identity"
+      ],
+      "contract_sha256": "bc62d4f35445a8db90edd38825221aa68df56e89c8b78a24f20bd8c73d501d65",
+      "integration_tests": [
+        "tests/test_a_rerun_may_ask_for_fewer_things.py",
+        "tests/test_an_uninstall_names_what_it_leaves.py",
+        "tests/test_install_control.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/install_requests.py",
+      "names": [
+        "install_from_args"
+      ],
+      "contract_sha256": "e4f49c041915fca18ffb0241dd00aa4407e85859438d7ed938f90a475108874d",
+      "integration_tests": [
+        "tests/test_a_rerun_may_ask_for_fewer_things.py",
+        "tests/test_a_rollback_undoes_only_what_it_did.py",
+        "tests/test_an_uninstall_names_what_it_leaves.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/install_resource_builder.py",
+      "names": [
+        "posix_scheduler_resource",
+        "selected_backend"
+      ],
+      "contract_sha256": "ca19e8e53ecf058bbb034b96b07698b22d60df7310b24a9e6f1c562ef4f08c57",
+      "integration_tests": [
+        "tests/test_a_rerun_may_ask_for_fewer_things.py",
+        "tests/test_an_uninstall_names_what_it_leaves.py",
+        "tests/test_claude_settings_ownership.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/model_choice.py",
+      "names": [
+        "using_root"
+      ],
+      "contract_sha256": "d45f2655cb61963e77617d1dfd7d617b134ad77cc770b59b335d0856e5d65019",
+      "integration_tests": [
+        "tests/test_an_uninstall_names_what_it_leaves.py"
+      ]
+    },
+    {
+      "provider": "scripts/reliable_memory.py",
+      "names": [
+        "validate_state_root"
+      ],
+      "contract_sha256": "8680515cd873056a7c8a36e0057d91f2f83f23c48841263697676ff91f7ff964",
+      "integration_tests": [
+        "tests/test_an_uninstall_names_what_it_leaves.py"
+      ]
+    },
+    {
+      "provider": "scripts/repository_scope.py",
+      "names": [
+        "sanitized_git_environment"
+      ],
+      "contract_sha256": "fd550ae20761afad50b37fa3a71044a162485b0e4d4b3e2af9b5b22e143c2bec",
+      "integration_tests": [
+        "tests/test_an_uninstall_names_what_it_leaves.py"
+      ]
+    }
+  ]
+}

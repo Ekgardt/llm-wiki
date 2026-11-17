@@ -11,11 +11,16 @@ import ast
 import time
 from pathlib import Path
 
+from llm_wiki.pyright_session_startup import HEALTHY_RUN_SECONDS, STARTUP_RETRY_BACKOFF
 from lsp_process import ProcessState
 
-from tests.code_kernel_helpers import repository, state_root  # noqa: F401 - fixtures
+from tests.pyright_session_helpers import (  # noqa: F401
+    _anchor,
+    _session,
+    semantic_pyright,  # noqa: F401
+)
+from tests.script_sources import split_module_files
 from tests.slow_machine import SHORT_TIMEOUT
-from tests.test_pyright_session import _anchor, _session, semantic_pyright  # noqa: F401 - fixture
 
 
 def test_a_failed_process_is_replaced_and_answers(repository: Path, state_root: Path, semantic_pyright) -> None:  # noqa: F811
@@ -62,13 +67,11 @@ def test_a_replacement_waits_for_the_first_backoff(repository: Path, state_root:
 def test_a_server_that_ran_long_enough_gets_its_budget_back(
     repository: Path, state_root: Path, semantic_pyright  # noqa: F811
 ) -> None:
-    import pyright_session
-
     session = _session(repository, state_root, semantic_pyright)
     try:
         session.open_document("pkg/service.py", deadline=time.monotonic() + 10)
-        session._startup_retries = len(pyright_session._STARTUP_RETRY_BACKOFF)
-        session._process_started_at = time.monotonic() - pyright_session.HEALTHY_RUN_SECONDS - 1
+        session._startup_retries = len(STARTUP_RETRY_BACKOFF)
+        session._process_started_at = time.monotonic() - HEALTHY_RUN_SECONDS - 1
         session._process.state = ProcessState.FAILED
 
         session.definition(_anchor(repository, "pkg/service.py", 10, 20), deadline=time.monotonic() + 10)
@@ -97,11 +100,14 @@ def _attributes(function: ast.AST, kind: type) -> set[str]:
     return _attribute_names(targets)
 
 
-def _spending_functions() -> list[ast.FunctionDef]:
-    import pyright_session
+def _session_functions() -> list[ast.FunctionDef]:
+    sources = split_module_files("pyright_session", "pyright_session")
+    trees = [ast.parse(path.read_text(encoding="utf-8")) for path in sources]
+    return [node for tree in trees for node in ast.walk(tree) if isinstance(node, ast.FunctionDef)]
 
-    tree = ast.parse(Path(pyright_session.__file__).read_text(encoding="utf-8"))
-    functions = [node for node in ast.walk(tree) if isinstance(node, ast.FunctionDef)]
+
+def _spending_functions() -> list[ast.FunctionDef]:
+    functions = _session_functions()
     return [node for node in functions if "_startup_retries" in _attributes(node, ast.AugAssign)]
 
 

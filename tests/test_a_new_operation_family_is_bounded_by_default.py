@@ -7,18 +7,20 @@ from __future__ import annotations
 import shutil
 import sqlite3
 import time
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import markdown_transaction
 import pytest
-from markdown_transaction import KEPT_OPERATION_FAMILIES, MarkdownCoordinator
+from llm_wiki import markdown_undo
+from llm_wiki.markdown_undo import KEPT_OPERATION_FAMILIES
+from markdown_transaction import MarkdownCoordinator
 from project_journal import ProjectStore, parse_journal_events
 
+from tests.project_journal_helpers import checkpoint_event
 from tests.slow_machine import LONG_TIMEOUT
-from tests.test_project_journal import checkpoint_event
 
-LATER = timedelta(days=markdown_transaction.HISTORY_RETENTION_DAYS + 1)
+LATER = timedelta(days=markdown_undo.HISTORY_RETENTION_DAYS + 1)
 
 
 def _coordinator(tmp_path: Path) -> MarkdownCoordinator:
@@ -28,7 +30,7 @@ def _coordinator(tmp_path: Path) -> MarkdownCoordinator:
 
 
 def _append(coordinator: MarkdownCoordinator, family: str) -> None:
-    markdown_transaction._append_until_committed(
+    markdown_transaction.append_until_committed(
         coordinator,
         f"{family}:2026-01-01",
         "knowledge/daily/2026-01-01.md",
@@ -39,7 +41,7 @@ def _append(coordinator: MarkdownCoordinator, family: str) -> None:
 
 
 def _prune_past_window(coordinator: MarkdownCoordinator) -> dict[str, int]:
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     coordinator.prune(now=now + timedelta(days=3))
     return coordinator.prune_history(now=now + LATER)
 

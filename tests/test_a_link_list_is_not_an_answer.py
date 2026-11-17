@@ -4,39 +4,7 @@ docs/research/2026-09-26-a-link-list-is-not-an-answer.md
 """
 from __future__ import annotations
 
-import pytest
-
-RELATED = (
-    "## Related\n"
-    "- [[knowledge/notes/secret-shape-not-secret-name-decision]] — what the redactor may treat as a secret.\n"
-    "- [[solo-operator-superset-product-decision]]\n"
-    "- [[v4-reliability-contracts-decision]]\n"
-    "- [[derived-evidence-generation-decision]]\n"
-)
-# Measured on this vault: link density 0.31, under the boilerpipe bound.
-ANNOTATED = (
-    "## Related\n"
-    "- [[knowledge/notes/secret-shape-not-secret-name-decision]] — what the redactor may treat\n"
-    "  as a secret: the value decides, not the name beside it.\n"
-    "- [[knowledge/notes/self-resolving-health-findings-decision]] — the same principle applied\n"
-    "  to health: a rule that can never pass is not a safety rule.\n"
-)
-PROSE = (
-    "## Decision\n"
-    "The redactor treats a value as a secret by its shape, not by the name beside it; "
-    "see [[secret-shape-not-secret-name-decision]] for the measured misses.\n"
-)
-
-
-@pytest.mark.parametrize(
-    ("content", "navigation"),
-    [(RELATED, True), (ANNOTATED, True), ("## Related\n", True), (PROSE, False),
-     ("- [[a]] is one option.\nThe other is prose.\n", False), (None, False), ("", False)],
-)
-def test_substance_weight_reads_link_density(content, navigation) -> None:
-    from provenance import NAVIGATION_WEIGHT, substance_weight
-
-    assert (substance_weight(content) == NAVIGATION_WEIGHT) is navigation
+from tests.modules.provenance.fixtures import PROSE, RELATED
 
 
 def _row(candidate_id: str, content: str) -> dict[str, object]:
@@ -65,7 +33,7 @@ def test_fusion_ranks_prose_above_a_link_list_the_lexical_leg_put_first() -> Non
 
 
 def test_the_generation_search_weighs_a_link_list_down() -> None:
-    import search_memory
+    import generation_search
 
     def row(content: str) -> dict[str, object]:
         fields = dict.fromkeys(
@@ -76,7 +44,7 @@ def test_the_generation_search_weighs_a_link_list_down() -> None:
         return {**fields, "heading_ancestry": "[]", "rank": -5.0, "source_path": "knowledge/notes/x.md", "title": "x",
                 "content": content, "chunk_order": 0}
 
-    link_score = search_memory._generation_result(row(RELATED), "g")["score"]
-    prose_score = search_memory._generation_result(row(PROSE), "g")["score"]
+    link_score = generation_search.generation_result(row(RELATED), "g")["score"]
+    prose_score = generation_search.generation_result(row(PROSE), "g")["score"]
 
     assert link_score < prose_score

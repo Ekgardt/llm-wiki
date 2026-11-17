@@ -17,7 +17,11 @@ for directory in (TESTS.parent / "scripts", TESTS):
     if str(directory) not in sys.path:
         sys.path.insert(0, str(directory))
 
-from test_self_update import _commit, _git, _repository  # noqa: E402
+from tests.self_update_helpers import (  # noqa: E402
+    _commit,
+    _git,  # noqa: E402
+    _repository,
+)
 
 
 def _work_clone(tmp_path: Path) -> tuple[Path, Path]:
@@ -59,7 +63,7 @@ def test_a_checkout_on_the_default_branch_gets_the_merged_commit(tmp_path, monke
 
     _upstream, clone = _merged_upstream(tmp_path)
     _git(clone, "checkout", "--quiet", "main")
-    monkeypatch.setattr(self_update, "_synced_dependencies", lambda _root, _extras: True)
+    monkeypatch.setattr(self_update, "synced_dependencies", lambda _root, _extras: True)
 
     outcome = self_update.update_checkout(clone)
 

@@ -30,13 +30,13 @@ _CUTOFF_CEILING_SECONDS = 4.0
 def _dispatch(name: str, arguments: dict, deadline: float) -> dict:
     import mcp_server
 
-    data, _clamped = mcp_server._dispatch_tool(name, arguments, deadline)
+    data, _clamped = mcp_server.dispatch_tool(name, arguments, deadline)
     return data
 
 
 def _held_slots(mcp_server) -> list[bool]:
     return [
-        mcp_server._CODE_GRAPH_SLOTS.acquire(blocking=False)
+        mcp_server.CODE_GRAPH_SLOTS.acquire(blocking=False)
         for _ in range(mcp_server.CODE_GRAPH_WORK_SLOTS)
     ]
 
@@ -44,7 +44,7 @@ def _held_slots(mcp_server) -> list[bool]:
 def _release_slots(mcp_server, held: list[bool]) -> None:
     for taken in held:
         if taken:
-            mcp_server._CODE_GRAPH_SLOTS.release()
+            mcp_server.CODE_GRAPH_SLOTS.release()
 
 
 class TestMissingDirectoryIsNamed:
@@ -122,7 +122,7 @@ def _bounded_elapsed(name: str, tmp_path) -> tuple[dict, float]:
 class TestSlowWorkIsCutOffAtTheBudget:
     def test_a_slow_dead_code_step_returns_at_the_budget(self, tmp_path, monkeypatch):
         release = threading.Event()
-        monkeypatch.setattr("code_graph.find_dead_code", _slow_step(release))
+        monkeypatch.setattr("llm_wiki.code_graph_dead_code.find_dead_code", _slow_step(release))
 
         data, elapsed = _bounded_elapsed("find_dead_code", tmp_path)
         release.set()
@@ -136,7 +136,7 @@ class TestSlowWorkIsCutOffAtTheBudget:
 
     def test_a_slow_architecture_step_returns_at_the_budget(self, tmp_path, monkeypatch):
         release = threading.Event()
-        monkeypatch.setattr("code_graph.get_architecture", _slow_step(release))
+        monkeypatch.setattr("llm_wiki.code_graph_architecture.get_architecture", _slow_step(release))
 
         data, elapsed = _bounded_elapsed("get_architecture", tmp_path)
         release.set()

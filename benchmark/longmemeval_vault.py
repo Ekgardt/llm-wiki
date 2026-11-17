@@ -226,18 +226,21 @@ def ingest_sessions(root: Path, question: dict) -> tuple[list[str], int]:
 def _reuse_config(snapshot: object) -> object:
     import hashlib
 
-    from doctor import _maintenance_extractor_identity, _workspace_manifest_sha256
     from evidence_graph_builder import GRAPH_SCHEMA_VERSION, IncrementalReuseConfig
+    from generation_maintenance import (
+        maintenance_extractor_identity,
+        workspace_manifest_sha256,
+    )
 
     return IncrementalReuseConfig(
-        extractor_version=_maintenance_extractor_identity(),
+        extractor_version=maintenance_extractor_identity(),
         grammar_version="builtin-grammars/v1",
         compiler_version=f"python-{sys.version_info.major}.{sys.version_info.minor}",
         resolver_config_sha256=hashlib.sha256(
             b"llm-wiki-maintenance-resolver/v1"
         ).hexdigest(),
         schema_version=GRAPH_SCHEMA_VERSION,
-        workspace_manifest_sha256=_workspace_manifest_sha256(snapshot),
+        workspace_manifest_sha256=workspace_manifest_sha256(snapshot),
     )
 
 
@@ -252,9 +255,9 @@ def _warm_reranker() -> None:
     abandoned on 483 of 600 questions and the reranker scored nothing.
     See `docs/research/2026-09-07-a-reranker-that-never-finished.md`.
     """
-    from reranker import _get_reranker_bundle
+    from reranker import get_reranker_bundle
 
-    _get_reranker_bundle()
+    get_reranker_bundle()
 
 
 def build_generation(
@@ -268,15 +271,15 @@ def build_generation(
     `docs/research/2026-09-17-the-stand-keys-the-turns-before-it-builds.md`.
     """
     from corpus_snapshot import collect_corpus
-    from doctor import (
-        _corpus_policy,
-        _fresh_generation_id,
-        _generation_source_bytes,
-        _generation_source_extractor,
-        _generation_source_rows,
-    )
     from evidence_graph_builder import build_incremental_generation
-    from generation_catalog import GenerationCatalog
+    from generation_maintenance import (
+        corpus_policy,
+        fresh_generation_id,
+        generation_source_bytes,
+        generation_source_extractor,
+        generation_source_rows,
+    )
+    from llm_wiki.generation_catalog_store import GenerationCatalog
     from repository_scope import resolve_repository_scope
 
     deadline = time.monotonic() + BUILD_DEADLINE_SECONDS
@@ -286,13 +289,13 @@ def build_generation(
     catalog = GenerationCatalog(state)
     built = build_incremental_generation(
         catalog,
-        sources=_generation_source_rows(snapshot),
-        source_bytes=_generation_source_bytes(snapshot),
-        extractor=_generation_source_extractor(snapshot, scope.repository_id),
+        sources=generation_source_rows(snapshot),
+        source_bytes=generation_source_bytes(snapshot),
+        extractor=generation_source_extractor(snapshot, scope.repository_id),
         reuse_config=_reuse_config(snapshot),
-        generation_id=_fresh_generation_id(catalog),
+        generation_id=fresh_generation_id(catalog),
         parent_generation_id=None,
-        policy=_corpus_policy(snapshot),
+        policy=corpus_policy(snapshot),
         expected_active=None,
         deadline=deadline,
         cancelled=None,
@@ -492,7 +495,7 @@ def _lane_source(row: Mapping[str, object]) -> list:
     where the chunk came from, so a rule about sources — a per-source quota,
     say — cannot be replayed over a recorded run at all: on 2026-09-19 that
     question could only be bounded, never measured. The key is the one
-    `retrieval._source_key` and `query_memory._entry_key` already use.
+    `retrieval.source_key` and `query_memory._entry_key` already use.
     """
     ancestry = row.get("heading_ancestry")
     if not isinstance(ancestry, (list, tuple)):
@@ -519,7 +522,7 @@ def _lane_row(row: Mapping[str, object], windows: list[tuple[str, ...]]) -> dict
 # Where the answer session stands in the ranking, because that is what decides
 # whether it survives.
 #
-# `query_memory._fitted_selection` sheds from the tail: it keeps the top-ranked
+# `query_memory.fitted_selection` sheds from the tail: it keeps the top-ranked
 # candidates and drops the lowest-ranked ones until the rest fit the answer
 # budget. A LongMemEval session entry is about 10 KB against a 28 KB budget, so
 # only a handful survive. A right session ranked below that line is retrieved

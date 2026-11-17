@@ -1,0 +1,103 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://llm-wiki.local/schemas/reliability-v3-adoption-v2.json",
+  "$defs": {
+    "digest": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "identity": {
+      "type": "object",
+      "required": [
+        "platform",
+        "volume",
+        "file_id",
+        "size",
+        "mtime_ns"
+      ],
+      "properties": {
+        "platform": {
+          "enum": [
+            "posix",
+            "windows"
+          ]
+        },
+        "volume": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 512
+        },
+        "file_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 512
+        },
+        "size": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "mtime_ns": {
+          "type": "integer",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false
+    },
+    "artifact": {
+      "type": "object",
+      "required": [
+        "path",
+        "sha256",
+        "identity"
+      ],
+      "properties": {
+        "path": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4096
+        },
+        "sha256": {
+          "$ref": "#/$defs/digest"
+        },
+        "identity": {
+          "$ref": "#/$defs/identity"
+        }
+      },
+      "additionalProperties": false
+    }
+  },
+  "type": "object",
+  "required": [
+    "schema_version",
+    "previous",
+    "previous_sha256",
+    "queue_active",
+    "queue_schema_sha256",
+    "operation_id",
+    "backup_manifest_sha256"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "reliability-v3-adoption/v2"
+    },
+    "previous": {
+      "type": "object"
+    },
+    "previous_sha256": {
+      "$ref": "#/$defs/digest"
+    },
+    "queue_active": {
+      "$ref": "#/$defs/artifact"
+    },
+    "queue_schema_sha256": {
+      "$ref": "#/$defs/digest"
+    },
+    "operation_id": {
+      "$ref": "#/$defs/digest"
+    },
+    "backup_manifest_sha256": {
+      "$ref": "#/$defs/digest"
+    }
+  },
+  "additionalProperties": false
+}

@@ -1,0 +1,178 @@
+{
+  "encoding": "o200k_base",
+  "max_tokens": 100000,
+  "serialization": "exact-duplicates/v1",
+  "files": [
+    "AGENTS.md",
+    "CLAUDE.md",
+    "docs/AGENTS.md",
+    "docs/STRUCTURE.md",
+    "docs/modules/choose-model-context.json",
+    "docs/modules/choose-model.md",
+    "docs/modules/context-bundle.md",
+    "docs/modules/context-records.md",
+    "docs/modules/context-tooling.md",
+    "docs/modules/model-choice.md",
+    "docs/modules/product-structure.md",
+    "docs/modules/project-governance.md",
+    "docs/modules/settings.md",
+    "docs/modules/test-support.md",
+    "rules/development-laws.md",
+    "scripts/__init__.py",
+    "scripts/choose_model.py",
+    "scripts/llm_wiki/__init__.py",
+    "scripts/llm_wiki/context_bundle.py",
+    "scripts/settings.py",
+    "tests/__init__.py",
+    "tests/conftest.py",
+    "tests/module_context.py",
+    "tests/module_context_paths.py",
+    "tests/module_interface.py",
+    "tests/module_interface_render.py",
+    "tests/module_qualification.py",
+    "tests/module_record_context.py",
+    "tests/module_records.py",
+    "tests/shared_fixtures.py",
+    "tests/shell_function_source.py",
+    "tests/slow_machine.py",
+    "tests/test_model_selection_test_provider.py",
+    "tests/test_the_installer_asks_which_model.py"
+  ],
+  "ownership": {
+    "files": [
+      "docs/modules/choose-model-context.json",
+      "docs/modules/choose-model.md",
+      "scripts/choose_model.py",
+      "tests/test_model_selection_test_provider.py",
+      "tests/test_the_installer_asks_which_model.py"
+    ]
+  },
+  "qualified_dependencies": [
+    {
+      "provider": "scripts/bounded_io.py",
+      "names": [
+        "read_stable_bytes"
+      ],
+      "contract_sha256": "e570dc41e0fd70556ec6a4e887a3da194bcc13122684e515651b13dd19d7d5c1",
+      "integration_tests": [
+        "tests/test_model_selection_test_provider.py",
+        "tests/test_the_installer_asks_which_model.py"
+      ]
+    },
+    {
+      "provider": "scripts/integration_hook_config.py",
+      "names": [
+        "provider_environment"
+      ],
+      "contract_sha256": "0f00929522819c7606acd934fd91c73b741f6809118ebaa5958f15ae0ad70791",
+      "integration_tests": [
+        "tests/test_the_installer_asks_which_model.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_client.py",
+      "names": [
+        "ProviderDescriptor",
+        "call_candidate",
+        "find_codex_binary",
+        "forced_provider",
+        "is_local_ollama_entry",
+        "ollama_api_url",
+        "open_provider_request",
+        "probe_candidate",
+        "provider_candidates",
+        "timeout_s"
+      ],
+      "contract_sha256": "58911f7bd8905ed14d23f53e1643d3fb7b5009bb2323e05c452a02768d1faa89",
+      "integration_tests": [
+        "tests/test_the_installer_asks_which_model.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/generation_catalog_store.py",
+      "names": [
+        "GenerationCatalog"
+      ],
+      "contract_sha256": "b18194ebe04bf988b4474379fcb5243516550d43b745a00eaed1453f7844c983",
+      "integration_tests": [
+        "tests/test_a_blocked_task_has_a_way_back.py",
+        "tests/test_a_build_in_flight_is_not_an_orphan.py",
+        "tests/test_a_capacity_refusal_does_not_corrupt_a_generation.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/model_choice.py",
+      "names": [
+        "selection",
+        "selection_table",
+        "settings_root",
+        "table_values",
+        "using_root"
+      ],
+      "contract_sha256": "7430c6a2666e11324fe76a4d182df87b5ff27e9e1fd31cf0694a8c3ec90f9f76",
+      "integration_tests": [
+        "tests/test_model_selection_test_provider.py",
+        "tests/test_the_installer_asks_which_model.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/runtime_roots.py",
+      "names": [
+        "vault_root"
+      ],
+      "contract_sha256": "35ea768c9fd09097366a2ded61783ec66ac8997f3f02255c744c8443405a706b",
+      "integration_tests": [
+        "tests/test_a_continuation_keeps_its_original_entry.py",
+        "tests/test_a_prompt_checkpoint_does_not_outwait_its_host.py",
+        "tests/test_a_session_marker_survives_a_busy_writer.py"
+      ]
+    },
+    {
+      "provider": "scripts/model_selection.py",
+      "names": [
+        "current",
+        "using"
+      ],
+      "contract_sha256": "4638abe534a5cdc6dadfb72cafeee06312dcfa015c88580f60c9f6a7bace9faa",
+      "integration_tests": [
+        "tests/test_model_selection_test_provider.py",
+        "tests/test_the_installer_asks_which_model.py"
+      ]
+    },
+    {
+      "provider": "scripts/model_selection_file.py",
+      "names": [
+        "file_bytes",
+        "save"
+      ],
+      "contract_sha256": "97637daca981a5aec2e975f7a4ae43aaabf23f28474e2d0a6698855ebdc43d47",
+      "integration_tests": [
+        "tests/test_model_selection_test_provider.py",
+        "tests/test_the_installer_asks_which_model.py"
+      ]
+    },
+    {
+      "provider": "scripts/reliable_memory.py",
+      "names": [
+        "validate_state_root"
+      ],
+      "contract_sha256": "8680515cd873056a7c8a36e0057d91f2f83f23c48841263697676ff91f7ff964",
+      "integration_tests": [
+        "tests/test_model_selection_test_provider.py",
+        "tests/test_the_installer_asks_which_model.py"
+      ]
+    },
+    {
+      "provider": "scripts/repository_scope.py",
+      "names": [
+        "sanitized_git_environment"
+      ],
+      "contract_sha256": "fd550ae20761afad50b37fa3a71044a162485b0e4d4b3e2af9b5b22e143c2bec",
+      "integration_tests": [
+        "tests/test_a_code_generation_is_not_abandoned.py",
+        "tests/test_a_directory_link_inside_the_checkout_does_not_refuse_the_revision.py",
+        "tests/test_a_document_is_opened_in_its_own_language.py"
+      ]
+    }
+  ]
+}

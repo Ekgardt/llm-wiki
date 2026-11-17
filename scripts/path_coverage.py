@@ -99,7 +99,7 @@ def _contained_sha(scope, relative: str, deadline: float) -> str:
     return hashlib.sha256(content).hexdigest()
 
 
-def _current_sha(scope, relative: str, deadline: float) -> str | None:
+def current_sha(scope, relative: str, deadline: float) -> str | None:
     """The file's digest, None when it is absent, UNREADABLE when refused."""
     exists = _exists_inside(scope, relative)
     if exists is None:
@@ -112,7 +112,7 @@ def _current_sha(scope, relative: str, deadline: float) -> str | None:
 _DISK_STATES = {None: "missing_on_disk", UNREADABLE: UNREADABLE}
 
 
-def _freshness(recorded: str | None, current: str | None) -> str:
+def freshness(recorded: str | None, current: str | None) -> str:
     """What the disk says first; only a digest is compared with the index."""
     disk_state = _DISK_STATES.get(current)
     if disk_state is not None:
@@ -126,7 +126,7 @@ def _indexed_freshness(recorded: str | None, current: str | None) -> str:
     return "fresh" if recorded == current else "stale"
 
 
-def _node_count(graph, relative: str, deadline: float) -> dict:
+def node_count(graph, relative: str, deadline: float) -> dict:
     try:
         rows = graph.find_nodes(
             path=relative, max_rows=NODE_CEILING, deadline=deadline
@@ -154,7 +154,7 @@ def _visit(node, stack: list, found: list) -> None:
         stack.extend(reversed(node.children))
 
 
-def _error_ranges(root) -> tuple[list[dict], bool]:
+def error_ranges(root) -> tuple[list[dict], bool]:
     """ERROR and MISSING ranges of a tree-sitter tree, bounded in both counts."""
     found: list[dict] = []
     stack = [root]
@@ -171,14 +171,14 @@ def _parse_status(errors: list[dict]) -> str:
 
 
 def _tree_sitter_parse(language: str, content: bytes) -> dict:
-    from code_graph import GRAMMAR_LOADERS, _get_parser
+    from llm_wiki.code_graph_parse import GRAMMAR_LOADERS, parser_attempt
 
     if language not in GRAMMAR_LOADERS:
         return {"status": "unsupported_language", "language": language}
-    parser = _get_parser(language)
+    parser, cause = parser_attempt(language)
     if parser is None:
-        return {"status": "not_parsed", "language": language, "reason": "grammar unavailable"}
-    errors, truncated = _error_ranges(parser.parse(content).root_node)
+        return {"status": "not_parsed", "language": language, "reason": f"grammar unavailable: {cause}"}
+    errors, truncated = error_ranges(parser.parse(content).root_node)
     return {
         "status": _parse_status(errors),
         "language": language,
@@ -187,7 +187,7 @@ def _tree_sitter_parse(language: str, content: bytes) -> dict:
     }
 
 
-def _python_parse(content: bytes) -> dict:
+def python_parse(content: bytes) -> dict:
     try:
         parse_python(content)
     except SyntaxError as exc:
@@ -213,13 +213,13 @@ def _parse_refusal(language: str | None, content: bytes) -> dict | None:
     return None
 
 
-def _parse_report(language: str | None, content: bytes) -> dict:
+def parse_report(language: str | None, content: bytes) -> dict:
     """Re-parse the stored bytes the way the extractor did and name the gaps."""
     refusal = _parse_refusal(language, content)
     if refusal is not None:
         return refusal
     if language == "python":
-        return _python_parse(content)
+        return python_parse(content)
     return _tree_sitter_parse(str(language), content)
 
 
@@ -230,16 +230,16 @@ def _source_fields(graph, source: dict | None, relative: str, deadline: float) -
         "indexed": True,
         "language": source.get("language"),
         "size": source.get("size"),
-        "parse": _parse_report(source.get("language"), source["content"]),
+        "parse": parse_report(source.get("language"), source["content"]),
         "observations": graph.source_observations(relative, deadline=deadline),
     }
 
 
 def coverage_for_path(directory: Path, relative: str, deadline: float) -> dict:
     """One path's standing in the active generation, honestly bounded."""
-    from code_graph import _active_evidence_graph
+    from llm_wiki.code_graph_generation import active_evidence_graph
 
-    graph = _active_evidence_graph(directory)
+    graph = active_evidence_graph(directory)
     if graph is None:
         return {
             "path": relative,
@@ -247,21 +247,21 @@ def coverage_for_path(directory: Path, relative: str, deadline: float) -> dict:
             "note": COVERAGE_NOTE,
         }
     try:
-        return _coverage_answer(graph, directory, relative, deadline)
+        return coverage_answer(graph, directory, relative, deadline)
     finally:
         graph.close()
 
 
-def _coverage_answer(graph, directory: Path, relative: str, deadline: float) -> dict:
+def coverage_answer(graph, directory: Path, relative: str, deadline: float) -> dict:
     source = graph.source_by_path(relative, deadline=deadline)
     recorded = source.get("sha256") if source else None
-    current = _current_sha(contained_scope(directory, deadline), relative, deadline)
+    current = current_sha(contained_scope(directory, deadline), relative, deadline)
     answer = {
         "path": relative,
         "generation_id": str(graph.generation_id),
         **_source_fields(graph, source, relative, deadline),
-        "freshness": _freshness(recorded, current),
+        "freshness": freshness(recorded, current),
         "note": COVERAGE_NOTE,
     }
-    answer.update(_node_count(graph, relative, deadline))
+    answer.update(node_count(graph, relative, deadline))
     return answer

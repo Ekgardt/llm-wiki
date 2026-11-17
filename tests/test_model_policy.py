@@ -12,7 +12,7 @@ import pytest
 
 ROOT = Path(__file__).resolve().parent.parent
 MATRIX = ROOT / "benchmark" / "model-matrix-v1.json"
-RUNNER = ROOT / "benchmark" / "run_retrieval_v2.py"
+RUNNER_ENVIRONMENT = ROOT / "benchmark" / "retrieval_v2_environment.py"
 MODEL_KINDS = {"embedding", "reranker"}
 KNOWN_LICENSES = {"Apache-2.0", "Gemma", "MIT"}
 TARGET_LANGUAGES = {"EN", "RU", "ZH"}
@@ -71,7 +71,7 @@ def _assigns_name(node: ast.stmt, name: str) -> bool:
 
 
 def _runner_literal(name: str) -> object:
-    tree = ast.parse(RUNNER.read_text(encoding="utf-8"), filename=str(RUNNER))
+    tree = ast.parse(RUNNER_ENVIRONMENT.read_text(encoding="utf-8"), filename=str(RUNNER_ENVIRONMENT))
     for node in tree.body:
         if _assigns_name(node, name):
             return ast.literal_eval(node.value)
@@ -785,16 +785,6 @@ def test_models_have_unique_normalized_ids_and_immutable_sources():
 
 def _variant_pairs(model: dict) -> list:
     return [(item["variant_id"], item["dimensions"]) for item in model["variants"]]
-
-
-def _pin_identity(model: dict) -> tuple:
-    """Revision, licence and token bounds: the fields a pin is made of."""
-    return (
-        model["revision"],
-        model["license"],
-        model["benchmark_max_tokens"],
-        model["native_max_tokens"],
-    )
 
 
 def test_required_embedding_pins_and_formatting_are_exact():

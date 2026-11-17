@@ -13,13 +13,14 @@ from pathlib import Path
 
 import pytest
 from self_update import update_target_note
-from sync_memory import _attention, _final_doctor_message
+from sync_memory import attention_summary, final_doctor_message
 
+from tests.installer_bootstrap_helpers import _bash
+from tests.shell_function_source import _shell_function
 from tests.slow_machine import LONG_TIMEOUT
-from tests.test_the_installer_says_what_it_needs import (
+from tests.the_installer_says_what_it_needs_helpers import (
     INSTALL_PS1,
     INSTALL_SH,
-    _bash,
     _call,
     needs_bash,
 )
@@ -83,7 +84,7 @@ def test_a_final_doctor_warning_names_its_checks() -> None:
         ]
     }
 
-    message = _final_doctor_message("skipped", _attention(report))
+    message = final_doctor_message("skipped", attention_summary(report))
 
     assert message == (
         "Final doctor check requires attention - backup: No knowledge snapshot has been taken yet.; "
@@ -100,9 +101,7 @@ def test_both_installers_say_where_the_warning_came_from() -> None:
 @needs_bash
 @pytest.mark.parametrize(("bound", "deadline"), [("180", "120"), ("600", "400"), ("5", "4")])
 def test_the_smoke_deadline_follows_the_configured_bound(bound: str, deadline: str) -> None:
-    section = INSTALL_SH.split("4. Run production smoke", 1)[1]
-    assignments = [line for line in section.splitlines() if line.startswith(("testTimeoutSeconds=", "smokeDeadlineSeconds="))]
-    script = "\n".join([*assignments, 'echo "$smokeDeadlineSeconds"'])
+    script = "\n".join([_shell_function(INSTALL_SH, "read_smoke_bound"), "read_smoke_bound", 'echo "$smokeDeadlineSeconds"'])
 
     result = subprocess.run(
         [_bash(), "-c", script], capture_output=True, text=True, check=False, timeout=LONG_TIMEOUT,

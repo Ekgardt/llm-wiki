@@ -18,12 +18,8 @@ from datetime import datetime
 from typing import Any
 
 STATE_KEY = "codex_turn_end_captures"
-# The host's own figure: Codex ends a session that has been idle for 30 minutes.
+# Existing product capture cadence; not a claimed Codex session lifetime.
 CAPTURE_WINDOW_SECONDS = 30 * 60
-# Sessions remembered for de-duplication, newest kept: an evicted one can only be
-# captured twice, never lost, and 64 Codex sessions touched inside one 30-minute
-# window is assumed past what one operator runs (not measured).
-MAX_SESSIONS = 64
 TAIL_FIELDS = ("cwd", "transcript_path", "turn_id")
 
 
@@ -49,25 +45,29 @@ def _mapping(value: object) -> Mapping[str, Any]:
     return value if isinstance(value, Mapping) else {}
 
 
-def _last_touch(entry: object) -> str:
-    """The newest stamp an entry carries, for choosing which sessions to keep."""
+def _retirable_capture(entry: object, now: datetime) -> bool:
+    """Only an expired, valid capture timestamp has no remaining dedupe role.
+
+    A pending tail or an unknown entry remains protected. Its age does not
+    prove that its conversation has been captured.
+    """
     known = _mapping(entry)
-    tail_at = _mapping(known.get("pending")).get("at")
-    return max(str(known.get("captured_at") or ""), str(tail_at or ""))
+    age = _age_seconds(known.get("captured_at"), now)
+    return set(known) == {"captured_at"} and math.isfinite(age) and age >= CAPTURE_WINDOW_SECONDS
 
 
-def _trim(state: dict[str, Any]) -> None:
+def _trim(state: dict[str, Any], now: datetime) -> None:
+    """Retire expired dedupe timestamps, never unfinished conversations."""
     sessions = _sessions(state)
-    if len(sessions) <= MAX_SESSIONS:
-        return
-    newest = sorted(sessions, key=lambda name: _last_touch(sessions[name]), reverse=True)
-    state[STATE_KEY] = {name: sessions[name] for name in newest[:MAX_SESSIONS]}
+    for session_id in list(sessions):
+        if _retirable_capture(sessions[session_id], now):
+            del sessions[session_id]
 
 
 def mark_captured(state: dict[str, Any], session_id: str, now: datetime) -> None:
     """This session was captured whole just now; it has no tail."""
     _sessions(state)[session_id] = {"captured_at": now.isoformat()}
-    _trim(state)
+    _trim(state, now)
 
 
 def _tail(raw: Mapping[str, Any], now: datetime) -> dict[str, Any]:
@@ -84,7 +84,7 @@ def claim_turn_end(state: dict[str, Any], raw: Mapping[str, Any], now: datetime)
         mark_captured(state, session_id, now)
         return True
     _sessions(state)[session_id] = {"captured_at": captured_at, "pending": _tail(raw, now)}
-    _trim(state)
+    _trim(state, now)
     return False
 
 

@@ -1,0 +1,255 @@
+{
+  "encoding": "o200k_base",
+  "max_tokens": 100000,
+  "serialization": "exact-duplicates/v1",
+  "files": [
+    "AGENTS.md",
+    "CLAUDE.md",
+    "docs/AGENTS.md",
+    "docs/STRUCTURE.md",
+    "docs/modules/claim-tree-manifest-context.json",
+    "docs/modules/claim-tree-manifest.md",
+    "docs/modules/context-bundle.md",
+    "docs/modules/context-records.md",
+    "docs/modules/context-tooling.md",
+    "docs/modules/formats.md",
+    "docs/modules/model-choice.md",
+    "docs/modules/product-structure.md",
+    "docs/modules/project-governance.md",
+    "docs/modules/test-support.md",
+    "rules/development-laws.md",
+    "scripts/__init__.py",
+    "scripts/claim_tree_manifest.py",
+    "scripts/llm_wiki/__init__.py",
+    "scripts/llm_wiki/context_bundle.py",
+    "scripts/llm_wiki/formats/__init__.py",
+    "tests/__init__.py",
+    "tests/conftest.py",
+    "tests/module_context.py",
+    "tests/module_context_paths.py",
+    "tests/module_interface.py",
+    "tests/module_interface_render.py",
+    "tests/module_qualification.py",
+    "tests/module_record_context.py",
+    "tests/module_records.py",
+    "tests/shared_fixtures.py",
+    "tests/slow_machine.py",
+    "tests/test_a_journal_is_readable_by_every_reader.py",
+    "tests/test_claim_ceiling_counts_only_claim_pages.py"
+  ],
+  "ownership": {
+    "files": [
+      "docs/modules/claim-tree-manifest-context.json",
+      "docs/modules/claim-tree-manifest.md",
+      "scripts/claim_tree_manifest.py",
+      "tests/test_a_journal_is_readable_by_every_reader.py",
+      "tests/test_claim_ceiling_counts_only_claim_pages.py"
+    ]
+  },
+  "qualified_dependencies": [
+    {
+      "provider": "scripts/access_tracking.py",
+      "names": [
+        "MAX_ACCESS_PAGE_BYTES"
+      ],
+      "contract_sha256": "3e15b200c76259c4393e5ae47f23348bd70ddbd0ca4750a35a588d98575ada86",
+      "integration_tests": [
+        "tests/test_a_journal_is_readable_by_every_reader.py"
+      ]
+    },
+    {
+      "provider": "scripts/bounded_io.py",
+      "names": [
+        "MAX_KNOWLEDGE_PAGE_BYTES",
+        "read_stable_bytes"
+      ],
+      "contract_sha256": "87826f93ff8f76c61d945698c7f5ca82bee5b8701fa1315e9efbe307dda3587f",
+      "integration_tests": [
+        "tests/test_a_journal_is_readable_by_every_reader.py"
+      ]
+    },
+    {
+      "provider": "scripts/claims.py",
+      "names": [
+        "ClaimIndex",
+        "MAX_CLAIM_PAGE_BYTES",
+        "project_pages"
+      ],
+      "contract_sha256": "e21ee0ac98630163ba08b48fe2a2765cf112403230f0f02dfbf3a788c8bbea22",
+      "integration_tests": [
+        "tests/test_a_journal_is_readable_by_every_reader.py"
+      ]
+    },
+    {
+      "provider": "scripts/compile_receipts.py",
+      "names": [
+        "MAX_DAILY_BYTES"
+      ],
+      "contract_sha256": "67bdf6c1a8f32fcf2f7d79b17ad45deed31ece6af1fbd94c3aeb0c3003073943",
+      "integration_tests": [
+        "tests/test_a_journal_is_readable_by_every_reader.py"
+      ]
+    },
+    {
+      "provider": "scripts/corpus_snapshot.py",
+      "names": [
+        "MAX_CORPUS_FILE_BYTES"
+      ],
+      "contract_sha256": "733e721251a97f6ee037a10011e544a3b1d11381b4448aa3147eb9cac17bb453",
+      "integration_tests": [
+        "tests/test_a_journal_is_readable_by_every_reader.py"
+      ]
+    },
+    {
+      "provider": "scripts/generation_search.py",
+      "names": [
+        "MAX_PAGE_BYTES"
+      ],
+      "contract_sha256": "0b99c41ac966894851dcbf13b5f615cbf4332251dbc4753078e0d69041f184a7",
+      "integration_tests": [
+        "tests/test_a_journal_is_readable_by_every_reader.py"
+      ]
+    },
+    {
+      "provider": "scripts/lint_memory.py",
+      "names": [
+        "MAX_LINT_PAGE_BYTES",
+        "project_claim_pages"
+      ],
+      "contract_sha256": "8db3f553294d919e7ece956429e1ac5f66a4f23673d746b1f53761952bd81acd",
+      "integration_tests": [
+        "tests/test_a_journal_is_readable_by_every_reader.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/compile_pipeline_apply.py",
+      "names": [
+        "MAX_AFTER_IMAGE_BYTES"
+      ],
+      "contract_sha256": "d7a2b4c5599ab95b981fd54cde05a1f8776138e7a52d7eca9f8eb1c491fc5a0e",
+      "integration_tests": [
+        "tests/test_a_journal_is_readable_by_every_reader.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/doctor_capture.py",
+      "names": [
+        "settings_check"
+      ],
+      "contract_sha256": "27aa38ad93f67d5a50db54e72f2568eef9afdf7f98686179e7c38388875a1725",
+      "integration_tests": [
+        "tests/test_claim_ceiling_counts_only_claim_pages.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/formats/canonical.py",
+      "names": [
+        "canonical_json_bytes",
+        "sha256_bytes"
+      ],
+      "contract_sha256": "2e42a7aefcb66ac2515f6665a03feae34e6f7bad4807787a789ce031f9f3a9c1",
+      "integration_tests": [
+        "tests/test_a_journal_is_readable_by_every_reader.py",
+        "tests/test_claim_ceiling_counts_only_claim_pages.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/generation_catalog_store.py",
+      "names": [
+        "GenerationCatalog"
+      ],
+      "contract_sha256": "b18194ebe04bf988b4474379fcb5243516550d43b745a00eaed1453f7844c983",
+      "integration_tests": [
+        "tests/test_a_blocked_task_has_a_way_back.py",
+        "tests/test_a_build_in_flight_is_not_an_orphan.py",
+        "tests/test_a_capacity_refusal_does_not_corrupt_a_generation.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/model_choice.py",
+      "names": [
+        "using_root"
+      ],
+      "contract_sha256": "d45f2655cb61963e77617d1dfd7d617b134ad77cc770b59b335d0856e5d65019",
+      "integration_tests": [
+        "tests/test_a_journal_is_readable_by_every_reader.py",
+        "tests/test_claim_ceiling_counts_only_claim_pages.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/restricted_paths.py",
+      "names": [
+        "restricted_relative_path"
+      ],
+      "contract_sha256": "da0f32f3b3897cc6b0a148a0ab7dcad5a82bf356267ecd94c5ab0aaab267fd42",
+      "integration_tests": [
+        "tests/test_a_journal_is_readable_by_every_reader.py",
+        "tests/test_claim_ceiling_counts_only_claim_pages.py"
+      ]
+    },
+    {
+      "provider": "scripts/project_journal.py",
+      "names": [
+        "MAX_JOURNAL_BYTES"
+      ],
+      "contract_sha256": "830652d08cdd227f99e68d6379b0b0636a3272d1939a57c43e15837221ca1a1e",
+      "integration_tests": [
+        "tests/test_a_journal_is_readable_by_every_reader.py"
+      ]
+    },
+    {
+      "provider": "scripts/rebuild_memory_index.py",
+      "names": [
+        "MAX_PAGE_BYTES"
+      ],
+      "contract_sha256": "acf7e2966a42617f8921cf8ef071bd2c827f384b9b23e7d7f6c5aea8957aef4a",
+      "integration_tests": [
+        "tests/test_a_journal_is_readable_by_every_reader.py"
+      ]
+    },
+    {
+      "provider": "scripts/reliable_memory.py",
+      "names": [
+        "validate_state_root"
+      ],
+      "contract_sha256": "8680515cd873056a7c8a36e0057d91f2f83f23c48841263697676ff91f7ff964",
+      "integration_tests": [
+        "tests/test_a_journal_is_readable_by_every_reader.py",
+        "tests/test_claim_ceiling_counts_only_claim_pages.py"
+      ]
+    },
+    {
+      "provider": "scripts/repair_backlinks.py",
+      "names": [
+        "MAX_PAGE_BYTES"
+      ],
+      "contract_sha256": "42f769bf56833f8491f101a7f37605a2c67d1ad5dc08592b45d514e26e22b67e",
+      "integration_tests": [
+        "tests/test_a_journal_is_readable_by_every_reader.py"
+      ]
+    },
+    {
+      "provider": "scripts/repository_scope.py",
+      "names": [
+        "sanitized_git_environment"
+      ],
+      "contract_sha256": "fd550ae20761afad50b37fa3a71044a162485b0e4d4b3e2af9b5b22e143c2bec",
+      "integration_tests": [
+        "tests/test_a_journal_is_readable_by_every_reader.py",
+        "tests/test_claim_ceiling_counts_only_claim_pages.py"
+      ]
+    },
+    {
+      "provider": "scripts/settings.py",
+      "names": [
+        "raise_hint",
+        "setting_value"
+      ],
+      "contract_sha256": "6996986733aff8ab379a49ff913796288b35a03330b3f3d67951ced08a779207",
+      "integration_tests": [
+        "tests/test_a_journal_is_readable_by_every_reader.py",
+        "tests/test_claim_ceiling_counts_only_claim_pages.py"
+      ]
+    }
+  ]
+}

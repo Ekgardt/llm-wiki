@@ -17,10 +17,20 @@ from types import SimpleNamespace
 
 import markdown_transaction
 import pytest
+from llm_wiki import (
+    markdown_operations,
+    markdown_prepare,
+    markdown_store,
+    markdown_targets,
+    windows_acl,
+)
 from markdown_transaction import MarkdownChange, MarkdownCoordinator
 from reliable_memory import canonical_json_bytes, sha256_bytes
 
+from tests.markdown_coordinator_parts import patch_coordinator
+from tests.script_sources import SCRIPTS
 from tests.slow_machine import SHORT_TIMEOUT
+from tests.sqlite_errors import busy_database_error, locked_table_error
 
 # How long a coordination wait may take on the slowest supported machine: the
 # hosted four-vCPU Windows and macOS runners, where opening a SQLite database
@@ -49,8 +59,8 @@ def _prepared_artifacts(
 ) -> tuple[bytes, bytes, bool, set[str]]:
     """Both stored images, whether the plan is a file, and what was fsynced."""
     return (
-        markdown_transaction._image_bytes(artifact_root / "before/000000.bin"),
-        markdown_transaction._image_bytes(artifact_root / "after/000000.bin"),
+        markdown_transaction.image_bytes(artifact_root / "before/000000.bin"),
+        markdown_transaction.image_bytes(artifact_root / "after/000000.bin"),
         (artifact_root / "plan.json").is_file(),
         {path.relative_to(artifact_root).as_posix() for path in synced},
     )
@@ -284,14 +294,14 @@ def test_model_output_recheck_quarantines_during_recovery(
     [0, (1 << 63) - 1, 1 << 63, 11853635609087352826, (1 << 64) - 1],
 )
 def test_sqlite_filesystem_identity_encoding_round_trips_without_collisions(identity: int):
-    encoded = markdown_transaction._encode_filesystem_id(identity)
+    encoded = markdown_store.encode_filesystem_id(identity)
 
     assert -(1 << 63) <= encoded < 1 << 63
-    assert markdown_transaction._decode_filesystem_id(encoded) == identity
+    assert markdown_targets.decode_filesystem_id(encoded) == identity
     assert len(
         {
-            markdown_transaction._encode_filesystem_id(0),
-            markdown_transaction._encode_filesystem_id(1 << 63),
+            markdown_store.encode_filesystem_id(0),
+            markdown_store.encode_filesystem_id(1 << 63),
         }
     ) == 2
 
@@ -321,7 +331,7 @@ def test_windows_capture_snapshot_ignores_deprecated_creation_time():
     right = SimpleNamespace(**vars(left))
     right.st_ctime_ns = 5
 
-    assert MarkdownCoordinator._same_capture_snapshot(left, right)
+    assert MarkdownCoordinator.same_capture_snapshot(left, right)
 
 
 def test_read_normalizes_equivalent_signed_and_unsigned_stat_identities(
@@ -331,7 +341,7 @@ def test_read_normalizes_equivalent_signed_and_unsigned_stat_identities(
     target.write_bytes(b"content")
     coordinator = MarkdownCoordinator(vault, state_root)
     identity = (11853635609087352826, (1 << 63) + 7)
-    encoded = tuple(markdown_transaction._encode_filesystem_id(value) for value in identity)
+    encoded = tuple(markdown_store.encode_filesystem_id(value) for value in identity)
     real_lstat = os.lstat
     real_fstat = os.fstat
     monkeypatch.setattr(
@@ -355,7 +365,7 @@ def test_hash_normalizes_equivalent_signed_and_unsigned_stat_identities(
     target.write_bytes(b"content")
     coordinator = MarkdownCoordinator(vault, state_root)
     identity = (11853635609087352826, (1 << 63) + 7)
-    encoded = tuple(markdown_transaction._encode_filesystem_id(value) for value in identity)
+    encoded = tuple(markdown_store.encode_filesystem_id(value) for value in identity)
     real_lstat = os.lstat
     real_fstat = os.fstat
     monkeypatch.setattr(
@@ -388,7 +398,7 @@ def test_prepare_apply_preserves_real_parent_identity(vault: Path, state_root: P
             'SELECT parent_device, parent_inode FROM "operation" WHERE transaction_id = ?',
             (transaction.id,),
         ).fetchone()
-    assert markdown_transaction._decode_parent_identity(persisted) == expected
+    assert markdown_targets.decode_parent_identity(persisted) == expected
     assert coordinator.apply(transaction.id).state == "committed"
     assert target.read_bytes() == b"after"
 
@@ -401,8 +411,9 @@ def test_prepare_persists_unsigned_64_bit_parent_identity(
     coordinator = MarkdownCoordinator(vault, state_root)
     parent_identity = (11853635609087352826, (1 << 63) + 7)
 
+    @contextlib.contextmanager
     def capture_with_unsigned_identity(path: Path, *, max_before_bytes: int | None = None):
-        return path.read_bytes(), parent_identity
+        yield path.read_bytes(), parent_identity
 
     monkeypatch.setattr(coordinator, "_capture_target", capture_with_unsigned_identity)
     monkeypatch.setattr(coordinator, "_parent_identity", lambda path: parent_identity)
@@ -418,7 +429,7 @@ def test_prepare_persists_unsigned_64_bit_parent_identity(
             (transaction.id,),
         ).fetchone()
     assert persisted == tuple(
-        markdown_transaction._encode_filesystem_id(value) for value in parent_identity
+        markdown_store.encode_filesystem_id(value) for value in parent_identity
     )
     manifest = json.loads(
         (state_root / "run/transactions" / transaction.id / "manifest.json").read_bytes()
@@ -443,13 +454,13 @@ def test_prepare_captures_before_images_and_fsyncs_every_artifact(
     target = vault / "knowledge/notes/page.md"
     target.write_bytes(b"before\n")
     synced: list[Path] = []
-    real_fsync = markdown_transaction.fsync_file
+    real_fsync = markdown_prepare.fsync_file
 
     def recording_fsync(path: Path):
         synced.append(Path(path))
         real_fsync(path)
 
-    monkeypatch.setattr(markdown_transaction, "fsync_file", recording_fsync)
+    patch_coordinator(monkeypatch, 'fsync_file', recording_fsync)
     coordinator = MarkdownCoordinator(vault, state_root)
     transaction = coordinator.prepare(
         [MarkdownChange.replace("knowledge/notes/page.md", b"after\n")],
@@ -507,7 +518,7 @@ def test_apply_hashes_oversized_changed_target_without_materializing_it(
 ):
     target = vault / "knowledge/guardrails.md"
     target.write_bytes(b"before")
-    monkeypatch.setattr(markdown_transaction, "MAX_KNOWLEDGE_TARGET_BYTES", 8)
+    patch_coordinator(monkeypatch, 'MAX_KNOWLEDGE_TARGET_BYTES', 8)
     coordinator = MarkdownCoordinator(vault, state_root)
     transaction = coordinator.prepare(
         [MarkdownChange.replace("knowledge/guardrails.md", b"after")],
@@ -520,7 +531,7 @@ def test_apply_hashes_oversized_changed_target_without_materializing_it(
         assert value != b"x" * 9, "oversized target was materialized for hashing"
         return real_sha256_bytes(value)
 
-    monkeypatch.setattr(markdown_transaction, "sha256_bytes", reject_materialized_oversize)
+    patch_coordinator(monkeypatch, 'sha256_bytes', reject_materialized_oversize)
 
     with pytest.raises(markdown_transaction.TransactionFailure) as raised:
         coordinator.apply(transaction.id)
@@ -535,7 +546,7 @@ def test_prepare_rejects_target_replaced_between_lstat_and_open(
     target = vault / "knowledge/notes/page.md"
     target.write_bytes(b"before")
     replacement = target.with_name("replacement.tmp")
-    real_open = markdown_transaction.os.open
+    real_open = os.open
     replaced = False
 
     def replace_before_open(path, flags, *args, **kwargs):
@@ -546,7 +557,7 @@ def test_prepare_rejects_target_replaced_between_lstat_and_open(
             replaced = True
         return real_open(path, flags, *args, **kwargs)
 
-    monkeypatch.setattr(markdown_transaction.os, "open", replace_before_open)
+    monkeypatch.setattr(os, "open", replace_before_open)
     coordinator = MarkdownCoordinator(vault, state_root)
 
     with pytest.raises(ValueError, match="changed before open"):
@@ -568,14 +579,14 @@ def test_artifacts_are_created_owner_only_without_an_umask_window(
     vault: Path, state_root: Path, monkeypatch: pytest.MonkeyPatch
 ):
     create_modes = []
-    real_open = markdown_transaction.os.open
+    real_open = os.open
 
     def recording_open(path, flags, mode=0o777, *args, **kwargs):
         if flags & os.O_CREAT:
             create_modes.append(mode)
         return real_open(path, flags, mode, *args, **kwargs)
 
-    monkeypatch.setattr(markdown_transaction.os, "open", recording_open)
+    monkeypatch.setattr(os, "open", recording_open)
     coordinator = MarkdownCoordinator(vault, state_root)
     coordinator.prepare(
         [MarkdownChange.create("knowledge/notes/new.md", b"new")],
@@ -616,14 +627,14 @@ def test_operation_lookup_tolerates_disappearing_preparing_row(
         database.commit()
     original = coordinator._record
 
-    def delete_then_read(transaction_id: str):
-        with coordinator._connect() as database:
+    def delete_then_read(transaction_id: str, *, deadline=None):
+        with coordinator._connect(deadline=deadline) as database:
             database.execute(
                 'DELETE FROM "transaction" WHERE id=? AND state=\'preparing\'',
                 (transaction_id,),
             )
             database.commit()
-        return original(transaction_id)
+        return original(transaction_id, deadline=deadline)
 
     monkeypatch.setattr(coordinator, "_record", delete_then_read)
 
@@ -742,7 +753,7 @@ def test_symlinked_target_component_is_rejected(vault: Path, state_root: Path):
 def test_windows_reparse_target_component_is_rejected(
     vault: Path, state_root: Path, monkeypatch: pytest.MonkeyPatch
 ):
-    monkeypatch.setattr(markdown_transaction, "_is_reparse_point", lambda path: path.name == "notes")
+    patch_coordinator(monkeypatch, 'is_reparse_point', lambda path: path.name == "notes")
     coordinator = MarkdownCoordinator(vault, state_root)
     with pytest.raises(ValueError, match="reparse"):
         coordinator.prepare(
@@ -838,13 +849,13 @@ def test_create_does_not_clobber_file_created_after_prepare(vault: Path, state_r
 
 
 def _recording_windows_replace(monkeypatch, replacements: list):
-    real_replace = markdown_transaction.durable_publish_file
+    real_replace = markdown_operations.durable_publish_file
 
     def recording(staged, destination, **options):
         replacements.append((Path(staged), Path(destination), options))
         return real_replace(staged, destination, **options)
 
-    monkeypatch.setattr(markdown_transaction, "durable_publish_file", recording)
+    patch_coordinator(monkeypatch, 'durable_publish_file', recording)
 
 
 def _recording_posix_replace(monkeypatch, replacements: list):
@@ -854,7 +865,7 @@ def _recording_posix_replace(monkeypatch, replacements: list):
         replacements.append((Path(source), Path(destination)))
         real_replace(source, destination, *args, **kwargs)
 
-    monkeypatch.setattr(markdown_transaction.os, "replace", recording)
+    monkeypatch.setattr(os, "replace", recording)
 
 
 def _record_replacements(monkeypatch, replacements: list) -> None:
@@ -872,7 +883,7 @@ def _assert_windows_replacements(replacements: list, target: Path) -> None:
 
 def _expected_posix_replacement(target: Path) -> tuple[Path, Path]:
     """Where a staged file sits and what it becomes, per replace strategy."""
-    if markdown_transaction._use_posix_dir_fd():
+    if markdown_targets.use_posix_dir_fd():
         return Path(), Path(target.name)
     return target.parent, target
 
@@ -1017,7 +1028,7 @@ def test_nested_writer_references_parent_without_reacquiring_or_releasing_it(
     state_root = tmp_path / "state"
     candidate = state_root / "run/markdown-transactions-v3.candidate.sqlite3"
     markdown_transaction.initialize_coordinator_v3_candidate(candidate, source_v2=None)
-    coordinator = MarkdownCoordinator._from_v3_candidate(candidate, state_root=state_root)
+    coordinator = MarkdownCoordinator.from_v3_candidate(candidate, state_root=state_root)
     registry = operational_ownership.OwnershipRegistry(state_root)
     parent = registry.acquire("doctor", scope="global")
 
@@ -1054,7 +1065,7 @@ def test_v3_top_level_writer_inserts_and_releases_canonical_projection(
     state_root = tmp_path / "state"
     candidate = state_root / "run/markdown-transactions-v3.candidate.sqlite3"
     markdown_transaction.initialize_coordinator_v3_candidate(candidate, source_v2=None)
-    coordinator = MarkdownCoordinator._from_v3_candidate(candidate, state_root=state_root)
+    coordinator = MarkdownCoordinator.from_v3_candidate(candidate, state_root=state_root)
 
     held = (
         "SELECT canonical_role, canonical_scope, actor_id, owner_token, "
@@ -1104,7 +1115,7 @@ with coordinator.writer_gate():
             sys.executable,
             "-c",
             code,
-            str(Path(markdown_transaction.__file__).parent),
+            str(SCRIPTS),
             str(vault),
             str(state_root),
             str(marker),
@@ -1139,8 +1150,8 @@ with coordinator.writer_gate():
 def test_live_writer_heartbeat_renews_before_expiry(
     vault: Path, state_root: Path, monkeypatch: pytest.MonkeyPatch
 ):
-    monkeypatch.setattr(markdown_transaction, "_WRITER_LEASE_SECONDS", 0.3)
-    monkeypatch.setattr(markdown_transaction, "_WRITER_HEARTBEAT_SECONDS", 0.05)
+    patch_coordinator(monkeypatch, 'WRITER_LEASE_SECONDS', 0.3)
+    patch_coordinator(monkeypatch, 'WRITER_HEARTBEAT_SECONDS', 0.05)
     coordinator = MarkdownCoordinator(vault, state_root)
     with coordinator.writer_gate():
         with sqlite3.connect(state_root / "run/markdown-transactions.sqlite3") as database:
@@ -1167,7 +1178,7 @@ def test_late_writer_heartbeat_renews_expired_unchanged_owner(
     expired = "2000-01-01T00:00:00Z"
     with coordinator._connect() as database:
         database.execute(
-            "INSERT INTO writer_owners VALUES ('global', ?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO writer_owners (gate_name, owner_token, process_id, thread_id, acquired_at, heartbeat_at, expires_at, fencing_epoch) VALUES ('global', ?, ?, ?, ?, ?, ?, ?)",
             (token, os.getpid(), threading.get_ident(), expired, expired, expired, 1),
         )
         database.commit()
@@ -1209,7 +1220,7 @@ def test_late_writer_heartbeat_after_takeover_is_lost_without_overwrite(
     )
     with coordinator._connect() as database:
         database.execute(
-            "INSERT INTO writer_owners VALUES ('global', ?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO writer_owners (gate_name, owner_token, process_id, thread_id, acquired_at, heartbeat_at, expires_at, fencing_epoch) VALUES ('global', ?, ?, ?, ?, ?, ?, ?)",
             takeover,
         )
         database.commit()
@@ -1231,8 +1242,8 @@ def test_late_writer_heartbeat_after_takeover_is_lost_without_overwrite(
 @pytest.mark.parametrize(
     "contention",
     [
-        sqlite3.OperationalError("database is busy"),
-        sqlite3.OperationalError("database table is locked"),
+        busy_database_error(),
+        locked_table_error(),
         PermissionError(32, "sharing violation"),
     ],
 )
@@ -1244,17 +1255,17 @@ def test_writer_heartbeat_retries_transient_contention_without_losing_fence(
 ):
     coordinator = MarkdownCoordinator(vault, state_root)
     token = "heartbeat-owner"
-    now = markdown_transaction._now()
+    now = markdown_transaction.now()
     with coordinator._connect() as database:
         database.execute(
-            "INSERT INTO writer_owners VALUES ('global', ?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO writer_owners (gate_name, owner_token, process_id, thread_id, acquired_at, heartbeat_at, expires_at, fencing_epoch) VALUES ('global', ?, ?, ?, ?, ?, ?, ?)",
             (
                 token,
                 os.getpid(),
                 threading.get_ident(),
                 now,
                 now,
-                markdown_transaction._future_timestamp(1),
+                markdown_store.future_timestamp(1),
                 1,
             ),
         )
@@ -1272,7 +1283,7 @@ def test_writer_heartbeat_retries_transient_contention_without_losing_fence(
         connected.set()
         return real_connect(**kwargs)
 
-    monkeypatch.setattr(markdown_transaction, "_WRITER_HEARTBEAT_SECONDS", 0.01)
+    patch_coordinator(monkeypatch, 'WRITER_HEARTBEAT_SECONDS', 0.01)
     monkeypatch.setattr(coordinator, "_connect", contended_connect)
     stop = threading.Event()
     lost = threading.Event()
@@ -1291,11 +1302,11 @@ def test_writer_heartbeat_retries_transient_contention_without_losing_fence(
 
 
 def test_adoption_validation_recognizes_nested_sqlite_contention() -> None:
-    contention = sqlite3.OperationalError("database is locked")
+    contention = busy_database_error()
     wrapped = RuntimeError("reliability_v3_record_invalid")
     wrapped.__cause__ = contention
 
-    assert markdown_transaction._transient_adoption_contention(wrapped)
+    assert markdown_transaction.transient_adoption_contention(wrapped)
 
 
 def test_writer_gate_exit_retries_locked_database_then_releases_owner(
@@ -1312,11 +1323,11 @@ def test_writer_gate_exit_retries_locked_database_then_releases_owner(
         nonlocal injected
         if armed and threading.get_ident() == main_thread and not injected:
             injected = True
-            raise sqlite3.OperationalError("database is locked")
+            raise busy_database_error()
         with real_begin(database):
             yield database
 
-    monkeypatch.setattr(markdown_transaction, "begin_immediate", contended_begin)
+    patch_coordinator(monkeypatch, 'begin_immediate', contended_begin)
     with coordinator.writer_gate():
         armed = True
 
@@ -1366,11 +1377,13 @@ def test_a_reclaimed_gate_still_reports_the_loss_and_names_the_heartbeat(
 
     monkeypatch.setattr(coordinator, "_heartbeat_writer_gate", starved_heartbeat)
 
-    with pytest.raises(RuntimeError, match="another owner reclaimed the gate"):
-        with coordinator.writer_gate():
-            with sqlite3.connect(coordinator.database_path) as database:
-                database.execute("DELETE FROM writer_owners WHERE gate_name = 'global'")
-                database.commit()
+    with (
+        pytest.raises(RuntimeError, match="another owner reclaimed the gate"),
+        coordinator.writer_gate(),
+    ):
+        with sqlite3.connect(coordinator.database_path) as database:
+            database.execute("DELETE FROM writer_owners WHERE gate_name = 'global'")
+            database.commit()
 
 
 def test_reclaimed_writer_fails_fence_before_filesystem_mutation(
@@ -1445,10 +1458,13 @@ def test_writer_ownership_renewal_rejects_expiry_equal_to_captured_now(
                 (fixed_now,),
             )
             database.commit()
-        monkeypatch.setattr(markdown_transaction, "_now", lambda: fixed_now)
-        with coordinator._connect() as database, markdown_transaction.begin_immediate(database):
-            with pytest.raises(RuntimeError, match="ownership was lost before mutation"):
-                coordinator._assert_writer_ownership(database)
+        patch_coordinator(monkeypatch, 'now', lambda: fixed_now)
+        with (
+            coordinator._connect() as database,
+            markdown_transaction.begin_immediate(database),
+            pytest.raises(RuntimeError, match="ownership was lost before mutation"),
+        ):
+            coordinator._assert_writer_ownership(database)
 
 
 @pytest.mark.skipif(os.name != "posix", reason="requires POSIX dir_fd semantics")
@@ -1498,7 +1514,7 @@ def test_windows_parent_identity_change_fails_closed(
         identity = real_identity(path)
         return identity if calls == 1 else (identity[0], identity[1] + 1)
 
-    monkeypatch.setattr(markdown_transaction, "_use_posix_dir_fd", lambda: False)
+    patch_coordinator(monkeypatch, 'use_posix_dir_fd', lambda: False)
     monkeypatch.setattr(coordinator, "_parent_identity", changing_identity)
     with pytest.raises(RuntimeError, match="parent identity"):
         coordinator.apply(transaction.id)
@@ -1558,9 +1574,9 @@ def test_windows_acl_hardening_verifies_owner_only_success(tmp_path: Path, monke
             return subprocess.CompletedProcess(command, 0, "", "")
         return subprocess.CompletedProcess(command, 0, "artifact DOMAIN\\user:(F)\n", "")
 
-    monkeypatch.setattr(markdown_transaction, "_windows_acl_identity", lambda: "DOMAIN\\user")
-    monkeypatch.setattr(markdown_transaction, "_run_acl_command", successful)
-    markdown_transaction._harden_windows_acl(path)
+    monkeypatch.setattr(windows_acl, "windows_acl_identity", lambda: "DOMAIN\\user")
+    monkeypatch.setattr(windows_acl, "run_acl_command", successful)
+    markdown_transaction.harden_windows_acl(path)
     hardening = calls[0]
     # The groups every Windows install grants by default, removed by SID.
     removed = (
@@ -1583,9 +1599,9 @@ def test_windows_acl_hardening_failure_is_not_silently_accepted(tmp_path: Path, 
     path = tmp_path / "artifact"
     path.write_bytes(b"artifact")
     denied = subprocess.CompletedProcess(["icacls"], 5, "", "access denied")
-    monkeypatch.setattr(markdown_transaction, "_run_acl_command", lambda command: denied)
+    monkeypatch.setattr(windows_acl, "run_acl_command", lambda command: denied)
     with pytest.raises(PermissionError, match="owner-only ACL"):
-        markdown_transaction._harden_windows_acl(path)
+        markdown_transaction.harden_windows_acl(path)
 
 
 @pytest.mark.skipif(os.name != "nt", reason="requires Windows ACL enforcement")
@@ -1593,7 +1609,7 @@ def test_windows_acl_failure_aborts_transaction_preparation(
     vault: Path, state_root: Path, monkeypatch: pytest.MonkeyPatch
 ):
     denied = subprocess.CompletedProcess(["icacls"], 5, b"", b"access denied")
-    monkeypatch.setattr(markdown_transaction, "_run_acl_command", lambda command: denied)
+    monkeypatch.setattr(windows_acl, "run_acl_command", lambda command: denied)
     coordinator = MarkdownCoordinator(vault, state_root)
     with pytest.raises(PermissionError, match="owner-only ACL"):
         coordinator.prepare(
@@ -1606,21 +1622,21 @@ def test_windows_acl_failure_aborts_transaction_preparation(
 def test_apply_fsyncs_changed_directories(vault: Path, state_root: Path, monkeypatch):
     synced = []
     synced_descriptors = []
-    real_fsync = markdown_transaction.os.fsync
+    real_fsync = os.fsync
 
     def recording_fsync(descriptor):
         metadata = os.fstat(descriptor)
         synced_descriptors.append((metadata.st_dev, metadata.st_ino))
         real_fsync(descriptor)
 
-    monkeypatch.setattr(markdown_transaction, "fsync_directory", lambda path: synced.append(Path(path)))
-    monkeypatch.setattr(markdown_transaction.os, "fsync", recording_fsync)
+    patch_coordinator(monkeypatch, 'fsync_directory', lambda path: synced.append(Path(path)))
+    monkeypatch.setattr(os, "fsync", recording_fsync)
     coordinator = MarkdownCoordinator(vault, state_root)
     transaction = coordinator.prepare(
         [MarkdownChange.create("knowledge/notes/new.md", b"new")], operation_id="dirsync"
     )
     coordinator.apply(transaction.id)
-    if markdown_transaction._use_posix_dir_fd():
+    if markdown_targets.use_posix_dir_fd():
         metadata = (vault / "knowledge/notes").stat()
         assert (metadata.st_dev, metadata.st_ino) in synced_descriptors
     else:
@@ -1633,7 +1649,7 @@ def test_posix_directory_fsync_unsupported_is_durability_failure(
 ):
     from reliable_memory import MetadataDurabilityUnavailable
 
-    real_open = markdown_transaction.os.open
+    real_open = os.open
 
     def unsupported(path, flags, *args, **kwargs):
         if Path(path) == vault / "knowledge/notes":
@@ -1642,7 +1658,7 @@ def test_posix_directory_fsync_unsupported_is_durability_failure(
 
     monkeypatch.setattr("reliable_memory.os.open", unsupported)
     with pytest.raises(MetadataDurabilityUnavailable) as raised:
-        markdown_transaction.fsync_directory(vault / "knowledge/notes")
+        markdown_targets.fsync_directory(vault / "knowledge/notes")
     assert raised.value.code == "metadata_durability_unavailable"
 
 
@@ -1661,9 +1677,9 @@ def test_windows_sharing_violation_leaves_unknown_target_unchanged(
         raise PermissionError(32, "sharing violation", str(args[-1]))
 
     if os.name == "nt":
-        monkeypatch.setattr(markdown_transaction, "durable_publish_file", sharing_violation)
+        patch_coordinator(monkeypatch, 'durable_publish_file', sharing_violation)
     else:
-        monkeypatch.setattr(markdown_transaction.os, "replace", sharing_violation)
+        monkeypatch.setattr(os, "replace", sharing_violation)
     with pytest.raises(PermissionError, match="sharing violation"):
         coordinator.apply(transaction.id)
     assert target.read_bytes() == b"before"
@@ -1745,14 +1761,14 @@ def test_coordinator_candidate_test_seam_requires_validation(
     candidate = state_root / "run" / "markdown-transactions-v3.candidate.sqlite3"
     markdown_transaction.initialize_coordinator_v3_candidate(candidate, source_v2=None)
 
-    opened = MarkdownCoordinator._from_v3_candidate(candidate, state_root=state_root)
+    opened = MarkdownCoordinator.from_v3_candidate(candidate, state_root=state_root)
     with opened._connect() as database:
         assert database.execute("PRAGMA application_id").fetchone()[0] == 0x4C575433
 
     with sqlite3.connect(candidate) as database:
         database.execute("PRAGMA user_version=2")
     with pytest.raises(sqlite3.DatabaseError):
-        MarkdownCoordinator._from_v3_candidate(candidate, state_root=state_root)
+        MarkdownCoordinator.from_v3_candidate(candidate, state_root=state_root)
 
 
 @pytest.mark.parametrize("target_content", [b"before", b"unknown"])
@@ -1820,7 +1836,7 @@ def test_schema_migration_validates_and_recaptures_prepared_parent_identity(
             "WHERE transaction_id = 'legacy-tx'"
         ).fetchone()
     metadata = target.parent.stat()
-    assert tuple(markdown_transaction._decode_filesystem_id(value) for value in identity) == (
+    assert tuple(markdown_targets.decode_filesystem_id(value) for value in identity) == (
         metadata.st_dev,
         metadata.st_ino,
     )
@@ -1837,14 +1853,16 @@ def test_an_image_written_before_compression_is_still_readable(tmp_path: Path) -
     plain = tmp_path / "000000.bin"
     plain.write_bytes(b"written by an older build\n")
 
-    assert markdown_transaction._image_bytes(plain) == b"written by an older build\n"
+    assert markdown_transaction.image_bytes(plain) == b"written by an older build\n"
 
 
 def test_a_compressed_image_reads_back_as_what_it_stands_for(tmp_path: Path) -> None:
-    packed = tmp_path / "000000.bin"
-    packed.write_bytes(markdown_transaction._compressed_image(b"journal line\n" * 500))
+    import lzma
 
-    assert markdown_transaction._image_bytes(packed) == b"journal line\n" * 500
+    packed = tmp_path / "000000.bin"
+    packed.write_bytes(lzma.compress(b"journal line\n" * 500, preset=markdown_prepare.IMAGE_COMPRESSION_PRESET))
+
+    assert markdown_transaction.image_bytes(packed) == b"journal line\n" * 500
     assert packed.stat().st_size < 500 * len(b"journal line\n") // 10
 
 

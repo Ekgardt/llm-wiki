@@ -10,8 +10,10 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
-import install_control
-import scheduled_weekly
+import weekly_budget
+from llm_wiki import install_scheduler_render
+
+from tests.script_sources import script_files
 
 ROOT = Path(__file__).resolve().parent.parent
 GUIDE = (ROOT / "docs" / "USER-GUIDE.md").read_text(encoding="utf-8")
@@ -19,7 +21,7 @@ EXACT_EXTRA_SYNC = re.compile(r"uv sync(?![^`\n]*--inexact)[^`\n]*--extra")
 
 
 def test_the_guide_names_the_scheduler_limits_the_code_sets() -> None:
-    hours = install_control.SCHEDULER_LIMIT_HOURS
+    hours = install_scheduler_render.SCHEDULER_LIMIT_HOURS
     stated = f"{hours['nightly']} hours nightly and {hours['weekly']} hours"
 
     assert stated in " ".join(GUIDE.split())
@@ -29,14 +31,14 @@ def test_the_guide_names_every_weekly_step() -> None:
     words = {"okf": "OKF", "status": "queue status", "queue_purge": "purge finished queue work",
              "archive": "archive stale pages", "sessions": "archive session records",
              "daily_archive": "archive daily logs", "generations": "prune superseded evidence generations"}
-    labels = [label for _message, label, _command, _timeout in scheduled_weekly._script_steps()]
+    labels = [label for _message, label, _command, _timeout in weekly_budget.script_steps()]
     guide = " ".join(GUIDE.split())
 
     assert [label for label in labels if words.get(label, label) not in guide] == []
 
 
 def test_no_hint_syncs_one_extra_exactly() -> None:
-    sources = [*ROOT.glob("README*.md"), *(ROOT / "docs").glob("*.md"), *(ROOT / "scripts").glob("*.py")]
+    sources = [*ROOT.glob("README*.md"), *(ROOT / "docs").glob("*.md"), *script_files()]
     found = [
         f"{path.name}: {match.group(0)}"
         for path in sources

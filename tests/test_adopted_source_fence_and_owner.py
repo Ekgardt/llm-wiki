@@ -22,7 +22,7 @@ SCRIPTS_DIR = Path(__file__).resolve().parent.parent / "scripts"
 if str(SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_DIR))
 
-import memory_queue  # noqa: E402
+import queue_core  # noqa: E402
 from archive_daily import DailyArchiver  # noqa: E402
 from installed_memory_repair import repair_installed_vault  # noqa: E402
 from reliable_memory import canonical_json_bytes, sha256_bytes  # noqa: E402
@@ -34,7 +34,7 @@ _NOW = "2026-07-14T12:00:00.000000+00:00"
 
 def _adopted_queue(
     tmp_path: Path,
-) -> tuple[Path, Path, memory_queue._QueueV3CandidateReader]:
+) -> tuple[Path, Path, queue_core.QueueV3CandidateReader]:
     """A vault whose queue and coordinator went through real V3 adoption."""
     root = tmp_path / "vault"
     state_root = tmp_path / "state"
@@ -49,8 +49,8 @@ def _adopted_queue(
         confirm_all_agents_stopped=True,
     )
     assert report["overall_status"] == "ok"
-    queue = memory_queue.active_or_legacy_memory_queue(root, state_root)
-    assert isinstance(queue, memory_queue._QueueV3CandidateReader)
+    queue = queue_core.active_or_legacy_memory_queue(root, state_root)
+    assert isinstance(queue, queue_core.QueueV3CandidateReader)
     return root, state_root, queue
 
 
@@ -112,7 +112,7 @@ def test_a_second_fence_over_the_same_source_is_refused(tmp_path: Path) -> None:
     _root, _state_root, queue = _adopted_queue(tmp_path)
     queue.acquire_source_fence(_DAILY, _DIGEST)
 
-    with pytest.raises(memory_queue.QueueOperationError, match="source_fenced"):
+    with pytest.raises(queue_core.QueueOperationError, match="source_fenced"):
         queue.acquire_source_fence(_DAILY, _DIGEST)
 
 
@@ -120,7 +120,7 @@ def test_a_referenced_source_cannot_be_fenced(tmp_path: Path) -> None:
     _root, _state_root, queue = _adopted_queue(tmp_path)
     queue.enqueue("compile", 1, {"daily_id": _DAILY, "source_digest": _DIGEST})
 
-    with pytest.raises(memory_queue.QueueOperationError, match="source_referenced"):
+    with pytest.raises(queue_core.QueueOperationError, match="source_referenced"):
         queue.acquire_source_fence(_DAILY, _DIGEST)
 
 
@@ -131,9 +131,9 @@ def test_source_fence_atomically_blocks_enqueue_claim_and_redrive(
     _root, state_root, queue = _adopted_queue(tmp_path)
     fence = queue.acquire_source_fence(_DAILY, _DIGEST)
 
-    with pytest.raises(memory_queue.QueueOperationError, match="source_fenced"):
+    with pytest.raises(queue_core.QueueOperationError, match="source_fenced"):
         queue.enqueue("compile", 1, {"daily_id": _DAILY})
-    with pytest.raises(memory_queue.QueueOperationError, match="source_fenced"):
+    with pytest.raises(queue_core.QueueOperationError, match="source_fenced"):
         queue.enqueue("compile", 1, {"source_digest": _DIGEST})
 
     # An external writer cannot make fenced work claimable.
@@ -142,7 +142,7 @@ def test_source_fence_atomically_blocks_enqueue_claim_and_redrive(
 
     with sqlite3.connect(state_root / "run/queue-v3.sqlite3") as connection:
         connection.execute("UPDATE tasks SET state='dead' WHERE id='injected'")
-    with pytest.raises(memory_queue.QueueOperationError, match="source_fenced"):
+    with pytest.raises(queue_core.QueueOperationError, match="source_fenced"):
         queue.redrive("injected")
 
     queue.release_source_fence(fence.token)
@@ -167,7 +167,7 @@ def test_source_finalization_rejects_expired_fence(tmp_path: Path) -> None:
             ("2000-01-01T00:00:00+00:00", fence.token),
         )
 
-    with pytest.raises(memory_queue.QueueOperationError, match="source_fence_lost"):
+    with pytest.raises(queue_core.QueueOperationError, match="source_fence_lost"):
         with queue.source_finalization(fence):
             pytest.fail("expired fence must not finalize")
 
@@ -183,7 +183,7 @@ def test_source_finalization_rejects_task_injected_after_fence(
         {"daily_id": _DAILY, "source_digest": _DIGEST},
     )
 
-    with pytest.raises(memory_queue.QueueOperationError, match="source_referenced"):
+    with pytest.raises(queue_core.QueueOperationError, match="source_referenced"):
         with queue.source_finalization(fence):
             pytest.fail("referenced source must not finalize")
 
@@ -200,7 +200,7 @@ def test_source_finalization_rejects_recorded_source_failure(
         producer="compile",
     )
 
-    with pytest.raises(memory_queue.QueueOperationError, match="source_failure"):
+    with pytest.raises(queue_core.QueueOperationError, match="source_failure"):
         with queue.source_finalization(fence):
             pytest.fail("failed source must not finalize")
 
@@ -237,7 +237,7 @@ def test_the_archiver_queue_path_answers_instead_of_refusing(
     root, state_root, _queue = _adopted_queue(tmp_path)
     (root / "knowledge/daily").mkdir(parents=True)
     archiver = DailyArchiver(root, state_root)
-    assert isinstance(archiver.queue, memory_queue._QueueV3CandidateReader)
+    assert isinstance(archiver.queue, queue_core.QueueV3CandidateReader)
 
     assert archiver._queue_references(_DAILY, _DIGEST) == []
 

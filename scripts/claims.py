@@ -8,50 +8,50 @@ import sqlite3
 import sys
 import threading
 import time
-import unicodedata
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import closing, contextmanager
+from copy import deepcopy
 from dataclasses import dataclass
-from datetime import date, datetime, timezone
-from decimal import Decimal, InvalidOperation
+from datetime import date, datetime
 from pathlib import Path
 
 from bounded_io import read_stable_bytes
-from claim_tree_manifest import MAX_CLAIM_TREE_FILE_BYTES, PROJECT_CLAIM_FILES
-from compile_cache import _restrict_owner_only, _verify_owner_only
+from claim_tree_manifest import PROJECT_CLAIM_FILES
+from compile_cache import restrict_owner_only, verify_owner_only
 from evidence_resolver import (
     EvidenceRef,
     EvidenceResolutionError,
     EvidenceResolver,
     daily_entries,
 )
-from iso_time import block_instant, names_block
-from reliable_memory import (
-    canonical_json_bytes,
-    open_operational_db,
-    sha256_bytes,
-    validate_schema,
-    validate_state_root,
+from iso_time import block_instant
+from llm_wiki import runtime_roots
+from llm_wiki.claim_ledger import (
+    MAX_CLAIM_PAGE_BYTES,
+    SCHEMA_DIR,
+    claim_json_bytes,
+    claim_page_scan,
+    claim_record_schema,
+    decoded_claim_page,
+    ledger_schema_path,
+    nfc,
+    normalize_value,
+    parse_claim_ledger,
+    require_claim_byte_budget,
+    semantic_payload,
+    trim,
+    validate_claim_record,
+    validate_interval,
 )
+from llm_wiki.formats.canonical import canonical_json_bytes, sha256_bytes
+from llm_wiki.formats.schema import validate_schema, validate_schema_object
+from llm_wiki.runtime_publication import write_all
+from reliable_memory import open_operational_db
 from settings import raise_hint, setting_value
 
-SCHEMA_DIR = Path(__file__).with_name("schemas")
-LEDGER_SCHEMA = SCHEMA_DIR / "claim-ledger-v1.json"
 CANDIDATE_SCHEMA = SCHEMA_DIR / "claim-candidate-v1.json"
-# The claim tree's ceiling, which is the journal's: a project journal is one of
-# the pages this index reads, and a page the journal accepts must never be one
-# the index refuses. Measured 2026-09-10: a 4.2 MB journal refused every compile
-# for three days after the claim tree's own cap had already been raised. See
-# `docs/research/2026-09-10-one-ceiling-for-every-reader-of-a-journal.md`.
-MAX_CLAIM_PAGE_BYTES = MAX_CLAIM_TREE_FILE_BYTES
+# Basis unknown: value predates measurement; review when a real ledger is refused.
 MAX_ACTIVE_RECORDS = 10_000
-# A claim's number value is model-written text: characters, digits and exponent are bounded so
-# normalising `1e999999` can never expand into a huge integer (a resource bound on untrusted
-# input). Basis unknown: value predates measurement; review when a real measured quantity is
-# refused.
-MAX_DECIMAL_CHARS = 128
-MAX_DECIMAL_DIGITS = 128
-MAX_DECIMAL_EXPONENT = 128
 CLAIM_INDEX_SCHEMA_VERSION = "claim-index/v2"
 RELATIONS = frozenset(
     {
@@ -77,16 +77,7 @@ _NON_SUBSTANTIVE_RELATIONS = frozenset(
 # forms anchor on the start of the line and end it with the date, so nothing
 # ambiguous is admitted; anything else still refuses by name. See
 # `docs/research/2026-08-28-which-daily-header-is-canonical.md`.
-_DATE_RE = re.compile(r"^# (?:[^\r\n]*?[ \t]\u2014[ \t])?(\d{4}-\d{2}-\d{2})(?:\r?\n|$)")
-# The one definition of a Claims ledger, for its readers and its writers alike:
-# opening, the canonical JSON line, closing fence — then only blank lines before
-# the next section or the end. Three copies of this once required exactly one
-# line break, and compile's own `## Update` after a blank line made every such
-# page unreadable. See `docs/research/2026-09-14-a-blank-line-before-the-next-section.md`.
-CLAIM_LEDGER_RE = re.compile(
-    rb"(?ms)(^## Claims[ \t]*\r?\n```json[ \t]*\r?\n)([^\r\n]+)"
-    rb"(\r?\n```[ \t]*(?=(?:\r?\n[ \t]*)*(?:\r?\n## |\Z)))"
-)
+DATE_RE = re.compile(r"^# (?:[^\r\n]*?[ \t]\u2014[ \t])?(\d{4}-\d{2}-\d{2})(?:\r?\n|$)")
 _EXTRACTION_FIELDS = {
     "id",
     "text",
@@ -102,13 +93,6 @@ _EXTRACTION_FIELDS = {
     "links",
     "extractor_version",
 }
-_RFC3339_UTC_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z$")
-_DECIMAL_INPUT_RE = re.compile(
-    r"^[+-]?(?:(?P<integer>\d+)(?:\.(?P<fraction>\d*))?|"
-    r"\.(?P<leading_fraction>\d+))(?:[eE](?P<exponent>[+-]?\d+))?$"
-)
-
-
 class EvidenceMismatch(ValueError):
     """A proposed claim is not bound to the exact referenced literal bytes."""
 
@@ -153,308 +137,22 @@ class IndexedClaim:
     ledger_backed: bool = True
 
 
-def _nfc(value: str) -> str:
-    return unicodedata.normalize("NFC", value)
-
-
-def _trim(value: object, *, label: str, fold: bool = False) -> str:
-    if not isinstance(value, str):
-        raise ValueError(f"{label} must be a string")
-    result = _folded(_nfc(" ".join(value.split())), fold)
-    if not result:
-        raise ValueError(f"{label} must not be empty")
-    return result
-
-
-def _folded(text: str, fold: bool) -> str:
-    if fold:
-        return text.casefold()
-    return text
-
-
-def _canonical_time(value: object, *, nullable: bool, label: str) -> str | None:
-    if value is None and nullable:
-        return None
-    text = _trim(value, label=label)
-    if "T" not in text:
-        return _canonical_date_text(text, label=label)
-    return _canonical_timestamp_text(text, label=label)
-
-
-def _canonical_date_text(text: str, *, label: str) -> str:
-    try:
-        if date.fromisoformat(text).isoformat() != text:
-            raise ValueError
-    except ValueError as exc:
-        raise ValueError(f"{label} must be a canonical UTC date or timestamp") from exc
-    return text
-
-
-# `datetime.fromisoformat` accepted exactly three or six fractional digits until
-# Python 3.11; this project supports 3.10, where `…:00.5Z` — a perfectly ordinary
-# half second — raises `Invalid isoformat string`. Verified on 3.10.20 against
-# 3.12.3 on 2026-08-30, and it is why `test_a_sub_second_validity_interval_is_
-# not_refused_as_inverted` failed on every 3.10 job in CI while passing locally.
-# Padding to six digits is exact: it changes no instant and no rendered output,
-# because `isoformat()` prints six digits on both versions either way.
-_FRACTIONAL_SECONDS_RE = re.compile(
-    r"^(?P<head>.*T\d{2}:\d{2}:\d{2})\.(?P<digits>\d+)(?P<tail>.*)$"
-)
-
-
-def _six_digit_fraction(text: str) -> str:
-    """The same instant with a fraction every supported Python can read."""
-    match = _FRACTIONAL_SECONDS_RE.match(text)
-    if match is None:
-        return text
-    digits = match.group("digits")
-    if len(digits) > 6:
-        return text
-    return f"{match.group('head')}.{digits.ljust(6, '0')}{match.group('tail')}"
-
-
-def _canonical_timestamp_text(text: str, *, label: str) -> str:
-    try:
-        parsed = datetime.fromisoformat(
-            _six_digit_fraction(text[:-1] + "+00:00" if text.endswith("Z") else text)
-        )
-        if parsed.tzinfo is None or parsed.utcoffset() != timezone.utc.utcoffset(parsed):
-            raise ValueError
-    except ValueError as exc:
-        raise ValueError(f"{label} must be a canonical UTC date or timestamp") from exc
-    return parsed.isoformat().replace("+00:00", "Z").replace(".000000Z", "Z")
-
-
-def _strict_rfc3339_utc(value: object, *, label: str) -> str:
-    if not isinstance(value, str) or _RFC3339_UTC_RE.fullmatch(value) is None:
-        raise ValueError(f"{label} must be a strict UTC RFC3339 timestamp")
-    try:
-        parsed = datetime.fromisoformat(_six_digit_fraction(value[:-1] + "+00:00"))
-    except ValueError as exc:
-        raise ValueError(f"{label} is not a real RFC3339 date/time") from exc
-    if parsed.utcoffset() != timezone.utc.utcoffset(parsed):
-        raise ValueError(f"{label} must be UTC")
-    return value
-
-
-def _canonical_decimal(value: object) -> str:
-    source = _decimal_source(value)
-    _require_decimal_bounds(_decimal_match(source))
-    return _canonical_decimal_text(source)
-
-
-def _require_decimal_type(value: object) -> None:
-    if isinstance(value, (bool, float)) or not isinstance(value, (str, int, Decimal)):
-        raise ValueError("number value must be a decimal string, integer, or Decimal")
-
-
-def _decimal_source(value: object) -> str:
-    _require_decimal_type(value)
-    if not isinstance(value, str):
-        return str(value)
-    if value != value.strip() or not value:
-        raise ValueError("number value is invalid")
-    return value
-
-
-def _decimal_match(source: str) -> re.Match[str]:
-    if len(source) > MAX_DECIMAL_CHARS:
-        raise ValueError("number value exceeds the input length limit")
-    match = _DECIMAL_INPUT_RE.fullmatch(source)
-    if match is None:
-        raise ValueError("number value is invalid")
-    return match
-
-
-def _require_decimal_bounds(match: re.Match[str]) -> None:
-    integer = match["integer"] or ""
-    coefficient_digits = len(integer) + len(_decimal_fraction(match))
-    if coefficient_digits > MAX_DECIMAL_DIGITS:
-        raise ValueError("number value exceeds the coefficient digit limit")
-    position = len(integer) + _decimal_exponent(match)
-    if _expanded_digits(position, coefficient_digits) > MAX_DECIMAL_DIGITS:
-        raise ValueError("number value exceeds the expanded digit limit")
-
-
-def _decimal_fraction(match: re.Match[str]) -> str:
-    fraction = match["fraction"]
-    if fraction is None:
-        return match["leading_fraction"] or ""
-    return fraction
-
-
-def _decimal_exponent(match: re.Match[str]) -> int:
-    text = match["exponent"] or "0"
-    if len(text.lstrip("+-")) > 3:
-        raise ValueError("number value exponent is out of range")
-    exponent = int(text)
-    if abs(exponent) > MAX_DECIMAL_EXPONENT:
-        raise ValueError("number value exponent is out of range")
-    return exponent
-
-
-def _expanded_digits(decimal_position: int, coefficient_digits: int) -> int:
-    """How many digits the value would need written out in full."""
-    if decimal_position <= 0:
-        return 1 - decimal_position + coefficient_digits
-    if decimal_position >= coefficient_digits:
-        return decimal_position
-    return coefficient_digits
-
-
-def _trimmed_decimal(result: str) -> str:
-    if "." in result:
-        return result.rstrip("0").rstrip(".")
-    return result
-
-
-def _canonical_decimal_text(source: str) -> str:
-    result = _trimmed_decimal(format(_finite_decimal(source), "f"))
-    if len(result) > MAX_DECIMAL_CHARS:
-        raise ValueError("number value exceeds the canonical length limit")
-    if Decimal(result).is_zero():
-        return "0"
-    return result
-
-
-def _finite_decimal(source: str) -> Decimal:
-    try:
-        number = Decimal(source)
-    except InvalidOperation as exc:
-        raise ValueError("number value is invalid") from exc
-    if not number.is_finite():
-        raise ValueError("number value must be finite")
-    return number
-
-
-def _normalize_value(value: object) -> dict[str, object]:
-    if not isinstance(value, Mapping) or not isinstance(value.get("type"), str):
-        raise ValueError("claim value must be typed")
-    kind = value["type"]
-    _require_value_fields(value, kind)
-    raw = value["value"]
-    if kind == "number":
-        return {
-            "type": "number",
-            "value": _canonical_decimal(raw),
-            "unit": _trim(value["unit"], label="number unit", fold=True),
-        }
-    return {"type": kind, "value": _normalized_scalar(kind, raw)}
-
-
-def _require_value_fields(value: Mapping[str, object], kind: str) -> None:
-    expected = {"type", "value", "unit"} if kind == "number" else {"type", "value"}
-    if set(value) != expected:
-        raise ValueError("typed claim value fields are invalid")
-
-
-def _normalized_scalar(kind: str, raw: object) -> object:
-    normalizer = _SCALAR_NORMALIZERS.get(kind)
-    if normalizer is None:
-        raise ValueError("claim value type is invalid")
-    return normalizer(raw)
-
-
-def _normalized_string(raw: object) -> object:
-    if raw == "":
-        return ""
-    return _trim(raw, label="string value")
-
-
-def _normalized_entity(raw: object) -> object:
-    return _trim(raw, label="entity value", fold=True)
-
-
-def _normalized_boolean(raw: object) -> bool:
-    if not isinstance(raw, bool):
-        raise ValueError("boolean value is invalid")
-    return raw
-
-
-def _normalized_date(raw: object) -> object:
-    result = _canonical_time(raw, nullable=False, label="date value")
-    if "T" in str(result):
-        raise ValueError("date value must not contain a time")
-    return result
-
-
-def _normalized_timestamp(raw: object) -> object:
-    result = _canonical_time(raw, nullable=False, label="timestamp value")
-    if "T" not in str(result):
-        raise ValueError("timestamp value must contain a time")
-    return result
-
-
-_SCALAR_NORMALIZERS = {
-    "string": _normalized_string,
-    "entity": _normalized_entity,
-    "boolean": _normalized_boolean,
-    "date": _normalized_date,
-    "timestamp": _normalized_timestamp,
-}
-
-
-def _validate_interval(validity: object) -> dict[str, str | None]:
-    if not isinstance(validity, Mapping) or set(validity) != {"from", "to"}:
-        raise ValueError("claim validity must contain exactly from and to")
-    start = _canonical_time(validity["from"], nullable=True, label="validity from")
-    end = _canonical_time(validity["to"], nullable=True, label="validity to")
-    _require_ordered_interval(start, end)
-    return {"from": start, "to": end}
-
-
-def _require_ordered_interval(start: str | None, end: str | None) -> None:
-    if start is None or end is None:
-        return
-    if _instant_of(start) >= _instant_of(end):
-        raise ValueError("claim validity must be a non-empty half-open interval")
-
-
-def _instant_of(value: str) -> datetime:
-    """A bare date is its first instant; canonical times order by instant, not text.
-
-    Text ordering is wrong here because canonical form keeps fractional seconds
-    and `.` sorts before `Z`, so `…:00.5Z` compares as earlier than `…:00Z`.
-    """
-    if "T" in value:
-        return datetime.fromisoformat(value[:-1] + "+00:00")
-    return datetime.fromisoformat(f"{value}T00:00:00+00:00")
-
-
-def _semantic_payload(record: Mapping[str, object]) -> dict[str, object]:
-    qualifiers = [
-        {
-            "key": _trim(item["key"], label="qualifier key", fold=True),
-            "value": _normalize_value(item["value"]),
-        }
-        for item in record["qualifiers"]
-    ]
-    qualifiers.sort(key=canonical_json_bytes)
-    return {
-        "subject": _trim(record["subject"], label="subject", fold=True),
-        "relation": _trim(record["relation"], label="relation", fold=True),
-        "value": _normalize_value(record["value"]),
-        "qualifiers": qualifiers,
-        "validity": _validate_interval(record["validity"]),
-    }
-
-
 def _validate_extracted_record(record: object) -> None:
     if not isinstance(record, dict) or set(record) != _EXTRACTION_FIELDS:
         raise ValueError("claim extraction schema fields are invalid")
     for field in ("id", "text", "subject", "relation", "extractor_version"):
-        _trim(record[field], label=field)
+        trim(record[field], label=field)
     _require_extracted_relation(record["relation"])
-    _normalize_value(record["value"])
+    normalize_value(record["value"])
     _require_extracted_qualifiers(record["qualifiers"])
-    _validate_interval(record["validity"])
+    validate_interval(record["validity"])
     _require_extracted_enums(record)
     _require_extracted_evidence(record["evidence"])
     _require_extracted_links(record["links"])
 
 
 def _require_extracted_relation(relation: object) -> None:
-    if _trim(relation, label="relation", fold=True) not in RELATIONS:
+    if trim(relation, label="relation", fold=True) not in RELATIONS:
         raise ValueError("claim extraction schema relation is invalid")
 
 
@@ -468,11 +166,11 @@ def _require_extracted_qualifiers(qualifiers: object) -> None:
 def _require_extracted_qualifier(qualifier: object) -> None:
     if not isinstance(qualifier, dict) or set(qualifier) != {"key", "value"}:
         raise ValueError("claim extraction schema qualifier fields are invalid")
-    _trim(qualifier["key"], label="qualifier key")
-    _normalize_value(qualifier["value"])
+    trim(qualifier["key"], label="qualifier key")
+    normalize_value(qualifier["value"])
 
 
-_EXTRACTION_ENUMS = (
+EXTRACTION_ENUMS = (
     ("lifecycle", frozenset({"active", "superseded", "inactive", "quarantined"})),
     ("confidence", frozenset({"high", "medium", "low"})),
     ("authority", frozenset({"user", "web", "ai-derived", "inferred"})),
@@ -480,7 +178,7 @@ _EXTRACTION_ENUMS = (
 
 
 def _require_extracted_enums(record: Mapping[str, object]) -> None:
-    for field, allowed in _EXTRACTION_ENUMS:
+    for field, allowed in EXTRACTION_ENUMS:
         if record[field] not in allowed:
             raise ValueError(f"claim extraction schema {field} is invalid")
 
@@ -494,7 +192,7 @@ def _require_extracted_evidence(evidence: object) -> None:
         raise ValueError("claim extraction schema evidence fields are invalid")
     EvidenceRef.parse(evidence["reference"])
     _require_extracted_hash(evidence["sha256"])
-    _trim(evidence["text"], label="evidence text")
+    trim(evidence["text"], label="evidence text")
 
 
 def _require_extracted_hash(digest: object) -> None:
@@ -597,20 +295,20 @@ class ClaimPipeline:
             raise TypeError("claim must have verified literal evidence before normalization")
         self.calls.append("normalize")
         raw = claim.record
-        semantic = _semantic_payload(raw)
+        semantic = semantic_payload(raw)
         record = {
-            "schema_version": "claim/v1",
-            "id": _trim(raw["id"], label="id"),
+            "schema_version": raw.get("schema_version", "claim/v1"),
+            "id": trim(raw["id"], label="id"),
             "fingerprint": sha256_bytes(canonical_json_bytes(semantic)),
-            "text": _nfc(raw["text"]),
+            "text": _normalized_literal(raw),
             **semantic,
             "observed_at": claim.claim.block.observed_at,
             "lifecycle": raw["lifecycle"],
             "confidence": raw["confidence"],
             "authority": raw["authority"],
-            "evidence": json.loads(canonical_json_bytes(raw["evidence"])),
-            "links": sorted({_trim(item, label="claim link") for item in raw["links"]}),
-            "extractor_version": _trim(raw["extractor_version"], label="extractor version"),
+            "evidence": _normalized_evidence(raw),
+            "links": sorted({trim(item, label="claim link") for item in raw["links"]}),
+            "extractor_version": trim(raw["extractor_version"], label="extractor version"),
         }
         validate_claim_record(record)
         return NormalizedClaim(record)
@@ -618,7 +316,7 @@ class ClaimPipeline:
 
 def _claim_source_daily_id(source: bytes) -> str:
     text = _decoded_claim_source(source)
-    match = _DATE_RE.match(text)
+    match = DATE_RE.match(text)
     if match is None:
         raise ValueError("claim source has no canonical daily date")
     daily_id = match[1]
@@ -684,98 +382,82 @@ def _evidence_literal(span: bytes) -> str:
         raise EvidenceMismatch("evidence span is not UTF-8") from exc
 
 
-def validate_claim_record(record: object) -> None:
-    validate_schema({"schema_version": "claim-ledger/v1", "claims": [record]}, LEDGER_SCHEMA)
-    assert isinstance(record, Mapping)
-    _require_canonical_semantics(record)
-    evidence = record["evidence"]
-    assert isinstance(evidence, Mapping)
-    ref = EvidenceRef.parse(evidence["reference"])
-    if ref.byte_end <= ref.byte_start:
-        raise ValueError("claim evidence span must be non-empty")
-    _require_evidence_literal(record, evidence)
-    _require_observation(record, ref)
+def _normalized_evidence(record: Mapping[str, object]) -> dict:
+    if record.get("schema_version") == "claim/v2":
+        return deepcopy(record["evidence"])
+    return json.loads(canonical_json_bytes(record["evidence"]))
 
 
-def _require_canonical_semantics(record: Mapping[str, object]) -> None:
-    semantic = _semantic_payload(record)
-    if any(
-        canonical_json_bytes(record[field]) != canonical_json_bytes(semantic[field])
-        for field in semantic
-    ):
-        raise ValueError("claim semantic fields are not canonical")
-    if record["fingerprint"] != sha256_bytes(canonical_json_bytes(semantic)):
-        raise ValueError("claim fingerprint does not match normalized semantics")
+def _normalized_literal(record: Mapping[str, object]) -> str:
+    if record.get("schema_version") == "claim/v2":
+        return record["text"]
+    return nfc(record["text"])
 
 
-def _require_evidence_literal(
-    record: Mapping[str, object], evidence: Mapping[str, object]
-) -> None:
-    if evidence["text"] != record["text"] or sha256_bytes(
-        evidence["text"].encode("utf-8")
-    ) != evidence["sha256"]:
-        raise ValueError("claim evidence literal hash does not match")
+def _candidate_schema(record: object) -> dict:
+    rule = claim_record_schema(record)
+    schema = json.loads(CANDIDATE_SCHEMA.read_text(encoding="utf-8"))
+    if record["schema_version"] == "claim/v1":
+        return schema
+    rule["properties"]["lifecycle"] = deepcopy(schema["properties"]["claim"]["properties"]["lifecycle"])
+    schema["properties"]["claim"] = rule
+    return schema
 
 
-def _require_observation(record: Mapping[str, object], ref: EvidenceRef) -> None:
-    observed_at = _strict_rfc3339_utc(record["observed_at"], label="observed_at")
-    try:
-        datetime.strptime(ref.block_id, "%H:%M:%S")
-    except ValueError as exc:
-        raise ValueError(
-            "observed evidence block is not a valid HH:MM:SS timestamp"
-        ) from exc
-    well_formed = re.fullmatch(r"\d{2}:\d{2}:\d{2}", ref.block_id) is not None
-    if not (well_formed and names_block(observed_at, ref.daily_id, ref.block_id)):
-        raise ValueError("claim observation does not match its evidence block")
+def validate_claim_candidate(candidate: object) -> None:
+    if not isinstance(candidate, Mapping):
+        raise ValueError("claim candidate must be an object")
+    record = candidate.get("claim")
+    schema = _candidate_schema(record)
+    require_claim_byte_budget(claim_json_bytes(candidate))
+    validate_schema_object(candidate, schema)
+    validate_claim_record(record)
 
 
-def parse_claim_ledger(content: bytes) -> dict[str, object] | None:
-    text = _decoded_claim_page(content)
-    if not _has_claims_heading(text):
-        return None
-    ledger = _parsed_ledger(text)
-    validate_schema(ledger, LEDGER_SCHEMA)
-    _require_unique_ledger_ids(ledger["claims"])
-    for record in ledger["claims"]:
+def claim_ledger_document(records: Sequence[Mapping[str, object]], *, previous_version: str | None = None) -> dict:
+    for record in records:
         validate_claim_record(record)
+    version = _ledger_output_version(records, previous_version)
+    ledger = {"schema_version": version, "claims": list(records)}
+    validate_schema(ledger, ledger_schema_path(ledger))
+    require_claim_byte_budget(claim_json_bytes(ledger))
     return ledger
 
 
-def _decoded_claim_page(content: bytes) -> str:
-    try:
-        return content.decode("utf-8", errors="strict")
-    except UnicodeDecodeError as exc:
-        raise ValueError("claim page is not UTF-8") from exc
+def _ledger_output_version(records: Sequence[Mapping[str, object]], previous_version: str | None) -> str:
+    if previous_version not in {None, "claim-ledger/v1", "claim-ledger/v2"}:
+        raise ValueError("unsupported previous claim ledger version")
+    if previous_version == "claim-ledger/v2" or any(record["schema_version"] == "claim/v2" for record in records):
+        return "claim-ledger/v2"
+    return "claim-ledger/v1"
 
 
-def _has_claims_heading(text: str) -> bool:
-    headings = list(re.finditer(r"(?m)^## Claims[ \t]*\r?$", text))
-    if not headings:
-        return False
-    if len(headings) != 1:
-        raise ValueError("claim page must contain exactly one Claims ledger")
-    return True
+def claim_ledger_fingerprint(ledger: dict[str, object] | None) -> str:
+    """Bind the validated ledger consumed by assessment, including its absence."""
+    return sha256_bytes(canonical_json_bytes(ledger))
 
 
-def _parsed_ledger(text: str) -> dict[str, object]:
-    match = CLAIM_LEDGER_RE.search(text.encode("utf-8"))
-    if match is None:
-        raise ValueError("Claims ledger must be one fenced canonical JSON object")
-    raw = match[2]
-    try:
-        ledger = json.loads(raw.decode("utf-8"))
-    except json.JSONDecodeError as exc:
-        raise ValueError("Claims ledger is malformed JSON") from exc
-    if canonical_json_bytes(ledger) != raw:
-        raise ValueError("Claims ledger is not restricted canonical JSON")
-    return ledger
+def _record_ledger_snapshot(snapshot, relative, ledger) -> None:
+    if snapshot is not None:
+        snapshot[relative] = claim_ledger_fingerprint(ledger)
 
 
-def _require_unique_ledger_ids(claims: list[object]) -> None:
-    claim_ids = [str(record["id"]) for record in claims]
-    if len(claim_ids) != len(set(claim_ids)):
-        raise ValueError("claim ledger contains a duplicate claim id")
+def reflection_history_spans(content: bytes) -> tuple[tuple[int, int], ...]:
+    """Exact byte ranges of balanced producer-owned historical containers."""
+    require_claim_byte_budget(content)
+    decoded_claim_page(content)
+    return tuple(claim_page_scan(content).histories)
+
+
+def reflection_history_boundary(content: bytes) -> int | None:
+    """The legacy or current history heading outside Markdown fences."""
+    scan = claim_page_scan(content)
+    if not scan.history_markers:
+        return None
+    start = scan.history_markers[0]
+    if start and content[start - 1:start] == b"\n":
+        return start - 1
+    return start
 
 
 def is_substantive(record: Mapping[str, object]) -> bool:
@@ -859,10 +541,7 @@ def _table_shape(database: sqlite3.Connection, table: str) -> tuple[tuple, ...]:
 def _resolved_state_root(state_root: Path | None) -> Path:
     if state_root is not None:
         return Path(state_root)
-    configured = os.environ.get("LLM_WIKI_STATE_ROOT") or os.environ.get("LLM_WIKI_ROOT")
-    if configured:
-        return Path(configured)
-    return Path(__file__).resolve().parent.parent
+    return runtime_roots.state_root()
 
 
 def _resolved_vault(vault: Path | None, state_root: Path) -> Path:
@@ -872,7 +551,7 @@ def _resolved_vault(vault: Path | None, state_root: Path) -> Path:
     sibling = state_root.parent
     if (sibling / "knowledge").is_dir():
         return sibling
-    return Path(os.environ.get("LLM_WIKI_ROOT", Path(__file__).resolve().parent.parent))
+    return runtime_roots.vault_root()
 
 
 def _require_allowed_root(root: Path, allowed: tuple[Path, ...]) -> Path:
@@ -886,7 +565,7 @@ def _require_allowed_root(root: Path, allowed: tuple[Path, ...]) -> Path:
     return resolved
 
 
-def _project_pages(resolved: Path) -> list[Path]:
+def project_pages(resolved: Path) -> list[Path]:
     return [
         page
         for page in resolved.rglob("*.md")
@@ -954,9 +633,9 @@ class ClaimIndex:
     def _connect(self) -> sqlite3.Connection:
         connection = open_operational_db(self.path, busy_ms=5000)
         try:
-            _restrict_owner_only(self.path.parent, 0o700)
-            _restrict_owner_only(self.path, 0o600)
-            _verify_owner_only(self.path, 0o600)
+            restrict_owner_only(self.path.parent, 0o700)
+            restrict_owner_only(self.path, 0o600)
+            verify_owner_only(self.path, 0o600)
             return connection
         except Exception:
             connection.close()
@@ -1022,14 +701,18 @@ class ClaimIndex:
         *,
         deadline: float = float("inf"),
         cancelled: Callable[[], bool] | None = None,
+        ledger_snapshot: dict[str, str] | None = None,
     ) -> None:
         if time.monotonic() >= deadline or bool(cancelled and cancelled()):
             raise TimeoutError("claim rebuild cancelled or deadline reached")
-        validate_state_root(self.path.parent)
-        _restrict_owner_only(self.path.parent, 0o700)
-        with _exclusive_file_lock(self.lock_path):
+        # The established database-open boundary validates the actual parent.
+        # It also remains importable by processes holding the previous module.
+        with closing(self._connect()):
+            pass
+        with exclusive_file_lock(self.lock_path):
             pages = self._rebuild_pages(sources)
-            self._rebuild_locked(pages, deadline=deadline, cancelled=cancelled)
+            self._rebuild_locked(pages, deadline=deadline, cancelled=cancelled,
+                                 ledger_snapshot=ledger_snapshot)
 
     def _rebuild_pages(
         self,
@@ -1066,7 +749,7 @@ class ClaimIndex:
         resolved = _require_allowed_root(root, allowed)
         if resolved == allowed[0]:
             return list(resolved.rglob("*.md"))
-        return _project_pages(resolved)
+        return project_pages(resolved)
 
     def _rebuild_locked(
         self,
@@ -1074,13 +757,14 @@ class ClaimIndex:
         *,
         deadline: float = float("inf"),
         cancelled: Callable[[], bool] | None = None,
+        ledger_snapshot: dict[str, str] | None = None,
     ) -> None:
         rows: list[tuple[object, ...]] = []
         diagnostics: list[tuple[str, str, str]] = []
         seen_pages: set[str] = set()
         for page in pages:
             _require_rebuild_active(deadline, cancelled)
-            self._collect_page(Path(page), seen_pages, rows, diagnostics)
+            self._collect_page(Path(page), seen_pages, rows, diagnostics, ledger_snapshot)
         _require_rebuild_active(deadline, cancelled)
         self._write_index(rows, diagnostics)
 
@@ -1090,12 +774,14 @@ class ClaimIndex:
         seen_pages: set[str],
         rows: list[tuple[object, ...]],
         diagnostics: list[tuple[str, str, str]],
+        ledger_snapshot: dict[str, str] | None = None,
     ) -> None:
         relative, content = self._page_bytes(page)
         if relative in seen_pages:
             raise ValueError("claim index page list contains duplicates")
         seen_pages.add(relative)
         ledger = parse_claim_ledger(content)
+        _record_ledger_snapshot(ledger_snapshot, relative, ledger)
         if ledger is None:
             return
         for record in ledger["claims"]:
@@ -1120,7 +806,7 @@ class ClaimIndex:
                 record["relation"],
                 record["lifecycle"],
                 relative,
-                canonical_json_bytes(record),
+                claim_json_bytes(record),
             )
         )
 
@@ -1251,16 +937,16 @@ class ClaimIndex:
 
 
 @contextmanager
-def _exclusive_file_lock(path: Path, *, timeout: float = 10.0) -> Iterator[None]:
+def exclusive_file_lock(path: Path, *, timeout: float = 10.0) -> Iterator[None]:
     """Hold an OS-released cross-process lock for a complete index rebuild."""
     path = Path(path)
     descriptor, created = _open_lock_file(path)
     acquired = False
     try:
-        _prepare_lock_file(path, descriptor, created)
+        prepare_lock_file(path, descriptor, created)
         _acquire_lock(descriptor, path, timeout)
         acquired = True
-        _write_lock_token(descriptor)
+        write_lock_token(descriptor)
         yield
     finally:
         _release_lock(descriptor, acquired)
@@ -1274,13 +960,13 @@ def _open_lock_file(path: Path) -> tuple[int, bool]:
         return os.open(path, flags), False
 
 
-def _prepare_lock_file(path: Path, descriptor: int, created: bool) -> None:
+def prepare_lock_file(path: Path, descriptor: int, created: bool) -> None:
     if os.fstat(descriptor).st_size == 0:
-        os.write(descriptor, b"0")
+        write_all(descriptor, b"0")
     if created:
-        _restrict_owner_only(path, 0o600)
+        restrict_owner_only(path, 0o600)
         return
-    _verify_owner_only(path, 0o600)
+    verify_owner_only(path, 0o600)
 
 
 def _acquire_lock(descriptor: int, path: Path, timeout: float) -> None:
@@ -1320,10 +1006,10 @@ def _unlock_region(descriptor: int) -> None:
     fcntl.flock(descriptor, fcntl.LOCK_UN)
 
 
-def _write_lock_token(descriptor: int) -> None:
+def write_lock_token(descriptor: int) -> None:
     token = f"{os.getpid()}:{threading.get_ident()}".encode()
     os.lseek(descriptor, 0, os.SEEK_SET)
-    os.write(descriptor, token)
+    write_all(descriptor, token)
     os.ftruncate(descriptor, len(token))
 
 

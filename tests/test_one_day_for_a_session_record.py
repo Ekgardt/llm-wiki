@@ -27,7 +27,7 @@ def _record_written(monkeypatch, record: dict) -> list[dict]:
         "write_session_evidence",
         lambda root, fields, text, **_kwargs: written.append({**fields, "text": text}),
     )
-    flush_memory._keep_session_record(record, lambda: EVENING_WEST_OF_UTC)
+    flush_memory.keep_session_record(record, lambda: EVENING_WEST_OF_UTC)
     return written
 
 
@@ -37,7 +37,7 @@ def test_the_worker_files_an_evening_session_under_the_local_day(monkeypatch):
 
     written = _record_written(monkeypatch, record)
 
-    assert session_evidence._capture_day(written[0]) == "2026-09-13"
+    assert session_evidence.capture_day(written[0]) == "2026-09-13"
 
 
 def test_the_worker_keeps_the_record_before_any_classification(monkeypatch):

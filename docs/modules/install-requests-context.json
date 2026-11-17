@@ -1,0 +1,224 @@
+{
+  "encoding": "o200k_base",
+  "max_tokens": 100000,
+  "serialization": "exact-duplicates/v1",
+  "files": [
+    "AGENTS.md",
+    "CLAUDE.md",
+    "docs/AGENTS.md",
+    "docs/STRUCTURE.md",
+    "docs/modules/context-bundle.md",
+    "docs/modules/context-records.md",
+    "docs/modules/context-tooling.md",
+    "docs/modules/install-requests-context.json",
+    "docs/modules/install-requests.md",
+    "docs/modules/model-choice.md",
+    "docs/modules/product-structure.md",
+    "docs/modules/project-governance.md",
+    "docs/modules/test-support.md",
+    "rules/development-laws.md",
+    "scripts/__init__.py",
+    "scripts/llm_wiki/__init__.py",
+    "scripts/llm_wiki/context_bundle.py",
+    "scripts/llm_wiki/install_requests.py",
+    "tests/__init__.py",
+    "tests/conftest.py",
+    "tests/module_context.py",
+    "tests/module_context_paths.py",
+    "tests/module_interface.py",
+    "tests/module_interface_render.py",
+    "tests/module_qualification.py",
+    "tests/module_record_context.py",
+    "tests/module_records.py",
+    "tests/shared_fixtures.py",
+    "tests/slow_machine.py"
+  ],
+  "ownership": {
+    "files": [
+      "docs/modules/install-requests-context.json",
+      "docs/modules/install-requests.md",
+      "scripts/llm_wiki/install_requests.py"
+    ]
+  },
+  "qualified_dependencies": [
+    {
+      "provider": "scripts/install_state.py",
+      "names": [
+        "InstallControlError",
+        "ManagedResource",
+        "optional_install_record",
+        "replaced_whole",
+        "transaction_resources"
+      ],
+      "contract_sha256": "0cbdde6ffe24cea90a3602c28a97df6701e5b92e998d6267d478e46cb035dc20",
+      "integration_tests": [
+        "tests/test_a_changed_file_is_named_and_can_be_taken_over.py",
+        "tests/test_a_changed_task_setting_reaches_an_installed_machine.py",
+        "tests/test_a_rerun_may_ask_for_fewer_things.py"
+      ]
+    },
+    {
+      "provider": "scripts/install_takeover.py",
+      "names": [
+        "discard_unneeded_copies",
+        "drop_in_resources",
+        "keep_changed_whole_files",
+        "report_takeovers"
+      ],
+      "contract_sha256": "5bf0897d4a74f9d371842188dffc82c4ecd56b810972b5cc9c130ff4eddfd231",
+      "integration_tests": [
+        "tests/test_an_update_replaces_what_it_owns.py",
+        "tests/test_what_an_update_created_its_rollback_takes_back.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/generation_catalog_store.py",
+      "names": [
+        "GenerationCatalog"
+      ],
+      "contract_sha256": "b18194ebe04bf988b4474379fcb5243516550d43b745a00eaed1453f7844c983",
+      "integration_tests": [
+        "tests/test_a_blocked_task_has_a_way_back.py",
+        "tests/test_a_build_in_flight_is_not_an_orphan.py",
+        "tests/test_a_capacity_refusal_does_not_corrupt_a_generation.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/install_rebuild.py",
+      "names": [
+        "resources_from_record"
+      ],
+      "contract_sha256": "a3d13421aaf8c7fb4e640f0f6e54293e6c0b153415b3644af1edfc12db311156",
+      "integration_tests": [
+        "tests/test_claude_settings_ownership.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/install_record_reader.py",
+      "names": [
+        "record_backend"
+      ],
+      "contract_sha256": "2c18414507484ce39f29c6cc1db6e7884ddeac26fef7436e15ce5a45263674f3",
+      "integration_tests": [
+        "tests/test_claude_settings_ownership.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/install_records.py",
+      "names": [
+        "ExplainedInstallError",
+        "Identity",
+        "UNREADABLE_KINDS",
+        "adoptable",
+        "error_code",
+        "record_identity",
+        "records_by_identity",
+        "resource_identity",
+        "resources_by_identity"
+      ],
+      "contract_sha256": "cddd123138f772878b63d515f9cd10b9d51149fef314236433b7be9cea62cdc9",
+      "integration_tests": [
+        "tests/test_an_update_honors_explicit_resource_adoption.py",
+        "tests/test_lock_writes_are_complete.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/install_release.py",
+      "names": [
+        "build_release_identity"
+      ],
+      "contract_sha256": "bc62d4f35445a8db90edd38825221aa68df56e89c8b78a24f20bd8c73d501d65",
+      "integration_tests": [
+        "tests/test_a_rerun_may_ask_for_fewer_things.py",
+        "tests/test_an_uninstall_names_what_it_leaves.py",
+        "tests/test_install_control.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/install_resource_builder.py",
+      "names": [
+        "build_install_resources",
+        "selected_backend"
+      ],
+      "contract_sha256": "b722a52bd3dae57f3a5f01885cc4288d4106f5dd70e4dd61824214a4f45c38c7",
+      "integration_tests": [
+        "tests/test_a_rerun_may_ask_for_fewer_things.py",
+        "tests/test_an_uninstall_names_what_it_leaves.py",
+        "tests/test_claude_settings_ownership.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/install_scheduler_render.py",
+      "names": [
+        "installer_stable_uv_path"
+      ],
+      "contract_sha256": "a94b30fc07d9f5fdb71549a8ad235d599bb62d1733fc7350c3295805d025c0ab",
+      "integration_tests": [
+        "tests/test_a_scheduled_run_keeps_the_uv_link.py",
+        "tests/test_a_weekly_waits_for_the_nightly.py",
+        "tests/test_an_update_replaces_what_it_owns.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/install_uninstall_rollback.py",
+      "names": [
+        "uninstall_resources"
+      ],
+      "contract_sha256": "2fc91c977f9b6451740a12c154c12f82ff4de24b3bdfab625092579df0bada55",
+      "integration_tests": [
+        "tests/test_a_rollback_undoes_only_what_it_did.py",
+        "tests/test_an_update_honors_explicit_resource_adoption.py",
+        "tests/test_claude_provider_projection_round_trips.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/install_v2_transactions.py",
+      "names": [
+        "install_resources",
+        "transaction_settled",
+        "v2_nonterminal"
+      ],
+      "contract_sha256": "ff4c013439d798cd0f7ba6ea921b03c5c6e8d2f98a74b8ef63e4d2268db143a4",
+      "integration_tests": [
+        "tests/test_a_changed_task_setting_reaches_an_installed_machine.py",
+        "tests/test_a_rerun_may_ask_for_fewer_things.py",
+        "tests/test_a_rollback_undoes_only_what_it_did.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/model_choice.py",
+      "names": [
+        "using_root"
+      ],
+      "contract_sha256": "d45f2655cb61963e77617d1dfd7d617b134ad77cc770b59b335d0856e5d65019",
+      "integration_tests": [
+        "tests/test_central_model_selection.py",
+        "tests/test_compile_execution_inventory.py"
+      ]
+    },
+    {
+      "provider": "scripts/reliable_memory.py",
+      "names": [
+        "validate_state_root"
+      ],
+      "contract_sha256": "8680515cd873056a7c8a36e0057d91f2f83f23c48841263697676ff91f7ff964",
+      "integration_tests": [
+        "tests/test_a_backup_image_carries_what_git_does_not.py",
+        "tests/test_a_changed_task_setting_reaches_an_installed_machine.py",
+        "tests/test_a_committed_source_resolves_an_older_compile_plan.py"
+      ]
+    },
+    {
+      "provider": "scripts/repository_scope.py",
+      "names": [
+        "sanitized_git_environment"
+      ],
+      "contract_sha256": "fd550ae20761afad50b37fa3a71044a162485b0e4d4b3e2af9b5b22e143c2bec",
+      "integration_tests": [
+        "tests/test_a_code_generation_is_not_abandoned.py",
+        "tests/test_a_directory_link_inside_the_checkout_does_not_refuse_the_revision.py",
+        "tests/test_a_document_is_opened_in_its_own_language.py"
+      ]
+    }
+  ]
+}

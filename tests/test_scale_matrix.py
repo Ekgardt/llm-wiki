@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import importlib.util
 import json
 import math
 import subprocess
@@ -16,6 +15,11 @@ import pytest
 ROOT = Path(__file__).resolve().parent.parent
 BENCHMARK = ROOT / "benchmark"
 RUNNER = BENCHMARK / "run_scale_matrix.py"
+if str(BENCHMARK) not in sys.path:
+    sys.path.insert(0, str(BENCHMARK))
+
+import run_scale_matrix  # noqa: E402
+
 REPORT_SCHEMA = BENCHMARK / "scale-matrix-smoke-report-v1.schema.json"
 FULL_REPORT_SCHEMA = BENCHMARK / "scale-matrix-full-report-v1.schema.json"
 
@@ -44,15 +48,6 @@ METRIC_KEYS = {
     "recall_at_50",
     "batch_throughput_qps",
 }
-
-
-def _runner():
-    spec = importlib.util.spec_from_file_location("run_scale_matrix", RUNNER)
-    assert spec is not None and spec.loader is not None
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[spec.name] = module
-    spec.loader.exec_module(module)
-    return module
 
 
 _EXACT_METRICS = {
@@ -155,7 +150,7 @@ def test_required_scale_matrix_artifacts_exist() -> None:
 
 
 def test_closed_corpus_sizes_and_selectivity_are_exported() -> None:
-    runner = _runner()
+    runner = run_scale_matrix
     assert runner.CORPUS_SIZES == CORPUS_SIZES
     assert runner.SELECTIVITY_FRACTIONS == SELECTIVITY
     assert runner.ADAPTER_IDS == ADAPTER_IDS
@@ -168,7 +163,7 @@ def test_closed_corpus_sizes_and_selectivity_are_exported() -> None:
 
 def test_generate_corpus_is_deterministic_and_structurally_realistic() -> None:
     np = pytest.importorskip("numpy")
-    runner = _runner()
+    runner = run_scale_matrix
     a = runner.generate_corpus(n_chunks=64, dimensions=8, seed=7)
     b = runner.generate_corpus(n_chunks=64, dimensions=8, seed=7)
     c = runner.generate_corpus(n_chunks=64, dimensions=8, seed=8)
@@ -188,7 +183,7 @@ def test_generate_corpus_is_deterministic_and_structurally_realistic() -> None:
 
 
 def test_filter_selectivity_targets_are_realized() -> None:
-    runner = _runner()
+    runner = run_scale_matrix
     corpus = runner.generate_corpus(n_chunks=1000, dimensions=4, seed=3)
     for fraction in SELECTIVITY:
         mask = runner.selectivity_mask(corpus, fraction=fraction, seed=3)
@@ -201,7 +196,7 @@ def test_filter_selectivity_targets_are_realized() -> None:
 
 def test_exact_numpy_is_ground_truth_for_recall() -> None:
     np = pytest.importorskip("numpy")
-    runner = _runner()
+    runner = run_scale_matrix
     corpus = runner.generate_corpus(n_chunks=48, dimensions=6, seed=11)
     query = corpus.vectors[0]
     truth = runner.exact_numpy_search(corpus.vectors, query, k=10, mask=None)
@@ -217,7 +212,7 @@ def test_exact_numpy_is_ground_truth_for_recall() -> None:
 
 def test_exact_top_k_breaks_partition_boundary_ties_by_id() -> None:
     np = pytest.importorskip("numpy")
-    runner = _runner()
+    runner = run_scale_matrix
     vectors = np.ones((60, 2), dtype=np.float32)
     ids = [f"id-{index:03d}" for index in reversed(range(60))]
 
@@ -227,7 +222,7 @@ def test_exact_top_k_breaks_partition_boundary_ties_by_id() -> None:
 
 
 def test_recall_uses_true_exact_top_50_ground_truth() -> None:
-    runner = _runner()
+    runner = run_scale_matrix
     relevant = [f"id-{index:03d}" for index in range(50)]
     retrieved = relevant[:10] + [f"miss-{index:03d}" for index in range(40)]
     assert runner.recall_at_k(retrieved, relevant, 10) == 1.0
@@ -238,7 +233,7 @@ def test_recall_uses_true_exact_top_50_ground_truth() -> None:
 
 
 def test_optional_adapters_are_fail_closed_when_missing(monkeypatch) -> None:
-    runner = _runner()
+    runner = run_scale_matrix
     corpus = runner.generate_corpus(n_chunks=16, dimensions=4, seed=1)
     for adapter_id in ("sqlite-vec", "usearch"):
         monkeypatch.setattr(runner, "_adapter_available", lambda _id: False)
@@ -256,7 +251,7 @@ def test_optional_adapters_are_fail_closed_when_missing(monkeypatch) -> None:
 
 
 def test_metrics_bundle_includes_required_operational_fields() -> None:
-    runner = _runner()
+    runner = run_scale_matrix
     report = runner.run_smoke(corpus_size=32, dimensions=4, seed=2, queries=4)
     assert report["schema_version"] == "scale-matrix-smoke/v1"
     assert report["mode"] == "smoke"
@@ -282,7 +277,7 @@ def test_metrics_bundle_includes_required_operational_fields() -> None:
 
 
 def test_crash_points_are_enumerated_and_fail_closed() -> None:
-    runner = _runner()
+    runner = run_scale_matrix
     outcomes = runner.run_crash_matrix(
         corpus_size=16,
         dimensions=4,
@@ -305,7 +300,7 @@ def test_crash_points_are_enumerated_and_fail_closed() -> None:
 
 
 def test_crash_errors_are_failures_not_success(monkeypatch) -> None:
-    runner = _runner()
+    runner = run_scale_matrix
 
     def broken_run(*_args, **_kwargs):
         raise OSError("injected subprocess error")
@@ -317,7 +312,7 @@ def test_crash_errors_are_failures_not_success(monkeypatch) -> None:
 
 
 def test_crash_worker_that_did_not_reach_injection_claims_no_fsync(monkeypatch) -> None:
-    runner = _runner()
+    runner = run_scale_matrix
     result = types.SimpleNamespace(returncode=1, stderr="worker failed before injection")
     monkeypatch.setattr(runner.subprocess, "run", lambda *_args, **_kwargs: result)
 
@@ -330,7 +325,7 @@ def test_crash_worker_that_did_not_reach_injection_claims_no_fsync(monkeypatch) 
 
 
 def test_before_fsync_crash_does_not_require_directory_fsync(monkeypatch) -> None:
-    runner = _runner()
+    runner = run_scale_matrix
     result = types.SimpleNamespace(returncode=91, stderr="")
     monkeypatch.setattr(runner.subprocess, "run", lambda *_args, **_kwargs: result)
     monkeypatch.setattr(
@@ -348,7 +343,7 @@ def test_before_fsync_crash_does_not_require_directory_fsync(monkeypatch) -> Non
 def test_worker_reports_unavailable_when_required_directory_fsync_is_unavailable(
     monkeypatch,
 ) -> None:
-    runner = _runner()
+    runner = run_scale_matrix
     result = types.SimpleNamespace(returncode=81, stderr="directory fsync unsupported")
     monkeypatch.setattr(runner.subprocess, "run", lambda *_args, **_kwargs: result)
 
@@ -361,7 +356,7 @@ def test_worker_reports_unavailable_when_required_directory_fsync_is_unavailable
 
 
 def test_adoption_gate_is_fail_closed() -> None:
-    runner = _runner()
+    runner = run_scale_matrix
     # High recall but insufficient speedup → reject.
     decision = runner.evaluate_adoption_gate(
         recall_at_10=0.99,
@@ -396,7 +391,7 @@ def test_adoption_gate_is_fail_closed() -> None:
 
 @pytest.mark.parametrize("bad", [None, math.nan, math.inf, -math.inf, 0.0, -1.0, "1"])
 def test_adoption_gate_rejects_invalid_or_nonfinite_metrics(bad) -> None:
-    runner = _runner()
+    runner = run_scale_matrix
     values = {
         "recall_at_10": 0.99,
         "recall_at_50": 0.99,
@@ -410,7 +405,7 @@ def test_adoption_gate_rejects_invalid_or_nonfinite_metrics(bad) -> None:
 
 
 def test_adoption_requires_exact_to_materially_exceed_product_target() -> None:
-    runner = _runner()
+    runner = run_scale_matrix
     decision = runner.evaluate_adoption_gate(
         recall_at_10=0.99,
         recall_at_50=0.99,
@@ -422,7 +417,7 @@ def test_adoption_requires_exact_to_materially_exceed_product_target() -> None:
 
 
 def test_adoption_requires_candidate_to_meet_product_target() -> None:
-    runner = _runner()
+    runner = run_scale_matrix
     decision = runner.evaluate_adoption_gate(
         recall_at_10=0.99,
         recall_at_50=0.99,
@@ -434,7 +429,7 @@ def test_adoption_requires_candidate_to_meet_product_target() -> None:
 
 
 def test_adoption_rejects_nonfinite_computed_speedup() -> None:
-    runner = _runner()
+    runner = run_scale_matrix
     decision = runner.evaluate_adoption_gate(
         recall_at_10=0.99,
         recall_at_50=0.99,
@@ -450,7 +445,7 @@ def test_adoption_rejects_nonfinite_computed_speedup() -> None:
 def test_smoke_report_validates_against_schema() -> None:
     from reliable_memory import SchemaValidationError, validate_schema
 
-    runner = _runner()
+    runner = run_scale_matrix
     report = runner.run_smoke(corpus_size=24, dimensions=4, seed=9, queries=3)
     validate_schema(report, REPORT_SCHEMA)
     # Full matrix sizes are declared but smoke must not expand to heavy corpora.
@@ -500,7 +495,7 @@ def _leaked_cell_fields(cells: list) -> list:
 def test_full_report_has_separate_closed_schema(tmp_path) -> None:
     from reliable_memory import SchemaValidationError, validate_schema
 
-    runner = _runner()
+    runner = run_scale_matrix
     smoke = runner.run_smoke(corpus_size=16, dimensions=4, queries=2, adapters=("exact-numpy",))
     incomplete = runner.build_report(
         mode="full",
@@ -541,7 +536,7 @@ def test_full_report_has_separate_closed_schema(tmp_path) -> None:
 
 
 def test_full_atomic_report_rejects_duplicate_matrix_cells(tmp_path) -> None:
-    runner = _runner()
+    runner = run_scale_matrix
     cells = _full_matrix_cells()
     cells[-1] = json.loads(json.dumps(cells[0]))
     report = runner.build_report(
@@ -560,7 +555,7 @@ def test_full_atomic_report_rejects_duplicate_matrix_cells(tmp_path) -> None:
 
 
 def test_smoke_atomic_report_rejects_duplicate_adapter_cells(tmp_path) -> None:
-    runner = _runner()
+    runner = run_scale_matrix
     report = runner.run_smoke(
         corpus_size=16, dimensions=4, queries=2, adapters=("exact-numpy",)
     )
@@ -641,7 +636,7 @@ def test_cli_smoke_json_is_deterministic(tmp_path) -> None:
 
 
 def test_no_ann_default_without_measured_adoption() -> None:
-    runner = _runner()
+    runner = run_scale_matrix
     report = runner.run_smoke(corpus_size=16, dimensions=4, seed=1, queries=2)
     assert report["ann_default_claimed"] is False
     assert report["selected_default_backend"] == "exact-numpy"
@@ -655,7 +650,7 @@ def test_no_ann_default_without_measured_adoption() -> None:
 
 
 def test_optional_adapter_indexes_full_corpus_and_filters_at_query(monkeypatch) -> None:
-    runner = _runner()
+    runner = run_scale_matrix
     corpus = runner.generate_corpus(n_chunks=64, dimensions=4, seed=3)
     mask = runner.selectivity_mask(corpus, fraction=0.1, seed=3)
     observed = {}
@@ -717,7 +712,7 @@ def test_fake_usearch_adapter_requires_hnsw_configuration(
     monkeypatch, connectivity, metric, expected_status
 ) -> None:
     np = pytest.importorskip("numpy")
-    runner = _runner()
+    runner = run_scale_matrix
     corpus = runner.generate_corpus(n_chunks=16, dimensions=4, seed=4)
 
     class Matches:
@@ -773,7 +768,7 @@ def test_fake_usearch_adapter_requires_hnsw_configuration(
 
 def test_usearch_filter_application_is_included_in_cold_latency(monkeypatch) -> None:
     pytest.importorskip("numpy")
-    runner = _runner()
+    runner = run_scale_matrix
     corpus = runner.generate_corpus(n_chunks=8, dimensions=4, seed=4)
 
     class SlowKeys:
@@ -823,7 +818,7 @@ def test_usearch_filter_application_is_included_in_cold_latency(monkeypatch) -> 
     ],
 )
 def test_smoke_rejects_nonpositive_resource_bounds(kwargs, message) -> None:
-    runner = _runner()
+    runner = run_scale_matrix
     values = {"corpus_size": 16, "dimensions": 4, "queries": 2}
     values.update(kwargs)
     with pytest.raises(ValueError, match=message):
@@ -832,13 +827,13 @@ def test_smoke_rejects_nonpositive_resource_bounds(kwargs, message) -> None:
 
 @pytest.mark.parametrize("bad", [True, 1.5, "16"])
 def test_smoke_rejects_noninteger_resource_bounds(bad) -> None:
-    runner = _runner()
+    runner = run_scale_matrix
     with pytest.raises(ValueError, match="corpus_size"):
         runner.run_smoke(corpus_size=bad, dimensions=4, queries=2)
 
 
 def test_matrix_and_measurement_resource_bounds_are_strictly_positive() -> None:
-    runner = _runner()
+    runner = run_scale_matrix
     corpus = runner.generate_corpus(n_chunks=8, dimensions=4, seed=0)
     with pytest.raises(ValueError, match="corpus_sizes"):
         runner.plan_matrix(
@@ -882,7 +877,7 @@ def test_matrix_and_measurement_resource_bounds_are_strictly_positive() -> None:
 
 
 def test_cli_validates_before_atomic_durable_write(tmp_path) -> None:
-    runner = _runner()
+    runner = run_scale_matrix
     output = tmp_path / "report.json"
     report = runner.run_smoke(corpus_size=16, dimensions=4, queries=2)
     runner.write_report_atomic(report, output, mode="smoke")
@@ -903,7 +898,7 @@ def test_cli_validates_before_atomic_durable_write(tmp_path) -> None:
     ],
 )
 def test_cli_rejects_ambiguous_or_unexecutable_full_requests(argv) -> None:
-    runner = _runner()
+    runner = run_scale_matrix
     with pytest.raises(SystemExit):
         runner.main(argv)
 
@@ -920,7 +915,7 @@ def test_cli_rejects_ambiguous_or_unexecutable_full_requests(argv) -> None:
 def test_atomic_output_rejects_metric_provenance_mismatch(
     tmp_path, metric, value, status, source, reason
 ) -> None:
-    runner = _runner()
+    runner = run_scale_matrix
     report = runner.run_smoke(
         corpus_size=16,
         dimensions=4,
@@ -937,7 +932,7 @@ def test_atomic_output_rejects_metric_provenance_mismatch(
 
 
 def test_heavy_sizes_are_serial_only() -> None:
-    runner = _runner()
+    runner = run_scale_matrix
     plan = runner.plan_matrix(
         corpus_sizes=CORPUS_SIZES,
         adapters=("exact-numpy", "usearch"),

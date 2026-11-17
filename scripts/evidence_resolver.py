@@ -1,25 +1,33 @@
 """Resolve content-addressed daily evidence from flat files or sealed bags."""
 from __future__ import annotations
 
+import codecs
+import contextlib
 import hashlib
 import json
-import os
 import re
 import stat
+from bisect import bisect_left, bisect_right
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import date, datetime
+from itertools import chain, islice
 from pathlib import Path
 
-from bounded_io import read_stable_bytes
-from reliable_memory import canonical_json_bytes, sha256_bytes, validate_schema
+from bounded_io import IO_CHUNK_BYTES, VerifiedByteRange, open_stable_range, read_stable_bytes
+from llm_wiki import archive_read_only, runtime_roots
+from llm_wiki.compile_receipt_authority import read_compile_receipt_version
+from llm_wiki.evidence_reference import (
+    BLOCK_ID_RE,
+    MAX_DAILY_BYTES,
+    SHA256_PATTERN,
+    EvidenceRef,
+    EvidenceResolutionError,
+    is_plain_int,
+)
+from llm_wiki.formats.canonical import canonical_json_bytes, sha256_bytes
+from llm_wiki.formats.schema import validate_schema
 
-# Bounded reads of evidence files; a file past its bound is refused by name, never
-# cut, so a citation or an archive check fails rather than reading a partial file.
-# A daily log read for archiving (also by archive_daily): the largest of 32 daily logs
-# on the installed vault on 2026-09-27 was 867 318 bytes, so 16 MiB is about 19 times
-# that; review if days grow toward it.
-MAX_DAILY_BYTES = 16 * 1024 * 1024
 # A source a grounded answer cites. Basis unknown: value predates measurement; the
 # largest note is about 19 KB and the largest journal segment about 4 MiB.
 MAX_GROUNDED_SOURCE_BYTES = 8 * 1024 * 1024
@@ -39,96 +47,13 @@ ARCHIVE_SCHEMAS = {
     "archive-manifest/v1": ARCHIVE_SCHEMA,
     "archive-manifest/v2": Path(__file__).with_name("schemas") / "archive-manifest-v2.json",
 }
-_DAILY_ID_PATTERN = r"\d{4}-\d{2}-\d{2}"
-_SHA256_PATTERN = r"[0-9a-f]{64}"
-_BLOCK_ID_PATTERN = r"[A-Za-z0-9][A-Za-z0-9._:-]{0,199}"
-_BLOCK_ID_RE = re.compile(_BLOCK_ID_PATTERN)
-_REF_RE = re.compile(
-    rf"daily:(?P<daily>{_DAILY_ID_PATTERN}) "
-    rf"sha256:(?P<sha>{_SHA256_PATTERN}) "
-    rf"block:(?P<block>{_BLOCK_ID_PATTERN}) "
-    r"bytes:(?P<start>0|[1-9]\d*)-(?P<end>0|[1-9]\d*)"
-)
-_HEADER_RE = re.compile(rb"(?m)^## \[([^\]\r\n]+)\][^\r\n]*(?:\r?\n|$)")
-_MARKER_RE = re.compile(
-    rb"(?m)^<!-- llm-wiki-operation:[0-9a-f]+ -->[^\r\n]*(?:\r?\n|$)"
-)
-_MARKER_ID_RE = re.compile(
+_HEADING_PREFIX = b"## ["
+_OPERATION_PREFIX = b"<!-- llm-wiki-operation:"
+MARKER_ID_RE = re.compile(
     r"^(?:[-+*]\s+)?`?\[((?:[01]\d|2[0-3]):[0-5]\d:[0-5]\d)\]"
 )
+_TEXT_LINE_BREAK_RE = re.compile(r"[\n\r\v\f\x1c\x1d\x1e\x85\u2028\u2029]")
 _HASH_LINE_RE = re.compile(r"([0-9a-f]{64})  ([A-Za-z0-9][A-Za-z0-9._/-]*)\n")
-
-
-class EvidenceResolutionError(ValueError):
-    """Evidence could not be proven from one unambiguous immutable source."""
-
-
-def _require_daily_id(daily_id: object) -> None:
-    if not isinstance(daily_id, str) or re.fullmatch(_DAILY_ID_PATTERN, daily_id) is None:
-        raise ValueError("evidence daily ID is invalid")
-    try:
-        if date.fromisoformat(daily_id).isoformat() != daily_id:
-            raise ValueError
-    except ValueError as exc:
-        raise ValueError("evidence daily ID is invalid") from exc
-
-
-def _require_source_digest(digest: object) -> None:
-    if not isinstance(digest, str) or re.fullmatch(_SHA256_PATTERN, digest) is None:
-        raise ValueError("evidence SHA-256 is invalid")
-
-
-def _require_block_identifier(block_id: object) -> None:
-    if not isinstance(block_id, str) or _BLOCK_ID_RE.fullmatch(block_id) is None:
-        raise ValueError("evidence block ID is invalid")
-
-
-def _is_plain_int(value: object) -> bool:
-    """A bool is an int in Python, and never a byte offset here."""
-    return isinstance(value, int) and not isinstance(value, bool)
-
-
-def _require_byte_span(start: object, end: object) -> None:
-    if not _is_plain_int(start) or not _is_plain_int(end):
-        raise ValueError("evidence byte span must be non-empty and half-open")
-    if start < 0 or start >= end:
-        raise ValueError("evidence byte span must be non-empty and half-open")
-
-
-@dataclass(frozen=True)
-class EvidenceRef:
-    daily_id: str
-    source_sha256: str
-    block_id: str
-    byte_start: int
-    byte_end: int
-
-    def __post_init__(self) -> None:
-        _require_daily_id(self.daily_id)
-        _require_source_digest(self.source_sha256)
-        _require_block_identifier(self.block_id)
-        _require_byte_span(self.byte_start, self.byte_end)
-
-    @classmethod
-    def parse(cls, value: str) -> EvidenceRef:
-        if not isinstance(value, str):
-            raise TypeError("evidence reference must be a string")
-        match = _REF_RE.fullmatch(value)
-        if match is None:
-            raise ValueError("evidence reference is not canonical")
-        return cls(
-            match["daily"],
-            match["sha"],
-            match["block"],
-            int(match["start"]),
-            int(match["end"]),
-        )
-
-    def __str__(self) -> str:
-        return (
-            f"daily:{self.daily_id} sha256:{self.source_sha256} "
-            f"block:{self.block_id} bytes:{self.byte_start}-{self.byte_end}"
-        )
 
 
 @dataclass(frozen=True)
@@ -151,10 +76,9 @@ class ValidatedBag:
     path: Path
     manifest: dict[str, object]
     payload_path: Path
-    payload: bytes
 
 
-def _regular_directory(path: Path, *, label: str) -> None:
+def regular_directory(path: Path, *, label: str) -> None:
     info = path.lstat()
     if (
         path.is_symlink()
@@ -173,46 +97,6 @@ def bounded_directory_entries(
         if len(entries) > max_entries:
             raise EvidenceResolutionError(f"{label} exceeds the entry scan limit")
     return entries
-
-
-def _archive_path_is_read_only(path: Path) -> bool:
-    if os.name == "nt":
-        return _windows_path_is_read_only(path)
-    expected = 0o500 if path.is_dir() else 0o400
-    try:
-        return stat.S_IMODE(path.stat(follow_symlinks=False).st_mode) == expected
-    except OSError:
-        return False
-
-
-def _windows_path_is_read_only(path: Path) -> bool:
-    from markdown_transaction import (
-        _acl_output_text,
-        _run_acl_command,
-        _windows_acl_identity,
-    )
-
-    verified = _run_acl_command(["icacls", str(path)])
-    if verified.returncode != 0:
-        return False
-    return _acl_is_owner_read_only(
-        _acl_output_text(verified.stdout), _windows_acl_identity()
-    )
-
-
-def _acl_is_owner_read_only(acl: str, identity: str) -> bool:
-    lines = _acl_entry_lines(acl)
-    if not lines or _acl_grants_write(acl):
-        return False
-    return all(identity.casefold() in line.casefold() for line in lines)
-
-
-def _acl_entry_lines(acl: str) -> list[str]:
-    return [line.strip() for line in acl.splitlines() if ":(" in line]
-
-
-def _acl_grants_write(acl: str) -> bool:
-    return any(marker in acl for marker in ("(F)", "(M)", "(W)"))
 
 
 def _parse_hash_file(raw: bytes, *, label: str) -> dict[str, str]:
@@ -257,56 +141,223 @@ def daily_entries(content: bytes) -> list[tuple[str, int, int]]:
     packager and the claim pipeline all read it from here. See
     `knowledge/notes/daily-entry-boundary-decision.md`.
     """
-    starts = _entry_starts(content)
+    starts = entry_starts(content)
     ends = [item[0] for item in starts[1:]] + [len(content)]
     entries = [
-        (_entry_id(content[start:end], declared), start, end)
+        (_entry_id(content, start, end, declared), start, end)
         for (start, declared), end in zip(starts, ends)
     ]
     return [(item[0], item[1], item[2]) for item in entries if item[0] is not None]
 
 
-def _entry_starts(content: bytes) -> list[tuple[int, str | None]]:
+def entry_starts(content: bytes) -> list[tuple[int, str | None]]:
     """Where each entry begins, with the id its own delimiter declares."""
-    headings = [
-        (match.start(), _heading_block_id(match[1]))
-        for match in _HEADER_RE.finditer(content)
-    ]
-    markers = [(match.start(), None) for match in _MARKER_RE.finditer(content)]
-    return sorted(headings + markers, key=lambda item: item[0])
+    if type(content) is VerifiedByteRange:
+        return _windowed_entry_starts(content)
+    return _direct_entry_starts(content)
 
 
-def _heading_block_id(raw: bytes) -> str:
-    try:
-        block_id = raw.decode("utf-8", errors="strict")
-    except UnicodeDecodeError as exc:
-        raise EvidenceResolutionError("daily block ID is not UTF-8") from exc
-    if _BLOCK_ID_RE.fullmatch(block_id) is None:
-        raise EvidenceResolutionError("daily block ID is invalid")
-    return block_id
+def _direct_entry_starts(content):
+    return sorted(chain(_heading_starts(content), _operation_starts(content)),
+                  key=lambda item: item[0])
 
 
-def _entry_id(entry: bytes, declared: str | None) -> str | None:
-    if declared is not None:
-        return declared
-    return _marker_entry_id(entry)
+def _windowed_entry_starts(content):
+    content.require_active()
+    starts = []
+    for offset, window in _complete_entry_windows(content):
+        if window is None:
+            return _direct_entry_starts(content)
+        starts.extend((offset + start, declared) for start, declared in _direct_entry_starts(window))
+    return starts
 
 
-def _marker_entry_id(entry: bytes) -> str | None:
-    """A captured entry declares its time at the head of its first content line."""
-    for raw in entry.decode("utf-8", errors="replace").splitlines()[1:]:
-        line = raw.strip()
-        if not line:
-            continue
-        match = _MARKER_ID_RE.match(line)
-        return match.group(1) if match else None
+def _complete_entry_windows(content):
+    offset = 0
+    while offset < len(content):
+        end = min(len(content), offset + IO_CHUNK_BYTES)
+        window = content[offset:end]
+        stop = _complete_window_length(window, end == len(content))
+        if not stop:
+            yield offset, None
+            return
+        yield offset, window[:stop]
+        offset += stop
+
+
+def _complete_window_length(window, final):
+    if final:
+        return len(window)
+    return window.rfind(b'\n') + 1
+
+
+def _line_prefix_offsets(content, prefix):
+    position = content.find(prefix)
+    while position != -1:
+        if position == 0 or content[position - 1] == ord('\n'):
+            yield position
+        position = content.find(prefix, position + 1)
+
+
+def _header_line_end(content, start):
+    newline = content.find(b'\n', start)
+    end = len(content) if newline < 0 else newline
+    carriage = content.find(b'\r', start, end)
+    if carriage < 0:
+        return end
+    if newline >= 0 and carriage == end - 1:
+        return carriage
     return None
 
 
+def _heading_starts(content):
+    for offset in _line_prefix_offsets(content, _HEADING_PREFIX):
+        end = _header_line_end(content, offset)
+        if end is None:
+            continue
+        declared = _heading_declaration(content, offset, end)
+        if declared is not None:
+            yield offset, declared
 
 
-def _line_span(content: bytes, start: int, end: int) -> tuple[int, int]:
-    return content[:start].count(b"\n") + 1, content[: end - 1].count(b"\n") + 2
+def _heading_declaration(content, offset, end):
+    start = offset + len(_HEADING_PREFIX)
+    closing = content.find(b']', start, end)
+    if closing <= start:
+        return None
+    return _heading_block_id_chunks(_entry_byte_chunks(content, start, closing))
+
+
+def _operation_starts(content):
+    for offset in _line_prefix_offsets(content, _OPERATION_PREFIX):
+        end = _header_line_end(content, offset)
+        if end is not None and _operation_declaration(content, offset, end):
+            yield offset, None
+
+
+def _operation_declaration(content, offset, end):
+    start = offset + len(_OPERATION_PREFIX)
+    closing = content.find(b' -->', start, end)
+    if closing <= start:
+        return False
+    return all(not content[cursor:min(closing, cursor + IO_CHUNK_BYTES)].strip(b'0123456789abcdef')
+               for cursor in range(start, closing, IO_CHUNK_BYTES))
+
+
+def _heading_block_id_chunks(chunks):
+    try:
+        return _decoded_block_id(_decoded_id_chunks(chunks))
+    except UnicodeDecodeError as exc:
+        raise EvidenceResolutionError("daily block ID is not UTF-8") from exc
+
+
+def _decoded_id_chunks(chunks):
+    chunks = iter(chunks)
+    first, second = next(chunks, b''), next(chunks, None)
+    if second is None:
+        yield first.decode("utf-8", errors="strict")
+        return
+    yield from codecs.iterdecode(chain((first, second), chunks), "utf-8", errors="strict")
+
+
+def _decoded_block_id(chunks):
+    candidate = ''
+    for text in chunks:
+        candidate = _extend_block_id(candidate, text)
+    if not candidate:
+        raise EvidenceResolutionError("daily block ID is invalid")
+    return candidate
+
+
+def _extend_block_id(candidate, text):
+    if candidate is None:
+        return None
+    combined = candidate + text
+    if BLOCK_ID_RE.fullmatch(combined) is None:
+        return None
+    return combined
+
+
+def _entry_id(content, start, end, declared):
+    if declared is not None:
+        return declared
+    return marker_entry_id(content, start, end)
+
+
+def marker_entry_id(content, start, end):
+    """A captured entry declares its time at the head of its first content line."""
+    chunks = decoded_entry_range(content, start, end)
+    after_header = _after_first_text_line(chunks)
+    line = _first_text_line(_drop_leading_text_space(after_header))
+    match = MARKER_ID_RE.match(_marker_time_prefix(line))
+    return match.group(1) if match else None
+
+
+def decoded_entry_range(content, start, end):
+    yield from codecs.iterdecode(_entry_byte_chunks(content, start, end),
+                                 'utf-8', errors='replace')
+
+
+def _entry_byte_chunks(content, start, end):
+    for cursor in range(start, end, IO_CHUNK_BYTES):
+        yield content[cursor:min(end, cursor + IO_CHUNK_BYTES)]
+
+
+def _after_first_text_line(chunks):
+    for text in chunks:
+        match = _TEXT_LINE_BREAK_RE.search(text)
+        if match:
+            yield text[match.end():]
+            yield from chunks
+            return
+
+
+def _drop_leading_text_space(chunks):
+    for text in chunks:
+        trimmed = text.lstrip()
+        if trimmed:
+            yield trimmed
+            yield from chunks
+            return
+
+
+def _first_text_line(chunks):
+    for text in chunks:
+        match = _TEXT_LINE_BREAK_RE.search(text)
+        if match:
+            yield text[:match.start()]
+            return
+        yield text
+
+
+def _marker_time_prefix(line):
+    first = next(line, '')
+    if not first:
+        return ''
+    if first[0] in {'-', '+', '*'}:
+        return _bullet_time_prefix(first[0], chain((first[1:],), line))
+    return _clock_prefix(chain.from_iterable(chain((first,), line)))
+
+
+def _bullet_time_prefix(symbol, chunks):
+    following = next(filter(None, chunks), '')
+    if not following or not following[0].isspace():
+        return ''
+    normalized = _drop_leading_text_space(chain((following,), chunks))
+    return symbol + ' ' + _clock_prefix(chain.from_iterable(normalized))
+
+
+def _clock_prefix(characters):
+    # Grammar width, not a source/line limit; bullet whitespace is scanned above.
+    return ''.join(islice(characters, len('`[00:00:00]')))
+
+
+def line_span(content: bytes, start: int, end: int) -> tuple[int, int]:
+    if type(content) is VerifiedByteRange:
+        prefix_start = slice(None, start).indices(len(content))[1]
+        prefix_end = slice(None, end - 1).indices(len(content))[1]
+        return _indexed_line_span(content.newline_offsets(), prefix_start, prefix_end + 1)
+    return content.count(b"\n", 0, start) + 1, content.count(b"\n", 0, end - 1) + 2
 
 
 def _coordinator_record_document(record: object) -> dict[str, object]:
@@ -405,8 +456,6 @@ def _require_authority_fields(authority: object) -> None:
 
 def _authority_committed_at(raw: object) -> datetime:
     text = str(raw)
-    if text.endswith("Z"):
-        text = text[:-1] + "+00:00"
     try:
         return datetime.fromisoformat(text)
     except ValueError as exc:
@@ -426,7 +475,7 @@ def _require_authority_schema(authority: Mapping[str, object]) -> None:
 
 
 def _require_authority_sequence(sequence: object) -> None:
-    if not _is_plain_int(sequence) or sequence < 1:
+    if not is_plain_int(sequence) or sequence < 1:
         raise EvidenceResolutionError("archive compile authority is invalid")
 
 
@@ -436,7 +485,7 @@ def _require_authority_identity(
     if (
         authority["operation_ids"] != [receipt["operation_id"]]
         or not isinstance(authority["coordinator_record"], dict)
-        or re.fullmatch(_SHA256_PATTERN, str(authority["coordinator_record_digest"]))
+        or re.fullmatch(SHA256_PATTERN, str(authority["coordinator_record_digest"]))
         is None
     ):
         raise EvidenceResolutionError("archive compile authority is invalid")
@@ -554,10 +603,21 @@ def validate_bag(
     vault: Path | None = None,
     allow_build_intent: bool = False,
 ) -> ValidatedBag:
-    """Validate a complete, sealed BagIt daily package without following links."""
+    """Validate the complete bag and return metadata after closing its payload."""
+    with open_validated_bag(path, coordinator=coordinator, vault=vault,
+                            allow_build_intent=allow_build_intent) as (bag, _payload):
+        return bag
+
+
+@contextlib.contextmanager
+def open_validated_bag(
+    path: Path, *, coordinator=None, vault=None, allow_build_intent=False,
+):
+    """Own validated payload ranges; results remain provisional until clean exit."""
     path = Path(path)
     try:
-        return _validated_bag(path, coordinator, vault, allow_build_intent)
+        with contextlib.ExitStack() as owner:
+            yield _validated_bag(path, coordinator, vault, allow_build_intent, owner)
     except EvidenceResolutionError:
         raise
     except (OSError, ValueError, TypeError, KeyError, UnicodeDecodeError) as exc:
@@ -577,8 +637,8 @@ _BAG_MEMBERS = frozenset(
 
 
 def _validated_bag(
-    path: Path, coordinator: object | None, vault: Path | None, allow_build_intent: bool
-) -> ValidatedBag:
+    path: Path, coordinator: object | None, vault: Path | None, allow_build_intent: bool, owner
+):
     """The checks in the order they were written; each one refuses on its own."""
     expected = _expected_bag_members(allow_build_intent)
     members = _bag_members(path, expected)
@@ -586,15 +646,15 @@ def _validated_bag(
     manifest = _bag_manifest(path)
     daily_id = _bag_daily_id(manifest)
     payload_name = f"data/{daily_id}.md"
-    payload = _bag_payload(path, daily_id, payload_name, manifest)
+    payload = _bag_payload(path, daily_id, payload_name, manifest, owner)
     receipts, receipt_names = _bag_receipts(path, manifest, daily_id, payload, coordinator, vault, expected)
     _require_bag_members(members, expected)
     _require_manifest_operations(manifest, receipts)
     _require_bag_tags(path, receipt_names)
     _require_bag_info(path, payload, daily_id)
-    _require_payload_evidence(manifest, payload)
+    require_payload_evidence(manifest, payload)
     _require_bag_immutable(path, payload_name, expected)
-    return ValidatedBag(path, manifest, path / payload_name, payload)
+    return ValidatedBag(path, manifest, path / payload_name), payload
 
 
 def _expected_bag_members(allow_build_intent: bool) -> set[str]:
@@ -605,14 +665,14 @@ def _expected_bag_members(allow_build_intent: bool) -> set[str]:
 
 
 def _bag_members(path: Path, expected: set[str]) -> set[str]:
-    _regular_directory(path, label="archive bag")
+    regular_directory(path, label="archive bag")
     members = {
         item.name
         for item in bounded_directory_entries(
             path, len(expected) + 1 + MAX_COMPILE_PARTS, label="archive bag"
         )
     }
-    _regular_directory(path / "data", label="archive payload directory")
+    regular_directory(path / "data", label="archive payload directory")
     return members
 
 
@@ -648,16 +708,15 @@ def _bag_daily_id(manifest: Mapping[str, object]) -> str:
 
 
 def _bag_payload(
-    path: Path, daily_id: str, payload_name: str, manifest: Mapping[str, object]
-) -> bytes:
+    path: Path, daily_id: str, payload_name: str, manifest: Mapping[str, object], owner
+):
     entries = bounded_directory_entries(
         path / "data", 1, label="archive payload directory"
     )
     if len(entries) != 1 or entries[0].name != f"{daily_id}.md":
         raise EvidenceResolutionError("archive payload members are not canonical")
-    payload = read_stable_bytes(
-        path / payload_name, MAX_DAILY_BYTES, label="archive payload"
-    )
+    payload = owner.enter_context(open_stable_range(
+        path / payload_name, MAX_DAILY_BYTES, label="archive payload"))
     _require_payload_hash(path, payload_name, payload, manifest)
     return payload
 
@@ -671,7 +730,7 @@ def _require_payload_hash(
         ),
         label="payload manifest",
     )
-    payload_hash = sha256_bytes(payload)
+    payload_hash = source_range_digest(payload, 0, len(payload))
     if hashes != {payload_name: payload_hash} or any(
         manifest[field] != payload_hash for field in ("source_hash", "payload_hash")
     ):
@@ -690,11 +749,12 @@ def _bag_receipts(
     """Each receipt the bag stands on, and the embedded receipt files it carries."""
     if manifest["schema_version"] == "archive-manifest/v2":
         return _part_receipts(path, manifest, daily_id, payload, coordinator, expected)
-    payload_hash = sha256_bytes(payload)
+    payload_hash = source_range_digest(payload, 0, len(payload))
     receipt_path, self_contained = _bag_receipt_path(
         path, manifest, daily_id, payload_hash, coordinator, vault, expected
     )
     receipt = _bag_receipt(manifest, receipt_path, daily_id, payload_hash, coordinator, vault, self_contained)
+    require_archive_receipt_context(receipt, payload, 0, len(payload))
     return [receipt], ["compile-receipt.md"] if self_contained else []
 
 
@@ -708,14 +768,14 @@ def _part_receipts(
 ) -> tuple[list[dict[str, object] | None], list[str]]:
     """A split day: its parts must be the day's own compile parts, each with its receipt."""
     parts = manifest["compile_parts"]
-    _require_recorded_parts([(part["byte_start"], part["byte_end"]) for part in parts], payload)
+    require_recorded_parts([(part["byte_start"], part["byte_end"]) for part in parts], payload)
     names = [str(part["compile_receipt_ref"]["embedded_path"]) for part in parts]
     expected.update(names)
     receipts = [_part_receipt(path, part, daily_id, payload, coordinator) for part in parts]
     return receipts, names
 
 
-def _require_recorded_parts(spans: list[tuple[int, int]], payload: bytes) -> None:
+def require_recorded_parts(spans: list[tuple[int, int]], payload: bytes) -> None:
     """The bag's own part table, checked without today's split rule (audit 2026-09-27 B-17).
 
     A sealed bag is checked against what it recorded, not against a rule that
@@ -741,12 +801,14 @@ def _require_recorded_parts(spans: list[tuple[int, int]], payload: bytes) -> Non
 def _part_receipt(
     path: Path, part: Mapping[str, object], daily_id: str, payload: bytes, coordinator: object | None
 ) -> dict[str, object] | None:
-    digest = sha256_bytes(payload[part["byte_start"] : part["byte_end"]])
+    digest = source_range_digest(payload, part["byte_start"], part["byte_end"])
     receipt_ref = part["compile_receipt_ref"]
     _require_receipt_reference(receipt_ref, daily_id, digest)
     view = {"compile_receipt_ref": receipt_ref, "compile_authority": part["compile_authority"]}
     receipt_path = path / str(receipt_ref["embedded_path"])
-    return _bag_receipt(view, receipt_path, daily_id, digest, coordinator, None, True)
+    receipt = _bag_receipt(view, receipt_path, daily_id, digest, coordinator, None, True)
+    require_archive_receipt_context(receipt, payload, part["byte_start"], part["byte_end"])
+    return receipt
 
 
 def _bag_receipt_path(
@@ -783,16 +845,31 @@ def _require_receipt_reference(
     receipt_ref: Mapping[str, object], daily_id: str, payload_hash: str
 ) -> None:
     logical_path = f"knowledge/daily/{daily_id}.md"
-    from compile_memory import compile_source_identity
-
-    source_identity = compile_source_identity(logical_path, payload_hash)
-    if (
-        receipt_ref["path"] != f"knowledge/daily/receipts/v3-{source_identity}.md"
-        or receipt_ref["logical_path"] != logical_path
-        or receipt_ref["source_digest"] != payload_hash
-        or receipt_ref["source_identity"] != source_identity
-    ):
+    if receipt_ref["logical_path"] != logical_path or receipt_ref["source_digest"] != payload_hash:
         raise EvidenceResolutionError("archive compile receipt reference is invalid")
+    _require_versioned_receipt_reference(receipt_ref, logical_path, payload_hash)
+
+
+def _require_versioned_receipt_reference(receipt_ref, logical_path, payload_hash):
+    from llm_wiki.formats.receipts import compile_source_identity
+
+    identity = receipt_ref["source_identity"]
+    names = {f"knowledge/daily/receipts/v3-{identity}.md", f"knowledge/daily/receipts/v4-{identity}.md"}
+    if receipt_ref["path"] not in names:
+        raise EvidenceResolutionError("archive compile receipt reference is invalid")
+    if str(receipt_ref["path"]).split("/")[-1].startswith("v3-") and identity != compile_source_identity(logical_path, payload_hash):
+        raise EvidenceResolutionError("archive legacy receipt identity disagrees")
+
+
+def require_archive_receipt_context(receipt, payload, start, end):
+    if receipt["schema_version"] == "compile-receipt/v3":
+        return
+    source = receipt["source"]
+    prefix_end = min(len(payload), source["original_byte_size"])
+    expected = (source["original_byte_size"], source["original_sha256"], source["byte_start"], source["byte_end"])
+    actual = (prefix_end, source_range_digest(payload, 0, prefix_end), start, end)
+    if actual != expected:
+        raise EvidenceResolutionError("archive compile receipt original context disagrees")
 
 
 def _require_bag_members(members: set[str], expected: set[str]) -> None:
@@ -846,21 +923,20 @@ def _authoritative_receipt(
 ) -> dict[str, object] | None:
     logical_path = f"knowledge/daily/{daily_id}.md"
     if not self_contained:
-        from compile_memory import read_compile_receipt_v3
-
-        return read_compile_receipt_v3(
+        return read_compile_receipt_version(
             logical_path,
             payload_hash,
             coordinator,  # type: ignore[arg-type]
             path=receipt_path,
             vault=Path(vault),  # type: ignore[arg-type]
         )
-    from compile_memory import parse_compile_receipt_v3
+    from llm_wiki.formats.receipts import parse_compile_receipt_version
 
-    receipt = parse_compile_receipt_v3(
+    receipt = parse_compile_receipt_version(
         receipt_bytes, logical_path=logical_path, source_sha256=payload_hash
     )
     receipt_ref = manifest["compile_receipt_ref"]
+    _require_receipt_record_reference(receipt, receipt_ref)
     _validate_compile_authority(
         manifest.get("compile_authority"),
         receipt,
@@ -869,6 +945,13 @@ def _authoritative_receipt(
         receipt_hash=str(receipt_ref["receipt_file_hash"]),
     )
     return receipt
+
+
+def _require_receipt_record_reference(receipt, receipt_ref):
+    version = receipt["schema_version"].rsplit("/", 1)[1]
+    identity = receipt["source_identity"]
+    if (receipt_ref["source_identity"], receipt_ref["path"]) != (identity, f"knowledge/daily/receipts/{version}-{identity}.md"):
+        raise EvidenceResolutionError("archive receipt record identity disagrees")
 
 
 def _require_manifest_operations(
@@ -946,7 +1029,7 @@ def _bagging_date(bag_info: bytes) -> str:
         raise EvidenceResolutionError("archive bag info is invalid") from exc
 
 
-def _require_payload_evidence(manifest: Mapping[str, object], payload: bytes) -> None:
+def require_payload_evidence(manifest: Mapping[str, object], payload: bytes) -> None:
     entries = daily_entries(payload)
     block_map = {block_id: (start, end) for block_id, start, end in entries}
     if len(block_map) != len(entries):
@@ -977,10 +1060,10 @@ def _require_evidence_entry(
     if span is None or span != (evidence["byte_start"], evidence["byte_end"]):
         raise EvidenceResolutionError("archive evidence block span mismatch")
     start, end = span
-    if evidence["sha256"] != sha256_bytes(payload[start:end]) or (
+    if evidence["sha256"] != source_range_digest(payload, start, end) or (
         evidence["line_start"],
         evidence["line_end"],
-    ) != _line_span(payload, start, end):
+    ) != line_span(payload, start, end):
         raise EvidenceResolutionError("archive evidence hash or line span mismatch")
 
 
@@ -993,7 +1076,7 @@ def _require_bag_immutable(
         path / payload_name,
         *(path / name for name in expected if name != "data"),
     ]
-    if any(not _archive_path_is_read_only(item) for item in immutable):
+    if any(not archive_read_only.archive_path_is_read_only(item) for item in immutable):
         raise EvidenceResolutionError("archive bag is not immutable")
 
 
@@ -1027,9 +1110,6 @@ _DAILY_ENTRY_MARKER = b"<!-- llm-wiki-operation:"
 # `docs/research/2026-09-12-a-daily-grows-by-two-kinds-of-entry.md`.
 _DAILY_BLOCK_MARKER = b"\n## "
 
-# A day is bounded, but the scan for a historical slice must be bounded too.
-MAX_EVIDENCE_SLICE_CANDIDATES = 4096
-
 
 def _daily_entry_offsets(content: bytes) -> list[int]:
     """Where each entry starts, the first one covering whatever precedes it."""
@@ -1042,11 +1122,57 @@ def _daily_entry_offsets(content: bytes) -> list[int]:
     return offsets
 
 
-def _daily_part_bounds(content: bytes) -> list[tuple[int, int]]:
-    """The byte ranges this day is compiled in, split only where an entry ends."""
+# Where a single entry longer than a part is cut inside itself, best first: a
+# `## ` block start, a blank line, a line end. One transactional append can carry
+# a whole pre-compact summary: on 2026-09-27 one entry was 49 964 bytes, its part
+# exceeded the compile budget, and the refusal stopped every day's compile
+# (docs/research/2026-09-28-a-long-entry-is-cut-inside-itself.md). A day whose
+# entries all fit a part is cut exactly as before, so no existing receipt moves.
+_INNER_SEPARATORS = (b"\n## ", b"\n\n", b"\n")
+
+
+def _character_boundary(content: bytes, start: int, position: int) -> int:
+    """`position`, moved back off a UTF-8 continuation byte, never to `start`."""
+    while position - 1 > start and content[position] & 0xC0 == 0x80:
+        position -= 1
+    return position
+
+
+def _inner_cut(content: bytes, start: int) -> int:
+    """The latest good place, within one part of `start`, for a piece to end."""
+    window = content[start : start + MAX_DAILY_PART_BYTES]
+    for separator in _INNER_SEPARATORS:
+        found = window.rfind(separator)
+        if found > 0:
+            return start + found + 1
+    return _character_boundary(content, start, start + MAX_DAILY_PART_BYTES)
+
+
+def _inner_cuts(content: bytes, start: int, end: int) -> list[int]:
+    """Cuts that leave every piece of one entry no longer than a part; none when it fits."""
+    cuts: list[int] = []
+    while end - start > MAX_DAILY_PART_BYTES:
+        start = _inner_cut(content, start)
+        cuts.append(start)
+    return cuts
+
+
+def _cut_offsets(content: bytes) -> list[int]:
+    """Entry starts, plus the cuts inside any entry longer than a part, and the end."""
+    entries = [*_daily_entry_offsets(content), len(content)]
+    offsets = [entries[0]]
+    for start, end in zip(entries, entries[1:]):
+        offsets.extend(_inner_cuts(content, start, end))
+        offsets.append(end)
+    return offsets
+
+
+def daily_part_bounds(content: bytes) -> list[tuple[int, int]]:
+    """The byte ranges this day is compiled in, split where an entry ends or, inside
+    an entry longer than a part, at its latest block, paragraph or line end."""
     if len(content) <= MAX_DAILY_PART_BYTES:
         return [(0, len(content))]
-    offsets = [*_daily_entry_offsets(content), len(content)]
+    offsets = _cut_offsets(content)
     bounds: list[tuple[int, int]] = []
     start = 0
     for index in range(1, len(offsets)):
@@ -1077,11 +1203,11 @@ def _entry_ends(content: bytes, offset: int) -> range:
     return range(cursor, offset + 1)
 
 
-def _slice_offsets(content: bytes) -> list[int]:
+def slice_offsets(content: bytes) -> list[int]:
     """Every place an entry begins, of either kind.
 
     Deliberately not `_daily_entry_offsets`: that one defines how a day is
-    split for compilation (`_daily_part_bounds`), and that split must keep
+    split for compilation (`daily_part_bounds`), and that split must keep
     meaning what it meant. This one only widens the search for a slice that
     already exists.
     """
@@ -1096,29 +1222,33 @@ def _slice_offsets(content: bytes) -> list[int]:
 def _slice_boundaries(content: bytes, start: int) -> list[int]:
     """Where a historical slice beginning at `start` could have ended.
 
-    The end of the file is always a candidate, even when a day carries more
-    entries than the scan is allowed to try: the whole tail is the one slice a
-    compile part is most likely to have been.
+    Every source-aligned end is included. The source's existing byte bound
+    limits discovery; an arbitrary candidate prefix must not hide old evidence.
 
     Sorted and deduplicated because `_slice_from` hashes forward from one
     candidate to the next and needs them ascending.
     """
     ends: set[int] = set()
-    for offset in _slice_offsets(content):
+    for offset in slice_offsets(content):
         if offset > start:
             ends.update(end for end in _entry_ends(content, offset) if end > start)
-    return [*sorted(ends)[: MAX_EVIDENCE_SLICE_CANDIDATES - 1], len(content)]
+    return sorted(ends | {len(content)})
 
 
-def _slice_from(content: bytes, start: int, digest: str) -> bytes | None:
+def _slice_from(content: bytes, start: int, digest: str, boundaries: list[int]) -> bytes | None:
     running = hashlib.sha256()
     cursor = start
-    for boundary in _slice_boundaries(content, start):
-        running.update(content[cursor:boundary])
+    for boundary in islice(boundaries, bisect_right(boundaries, start), None):
+        _update_source_digest(running, content, cursor, boundary)
         cursor = boundary
         if running.hexdigest() == digest:
             return content[start:boundary]
     return None
+
+
+def _update_source_digest(digest, content, start, end):
+    for chunk in _entry_byte_chunks(content, start, end):
+        digest.update(chunk)
 
 
 def compile_part_slice(content: bytes, digest: str) -> bytes | None:
@@ -1130,19 +1260,47 @@ def compile_part_slice(content: bytes, digest: str) -> bytes | None:
     longer part now. Both are one question: is there an entry-aligned slice,
     starting where a part starts, whose bytes still hash to what the page
     recorded? Nothing weaker is accepted — the historical bytes must still be
-    present verbatim and in place, which is the append-only argument a
-    transparency log makes with a consistency proof (RFC 6962).
+    present verbatim and hash to the recorded SHA-256. A quote alone never
+    substitutes for this source proof.
     """
-    return _slice_at(content, [start for start, _end in _daily_part_bounds(content)], digest)
+    bounds = daily_part_bounds(content)
+    current = _current_part_match(content, bounds, digest)
+    if current is not None:
+        return current
+    return slice_at(content, [start for start, _end in bounds], digest)
 
 
-def _slice_at(content: bytes, starts: list[int], digest: str) -> bytes | None:
+def _current_part_match(content: bytes, bounds: list[tuple[int, int]], digest: str) -> bytes | None:
+    """Try exact current parts first; historical matches still need the full scan."""
+    for start, end in bounds:
+        part = content[start:end]
+        if sha256_bytes(part) == digest:
+            return part
+    return None
+
+
+def slice_at(content: bytes, starts: list[int], digest: str) -> bytes | None:
     """The first entry-aligned slice, from one of these part starts, whose bytes hash to `digest`."""
+    boundaries = _slice_boundaries(content, 0)
     for start in starts:
-        found = _slice_from(content, start, digest)
+        found = _slice_from(content, start, digest, boundaries)
         if found is not None:
             return found
     return None
+
+
+def _historical_part_offsets(content: bytes, source_digest: str) -> tuple[int, int] | None:
+    part = compile_part_slice(content, source_digest)
+    if part is None:
+        return None
+    start = content.find(part)
+    return start, start + len(part)
+
+
+def _part_at_offsets(content: bytes, offsets: tuple[int, int] | None) -> bytes | None:
+    if offsets is None:
+        return None
+    return content[offsets[0]:offsets[1]]
 
 
 class EvidenceResolver:
@@ -1151,41 +1309,147 @@ class EvidenceResolver:
         self.state_root = state_root
         self.daily_root = self.vault / "knowledge" / "daily"
         self.archive_root = self.daily_root / "archive"
+        # Operation-local offsets only. Every lookup re-reads and hashes the
+        # source; even a same-size edit with restored timestamps invalidates it.
+        self._part_offsets: dict[Path, tuple[str, dict[str, tuple[int, int] | None]]] = {}
+        # Only parsed offsets are retained. Every live lookup still reads and
+        # hashes its file; changed content replaces that file's whole parse map.
+        self._flat_entry_metadata = {}
+        # Strong references qualify only these exact immutable byte objects.
+        self._immutable_sources = {}
+        self._immutable_entry_metadata = {}
 
     def resolve(self, reference: EvidenceRef | str) -> ResolvedEvidence:
-        ref = EvidenceRef.parse(reference) if isinstance(reference, str) else reference
-        if not isinstance(ref, EvidenceRef):
-            raise TypeError("reference must be EvidenceRef or canonical string")
+        ref = _captured_reference(reference)
         flat = self.daily_root / f"{ref.daily_id}.md"
-        content = _flat_source(flat)
+        content = flat_source(flat)
         if content is None:
             return self._resolve_archive(ref)
         return self._resolve_flat(ref, content, flat)
 
+    @contextlib.contextmanager
+    def captured_sources(self):
+        """Provisional read-only results; recheck every captured source before exit.
+
+        Callers must not publish or act on results inside this scope. Ordinary
+        resolve calls keep their independent current-file checks. Archives keep
+        their existing full per-reference verification.
+        """
+        captured = _CapturedEvidenceSources(self)
+        try:
+            yield captured
+            captured.validate_current_sources()
+        finally:
+            captured.close()
+
     def _resolve_flat(self, ref: EvidenceRef, content: bytes, flat: Path):
-        if sha256_bytes(content) == ref.source_sha256:
-            return self._slice(ref, content, flat, "flat")
-        part = compile_part_slice(content, ref.source_sha256)
+        current_digest = sha256_bytes(content)
+        if current_digest == ref.source_sha256:
+            return self._slice_live_source(ref, content, flat, "flat", current_digest)
+        part = self._historical_part(flat, content, current_digest, ref.source_sha256)
         if part is None:
             raise EvidenceResolutionError("flat daily source hash mismatch")
-        return self._slice(ref, part, flat, "flat-part")
+        return self._slice_live_source(ref, part, flat, "flat-part", current_digest)
+
+    def _live_entry_metadata(self, ref, content, flat, current_digest):
+        cached = self._flat_entry_metadata.get(flat)
+        if cached is None or cached[0] != current_digest:
+            cached = (current_digest, {})
+            self._flat_entry_metadata[flat] = cached
+        metadata = cached[1]
+        if ref.source_sha256 not in metadata:
+            metadata[ref.source_sha256] = _daily_entry_metadata(content)
+        return metadata[ref.source_sha256]
+
+    def _slice_live_source(self, ref, content, flat, location, current_digest):
+        entries, newlines = self._live_entry_metadata(ref, content, flat, current_digest)
+        selected = _checked_evidence_span(ref, content)
+        block = sole_entry_span(ref, entries.get(ref.block_id, ()))
+        return _resolved_byte_span(ref, content, flat, location, selected, block,
+                                  ref.source_sha256,
+                                  lines=_indexed_line_span(newlines, ref.byte_start, ref.byte_end))
+
+    def _historical_part(
+        self, flat: Path, content: bytes, current_digest: str, source_digest: str
+    ) -> bytes | None:
+        cached = self._part_offsets.get(flat)
+        if cached is None or cached[0] != current_digest:
+            cached = (current_digest, {})
+            self._part_offsets[flat] = cached
+        offsets = cached[1]
+        if source_digest not in offsets:
+            offsets[source_digest] = _historical_part_offsets(content, source_digest)
+        return _part_at_offsets(content, offsets[source_digest])
 
     def resolve_bytes(
         self,
         reference: EvidenceRef | str,
-        content: bytes,
+        content: bytes | VerifiedByteRange,
         *,
         source_path: Path,
         location: str = "snapshot",
+        reuse_immutable: bool = False,
     ) -> ResolvedEvidence:
-        """Apply the same hash/block/span checks to an immutable in-memory source."""
-        ref = EvidenceRef.parse(reference) if isinstance(reference, str) else reference
-        if not isinstance(ref, EvidenceRef) or not isinstance(content, bytes):
-            raise TypeError("reference and immutable content have invalid types")
+        """Resolve owned source evidence; range proofs always retain only metadata."""
+        ref = _owned_source_reference(reference, content)
+        if reuse_immutable or type(content) is VerifiedByteRange:
+            return self._resolve_immutable_bytes(ref, content, Path(source_path), location)
+        return self._resolve_uncached_bytes(ref, content, Path(source_path), location)
+
+    def _resolve_uncached_bytes(self, ref, content, source_path, location):
         if sha256_bytes(content) != ref.source_sha256:
             raise EvidenceResolutionError("immutable daily source hash mismatch")
-        return self._slice(ref, content, Path(source_path), location)
+        return self._slice(ref, content, source_path, location)
 
+    def _resolve_immutable_bytes(self, ref, content, source_path, location):
+        proof = self._immutable_byte_proof(content)
+        if proof[1] != ref.source_sha256:
+            raise EvidenceResolutionError("immutable daily source hash mismatch")
+        selected = _checked_evidence_span(ref, content)
+        block = sole_entry_span(ref, proof[4].get(ref.block_id, ()))
+        return _resolved_byte_span(ref, content, source_path, location, selected, block, proof[1],
+                                   lines=_indexed_line_span(proof[3], ref.byte_start, ref.byte_end))
+
+    def _immutable_byte_proof(self, content):
+        _require_owned_source(content)
+        proof = self._immutable_sources.get(id(content))
+        if proof is None or proof[0] is not content:
+            proof = _owned_source_proof(content)
+            self._immutable_sources[id(content)] = proof
+        return proof
+
+    def _indexed_source_entries(self, content, entries):
+        _require_owned_source(content)
+        key = (id(content), id(entries))
+        cached = self._immutable_entry_metadata.get(key)
+        if cached is not None and cached[0] is content and cached[1] is entries:
+            return cached[2]
+        return self._checked_entry_metadata(content, entries, key)
+
+    def _checked_entry_metadata(self, content, entries, key):
+        proof = self._immutable_byte_proof(content)
+        if tuple(entries) != proof[2]:
+            return None
+        if type(entries) is tuple:
+            self._immutable_entry_metadata[key] = (content, entries, proof)
+        return proof
+
+    def canonical_declaring_entries(self, content, timestamp):
+        """Read the canonical entry index of strongly held immutable source bytes."""
+        proof = self._immutable_byte_proof(content)
+        return [(start, end) for _block, start, end in proof[4].get(timestamp, ())]
+
+    def declaring_entries(self, content, entries, timestamp):
+        proof = self._indexed_source_entries(content, entries)
+        if proof is None:
+            return [(start, end) for block, start, end in entries if block == timestamp]
+        return [(start, end) for _block, start, end in proof[4].get(timestamp, ())]
+
+    def entry_ids_at(self, content, entries, offset):
+        proof = self._indexed_source_entries(content, entries)
+        if proof is None:
+            return tuple(sorted({block for block, start, end in entries if start <= offset < end}))
+        return _indexed_entry_ids_at(proof, offset)
     def _resolve_archive(self, ref: EvidenceRef) -> ResolvedEvidence:
         month = self.archive_root / ref.daily_id[:7]
         if not month.exists():
@@ -1194,19 +1458,24 @@ class EvidenceResolver:
         if len(matches) != 1:
             reason = "not found" if not matches else "ambiguous"
             raise EvidenceResolutionError(f"archive evidence source is {reason}")
-        bag = matches[0]
-        source = _referenced_source(bag, ref)
-        assert source is not None
-        return self._slice(ref, source, bag.payload_path, "archive")
+        return matches[0]
 
-    def _archive_matches(self, month: Path, ref: EvidenceRef) -> list[ValidatedBag]:
+    def _archive_matches(self, month: Path, ref: EvidenceRef) -> list[ResolvedEvidence]:
         """Every sealed bag in the month that carries the day this reference names."""
         try:
-            return [bag for bag in self._validated_bags(month) if _bag_matches(bag, ref)]
+            return list(self._resolved_archive_candidates(month, ref))
         except EvidenceResolutionError:
             raise
         except (OSError, ValueError) as exc:
             raise EvidenceResolutionError(f"invalid archive boundary: {exc}") from exc
+
+    def _resolved_archive_candidates(self, month, ref):
+        coordinator = self._archive_coordinator()
+        for candidate in self._bag_candidates(month):
+            with open_validated_bag(candidate, coordinator=coordinator, vault=self.vault) as (bag, payload):
+                result = _resolve_bag_evidence(bag, payload, ref)
+            if result is not None:
+                yield result
 
     def _validated_bags(self, month: Path) -> list[ValidatedBag]:
         coordinator = self._archive_coordinator()
@@ -1216,8 +1485,8 @@ class EvidenceResolver:
         ]
 
     def _bag_candidates(self, month: Path) -> list[Path]:
-        _regular_directory(self.archive_root, label="archive root")
-        _regular_directory(month, label="archive month")
+        regular_directory(self.archive_root, label="archive root")
+        regular_directory(month, label="archive month")
         entries = bounded_directory_entries(
             month, MAX_DIRECTORY_ENTRIES, label="archive month"
         )
@@ -1229,9 +1498,8 @@ class EvidenceResolver:
     def _archive_coordinator(self) -> object | None:
         """None means there is no transaction database to hold a bag to account."""
         if self.state_root is None:
-            from memory_state import STATE_ROOT
 
-            self.state_root = Path(STATE_ROOT)
+            self.state_root = Path(runtime_roots.state_root())
         if not (self.state_root / "run/markdown-transactions.sqlite3").exists():
             return None
         from markdown_transaction import active_or_legacy_coordinator
@@ -1242,29 +1510,195 @@ class EvidenceResolver:
     def _slice(
         ref: EvidenceRef, content: bytes, source_path: Path, location: str
     ) -> ResolvedEvidence:
-        _require_utf8(content, "daily source is not UTF-8")
-        if ref.byte_end > len(content):
-            raise EvidenceResolutionError("evidence byte span exceeds the source")
-        selected = content[ref.byte_start : ref.byte_end]
-        _require_utf8(selected, "evidence span is not on UTF-8 boundaries")
-        block_start, block_end = _sole_block_span(content, ref)
-        line_start, line_end = _line_span(content, ref.byte_start, ref.byte_end)
-        return ResolvedEvidence(
-            reference=ref,
-            bytes=selected,
-            sha256=sha256_bytes(selected),
-            source_sha256=sha256_bytes(content),
-            block_sha256=sha256_bytes(content[block_start:block_end]),
-            byte_start=ref.byte_start,
-            byte_end=ref.byte_end,
-            line_start=line_start,
-            line_end=line_end,
-            location=location,
-            source_path=source_path,
+        owned_source_newlines(content)
+        selected = _checked_evidence_span(ref, content)
+        block = _sole_block_span(content, ref)
+        return _resolved_byte_span(ref, content, source_path, location, selected, block,
+                                   source_range_digest(content, 0, len(content)))
+
+
+def _require_owned_source(content):
+    if isinstance(content, bytes):
+        return
+    if type(content) is not VerifiedByteRange:
+        raise TypeError("source requires immutable bytes or an owned verified range")
+    content.require_active()
+
+
+def _owned_source_reference(reference, content):
+    ref = EvidenceRef.parse(reference) if isinstance(reference, str) else reference
+    if not isinstance(ref, EvidenceRef):
+        raise TypeError("reference and immutable content have invalid types")
+    _require_owned_source(content)
+    return ref
+
+
+def source_chunks(content):
+    if type(content) is VerifiedByteRange:
+        yield from content.iter_chunks(0, len(content))
+        return
+    for offset in range(0, len(content), IO_CHUNK_BYTES):
+        yield content[offset:offset + IO_CHUNK_BYTES]
+
+
+def source_range_digest(content, start, end):
+    if type(content) is VerifiedByteRange:
+        return content.range_digest(start, end)
+    return hashlib.sha256(memoryview(content)[start:end]).hexdigest()
+
+
+def _owned_source_proof(content):
+    newlines = owned_source_newlines(content)
+    entries = tuple(daily_entries(content))
+    digest = source_range_digest(content, 0, len(content))
+    return (content, digest, entries, newlines, _entry_groups(entries),
+            tuple(start for _block, start, _end in entries))
+
+
+def owned_source_newlines(content):
+    try:
+        if type(content) is VerifiedByteRange:
+            return content.newline_offsets(validate_utf8=True)
+        return _utf8_source_newlines(content)
+    except UnicodeDecodeError as exc:
+        raise EvidenceResolutionError("daily source is not UTF-8") from exc
+
+
+def _utf8_source_newlines(content):
+    decoder = codecs.getincrementaldecoder('utf-8')(errors='strict')
+    newlines, offset = [], 0
+    for chunk in source_chunks(content):
+        decoder.decode(chunk, final=False)
+        newlines.extend(offset + match.start() for match in re.finditer(b"\n", chunk))
+        offset += len(chunk)
+    decoder.decode(b'', final=True)
+    return tuple(newlines)
+
+
+def _indexed_entry_ids_at(proof, offset):
+    index = bisect_right(proof[5], offset) - 1
+    if index < 0:
+        return ()
+    block, start, end = proof[2][index]
+    return (block,) if start <= offset < end else ()
+
+
+def _entry_groups(entries):
+    groups = {}
+    for entry in entries:
+        groups.setdefault(entry[0], []).append(entry)
+    return {key: tuple(value) for key, value in groups.items()}
+
+
+def _daily_entry_metadata(content):
+    _require_utf8(content, "daily source is not UTF-8")
+    entries = tuple(daily_entries(content))
+    newlines = tuple(match.start() for match in re.finditer(b"\n", content))
+    return _entry_groups(entries), newlines
+
+
+def _checked_evidence_span(ref, content):
+    if ref.byte_end > len(content):
+        raise EvidenceResolutionError("evidence byte span exceeds the source")
+    selected = content[ref.byte_start:ref.byte_end]
+    _require_utf8(selected, "evidence span is not on UTF-8 boundaries")
+    return selected
+
+
+def _indexed_line_span(newlines, start, end):
+    return bisect_left(newlines, start) + 1, bisect_left(newlines, end - 1) + 2
+
+
+def _resolved_byte_span(ref, content, source_path, location, selected, block, digest, *, lines=None):
+    block_start, block_end = block
+    line_start, line_end = lines or line_span(content, ref.byte_start, ref.byte_end)
+    return ResolvedEvidence(
+        reference=ref, bytes=selected, sha256=sha256_bytes(selected), source_sha256=digest,
+        block_sha256=source_range_digest(content, block_start, block_end), byte_start=ref.byte_start,
+        byte_end=ref.byte_end, line_start=line_start, line_end=line_end,
+        location=location, source_path=source_path,
+    )
+
+
+class _CapturedEvidenceSources:
+    """One explicit read-only operation, with exact immutable byte ownership."""
+
+    def __init__(self, resolver: EvidenceResolver):
+        self.resolver = resolver
+        self.byte_resolver = EvidenceResolver(resolver.vault, state_root=resolver.state_root)
+        self.sources = {}
+        self.closed = False
+
+    def resolve(self, reference):
+        self._require_open()
+        ref = _captured_reference(reference)
+        flat = self.resolver.daily_root / f"{ref.daily_id}.md"
+        captured = self._capture(flat)
+        if captured is None:
+            return self.resolver._resolve_archive(ref)
+        selected, location = self._selected_source(flat, captured, ref)
+        return self.byte_resolver.resolve_bytes(
+            ref, selected, source_path=flat, location=location, reuse_immutable=True
         )
 
+    def _capture(self, flat):
+        if flat in self.sources:
+            return self.sources[flat]
+        content = flat_source(flat)
+        if content is None:
+            return None
+        captured = (content, sha256_bytes(content), {})
+        self.sources[flat] = captured
+        return captured
 
-def _flat_source(flat: Path) -> bytes | None:
+    def _selected_source(self, flat, captured, ref):
+        content, digest, parts = captured
+        if digest == ref.source_sha256:
+            return content, "flat"
+        if ref.source_sha256 not in parts:
+            parts[ref.source_sha256] = self.resolver._historical_part(
+                flat, content, digest, ref.source_sha256
+            )
+        return _required_captured_part(parts[ref.source_sha256]), "flat-part"
+
+    def validate_current_sources(self):
+        self._require_open()
+        for flat, captured in self.sources.items():
+            current = flat_source(flat)
+            _require_captured_source_current(current, captured[1])
+
+    def _require_open(self):
+        if self.closed:
+            raise RuntimeError("evidence source capture is closed")
+
+    def close(self):
+        self.closed = True
+        self.sources.clear()
+        self.byte_resolver._immutable_sources.clear()
+        self.byte_resolver._immutable_entry_metadata.clear()
+
+
+def _captured_reference(reference):
+    ref = EvidenceRef.parse(reference) if isinstance(reference, str) else reference
+    if not isinstance(ref, EvidenceRef):
+        raise TypeError("reference must be EvidenceRef or canonical string")
+    return ref
+
+
+def _required_captured_part(content):
+    if content is None:
+        raise EvidenceResolutionError("flat daily source hash mismatch")
+    return content
+
+
+def _require_captured_source_current(current, digest):
+    if current is None:
+        raise EvidenceResolutionError("captured daily source disappeared before validation completed")
+    if sha256_bytes(current) != digest:
+        raise EvidenceResolutionError("captured daily source changed before validation completed")
+
+
+def flat_source(flat: Path) -> bytes | None:
     """None means the day is no longer flat and must come from an archive."""
     try:
         return read_stable_bytes(flat, MAX_DAILY_BYTES, label="daily source")
@@ -1289,9 +1723,13 @@ def _sole_block_span(content: bytes, ref: EvidenceRef) -> tuple[int, int]:
     repeated id stopped the compile of a whole day and every day after it
     (docs/research/2026-09-26-an-evidence-span-names-its-own-block.md).
     """
+    return sole_entry_span(ref, daily_entries(content))
+
+
+def sole_entry_span(ref, entries):
     matching = [
         (start, end)
-        for block_id, start, end in daily_entries(content)
+        for block_id, start, end in entries
         if block_id == ref.block_id and _span_inside(ref, start, end)
     ]
     if len(matching) != 1:
@@ -1303,19 +1741,20 @@ def _span_inside(ref: EvidenceRef, start: int, end: int) -> bool:
     return start <= ref.byte_start and ref.byte_end <= end
 
 
-def _bag_matches(bag: ValidatedBag, ref: EvidenceRef) -> bool:
+def _resolve_bag_evidence(bag, payload, ref):
     if bag.manifest["logical_daily_id"] != ref.daily_id:
-        return False
-    if _referenced_source(bag, ref) is None:
+        return None
+    source = _referenced_source(bag, payload, ref)
+    if source is None:
         raise EvidenceResolutionError("archive daily source hash mismatch")
-    return True
+    return EvidenceResolver._slice(ref, source, bag.payload_path, "archive")
 
 
-def _referenced_source(bag: ValidatedBag, ref: EvidenceRef) -> bytes | None:
+def _referenced_source(bag, payload, ref):
     """The whole day, or the compile part a page quoted from (audit 2026-09-26 B-1)."""
-    if sha256_bytes(bag.payload) == ref.source_sha256:
-        return bag.payload
-    return _slice_at(bag.payload, _recorded_part_starts(bag.manifest), ref.source_sha256)
+    if source_range_digest(payload, 0, len(payload)) == ref.source_sha256:
+        return payload
+    return slice_at(payload, _recorded_part_starts(bag.manifest), ref.source_sha256)
 
 
 def _recorded_part_starts(manifest: Mapping[str, object]) -> list[int]:
@@ -1432,7 +1871,7 @@ def verify_evidence_span(supplied: Mapping[str, object], *, vault: Path) -> None
 
 def _citation_source_path(relative: object, vault: Path) -> Path:
     try:
-        from reliable_memory import restricted_relative_path
+        from llm_wiki.restricted_paths import restricted_relative_path
 
         normalized = restricted_relative_path(str(relative), ("knowledge",))
         root = Path(vault).resolve(strict=True)
@@ -1450,7 +1889,7 @@ def _require_citation_span(citation: Mapping[str, object], text: object) -> None
 
 
 def _require_span_bounds(start: object, end: object) -> None:
-    if not _is_plain_int(start) or not _is_plain_int(end):
+    if not is_plain_int(start) or not is_plain_int(end):
         raise EvidenceResolutionError("citation span is invalid")
     if start < 0 or start >= end:
         raise EvidenceResolutionError("citation span is invalid")
@@ -1497,7 +1936,7 @@ def _citation_span_disagrees(
         return True
     if span != text.encode("utf-8"):
         return True
-    return _line_span(source, start, end) != (
+    return line_span(source, start, end) != (
         citation.get("line_start"),
         citation.get("line_end"),
     )

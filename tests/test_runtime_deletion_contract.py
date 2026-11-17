@@ -6,16 +6,17 @@ import json
 import os
 import re
 import sqlite3
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
-from install_control import ManagedResource, install_resources
-
-from tests.test_reliability_v3_adoption import (
-    _vault,
-    build_adopted_reliability_v3,
+from install_state import (
+    ManagedResource,
 )
+from llm_wiki.install_v2_transactions import install_resources
+
+from tests.reliability_v3_adoption_helpers import _vault, build_adopted_reliability_v3
+from tests.script_sources import split_module_files  # noqa: E402
 
 CANONICAL_ROLES = (
     "capture",
@@ -119,15 +120,14 @@ def _queue_db(state_root: Path, now: datetime) -> Path:
 
 
 def test_run_deletion_reports_every_contract_blocker(tmp_path, monkeypatch):
-    import doctor
+    from llm_wiki import doctor_deletion
 
-    now = datetime(2026, 7, 14, 12, tzinfo=timezone.utc)
+    now = datetime(2026, 7, 14, 12, tzinfo=UTC)
     state_root = tmp_path / "state"
     _transaction_db(state_root, now)
     _queue_db(state_root, now)
-    monkeypatch.setattr(doctor, "_pid_alive", lambda pid: True)
 
-    result = doctor._run_deletion_check(state_root, now)
+    result = doctor_deletion.run_deletion_check(state_root, now)
 
     assert result["blockers"] == [{"code": "legacy_protocol_unquiesced"}]
     assert result["quiescent"] is False
@@ -136,26 +136,26 @@ def test_run_deletion_reports_every_contract_blocker(tmp_path, monkeypatch):
 
 
 def test_run_deletion_never_treats_empty_legacy_state_as_quiescent(tmp_path):
-    import doctor
+    from llm_wiki import doctor_deletion
 
     state_root = tmp_path / "state"
     (state_root / "run").mkdir(parents=True)
 
-    assert doctor._run_deletion_check(
-        state_root, datetime.now(timezone.utc)
+    assert doctor_deletion.run_deletion_check(
+        state_root, datetime.now(UTC)
     )["blockers"] == [{"code": "legacy_protocol_unquiesced"}]
 
 
 def test_pre_adoption_doctor_always_blocks_with_legacy_protocol_unquiesced(
     tmp_path: Path,
 ) -> None:
-    import doctor
+    from llm_wiki import doctor_deletion
 
     root, state_root = _vault(tmp_path)
 
-    result = doctor._run_deletion_check(
+    result = doctor_deletion.run_deletion_check(
         state_root,
-        datetime.now(timezone.utc),
+        datetime.now(UTC),
         root=root,
     )
 
@@ -174,7 +174,7 @@ def test_doctor_never_returns_a_durable_deletion_permit(
     tmp_path: Path,
     retained: bool,
 ) -> None:
-    import doctor
+    from llm_wiki import doctor_deletion
 
     root, state_root = _vault(tmp_path)
     build_adopted_reliability_v3(root, state_root)
@@ -183,9 +183,9 @@ def test_doctor_never_returns_a_durable_deletion_permit(
         result_path.parent.mkdir(parents=True)
         result_path.write_text("{}", encoding="utf-8")
 
-    result = doctor._run_deletion_check(
+    result = doctor_deletion.run_deletion_check(
         state_root,
-        datetime.now(timezone.utc),
+        datetime.now(UTC),
         root=root,
     )
 
@@ -204,18 +204,18 @@ def test_doctor_never_returns_a_durable_deletion_permit(
 def test_protected_snapshot_releases_before_later_owner_admission(
     tmp_path: Path,
 ) -> None:
-    import doctor
+    from llm_wiki import doctor_deletion
     from operational_ownership import OwnershipRegistry
 
     root, state_root = _vault(tmp_path)
     build_adopted_reliability_v3(root, state_root)
 
-    result = doctor._run_deletion_check(
+    result = doctor_deletion.run_deletion_check(
         state_root,
-        datetime.now(timezone.utc),
+        datetime.now(UTC),
         root=root,
     )
-    registry = OwnershipRegistry._from_adopted_database(
+    registry = OwnershipRegistry.from_adopted_database(
         state_root,
         state_root / "run/markdown-transactions-v3.sqlite3",
     )
@@ -227,17 +227,17 @@ def test_protected_snapshot_releases_before_later_owner_admission(
 
 
 @pytest.mark.parametrize("role", CANONICAL_ROLES)
-def test_protected_snapshot_acquires_only_when_no_other_owner_exists(
+def test_observation_never_claims_quiescence_with_another_owner(
     tmp_path: Path,
     role: str,
 ) -> None:
-    import doctor
     import operational_ownership as ownership
+    from llm_wiki import doctor_deletion
     from reliable_memory import capture_runtime_file_identity, sha256_bytes
 
     root, state_root = _vault(tmp_path)
     build_adopted_reliability_v3(root, state_root)
-    registry = ownership.OwnershipRegistry._from_adopted_database(
+    registry = ownership.OwnershipRegistry.from_adopted_database(
         state_root,
         state_root / "run/markdown-transactions-v3.sqlite3",
     )
@@ -265,9 +265,9 @@ def test_protected_snapshot_acquires_only_when_no_other_owner_exists(
         marker=marker,
     )
 
-    result = doctor._run_deletion_check(
+    result = doctor_deletion.run_deletion_check(
         state_root,
-        datetime.now(timezone.utc),
+        datetime.now(UTC),
         root=root,
     )
 
@@ -283,11 +283,11 @@ def test_protected_snapshot_acquires_only_when_no_other_owner_exists(
 def test_snapshot_excludes_only_its_exact_token_and_reports_orphan_projections(
     tmp_path: Path,
 ) -> None:
-    import doctor
+    from llm_wiki import doctor_deletion
 
     root, state_root = _vault(tmp_path)
     build_adopted_reliability_v3(root, state_root)
-    now = datetime.now(timezone.utc).isoformat()
+    now = datetime.now(UTC).isoformat()
     queue_path = state_root / "run/queue-v3.sqlite3"
     with contextlib.closing(sqlite3.connect(queue_path)) as database:
         database.execute(
@@ -312,9 +312,9 @@ def test_snapshot_excludes_only_its_exact_token_and_reports_orphan_projections(
         )
         database.commit()
 
-    result = doctor._run_deletion_check(
+    result = doctor_deletion.run_deletion_check(
         state_root,
-        datetime.now(timezone.utc),
+        datetime.now(UTC),
         root=root,
     )
 
@@ -329,12 +329,13 @@ def test_snapshot_excludes_only_its_exact_token_and_reports_orphan_projections(
         ).fetchone() == (0,)
 
 
-def test_protected_scan_fails_closed_before_30_second_lease_expiry(
+def test_observation_fails_closed_at_the_caller_deadline(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     import doctor
-    import installed_memory_repair
+    import reliability_v3_validation
+    from llm_wiki import doctor_deletion
 
     root, state_root = _vault(tmp_path)
     build_adopted_reliability_v3(root, state_root)
@@ -349,17 +350,17 @@ def test_protected_scan_fails_closed_before_30_second_lease_expiry(
 
     monkeypatch.setattr(doctor.time, "monotonic", lambda: clock[0])
     monkeypatch.setattr(
-        installed_memory_repair,
+        reliability_v3_validation,
         "validate_reliability_v3_runtime",
         scan,
         raising=False,
     )
 
-    result = doctor._run_deletion_check(
+    result = doctor_deletion.run_deletion_check(
         state_root,
-        datetime.now(timezone.utc),
+        datetime.now(UTC),
         root=root,
-        deadline=float("inf"),
+        deadline=120.0,
     )
 
     assert observed_tokens and observed_tokens[0]
@@ -378,8 +379,8 @@ def test_snapshot_release_cannot_delete_a_changed_token(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    import doctor
-    import installed_memory_repair
+    import reliability_v3_validation
+    from llm_wiki import doctor_deletion
 
     root, state_root = _vault(tmp_path)
     build_adopted_reliability_v3(root, state_root)
@@ -396,15 +397,15 @@ def test_snapshot_release_cannot_delete_a_changed_token(
         return []
 
     monkeypatch.setattr(
-        installed_memory_repair,
+        reliability_v3_validation,
         "validate_reliability_v3_runtime",
         replace_snapshot_owner,
         raising=False,
     )
 
-    result = doctor._run_deletion_check(
+    result = doctor_deletion.run_deletion_check(
         state_root,
-        datetime.now(timezone.utc),
+        datetime.now(UTC),
         root=root,
     )
 
@@ -420,11 +421,11 @@ def test_snapshot_release_cannot_delete_a_changed_token(
 def test_expired_committed_undo_artifact_does_not_block_quiescent_observation(
     tmp_path: Path,
 ) -> None:
-    import doctor
+    from llm_wiki import doctor_deletion
 
     root, state_root = _vault(tmp_path)
     build_adopted_reliability_v3(root, state_root)
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     old = (now - timedelta(days=31)).isoformat()
     coordinator = state_root / "run/markdown-transactions-v3.sqlite3"
     with contextlib.closing(sqlite3.connect(coordinator)) as database:
@@ -465,7 +466,7 @@ def test_expired_committed_undo_artifact_does_not_block_quiescent_observation(
         database.commit()
     (state_root / "run/transactions/old-undo").mkdir(parents=True)
 
-    result = doctor._run_deletion_check(state_root, now, root=root)
+    result = doctor_deletion.run_deletion_check(state_root, now, root=root)
 
     assert result["quiescent"] is True
     assert result["blockers"] == []
@@ -473,7 +474,7 @@ def test_expired_committed_undo_artifact_does_not_block_quiescent_observation(
 
 
 def test_active_install_manifest_blocks_adopted_runtime_deletion(tmp_path: Path) -> None:
-    import doctor
+    from llm_wiki import doctor_deletion
 
     root, state_root = _vault(tmp_path)
     build_adopted_reliability_v3(root, state_root)
@@ -510,8 +511,8 @@ def test_active_install_manifest_blocks_adopted_runtime_deletion(tmp_path: Path)
         ],
     )
 
-    result = doctor._run_deletion_check(
-        state_root, datetime.now(timezone.utc), root=root
+    result = doctor_deletion.run_deletion_check(
+        state_root, datetime.now(UTC), root=root
     )
 
     assert result["quiescent"] is False
@@ -523,14 +524,13 @@ def test_live_blackboard_claim_blocks_adopted_runtime_deletion(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     import blackboard
-    import doctor
+    from llm_wiki import doctor_deletion
 
     root, state_root = _vault(tmp_path)
     build_adopted_reliability_v3(root, state_root)
-    now = datetime(2026, 8, 16, 12, tzinfo=timezone.utc)
+    now = datetime(2026, 8, 16, 12, tzinfo=UTC)
     projects = root / "knowledge/projects"
     (projects / "demo/.blackboard").mkdir(parents=True)
-    monkeypatch.setattr(blackboard, "PROJECTS_DIR", projects)
     monkeypatch.setenv("LLM_WIKI_ROOT", str(root))
     monkeypatch.setenv("LLM_WIKI_STATE_ROOT", str(state_root))
     blackboard.claim_task(
@@ -542,7 +542,7 @@ def test_live_blackboard_claim_blocks_adopted_runtime_deletion(
         now=now,
     )
 
-    result = doctor._run_deletion_check(state_root, now, root=root)
+    result = doctor_deletion.run_deletion_check(state_root, now, root=root)
     codes = {item["code"] for item in result["blockers"]}
 
     assert result["quiescent"] is False
@@ -1217,13 +1217,13 @@ def test_installer_guard_resolves_variables_and_line_continuations(source):
 
 def test_installers_and_doctor_have_no_direct_runtime_root_deletion_calls():
     root = Path(__file__).resolve().parent.parent
-    doctor_source = (root / "scripts/doctor.py").read_text(encoding="utf-8")
+    doctor_sources = [path.read_text(encoding="utf-8") for path in split_module_files("doctor", "doctor")]
     installer_sources = [
         (root / "install.sh").read_text(encoding="utf-8"),
         (root / "install.ps1").read_text(encoding="utf-8"),
     ]
 
-    assert _python_direct_runtime_root_deletions(doctor_source) == []
+    assert [_python_direct_runtime_root_deletions(source) for source in doctor_sources] == [[]] * len(doctor_sources)
     assert all(
         _installer_direct_runtime_root_deletions(source) == []
         for source in installer_sources
@@ -1231,7 +1231,7 @@ def test_installers_and_doctor_have_no_direct_runtime_root_deletion_calls():
 
 
 def test_deletion_blocks_every_legacy_and_retained_queue_artifact(tmp_path):
-    import doctor
+    from llm_wiki import doctor_deletion
 
     state_root = tmp_path / "state"
     run = state_root / "run"
@@ -1245,8 +1245,8 @@ def test_deletion_blocks_every_legacy_and_retained_queue_artifact(tmp_path):
     (results / "retained.tmp").write_text("result", encoding="utf-8")
     (quarantine / "bad.json").write_text("{}", encoding="utf-8")
 
-    result = doctor._run_deletion_check(
-        state_root, datetime.now(timezone.utc), deadline=float("inf")
+    result = doctor_deletion.run_deletion_check(
+        state_root, datetime.now(UTC), deadline=float("inf")
     )
 
     assert result["blockers"] == [{"code": "legacy_protocol_unquiesced"}]
@@ -1255,7 +1255,7 @@ def test_deletion_blocks_every_legacy_and_retained_queue_artifact(tmp_path):
 def test_deletion_blocks_source_state_and_any_partial_database_error(
     tmp_path, monkeypatch
 ):
-    import doctor
+    from llm_wiki import doctor_base, doctor_deletion, doctor_queue
 
     state_root = tmp_path / "state"
     path = state_root / "run/queue.sqlite3"
@@ -1274,11 +1274,11 @@ def test_deletion_blocks_source_state_and_any_partial_database_error(
             INSERT INTO source_failures VALUES('knowledge/daily/2026-01-01.md');
             """
         )
-    real = doctor._readonly_database
+    real = doctor_base.readonly_database
 
     class BrokenAfterRows:
         def __enter__(self):
-            self.database = real(path, state_root, max_bytes=doctor.MAX_OPERATIONAL_DB_BYTES)
+            self.database = real(path, state_root, max_bytes=None)
             return self
 
         def __exit__(self, *args):
@@ -1289,14 +1289,14 @@ def test_deletion_blocks_source_state_and_any_partial_database_error(
                 raise sqlite3.DatabaseError("corrupt tail")
             return self.database.execute(sql, parameters)
 
-    monkeypatch.setattr(doctor, "_readonly_database", lambda *args, **kwargs: BrokenAfterRows())
+    monkeypatch.setattr(doctor_base, "readonly_database", lambda *args, **kwargs: BrokenAfterRows())
 
-    queue = doctor._queue_v2_check(
-        state_root, datetime.now(timezone.utc), float("inf")
+    queue = doctor_queue.queue_v2_check(
+        state_root, datetime.now(UTC), float("inf")
     )
-    deletion = doctor._run_deletion_check(
+    deletion = doctor_deletion.run_deletion_check(
         state_root,
-        datetime.now(timezone.utc),
+        datetime.now(UTC),
         deadline=float("inf"),
         collected={"queue": queue},
     )
@@ -1308,7 +1308,7 @@ def test_deletion_blocks_source_state_and_any_partial_database_error(
 def test_pre_adoption_deletion_does_not_use_legacy_collected_checks(
     tmp_path, monkeypatch
 ):
-    import doctor
+    from llm_wiki import doctor_deletion, doctor_queue, doctor_transactions
 
     transaction = {
         "id": "transactions",
@@ -1318,19 +1318,19 @@ def test_pre_adoption_deletion_does_not_use_legacy_collected_checks(
     queue = {"id": "queue", "status": "ok", "details": {"deletion_codes": []}}
     archive = {"id": "archives", "status": "ok", "details": {"deletion_codes": []}}
     monkeypatch.setattr(
-        doctor,
-        "_transaction_check",
+        doctor_transactions,
+        "transaction_check",
         lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("rescanned")),
     )
     monkeypatch.setattr(
-        doctor,
-        "_queue_check",
+        doctor_queue,
+        "queue_check",
         lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("rescanned")),
     )
 
-    result = doctor._run_deletion_check(
+    result = doctor_deletion.run_deletion_check(
         tmp_path,
-        datetime.now(timezone.utc),
+        datetime.now(UTC),
         deadline=float("inf"),
         collected={"transactions": transaction, "queue": queue, "archives": archive},
     )
@@ -1419,14 +1419,14 @@ def _malformed_transaction_db(
 def test_transaction_health_blocks_unknown_or_corrupt_rows(
     tmp_path, mutation, expected_code
 ):
-    import doctor
+    from llm_wiki import doctor_deletion, doctor_transactions
 
-    now = datetime(2026, 7, 14, 12, tzinfo=timezone.utc)
+    now = datetime(2026, 7, 14, 12, tzinfo=UTC)
     state_root = tmp_path / "state"
     _malformed_transaction_db(state_root, now, **mutation)
 
-    check = doctor._transaction_check(state_root, now)
-    deletion = doctor._run_deletion_check(
+    check = doctor_transactions.transaction_check(state_root, now)
+    deletion = doctor_deletion.run_deletion_check(
         state_root, now, collected={"transactions": check}
     )
 
@@ -1436,7 +1436,7 @@ def test_transaction_health_blocks_unknown_or_corrupt_rows(
 
 
 def test_transaction_health_blocks_missing_required_schema(tmp_path):
-    import doctor
+    from llm_wiki import doctor_transactions
 
     state_root = tmp_path / "state"
     database = state_root / "run/markdown-transactions.sqlite3"
@@ -1446,8 +1446,8 @@ def test_transaction_health_blocks_missing_required_schema(tmp_path):
             'CREATE TABLE "transaction" (id, state, updated_at)'
         )
 
-    check = doctor._transaction_check(
-        state_root, datetime.now(timezone.utc)
+    check = doctor_transactions.transaction_check(
+        state_root, datetime.now(UTC)
     )
 
     assert check["status"] == "error"
@@ -1457,13 +1457,13 @@ def test_transaction_health_blocks_missing_required_schema(tmp_path):
 def test_recent_committed_transaction_with_malformed_date_cannot_allow_deletion(
     tmp_path,
 ):
-    import doctor
+    from llm_wiki import doctor_deletion
 
-    now = datetime(2026, 7, 14, 12, tzinfo=timezone.utc)
+    now = datetime(2026, 7, 14, 12, tzinfo=UTC)
     state_root = tmp_path / "state"
     _malformed_transaction_db(state_root, now, updated_at="recent-but-malformed")
 
-    result = doctor._run_deletion_check(state_root, now)
+    result = doctor_deletion.run_deletion_check(state_root, now)
 
     assert result["quiescent"] is False
     assert result["blockers"] == [{"code": "legacy_protocol_unquiesced"}]
@@ -1501,8 +1501,9 @@ def _retained_queue_db(state_root: Path, now: datetime) -> None:
 def test_policy_retention_blocks_deletion_without_degrading_health(tmp_path, monkeypatch):
     import doctor
     import session_start_context
+    from llm_wiki import doctor_lsp
 
-    from tests.test_doctor import (
+    from tests.doctor_helpers import (
         _build_root,
         _cache_pinned_models,
         _create_claim_index,
@@ -1511,7 +1512,7 @@ def test_policy_retention_blocks_deletion_without_degrading_health(tmp_path, mon
     )
 
     root, state_root, home = _build_root(tmp_path)
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     _malformed_transaction_db(state_root, now)
     _retained_queue_db(state_root, now)
     (state_root / "run/state.json").write_text(
@@ -1526,7 +1527,7 @@ def test_policy_retention_blocks_deletion_without_degrading_health(tmp_path, mon
     _create_claim_index(root, state_root)
     _create_generation(root, state_root)
     _cache_pinned_models(tmp_path, monkeypatch)
-    monkeypatch.setattr(doctor, "_pyright_check", _qualified_pyright_check)
+    monkeypatch.setattr(doctor_lsp, "pyright_check", _qualified_pyright_check)
 
     report = doctor.run_doctor(root=root, state_root=state_root, home=home, now=now)
     checks = {check["id"]: check for check in report["checks"]}
@@ -1563,7 +1564,7 @@ def test_policy_retention_blocks_deletion_without_degrading_health(tmp_path, mon
 def test_queue_health_fails_closed_on_unknown_state_or_error_metadata(
     tmp_path, state, error_code
 ):
-    import doctor
+    from llm_wiki import doctor_deletion, doctor_queue
 
     state_root = tmp_path / "state"
     database = state_root / "run/queue.sqlite3"
@@ -1578,10 +1579,10 @@ def test_queue_health_fails_closed_on_unknown_state_or_error_metadata(
             (state, error_code),
         )
 
-    check = doctor._queue_v2_check(state_root, datetime.now(timezone.utc), float("inf"))
-    deletion = doctor._run_deletion_check(
+    check = doctor_queue.queue_v2_check(state_root, datetime.now(UTC), float("inf"))
+    deletion = doctor_deletion.run_deletion_check(
         state_root,
-        datetime.now(timezone.utc),
+        datetime.now(UTC),
         collected={"queue": check},
     )
 
@@ -1594,7 +1595,7 @@ def test_queue_health_fails_closed_on_unknown_state_or_error_metadata(
 
 
 def test_queue_health_fails_closed_when_required_state_metadata_is_missing(tmp_path):
-    import doctor
+    from llm_wiki import doctor_queue
 
     state_root = tmp_path / "state"
     database = state_root / "run/queue.sqlite3"
@@ -1605,9 +1606,136 @@ def test_queue_health_fails_closed_when_required_state_metadata_is_missing(tmp_p
         )
         connection.execute("INSERT INTO tasks VALUES ('task', NULL, NULL)")
 
-    check = doctor._queue_v2_check(
-        state_root, datetime.now(timezone.utc), float("inf")
+    check = doctor_queue.queue_v2_check(
+        state_root, datetime.now(UTC), float("inf")
     )
 
     assert check["status"] == "error"
     assert "queue_state_corrupt" in check["details"]["deletion_codes"]
+
+
+def test_health_scan_accepts_a_complete_capture_and_refuses_quiescence(tmp_path, monkeypatch):
+    import reliability_v3_validation
+    from llm_wiki import doctor_deletion
+    from markdown_transaction import active_markdown_coordinator
+    from queue_core import (
+        active_memory_queue,
+    )
+
+    from tests.breadcrumb_storage_helpers import _bundle, _publish
+
+    root, state_root = _vault(tmp_path)
+    build_adopted_reliability_v3(root, state_root)
+    queue = active_memory_queue(root, state_root)
+    coordinator = active_markdown_coordinator(root, state_root)
+    validate = reliability_v3_validation.validate_reliability_v3_runtime
+    publications = []
+
+    def scan(**kwargs):
+        publications.append(_publish(queue, coordinator))
+        return validate(**kwargs)
+
+    monkeypatch.setattr(reliability_v3_validation, "validate_reliability_v3_runtime", scan)
+    result = doctor_deletion.run_deletion_check(state_root, datetime.now(UTC), root=root)
+    assert len(publications) == 1
+    assert publications[0].registered is True
+    assert _bundle(state_root, publications[0].intent_id).content
+    assert result["quiescent"] is False
+    assert result["permit"] is False
+
+
+def test_health_scan_detects_an_owner_that_arrived_and_left(tmp_path, monkeypatch):
+    import reliability_v3_validation
+    from llm_wiki import doctor_deletion
+    from operational_ownership import OwnershipRegistry
+
+    root, state_root = _vault(tmp_path)
+    build_adopted_reliability_v3(root, state_root)
+    registry = OwnershipRegistry.from_adopted_database(
+        state_root, state_root / "run/markdown-transactions-v3.sqlite3"
+    )
+    admitted = []
+
+    def scan(**kwargs):
+        owner = registry.acquire("capture", scope="transient-input")
+        admitted.append(owner.token)
+        registry.release(owner)
+        return []
+
+    monkeypatch.setattr(reliability_v3_validation, "validate_reliability_v3_runtime", scan)
+    result = doctor_deletion.run_deletion_check(state_root, datetime.now(UTC), root=root)
+    assert admitted
+    assert result["quiescent"] is False
+    assert result["permit"] is False
+    assert {item["code"] for item in result["blockers"]} == {"runtime_deletion_snapshot_changed"}
+
+
+def test_observation_detects_database_replacement_with_the_same_epochs(tmp_path, monkeypatch):
+    import shutil
+
+    import reliability_v3_validation
+    from llm_wiki import doctor_deletion
+    from reliable_memory import harden_runtime_owner_only, validate_operational_db_file
+
+    root, state_root = _vault(tmp_path)
+    build_adopted_reliability_v3(root, state_root)
+    database_path = state_root / "run/markdown-transactions-v3.sqlite3"
+
+    def scan(**kwargs):
+        replacement = database_path.with_name("replacement.sqlite3")
+        shutil.copy2(database_path, replacement)
+        # copy2 carries POSIX mode bits, but does not preserve a Windows DACL.
+        harden_runtime_owner_only(replacement, 0o600)
+        validate_operational_db_file(replacement, state_root, max_bytes=replacement.stat().st_size)
+        os.replace(replacement, database_path)
+        return []
+
+    monkeypatch.setattr(reliability_v3_validation, "validate_reliability_v3_runtime", scan)
+    result = doctor_deletion.run_deletion_check(state_root, datetime.now(UTC), root=root)
+    assert result["quiescent"] is False
+    assert {item["code"] for item in result["blockers"]} == {"runtime_deletion_snapshot_changed"}, result
+
+
+def test_observer_heartbeat_does_not_invalidate_an_otherwise_quiescent_scan(tmp_path, monkeypatch):
+    import reliability_v3_validation
+    from llm_wiki import doctor_deletion
+    from operational_ownership import OwnershipRegistry
+
+    root, state_root = _vault(tmp_path)
+    build_adopted_reliability_v3(root, state_root)
+    registry = OwnershipRegistry.from_adopted_database(
+        state_root, state_root / "run/markdown-transactions-v3.sqlite3"
+    )
+
+    def scan(**kwargs):
+        registry.heartbeat(kwargs["excluded_owner"])
+        return []
+
+    monkeypatch.setattr(reliability_v3_validation, "validate_reliability_v3_runtime", scan)
+    result = doctor_deletion.run_deletion_check(state_root, datetime.now(UTC), root=root)
+    assert result["quiescent"] is True
+    assert result["permit"] is False
+
+
+def test_real_exclusive_maintenance_still_refuses_breadcrumb_publication(tmp_path):
+    from markdown_transaction import active_markdown_coordinator
+    from operational_ownership import OperationalOwnershipError, OwnershipRegistry
+    from queue_core import (
+        active_memory_queue,
+    )
+
+    from tests.breadcrumb_storage_helpers import _publish
+
+    root, state_root = _vault(tmp_path)
+    build_adopted_reliability_v3(root, state_root)
+    queue = active_memory_queue(root, state_root)
+    coordinator = active_markdown_coordinator(root, state_root)
+    registry = OwnershipRegistry.from_adopted_database(
+        state_root, state_root / "run/markdown-transactions-v3.sqlite3"
+    )
+    owner = registry.acquire("runtime-deletion-check", scope="offline-operation")
+    try:
+        with pytest.raises(OperationalOwnershipError, match="runtime_deletion_check_active"):
+            _publish(queue, coordinator)
+    finally:
+        registry.release(owner)

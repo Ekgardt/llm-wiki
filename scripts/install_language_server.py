@@ -45,6 +45,7 @@ from pathlib import Path, PurePath, PurePosixPath, PureWindowsPath
 
 from bounded_io import IO_CHUNK_BYTES, read_stable_bytes
 from go_source_build import SourceBuildError
+from llm_wiki.formats.canonical import canonical_json_bytes
 from lsp_identity import (
     INSTALL_MANIFEST_NAME,
     ManifestError,
@@ -69,7 +70,6 @@ from pinned_download import (
     download_pinned,
     retry_transient,
 )
-from reliable_memory import canonical_json_bytes
 
 # One budget for the whole install, not one per socket. The Rust profile pulls
 # about 160 MB across five archives and unpacks past a gigabyte; the Go profile
@@ -165,7 +165,7 @@ def _fsync_tree(root: Path) -> None:
             _fsync_directory(Path(parent) / name)
 
 
-def _downloaded(url: str, target: Path, deadline: float, limit: int) -> None:
+def downloaded(url: str, target: Path, deadline: float, limit: int) -> None:
     """The archive on disk; a transient network failure is tried again.
 
     Each attempt opens the target afresh, so a partial file from a reset
@@ -200,7 +200,7 @@ def _artifact_file(
     _check_deadline(deadline)
     source = local if local is not None else scratch / f"archive-{secrets.token_hex(8)}"
     if local is None:
-        _downloaded(url, source, deadline, limit)
+        downloaded(url, source, deadline, limit)
     _require_integrity(source, integrity, label, limit)
     return source
 
@@ -272,7 +272,7 @@ def _require_plain_member(member: tarfile.TarInfo, limit: int = MAX_MEMBER_BYTES
 
 
 @dataclass(frozen=True, slots=True)
-class _Placement:
+class Placement:
     """Where an archive's members land inside the staging directory.
 
     `subdirectory` is the npm shape: re-root `package/` under a sibling
@@ -328,7 +328,7 @@ def _extract_member(
     archive: tarfile.TarFile,
     member: tarfile.TarInfo,
     root: Path,
-    placement: _Placement,
+    placement: Placement,
     member_limit: int = MAX_MEMBER_BYTES,
 ) -> int:
     _require_plain_member(member, member_limit)
@@ -349,7 +349,7 @@ _ZIP_KIND_MASK = 0o170000
 _ZIP_PLAIN_KINDS = frozenset({0, 0o100000, 0o040000})
 
 
-def _archive_mode(url: str) -> str:
+def archive_mode(url: str) -> str:
     """Zip, xz or gzip, by the pinned URL's own suffix.
 
     npm ships gzip, Rust xz, and Go's Windows toolchain is a zip, which used to
@@ -400,7 +400,7 @@ def _extract_zip_entry(
     archive: zipfile.ZipFile,
     info: zipfile.ZipInfo,
     root: Path,
-    placement: _Placement,
+    placement: Placement,
     member_limit: int,
 ) -> int:
     _require_plain_zip_entry(info, member_limit)
@@ -414,7 +414,7 @@ def _extract_zip_entry(
     return _write_zip_entry(archive, info, target)
 
 
-def _unpack_zip(scratch, root: Path, placement: _Placement, limits: tuple[int, int, int]) -> None:
+def _unpack_zip(scratch, root: Path, placement: Placement, limits: tuple[int, int, int]) -> None:
     total_limit, members_limit, member_limit = limits
     written = 0
     with zipfile.ZipFile(scratch) as archive:
@@ -427,7 +427,7 @@ def _unpack_zip(scratch, root: Path, placement: _Placement, limits: tuple[int, i
 
 
 def _unpack_tar(
-    scratch, mode: str, root: Path, placement: _Placement, limits: tuple[int, int, int]
+    scratch, mode: str, root: Path, placement: Placement, limits: tuple[int, int, int]
 ) -> None:
     total_limit, members_limit, member_limit = limits
     written = 0
@@ -437,10 +437,10 @@ def _unpack_tar(
             _require_total(written, total_limit)
 
 
-def _extract(
+def extract(
     source,
     root: Path,
-    placement: _Placement,
+    placement: Placement,
     limit: int = MAX_DECOMPRESSED_BYTES,
     members_limit: int = MAX_MEMBERS,
     mode: str = "r:gz",
@@ -462,14 +462,14 @@ def _extract(
 def _extract_path(
     source: Path,
     root: Path,
-    placement: _Placement,
+    placement: Placement,
     limit: int = MAX_DECOMPRESSED_BYTES,
     members_limit: int = MAX_MEMBERS,
     mode: str = "r:gz",
     member_limit: int = MAX_MEMBER_BYTES,
 ) -> None:
     with open(source, "rb") as handle:
-        _extract(handle, root, placement, limit, members_limit, mode, member_limit)
+        extract(handle, root, placement, limit, members_limit, mode, member_limit)
 
 
 def _bounded_members(
@@ -512,7 +512,7 @@ def _install_runtime(
         deadline,
     )
     _extract_path(
-        source, staging, _Placement(subdirectory=runtime.install_subdirectory)
+        source, staging, Placement(subdirectory=runtime.install_subdirectory)
     )
     return _sha256_file(staging / runtime.sibling_relative)
 
@@ -607,7 +607,7 @@ def _wait_for_lock(path: Path, deadline: float) -> None:
     time.sleep(LOCK_POLL_SECONDS)
 
 
-def _acquire_lock(path: Path, deadline: float) -> _InstallLock:
+def acquire_lock(path: Path, deadline: float) -> _InstallLock:
     """One installer per profile; an abandoned lock is reclaimed by name."""
     nonce = secrets.token_hex(16)
     while not _claimed_lock(path, nonce):
@@ -616,7 +616,7 @@ def _acquire_lock(path: Path, deadline: float) -> _InstallLock:
     return _InstallLock(path, nonce)
 
 
-def _release_lock(lock: _InstallLock) -> None:
+def release_lock(lock: _InstallLock) -> None:
     _unlink_matching_lock(lock.path, lock.nonce)
 
 
@@ -706,7 +706,7 @@ def _run_toolchain_probe(command: list[str], environment: dict[str, str], timeou
         raise InstallError(f"{Path(command[0]).name} exited {completed.returncode}")
 
 
-def _prove_toolchain(profile: LanguageServerProfile, root: Path, deadline: float) -> None:
+def prove_toolchain(profile: LanguageServerProfile, root: Path, deadline: float) -> None:
     """Run each toolchain probe in the staged tree before it is published.
 
     The archives were verified byte for byte, but only a run proves the
@@ -720,7 +720,7 @@ def _prove_toolchain(profile: LanguageServerProfile, root: Path, deadline: float
         _run_toolchain_probe([str(root / relative), argument], environment, timeout)
 
 
-def _validated_existing_install(profile: LanguageServerProfile, root: Path) -> Path:
+def validated_existing_install(profile: LanguageServerProfile, root: Path) -> Path:
     """An install already at the managed root, re-derived rather than trusted.
 
     The root used to be refused outright, so a re-run after an interrupted
@@ -761,7 +761,7 @@ def _staged(
         _profile_placement(profile),
         decompressed,
         profile.max_members or MAX_MEMBERS,
-        _archive_mode(profile.package_url),
+        archive_mode(profile.package_url),
         profile.max_member_bytes or MAX_MEMBER_BYTES,
     )
     _install_components(profile, staging, scratch, artifacts, deadline)
@@ -775,8 +775,8 @@ def _staged(
     )
 
 
-def _profile_placement(profile: LanguageServerProfile) -> _Placement:
-    return _Placement(strip=profile.strip_components, prefix=profile.install_prefix)
+def _profile_placement(profile: LanguageServerProfile) -> Placement:
+    return Placement(strip=profile.strip_components, prefix=profile.install_prefix)
 
 
 def _install_components(
@@ -818,10 +818,10 @@ def _install_component(
     _extract_path(
         source,
         staging,
-        _Placement(strip=component.strip_components, prefix=component.prefix),
+        Placement(strip=component.strip_components, prefix=component.prefix),
         bounds[1],
         profile.max_members or MAX_MEMBERS,
-        _archive_mode(artifact.url),
+        archive_mode(artifact.url),
         profile.max_member_bytes or MAX_MEMBER_BYTES,
     )
 
@@ -841,7 +841,7 @@ def _build_if_required(profile: LanguageServerProfile, staging: Path) -> None:
     build_source_server(staging, build)
 
 
-def _require_pinned_platform(profile: LanguageServerProfile) -> None:
+def require_pinned_platform(profile: LanguageServerProfile) -> None:
     """Refuse, before any download, a platform this profile pins nothing for.
 
     The registry falls back to the 64-bit Linux archive so that it stays
@@ -882,7 +882,7 @@ def _published(
     deadline: float,
 ) -> Path:
     manifest = _staged(profile, staging, scratch, artifacts, deadline)
-    _prove_toolchain(profile, staging, deadline)
+    prove_toolchain(profile, staging, deadline)
     (staging / INSTALL_MANIFEST_NAME).write_bytes(canonical_json_bytes(manifest))
     _fsync_tree(staging)
     staging.rename(root)
@@ -898,7 +898,7 @@ def _install_holding_lock(
     deadline: float,
 ) -> Path:
     if root.exists():
-        return _validated_existing_install(profile, root)
+        return validated_existing_install(profile, root)
     _sweep_abandoned_scratch(root.parent, lock_name)
     staging = _new_scratch(root.parent, profile)
     scratch = _new_scratch(root.parent, profile)
@@ -921,11 +921,11 @@ def install_language_server(
     deadline: float | None = None,
 ) -> Path:
     """Install the pinned artifacts and write the receipt; return the managed root."""
-    _require_pinned_platform(profile)
+    require_pinned_platform(profile)
     deadline = _install_deadline(deadline)
     root = profile.managed_root(state_root)
     root.parent.mkdir(parents=True, exist_ok=True)
-    lock = _acquire_lock(_lock_path(root.parent, profile), deadline)
+    lock = acquire_lock(_lock_path(root.parent, profile), deadline)
     artifacts = _Artifacts(
         server_artifact, runtime_artifact, dict(component_artifacts or {})
     )
@@ -934,7 +934,7 @@ def install_language_server(
             profile, root, lock.path.name, artifacts, deadline
         )
     finally:
-        _release_lock(lock)
+        release_lock(lock)
 
 
 def _component_artifact(value: str) -> tuple[str, Path]:

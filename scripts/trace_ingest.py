@@ -40,17 +40,17 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
-import os
 import re
 import sqlite3
 import sys
 from contextlib import closing
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 from bounded_io import IO_CHUNK_BYTES
 from evidence_graph import MAX_NODE_FILTER, MAX_ROWS
-from reliable_memory import begin_immediate
+from llm_wiki import runtime_roots
+from llm_wiki.sqlite_transactions import begin_immediate
 
 TRACE_SCHEMA = "execution-trace/v1"
 STORE_SCHEMA_VERSION = "execution-traces/v1"
@@ -263,7 +263,7 @@ def trace_digest(path: Path) -> str:
 def _graph_database(graph):
     """The generation's read connection.
 
-    `code_graph._store_report` reads the same connection the same way; the
+    `code_graph.store_report` reads the same connection the same way; the
     facade exposes no bulk reader, and one pass over 23,253 definition
     occurrences is far cheaper than a query per distinct frame.
     """
@@ -333,7 +333,7 @@ def _windowed_match(candidates: list[tuple[int, str]], line: int) -> str | None:
     return None
 
 
-def _resolve_frame(key: tuple[str, int, str], index: dict, decorated: dict) -> str | None:
+def resolve_frame(key: tuple[str, int, str], index: dict, decorated: dict) -> str | None:
     """Exact `(path, line, name)` first; then the bounded decorator window."""
     exact = index.get(key)
     if exact is not None:
@@ -351,8 +351,8 @@ def _accumulate(edges: dict, pair: tuple | None, count: int) -> int:
 
 
 def _bound_pair(caller_key, callee_key, index, decorated) -> tuple[str, str] | None:
-    caller = _resolve_frame(caller_key, index, decorated)
-    callee = _resolve_frame(callee_key, index, decorated)
+    caller = resolve_frame(caller_key, index, decorated)
+    callee = resolve_frame(callee_key, index, decorated)
     if caller is None or callee is None:
         return None
     return (caller, callee)
@@ -374,21 +374,9 @@ def bind_records(records, index) -> tuple[dict[tuple[str, str], int], int]:
 # --------------------------------------------------------------------------
 
 
-def _default_state_root() -> Path:
-    """Mirror `code_graph._generation_state_root` so the store sits beside it."""
-    configured = os.environ.get("LLM_WIKI_STATE_ROOT")
-    if configured:
-        return Path(configured).resolve()
-    try:
-        from . import memory_state
-    except ImportError:
-        import memory_state
-    return memory_state.STATE_ROOT
-
-
 def _resolved_state_root(state_root: Path | None) -> Path:
     if state_root is None:
-        return _default_state_root()
+        return runtime_roots.state_root()
     return Path(state_root).resolve()
 
 
@@ -407,7 +395,7 @@ def _ensure_schema(database: sqlite3.Connection) -> None:
     database.executescript(_STORE_SCHEMA)
 
 
-def _configure(database: sqlite3.Connection) -> sqlite3.Connection:
+def configure(database: sqlite3.Connection) -> sqlite3.Connection:
     database.row_factory = sqlite3.Row
     database.execute("PRAGMA journal_mode=DELETE")
     database.execute("PRAGMA synchronous=FULL")
@@ -419,7 +407,7 @@ def open_store(state_root: Path | None = None) -> sqlite3.Connection:
     """Open (creating if absent) the trace store under `cache/`."""
     path = store_path(state_root)
     path.parent.mkdir(parents=True, exist_ok=True)
-    database = _configure(sqlite3.connect(path))
+    database = configure(sqlite3.connect(path))
     # Inside a write transaction for the reason `retrieval_telemetry.record_events`
     # states: schema creation outside one is the lock promotion SQLite will not wait for.
     with begin_immediate(database):
@@ -444,7 +432,7 @@ def _edge_rows(digest: str, edges: dict) -> list[tuple]:
 
 
 def _now() -> str:
-    return datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+    return datetime.now(UTC).isoformat(timespec="seconds").replace("+00:00", "Z")
 
 
 def _trace_row(digest: str, report: dict) -> tuple:
@@ -484,17 +472,17 @@ def _replace_trace(database, digest: str, report: dict, edges: dict) -> None:
 # --------------------------------------------------------------------------
 
 
-def _open_graph(directory: Path):
+def open_graph(directory: Path):
     """The active generation, or None. Never opened for writing."""
     try:
-        from .code_graph import _active_evidence_graph
+        from .code_graph import active_evidence_graph
     except ImportError:
-        from code_graph import _active_evidence_graph
-    return _active_evidence_graph(Path(directory))
+        from llm_wiki.code_graph_generation import active_evidence_graph
+    return active_evidence_graph(Path(directory))
 
 
 def _active_graph(directory: Path):
-    graph = _open_graph(directory)
+    graph = open_graph(directory)
     if graph is None:
         raise TraceRefused(
             "no_active_generation", "trace frames can only bind to an active generation"
@@ -653,7 +641,7 @@ def trace_callers(
     answer is empty rather than an error: `find_callers` degrades to a live
     scan in exactly that case, and a reader must still get an answer.
     """
-    graph = _open_graph(directory)
+    graph = open_graph(directory)
     if graph is None:
         return _empty_trace_fields()
     try:

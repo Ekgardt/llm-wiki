@@ -35,7 +35,7 @@ def test_a_skipped_tag_is_not_reported_as_a_written_daily_log():
         _completed(""),
     )
 
-    written = tuple(integration_adapter._delegate_wrote_daily_log(r) for r in reports)
+    written = tuple(integration_adapter.delegate_wrote_daily_log(r) for r in reports)
 
     assert written == (False, True, False, True)
 
@@ -61,14 +61,14 @@ def test_the_tag_delegate_says_it_skipped_when_it_has_no_vault(tmp_path, monkeyp
 def test_the_per_line_legacy_sentinel_is_recognised():
     replies = ("FLUSH_OK", "(no durable content)", "some\n(no durable content)\nlines")
 
-    assert [flush_memory._classify_response(reply)[0] for reply in replies] == ["ok"] * 3
+    assert [flush_memory.classify_response(reply)[0] for reply in replies] == ["ok"] * 3
 
 
 def test_a_session_record_authority_is_named_by_the_contract_and_is_not_a_claim_authority():
-    from claims import _EXTRACTION_ENUMS  # noqa: PLC0415
+    from claims import EXTRACTION_ENUMS  # noqa: PLC0415
     from provenance import authority_weight  # noqa: PLC0415
 
-    claim_authorities = dict(_EXTRACTION_ENUMS)["authority"]
+    claim_authorities = dict(EXTRACTION_ENUMS)["authority"]
     contract = (Path(__file__).resolve().parent.parent / "CLAUDE.md").read_text("utf-8")
     ranked = authority_weight("inferred", "knowledge/notes/x.md") < authority_weight("session", "knowledge/notes/x.md") < authority_weight("ai-derived", "knowledge/notes/x.md")
 
@@ -88,19 +88,19 @@ def test_a_backfilled_record_is_named_and_dated_as_live_capture_would(tmp_path):
     )
     day = datetime.fromtimestamp(transcript.stat().st_mtime).date().isoformat()
 
-    fields = backfill_sessions._fields(transcript, backfill_sessions._session_day(transcript))
+    fields = backfill_sessions.fields(transcript, backfill_sessions.session_day(transcript))
 
     assert (fields["session"], fields["captured_at"][:10]) == ("0199c0de-1234", day)
 
 
-def test_the_scan_says_how_many_transcripts_its_cap_left_out():
-    outcome = backfill_sessions.Outcome(scanned=3, unscanned=7)
+def test_the_scan_reports_recorded_and_new_sessions_without_a_prefix_quota():
+    outcome = backfill_sessions.Outcome(scanned=10_001, present=10_000, written=1)
 
     lines = outcome.as_lines(applied=False)
 
-    assert lines[-1].startswith(
-        f"left unscanned by the {backfill_sessions.MAX_TRANSCRIPTS}-transcript cap: 7"
-    )
+    assert lines[0] == "transcripts scanned: 10001"
+    assert lines[1].startswith("records to write: 1 ")
+    assert lines[2] == "already present: 10000"
 
 
 def test_the_advisory_is_built_for_the_session_that_is_starting(monkeypatch):
@@ -111,7 +111,7 @@ def test_the_advisory_is_built_for_the_session_that_is_starting(monkeypatch):
         SimpleNamespace(build_advisory=lambda slug: asked.append(slug) or ""),
     )
     monkeypatch.setattr(
-        session_start_context, "_latest_heartbeat_slug", lambda: "another-project"
+        session_start_context, "latest_heartbeat_slug", lambda: "another-project"
     )
 
     session_start_context.advisory_block("this-project")
@@ -134,4 +134,4 @@ def test_a_host_event_raised_inside_the_memory_system_is_not_captured(monkeypatc
 def test_a_host_event_outside_the_memory_system_is_captured(monkeypatch, marker):
     monkeypatch.setenv(integration_adapter.REENTRY_MARKER, marker)
 
-    assert integration_adapter._is_memory_automation() is False
+    assert integration_adapter.is_memory_automation() is False

@@ -3,7 +3,7 @@ from __future__ import annotations
 import re
 import sqlite3
 import sys
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -13,21 +13,12 @@ if str(SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_DIR))
 
 import markdown_transaction  # noqa: E402
-import memory_queue  # noqa: E402
 import operational_ownership  # noqa: E402
+import queue_core  # noqa: E402
+from llm_wiki import queue_store  # noqa: E402
 from reliable_memory import sha256_bytes  # noqa: E402
 
-
-def _queue(tmp_path: Path):
-    coordinator = tmp_path / "run" / "markdown-transactions-v3.candidate.sqlite3"
-    candidate = tmp_path / "run" / "queue-v3.candidate.sqlite3"
-    markdown_transaction.initialize_coordinator_v3_candidate(
-        coordinator, source_v2=None
-    )
-    memory_queue.initialize_queue_v3_candidate(candidate, source_v2=None)
-    return memory_queue.MemoryQueue._from_v3_candidate(
-        candidate, state_root=tmp_path
-    )
+from tests.queue_v3_corruption_helpers import _queue  # noqa: E402
 
 
 def _insert_corrupt_task(queue, task_id: str) -> None:
@@ -94,7 +85,7 @@ def _quarantined_task(
     children: list[dict[str, object]] | None = None,
 ):
     queue = _queue(tmp_path)
-    coordinator = markdown_transaction.MarkdownCoordinator._from_v3_candidate(
+    coordinator = markdown_transaction.MarkdownCoordinator.from_v3_candidate(
         tmp_path / "run" / "markdown-transactions-v3.candidate.sqlite3",
         state_root=tmp_path,
     )
@@ -134,7 +125,7 @@ def _quarantined_task(
             (b'{"tampered":true}', binding.task_id),
         )
     if now is not None:
-        monkeypatch.setattr(memory_queue, "_utc_now", lambda: now)
+        monkeypatch.setattr(queue_store, "utc_now", lambda: now)
     owner = registry.acquire(
         "repair",
         scope=f"repair:{sha256_bytes(task_id.encode('utf-8'))}",
@@ -157,12 +148,12 @@ def _quarantined_task(
                 "operation_id": f"discard:{intent_id}",
                 "actor_identity": "test-operator",
                 "reason": "Disposition corrupt capture evidence.",
-                "disposed_at": (now or datetime.now(timezone.utc)).isoformat(),
+                "disposed_at": (now or datetime.now(UTC)).isoformat(),
             },
         }
         terminal_path = tmp_path / "run" / "queue-results" / f"capture-{intent_id}.json"
-        terminal_bytes = memory_queue.canonical_json_bytes(terminal)
-        memory_queue._write_durable_file(
+        terminal_bytes = queue_core.canonical_json_bytes(terminal)
+        queue_core.write_durable_file(
             terminal_path, terminal_bytes
         )
         with sqlite3.connect(queue.db_path) as database:
@@ -295,7 +286,7 @@ def test_disposition_file_precedes_atomic_terminal_state(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     queue = _queue(tmp_path)
-    coordinator = markdown_transaction.MarkdownCoordinator._from_v3_candidate(
+    coordinator = markdown_transaction.MarkdownCoordinator.from_v3_candidate(
         tmp_path / "run" / "markdown-transactions-v3.candidate.sqlite3",
         state_root=tmp_path,
     )
@@ -404,7 +395,7 @@ def test_quarantined_task_blocks_purge_for_thirty_days(
 def test_old_quarantined_task_blocks_purge_while_capture_intent_is_unresolved(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    old = datetime(2000, 1, 1, tzinfo=timezone.utc)
+    old = datetime(2000, 1, 1, tzinfo=UTC)
     queue, registry, owner, task_id, _ = _quarantined_task(
         tmp_path,
         monkeypatch,
@@ -412,7 +403,7 @@ def test_old_quarantined_task_blocks_purge_while_capture_intent_is_unresolved(
         now=old,
         resolve_intent=False,
     )
-    monkeypatch.setattr(memory_queue, "_utc_now", lambda: datetime.now(timezone.utc))
+    monkeypatch.setattr(queue_store, "utc_now", lambda: datetime.now(UTC))
 
     progress = queue.purge_quarantined(task_id, owner=owner)
 
@@ -432,7 +423,7 @@ def test_old_quarantined_task_blocks_purge_while_capture_intent_is_unresolved(
 def test_purge_rejects_invalid_package_or_changed_frozen_root(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, corruption: str
 ) -> None:
-    old = datetime(2000, 1, 1, tzinfo=timezone.utc)
+    old = datetime(2000, 1, 1, tzinfo=UTC)
     queue, registry, owner, task_id, _ = _quarantined_task(
         tmp_path, monkeypatch, task_id=f"{corruption}-parent", now=old
     )
@@ -451,7 +442,7 @@ def test_purge_rejects_invalid_package_or_changed_frozen_root(
     package = tmp_path / "run" / "queue-results" / f"corrupt-{package_key}"
     if corruption == "payload":
         (package / "payload.bin").write_bytes(b"changed")
-    monkeypatch.setattr(memory_queue, "_utc_now", lambda: datetime.now(timezone.utc))
+    monkeypatch.setattr(queue_store, "utc_now", lambda: datetime.now(UTC))
 
     progress = queue.purge_quarantined(task_id, owner=owner)
 
@@ -472,7 +463,7 @@ def test_purge_rejects_invalid_package_or_changed_frozen_root(
 def test_capture_terminal_file_without_task_result_binding_does_not_authorize_purge(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    old = datetime(2000, 1, 1, tzinfo=timezone.utc)
+    old = datetime(2000, 1, 1, tzinfo=UTC)
     queue, registry, owner, task_id, intent_id = _quarantined_task(
         tmp_path,
         monkeypatch,
@@ -503,11 +494,11 @@ def test_capture_terminal_file_without_task_result_binding_does_not_authorize_pu
             "disposed_at": old.isoformat(),
         },
     }
-    memory_queue._write_durable_file(
+    queue_core.write_durable_file(
         tmp_path / "run" / "queue-results" / f"capture-{intent_id}.json",
-        memory_queue.canonical_json_bytes(terminal),
+        queue_core.canonical_json_bytes(terminal),
     )
-    monkeypatch.setattr(memory_queue, "_utc_now", lambda: datetime.now(timezone.utc))
+    monkeypatch.setattr(queue_store, "utc_now", lambda: datetime.now(UTC))
 
     progress = queue.purge_quarantined(task_id, owner=owner)
 
@@ -525,11 +516,11 @@ def test_capture_terminal_file_without_task_result_binding_does_not_authorize_pu
 def test_purge_moves_parent_to_pending_before_lineage_work(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    old = datetime(2000, 1, 1, tzinfo=timezone.utc)
+    old = datetime(2000, 1, 1, tzinfo=UTC)
     queue, registry, owner, task_id, _ = _quarantined_task(
         tmp_path, monkeypatch, task_id="old-parent", now=old
     )
-    monkeypatch.setattr(memory_queue, "_utc_now", lambda: datetime.now(timezone.utc))
+    monkeypatch.setattr(queue_store, "utc_now", lambda: datetime.now(UTC))
 
     def stop_after_state(*_args: object, **_kwargs: object) -> None:
         with sqlite3.connect(queue.db_path) as database:
@@ -560,7 +551,7 @@ def test_purge_moves_parent_to_pending_before_lineage_work(
 def test_forged_lineage_authorization_cannot_bypass_live_purge_token(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    old = datetime(2000, 1, 1, tzinfo=timezone.utc)
+    old = datetime(2000, 1, 1, tzinfo=UTC)
     queue, registry, owner, task_id, _ = _quarantined_task(
         tmp_path,
         monkeypatch,
@@ -568,7 +559,7 @@ def test_forged_lineage_authorization_cannot_bypass_live_purge_token(
         now=old,
         children=[{"id": "protected-child", "updated_at": old.isoformat()}],
     )
-    monkeypatch.setattr(memory_queue, "_utc_now", lambda: datetime.now(timezone.utc))
+    monkeypatch.setattr(queue_store, "utc_now", lambda: datetime.now(UTC))
 
     def stop_after_state(*_args: object, **_kwargs: object) -> None:
         raise RuntimeError("leave live purge operation")
@@ -592,7 +583,7 @@ def test_forged_lineage_authorization_cannot_bypass_live_purge_token(
 def test_task_and_evidence_deletes_require_live_operation_authorization(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    old = datetime(2000, 1, 1, tzinfo=timezone.utc)
+    old = datetime(2000, 1, 1, tzinfo=UTC)
     queue, registry, owner, task_id, _ = _quarantined_task(
         tmp_path,
         monkeypatch,
@@ -628,7 +619,7 @@ def test_task_and_evidence_deletes_require_live_operation_authorization(
         )
         with pytest.raises(sqlite3.IntegrityError, match="task delete is unauthorized"):
             database.execute("DELETE FROM tasks WHERE id='isolated-task'")
-    monkeypatch.setattr(memory_queue, "_utc_now", lambda: datetime.now(timezone.utc))
+    monkeypatch.setattr(queue_store, "utc_now", lambda: datetime.now(UTC))
 
     def stop_after_state(*_args: object, **_kwargs: object) -> None:
         raise RuntimeError("leave live purge operation")
@@ -660,7 +651,7 @@ _GRANDCHILD = {"id": "grandchild", "state": "succeeded", "redrive_of": "blocked-
 
 def _blocked_children(blocker: str, old: datetime) -> list[dict[str, object]]:
     """The child rows each blocker case needs, and the grandchild only one does."""
-    child_time = datetime.now(timezone.utc) if blocker == "young" else old
+    child_time = datetime.now(UTC) if blocker == "young" else old
     child = {
         "id": "blocked-child",
         "state": _BLOCKER_CHILD_STATES.get(blocker, "succeeded"),
@@ -719,7 +710,7 @@ def _assert_purged_with_its_child(queue, task_id: str, completed) -> None:
 def test_purge_deletes_only_terminal_retention_eligible_leaves(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, blocker: str
 ) -> None:
-    old = datetime(2000, 1, 1, tzinfo=timezone.utc)
+    old = datetime(2000, 1, 1, tzinfo=UTC)
     children = _blocked_children(blocker, old)
     queue, registry, owner, task_id, _ = _quarantined_task(
         tmp_path,
@@ -728,8 +719,8 @@ def test_purge_deletes_only_terminal_retention_eligible_leaves(
         now=old,
         children=children,
     )
-    current = datetime.now(timezone.utc)
-    monkeypatch.setattr(memory_queue, "_utc_now", lambda: current)
+    current = datetime.now(UTC)
+    monkeypatch.setattr(queue_store, "utc_now", lambda: current)
 
     blocked = queue.purge_quarantined(task_id, owner=owner)
 
@@ -748,7 +739,7 @@ def test_purge_deletes_only_terminal_retention_eligible_leaves(
 def test_purge_commits_eligible_prefix_before_first_blocked_child(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    old = datetime(2000, 1, 1, tzinfo=timezone.utc)
+    old = datetime(2000, 1, 1, tzinfo=UTC)
     queue, registry, owner, task_id, _ = _quarantined_task(
         tmp_path,
         monkeypatch,
@@ -759,7 +750,7 @@ def test_purge_commits_eligible_prefix_before_first_blocked_child(
             {"id": "b-blocked", "state": "ready", "updated_at": old.isoformat()},
         ],
     )
-    monkeypatch.setattr(memory_queue, "_utc_now", lambda: datetime.now(timezone.utc))
+    monkeypatch.setattr(queue_store, "utc_now", lambda: datetime.now(UTC))
 
     progress = queue.purge_quarantined(task_id, owner=owner)
 
@@ -786,7 +777,7 @@ def test_purge_commits_eligible_prefix_before_first_blocked_child(
 def test_purge_processes_at_most_one_thousand_links_per_invocation(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    old = datetime(2000, 1, 1, tzinfo=timezone.utc)
+    old = datetime(2000, 1, 1, tzinfo=UTC)
     children = [
         {"id": f"child-{index:04d}", "updated_at": old.isoformat()}
         for index in range(1001)
@@ -798,7 +789,7 @@ def test_purge_processes_at_most_one_thousand_links_per_invocation(
         now=old,
         children=children,
     )
-    monkeypatch.setattr(memory_queue, "_utc_now", lambda: datetime.now(timezone.utc))
+    monkeypatch.setattr(queue_store, "utc_now", lambda: datetime.now(UTC))
 
     first = queue.purge_quarantined(task_id, owner=owner)
     second = queue.purge_quarantined(task_id, owner=owner)
@@ -824,7 +815,7 @@ def test_purge_processes_at_most_one_thousand_links_per_invocation(
 def test_purge_blocks_when_parent_generation_changes_after_start(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    old = datetime(2000, 1, 1, tzinfo=timezone.utc)
+    old = datetime(2000, 1, 1, tzinfo=UTC)
     queue, registry, owner, task_id, _ = _quarantined_task(
         tmp_path,
         monkeypatch,
@@ -832,7 +823,7 @@ def test_purge_blocks_when_parent_generation_changes_after_start(
         now=old,
         children=[{"id": "old-child", "updated_at": old.isoformat()}],
     )
-    monkeypatch.setattr(memory_queue, "_utc_now", lambda: datetime.now(timezone.utc))
+    monkeypatch.setattr(queue_store, "utc_now", lambda: datetime.now(UTC))
     real_page = queue._purge_corrupt_lineage_page
 
     def race_generation(*args: object, **kwargs: object):
@@ -864,7 +855,7 @@ def test_purge_blocks_when_parent_generation_changes_after_start(
 def test_purge_adopts_exact_orphan_page_after_database_rollback(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    old = datetime(2000, 1, 1, tzinfo=timezone.utc)
+    old = datetime(2000, 1, 1, tzinfo=UTC)
     queue, registry, owner, task_id, _ = _quarantined_task(
         tmp_path,
         monkeypatch,
@@ -872,7 +863,7 @@ def test_purge_adopts_exact_orphan_page_after_database_rollback(
         now=old,
         children=[{"id": "old-leaf", "updated_at": old.isoformat()}],
     )
-    monkeypatch.setattr(memory_queue, "_utc_now", lambda: datetime.now(timezone.utc))
+    monkeypatch.setattr(queue_store, "utc_now", lambda: datetime.now(UTC))
     real_insert = queue._insert_corrupt_purge_page
 
     def fail_insert(*args: object, **kwargs: object) -> None:
@@ -921,7 +912,7 @@ def test_purge_adopts_exact_orphan_page_after_database_rollback(
 def test_purge_retains_and_blocks_conflicting_orphan_page(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    old = datetime(2000, 1, 1, tzinfo=timezone.utc)
+    old = datetime(2000, 1, 1, tzinfo=UTC)
     queue, registry, owner, task_id, _ = _quarantined_task(
         tmp_path,
         monkeypatch,
@@ -929,7 +920,7 @@ def test_purge_retains_and_blocks_conflicting_orphan_page(
         now=old,
         children=[{"id": "old-leaf", "updated_at": old.isoformat()}],
     )
-    monkeypatch.setattr(memory_queue, "_utc_now", lambda: datetime.now(timezone.utc))
+    monkeypatch.setattr(queue_store, "utc_now", lambda: datetime.now(UTC))
     with sqlite3.connect(queue.db_path) as database:
         package_key = database.execute(
             """SELECT operation.disposition_key
@@ -947,7 +938,7 @@ def test_purge_retains_and_blocks_conflicting_orphan_page(
         / "purge-page-00000001.json"
     )
     conflicting = b'{"conflict":true}'
-    memory_queue._write_durable_file(page_path, conflicting)
+    queue_core.write_durable_file(page_path, conflicting)
 
     progress = queue.purge_quarantined(task_id, owner=owner)
 
@@ -969,7 +960,7 @@ def test_purge_retains_and_blocks_conflicting_orphan_page(
 def test_purge_authorizes_child_owned_history_before_leaf_deletion(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    old = datetime(2000, 1, 1, tzinfo=timezone.utc)
+    old = datetime(2000, 1, 1, tzinfo=UTC)
     queue, registry, owner, task_id, _ = _quarantined_task(
         tmp_path,
         monkeypatch,
@@ -984,7 +975,7 @@ def test_purge_authorizes_child_owned_history_before_leaf_deletion(
                ) VALUES ('history-leaf',1,?,?,'succeeded',NULL)""",
             (old.isoformat(), old.isoformat()),
         )
-    monkeypatch.setattr(memory_queue, "_utc_now", lambda: datetime.now(timezone.utc))
+    monkeypatch.setattr(queue_store, "utc_now", lambda: datetime.now(UTC))
 
     progress = queue.purge_quarantined(task_id, owner=owner)
 
@@ -1002,11 +993,11 @@ def test_purge_authorizes_child_owned_history_before_leaf_deletion(
 def test_purge_receipt_precedes_and_resumes_final_parent_deletion(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    old = datetime(2000, 1, 1, tzinfo=timezone.utc)
+    old = datetime(2000, 1, 1, tzinfo=UTC)
     queue, registry, owner, task_id, _ = _quarantined_task(
         tmp_path, monkeypatch, task_id="receipt-parent", now=old
     )
-    monkeypatch.setattr(memory_queue, "_utc_now", lambda: datetime.now(timezone.utc))
+    monkeypatch.setattr(queue_store, "utc_now", lambda: datetime.now(UTC))
     real_delete = queue._delete_corrupt_parent
 
     def fail_delete(*args: object, **kwargs: object) -> None:
@@ -1037,7 +1028,7 @@ def test_purge_receipt_precedes_and_resumes_final_parent_deletion(
     )
     receipt_bytes = receipt_path.read_bytes()
     assert len(receipt_bytes) < 64 * 1024
-    assert "pages" not in memory_queue.json.loads(receipt_bytes)
+    assert "pages" not in queue_core.json.loads(receipt_bytes)
 
     monkeypatch.setattr(queue, "_delete_corrupt_parent", real_delete)
     completed = queue.purge_quarantined(task_id, owner=owner)
@@ -1058,11 +1049,11 @@ def test_purge_receipt_precedes_and_resumes_final_parent_deletion(
 def test_final_parent_delete_restreams_live_payload_after_receipt(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    old = datetime(2000, 1, 1, tzinfo=timezone.utc)
+    old = datetime(2000, 1, 1, tzinfo=UTC)
     queue, registry, owner, task_id, _ = _quarantined_task(
         tmp_path, monkeypatch, task_id="payload-race-parent", now=old
     )
-    monkeypatch.setattr(memory_queue, "_utc_now", lambda: datetime.now(timezone.utc))
+    monkeypatch.setattr(queue_store, "utc_now", lambda: datetime.now(UTC))
     real_delete = queue._delete_corrupt_parent
 
     def mutate_then_delete(*args: object, **kwargs: object) -> None:
@@ -1076,7 +1067,7 @@ def test_final_parent_delete_restreams_live_payload_after_receipt(
     monkeypatch.setattr(queue, "_delete_corrupt_parent", mutate_then_delete)
 
     with pytest.raises(
-        memory_queue.QueueOperationError,
+        queue_core.QueueOperationError,
         match="corrupt_parent_delete_precondition_failed",
     ):
         queue.purge_quarantined(task_id, owner=owner)
@@ -1094,11 +1085,11 @@ def test_final_parent_delete_restreams_live_payload_after_receipt(
 def test_final_parent_delete_restreams_live_history_after_receipt(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    old = datetime(2000, 1, 1, tzinfo=timezone.utc)
+    old = datetime(2000, 1, 1, tzinfo=UTC)
     queue, registry, owner, task_id, _ = _quarantined_task(
         tmp_path, monkeypatch, task_id="history-race-parent", now=old
     )
-    monkeypatch.setattr(memory_queue, "_utc_now", lambda: datetime.now(timezone.utc))
+    monkeypatch.setattr(queue_store, "utc_now", lambda: datetime.now(UTC))
     real_delete = queue._delete_corrupt_parent
 
     def mutate_then_delete(*args: object, **kwargs: object) -> None:
@@ -1114,7 +1105,7 @@ def test_final_parent_delete_restreams_live_history_after_receipt(
     monkeypatch.setattr(queue, "_delete_corrupt_parent", mutate_then_delete)
 
     with pytest.raises(
-        memory_queue.QueueOperationError,
+        queue_core.QueueOperationError,
         match="corrupt_parent_delete_precondition_failed",
     ):
         queue.purge_quarantined(task_id, owner=owner)
@@ -1129,7 +1120,7 @@ def test_final_parent_delete_restreams_live_history_after_receipt(
 def test_completed_corrupt_purge_is_idempotent_after_crash_before_return(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    old = datetime(2000, 1, 1, tzinfo=timezone.utc)
+    old = datetime(2000, 1, 1, tzinfo=UTC)
     queue, registry, owner, task_id, _ = _quarantined_task(
         tmp_path,
         monkeypatch,
@@ -1137,7 +1128,7 @@ def test_completed_corrupt_purge_is_idempotent_after_crash_before_return(
         now=old,
         children=[{"id": "old-child", "updated_at": old.isoformat()}],
     )
-    monkeypatch.setattr(memory_queue, "_utc_now", lambda: datetime.now(timezone.utc))
+    monkeypatch.setattr(queue_store, "utc_now", lambda: datetime.now(UTC))
 
     first = queue.purge_quarantined(task_id, owner=owner)
     second = queue.purge_quarantined(task_id, owner=owner)

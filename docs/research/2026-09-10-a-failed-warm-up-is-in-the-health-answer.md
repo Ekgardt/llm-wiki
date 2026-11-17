@@ -34,3 +34,53 @@ doctor nor the `llm-wiki://health` resource could see why.
 
 Files: `scripts/mcp_server.py`, `scripts/mcp_http.py`, `tests/test_mcp_server.py`,
 `CHANGELOG.md`, `docs/AUDIT-2026-09-10-operations-and-reliability.md`.
+
+## 2026-10-05: foreground work preempts full-path warming
+
+The original measurements above remain historical. A real captured corpus with
+126,298 chunks and a complete graph reproduced a cold ordinary MCP refusal at
+14.033 seconds and a repeated BASE answer at 8.374 seconds. The transparent
+trace showed reranker loading (9.981 seconds) and a full warm-up search competing
+with foreground FTS work and owning the shared dense slot. A separate diagnostic
+without startup warming returned BASE in 8.917/3.760 seconds. These ordered runs
+shared CPU with pytest and filesystem caches; their difference is not an isolated
+speed claim, and disabling warming is not the proposed product fix.
+
+Relevant primary sources, checked 2026-10-05:
+
+- [Python 3.10.22 threading](https://docs.python.org/3.10/library/threading.html):
+  condition notifications and events support cooperating ownership; native
+  threads cannot safely be forcibly interrupted.
+- [PyTorch CPU threading](https://docs.pytorch.org/docs/2.14/notes/cpu_threading_torchscript_inference.html):
+  concurrent inference competes for CPU. This is current documentation, not a
+  claim that the installed runtime uses that documentation's version.
+- [Microsoft bulkhead pattern](https://learn.microsoft.com/en-us/azure/architecture/patterns/bulkhead):
+  retain per-kind capacity and actual ownership instead of enlarging pools.
+
+The candidate keeps full-path, two-pass warming and actual completed stage-cost
+observations. Process-local foreground leases cover a search and every optional
+worker it starts, including workers that outlive a BASE fallback. Warming waits
+for those owners to settle. A foreground search signals current warm-up tokens;
+existing cancellation checks then stop cooperating SQL/reading work. Each retry
+keeps the original warm-up stage clock. The existing 10 ms cancellation cadence
+is shared with the condition wait to observe shutdown; ownership notifications
+wake it immediately. No new setting, budget, runtime path, schema or daemon is
+introduced.
+
+Cancellation is checked before optional work starts and before its result can
+become a successful cost observation. A short *waiting* deadline is different
+from an expired original caller deadline: valid unknown-cost stragglers remain
+allowed, including an already expired waiting share created by the tail reserve.
+They retain ownership until actual settlement. A reranker accepts an optional
+cooperative cancellation callback on its built-in path, checks it before/after
+native batches, and preserves the fused order if cancellation invalidates partial
+scores. Custom scorers receive their original arguments; their late cancelled
+results are also discarded. An already running native forward or model load
+cannot be forcibly interrupted, and its capacity is never released early.
+
+Original race and cancellation failures, an initially incorrect WAIT/caller clock
+interpretation, and subsequent regression results are retained in private audit
+reports. This candidate qualification is not proof that the real cold MCP path
+now fits fourteen seconds or that HYBRID fits its optional share. The merged
+product still requires real first/repeated calls, measured costs and unchanged
+strict artifact validation before installation or closure.

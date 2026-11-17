@@ -18,6 +18,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 
 import markdown_transaction  # noqa: E402
+from llm_wiki import markdown_operations, markdown_store
 
 INVALID_HANDLE = ctypes.c_void_p(-1).value
 SHARING_VIOLATION = 32
@@ -40,6 +41,7 @@ def _refusing_kernel32() -> SimpleNamespace:
         GetFileInformationByHandle=_Function(0),
         SetFileInformationByHandle=_Function(0),
         GetConsoleOutputCP=_Function(866),
+        GetModuleFileNameW=_Function(0),
     )
 
 
@@ -52,10 +54,10 @@ def loaded(monkeypatch) -> dict[str, object]:
         seen["request"] = (name, use_last_error)
         return seen["kernel32"]
 
-    loader = getattr(markdown_transaction, "_windows_kernel32", None)
-    monkeypatch.setattr(markdown_transaction.ctypes, "WinDLL", load, raising=False)
+    loader = getattr(markdown_transaction, "windows_kernel32", None)
+    monkeypatch.setattr(markdown_operations.ctypes, "WinDLL", load, raising=False)
     monkeypatch.setattr(
-        markdown_transaction.ctypes,
+        markdown_operations.ctypes,
         "get_last_error",
         lambda: SHARING_VIOLATION if seen.get("request") == ("kernel32", True) else 0,
         raising=False,
@@ -69,16 +71,16 @@ def loaded(monkeypatch) -> dict[str, object]:
 
 def test_a_refused_mutation_handle_is_noticed_and_reads_as_contention(loaded, tmp_path):
     with pytest.raises(OSError) as refused:
-        markdown_transaction._open_windows_file_for_mutation(tmp_path / "page.md")
+        markdown_operations.open_windows_file_for_mutation(tmp_path / "page.md")
 
     assert refused.value.errno == SHARING_VIOLATION
-    assert markdown_transaction._is_transient_writer_contention(refused.value)
+    assert markdown_transaction.is_transient_writer_contention(refused.value)
     assert loaded["kernel32"].CreateFileW.restype is wintypes.HANDLE
 
 
 def test_every_handle_function_is_declared_before_it_is_called(loaded, tmp_path):
     with pytest.raises(OSError):
-        markdown_transaction._close_windows_handle(7)
+        markdown_store.close_windows_handle(7)
 
     kernel32 = loaded["kernel32"]
     assert kernel32.CloseHandle.argtypes == (wintypes.HANDLE,)
@@ -88,6 +90,14 @@ def test_every_handle_function_is_declared_before_it_is_called(loaded, tmp_path)
 
 def test_a_failed_delete_carries_the_kept_error(loaded):
     with pytest.raises(OSError) as refused:
-        markdown_transaction._delete_windows_handle(7)
+        markdown_operations.delete_windows_handle(7)
 
     assert refused.value.errno == SHARING_VIOLATION
+
+
+def test_transaction_aliases_share_native_types_and_loader_cache():
+    from llm_wiki import windows_native
+
+    for name in ('WindowsFileInformation', 'WindowsDispositionInformation',
+                 'WINDOWS_KERNEL32_PROTOTYPES', 'windows_kernel32'):
+        assert getattr(markdown_transaction, name) is getattr(windows_native, name)

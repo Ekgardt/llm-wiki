@@ -15,8 +15,8 @@ SCRIPTS = Path(__file__).resolve().parents[1] / "scripts"
 if str(SCRIPTS) not in sys.path:
     sys.path.insert(0, str(SCRIPTS))
 
+import generation_search  # noqa: E402
 import retrieval  # noqa: E402
-import search_memory  # noqa: E402
 
 PAGES = (
     "knowledge/projects/alpha/state.md",
@@ -36,14 +36,14 @@ def _vault(root: Path) -> list[Path]:
 
 
 def _legacy_hits(pages: list[Path]) -> list[dict]:
-    return search_memory._direct_markdown_hits(
+    return generation_search.direct_markdown_hits(
         "rollout checkpoint", pages, limit=5, project=None, since=None, as_of=None,
         deadline=None, cancelled=None,
     )
 
 
 def test_both_state_pages_survive_fusion(tmp_path: Path, monkeypatch) -> None:
-    monkeypatch.setattr(search_memory, "ROOT", tmp_path)
+    monkeypatch.setenv("LLM_WIKI_ROOT", str(tmp_path))
     hits = _legacy_hits(_vault(tmp_path))
 
     result = retrieval.retrieve(
@@ -59,6 +59,6 @@ def test_both_state_pages_survive_fusion(tmp_path: Path, monkeypatch) -> None:
 
 
 def test_a_flat_note_keeps_its_slug_and_any_other_file_is_named_by_its_path() -> None:
-    names = [search_memory.legacy_candidate_id(path) for path in (*PAGES, "")]
+    names = [generation_search.legacy_candidate_id(path) for path in (*PAGES, "")]
 
     assert names == ["knowledge/projects/alpha/state", "knowledge/projects/beta/state", "rollout", ""]

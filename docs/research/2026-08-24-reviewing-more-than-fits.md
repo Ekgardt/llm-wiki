@@ -64,3 +64,9 @@ compile still fails if a batch cannot be reviewed.
 - [Gavel: Agent Meets Checklist for Evaluating LLMs on Long-Context Legal Summarization, arXiv 2601.04424](https://arxiv.org/pdf/2601.04424) — chunk-by-chunk checklist extraction raises recall by 28 points over whole-document prompting.
 - [LLM Context Window Management and Long-Context Strategies 2026, Zylos](https://zylos.ai/research/2026-01-19-llm-context-management/) — the advertised window is a ceiling, not a design target.
 - [Long Context LLMs and the Lost in the Middle Phenomenon, QubitTool](https://qubittool.com/blog/long-context-lost-in-the-middle) — U-shaped recall inside a long prompt.
+
+## Policy update, 2026-10-07
+
+This dated research remains historical. Current automatic compilation refuses a
+source-bound critique rejection instead of accepting the filtered remainder as
+source completion. See [the current rejection boundary](2026-10-07-a-rejected-draft-is-not-source-no-content.md).

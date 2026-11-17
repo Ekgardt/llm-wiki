@@ -76,12 +76,10 @@ def hints_path(state_root: Path, checkout_id: str) -> Path:
 
 
 def _hint_row(row: dict) -> tuple:
-    from symbol_search import _qualified_name
-
     metadata = row["metadata"]
     return (
         str(metadata.get("name", row["identity_key"])),
-        _qualified_name(row),
+        qualified_name(row),
         str(row["kind"]),
         row.get("relative_path") or metadata.get("path"),
         row.get("line"),
@@ -107,7 +105,7 @@ def _collected_rows(graph, deadline: float) -> list[tuple]:
     return [_hint_row(row) for rows in _pages(graph, deadline) for row in rows]
 
 
-def _meta(scope, generation_id: str, symbols: int) -> dict[str, str]:
+def hint_meta(scope, generation_id: str, symbols: int) -> dict[str, str]:
     return {
         "schema_version": SCHEMA_VERSION,
         "generation_id": str(generation_id),
@@ -122,13 +120,11 @@ def _meta(scope, generation_id: str, symbols: int) -> dict[str, str]:
 
 def _handler_names(graph, routes: list[dict], deadline: float) -> dict[str, dict]:
     """The function that declares each route, by route node id."""
-    from code_graph import _in_node_chunks
-
     if not routes:
         return {}
     # Audit 3, A7: the reader refuses more than 512 ids in one call, and a
     # repository with more routes than that used to get no hint file at all.
-    edges = _in_node_chunks(
+    edges = in_node_chunks(
         [str(route["node_id"]) for route in routes],
         lambda ids: graph.edges(
             edge_types=("EXPOSES",),
@@ -148,8 +144,6 @@ def _handler_location(graph, node: dict) -> tuple[str, int | None]:
 
 
 def _route_row(graph, route: dict, edge: dict | None) -> tuple | None:
-    from symbol_search import _qualified_name
-
     handler = None if edge is None else graph.node(str(edge["source_node_id"]))
     if handler is None:
         return None
@@ -158,7 +152,7 @@ def _route_row(graph, route: dict, edge: dict | None) -> tuple | None:
     return (
         str(metadata.get("method", "")),
         str(metadata.get("path", "")),
-        _qualified_name(handler),
+        qualified_name(handler),
         file_path,
         line,
     )
@@ -214,7 +208,7 @@ def export_hints(catalog, scope, state_root: Path, *, deadline: float | None = N
     try:
         rows = _collected_rows(graph, bound)
         routes = _route_rows(graph, bound)
-        meta = _meta(scope, str(graph.generation_id), len(rows))
+        meta = hint_meta(scope, str(graph.generation_id), len(rows))
     finally:
         graph.close()
     path = write_hints(state_root, meta, rows, routes)
@@ -284,7 +278,7 @@ def _name_parts(symbol: str) -> tuple[str, str]:
 _LOOKUP_WHERE = "name = ? AND (? = '' OR substr(qualified_name, -length(?)) = ?)"
 
 
-def _lookup_rows(database: sqlite3.Connection, symbol: str) -> tuple[int, list[tuple]]:
+def lookup_rows(database: sqlite3.Connection, symbol: str) -> tuple[int, list[tuple]]:
     name, suffix = _name_parts(symbol)
     parameters = (name, suffix, suffix, suffix)
     total = database.execute(f"SELECT COUNT(*) FROM symbol WHERE {_LOOKUP_WHERE}", parameters).fetchone()[0]
@@ -303,7 +297,7 @@ def lookup_symbol(state_root: Path, checkout_id: str, symbol: str) -> dict | Non
     if meta is None or meta.get("checkout_id") != checkout_id:
         return None
     with closing(_open_read_only(path)) as database:
-        total, rows = _lookup_rows(database, symbol)
+        total, rows = lookup_rows(database, symbol)
     return {"symbol": symbol, "total": total, "rows": rows, "meta": meta}
 
 
@@ -426,3 +420,21 @@ def reminder_text(meta: dict[str, str] | None) -> str | None:
         f"{TOOL_NAME} (mode={'|'.join(REMINDER_MODES)}) before Grep; Grep stays right "
         "for literals, configuration and prose."
     )
+
+
+LOCATION_CHUNK = 512  # evidence_graph.MAX_NODE_FILTER
+
+
+def in_node_chunks(node_ids: list[str], ask) -> list:
+    """Every row `ask` returns for these ids, asked in slices the reader accepts."""
+    rows: list = []
+    for index in range(0, len(node_ids), LOCATION_CHUNK):
+        rows.extend(ask(node_ids[index : index + LOCATION_CHUNK]))
+    return rows
+
+
+def qualified_name(row: dict) -> str:
+    metadata = row["metadata"]
+    owner = str(metadata.get("owner", ""))
+    name = str(metadata.get("name", row["identity_key"]))
+    return f"{owner}.{name}" if owner else name

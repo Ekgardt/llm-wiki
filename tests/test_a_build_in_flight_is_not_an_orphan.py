@@ -15,14 +15,16 @@ for directory in (ROOT / "scripts", ROOT / "tests"):
     if str(directory) not in sys.path:
         sys.path.insert(0, str(directory))
 
-from test_generation_maintenance import _empty_generation, _vault  # noqa: E402
-
+from tests.generation_maintenance_helpers import (  # noqa: E402
+    _empty_generation,  # noqa: E402
+    _vault,  # noqa: E402
+)
 from tests.slow_machine import SHORT_TIMEOUT  # noqa: E402
 
 
 def test_a_fresh_unregistered_directory_survives_the_repair(tmp_path):
-    import doctor
-    from generation_catalog import GenerationCatalog
+    import generation_maintenance
+    from llm_wiki.generation_catalog_store import GenerationCatalog
 
     root, state = _vault(tmp_path)
     _empty_generation(state, "gen-1")
@@ -30,7 +32,7 @@ def test_a_fresh_unregistered_directory_survives_the_repair(tmp_path):
     building.mkdir()
     (building / "evidence.sqlite3").write_bytes(b"half written")
 
-    doctor._repair_generation_catalog(
+    generation_maintenance.repair_generation_catalog(
         root, state, deadline=time.monotonic() + SHORT_TIMEOUT, cancelled=lambda: False, repaired=[]
     )
 

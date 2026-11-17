@@ -55,7 +55,7 @@ def test_the_second_turn_of_a_session_is_not_sent_behind_other_sessions(episode:
         _chunk("knowledge/notes/page.md", ("Second",), 50),
     ]
 
-    assert _ids(retrieval._page_diverse(ranked)) == _ids(ranked)
+    assert _ids(retrieval.page_diverse(ranked)) == _ids(ranked)
 
 
 def test_a_compiled_page_still_waits_behind_the_turns_that_outranked_it() -> None:
@@ -65,4 +65,4 @@ def test_a_compiled_page_still_waits_behind_the_turns_that_outranked_it() -> Non
         _chunk("knowledge/daily/2023-05-26.md", ("session one",), 0),
     )
 
-    assert _ids(retrieval._page_diverse([first, second, turn])) == _ids([first, turn, second])
+    assert _ids(retrieval.page_diverse([first, second, turn])) == _ids([first, turn, second])

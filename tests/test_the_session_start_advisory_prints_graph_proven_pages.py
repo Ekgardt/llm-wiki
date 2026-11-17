@@ -14,7 +14,7 @@ SCRIPTS = Path(__file__).resolve().parents[1] / "scripts"
 if str(SCRIPTS) not in sys.path:
     sys.path.insert(0, str(SCRIPTS))
 
-from tests.test_impact_analysis import _Graph, _repository  # noqa: E402
+from tests.impact_analysis_helpers import _Graph, _repository  # noqa: E402
 
 
 def _changed_repository(tmp_path: Path) -> Path:
@@ -64,7 +64,7 @@ def test_session_start_gives_the_analysis_its_own_budget_and_skips_the_scan(monk
     monkeypatch.setattr(impact_analysis, "analyze_impact", _recorded)
     before = time.monotonic()
 
-    block = session_start_context._impact_block()
+    block = session_start_context.impact_block()
 
     after = time.monotonic()
     budget = session_start_context.IMPACT_BUDGET_SECONDS

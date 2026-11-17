@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import atexit
-import json
+import json as json
 import math
 import ntpath
 import os
@@ -13,33 +13,78 @@ import stat
 import subprocess as _subprocess
 import threading
 import time
+import tomllib
 from collections.abc import Mapping
 from dataclasses import dataclass
-from pathlib import Path, PureWindowsPath
-from types import MappingProxyType
-
-try:
-    import tomllib
-except ModuleNotFoundError:  # Python 3.10
-    import tomli as tomllib
+from pathlib import Path
 
 import lsp_process_tree as _lsp_process_tree
 from bounded_io import read_stable_bytes
+from llm_wiki import pyright_configuration
+from llm_wiki.formats.canonical import canonical_json_bytes, sha256_bytes
+from llm_wiki.pyright_configuration import (
+    PYRIGHT_CONFIGURATION as PYRIGHT_CONFIGURATION,
+)
+from llm_wiki.pyright_configuration import (
+    PYRIGHT_CONFIGURATION_SHA256 as PYRIGHT_CONFIGURATION_SHA256,
+)
+from llm_wiki.pyright_configuration import (
+    PYRIGHT_INITIALIZATION_OPTIONS as PYRIGHT_INITIALIZATION_OPTIONS,
+)
+from llm_wiki.pyright_configuration import (
+    PYRIGHT_INITIALIZATION_OPTIONS_SHA256 as PYRIGHT_INITIALIZATION_OPTIONS_SHA256,
+)
+from llm_wiki.pyright_configuration import (
+    PYRIGHT_INSTALL_MANIFEST_SCHEMA as PYRIGHT_INSTALL_MANIFEST_SCHEMA,
+)
+from llm_wiki.pyright_configuration import (
+    PYRIGHT_PACKAGE_INTEGRITY as PYRIGHT_PACKAGE_INTEGRITY,
+)
+from llm_wiki.pyright_configuration import (
+    PYRIGHT_PACKAGE_SHA256 as PYRIGHT_PACKAGE_SHA256,
+)
+from llm_wiki.pyright_configuration import (
+    PYRIGHT_PACKAGE_URL as PYRIGHT_PACKAGE_URL,
+)
+from llm_wiki.pyright_configuration import (
+    PYRIGHT_SERVER_RELATIVE as PYRIGHT_SERVER_RELATIVE,
+)
+from llm_wiki.pyright_configuration import (
+    QUALIFIED_NODE_MAJOR as QUALIFIED_NODE_MAJOR,
+)
+from llm_wiki.pyright_configuration import (
+    thaw_pyright_profile_value as thaw_pyright_profile_value,
+)
+from llm_wiki.pyright_metadata_json import (
+    CommentStripper as CommentStripper,
+)
+from llm_wiki.pyright_metadata_json import (
+    MetadataError as MetadataError,
+)
+from llm_wiki.pyright_metadata_json import (
+    TrailingCommaPass as TrailingCommaPass,
+)
+from llm_wiki.pyright_metadata_json import (
+    blank_unless_newline as blank_unless_newline,
+)
+from llm_wiki.pyright_metadata_json import (
+    normalize_jsonc as normalize_jsonc,
+)
+from llm_wiki.pyright_metadata_json import (
+    reject_duplicate_keys as reject_duplicate_keys,
+)
+from llm_wiki.pyright_metadata_json import (
+    reject_json_number as reject_json_number,
+)
+from llm_wiki.pyright_metadata_json import (
+    strict_json_object as strict_json_object,
+)
 from lsp_paths import PYRIGHT_VERSION, managed_pyright_root
-from reliable_memory import _known_network_path, canonical_json_bytes, sha256_bytes
+from reliable_memory import known_network_path
 from repository_scope import RepositoryScope
 
 ProcessTree = _lsp_process_tree.ProcessTree
 
-PYRIGHT_PACKAGE_URL = "https://registry.npmjs.org/pyright/-/pyright-1.1.411.tgz"
-PYRIGHT_PACKAGE_SHA256 = (
-    "bd5c488fc20fa237a944279bf32cae2f986cf10d5d5d9e8705819859daeb2f4a"
-)
-PYRIGHT_PACKAGE_INTEGRITY = (
-    "sha512-03S/vmS5lF1S/tVbKc2WNXCMq8JWCwta/qIYjj1jvqbQhoy+N3NgBzHTSmUlbYD6DJwqQ5XHf108QujoqeURvw=="
-)
-QUALIFIED_NODE_MAJOR = 22
-PYRIGHT_SERVER_RELATIVE = Path("package/langserver.index.js")
 
 # `langserver.index.js` is a 229-byte shim whose whole body is a `require` of
 # `./dist/pyright-langserver`; the megabytes the process executes are the
@@ -50,66 +95,6 @@ PYRIGHT_EXECUTED_TREE_RELATIVE = Path("package/dist")
 MAX_EXECUTED_TREE_FILES = 64
 MAX_EXECUTED_TREE_BYTES = 32 * 1024 * 1024
 
-
-def _freeze_pyright_profile_value(value: object) -> object:
-    if isinstance(value, dict):
-        return MappingProxyType(
-            {key: _freeze_pyright_profile_value(item) for key, item in value.items()}
-        )
-    if isinstance(value, list):
-        return tuple(_freeze_pyright_profile_value(item) for item in value)
-    return value
-
-
-def _thaw_mapping(value: Mapping) -> dict:
-    return {key: thaw_pyright_profile_value(item) for key, item in value.items()}
-
-
-def _thaw_tuple(value: tuple) -> list:
-    return [thaw_pyright_profile_value(item) for item in value]
-
-
-def thaw_pyright_profile_value(value: object) -> object:
-    """Return a mutable JSON-domain copy of an immutable profile value."""
-    if isinstance(value, Mapping):
-        return _thaw_mapping(value)
-    return _thaw_non_mapping(value)
-
-
-def _thaw_non_mapping(value: object) -> object:
-    if isinstance(value, tuple):
-        return _thaw_tuple(value)
-    if value is None or isinstance(value, (bool, int, str)):
-        return value
-    raise TypeError(f"unsupported Pyright profile value: {type(value).__name__}")
-
-
-PYRIGHT_CONFIGURATION = _freeze_pyright_profile_value({
-    "python": {
-        "analysis": {
-            "autoSearchPaths": True,
-            "diagnosticMode": "openFilesOnly",
-            "logLevel": "Error",
-            "useLibraryCodeForTypes": True,
-        }
-    },
-    "pyright": {
-        "disableLanguageServices": False,
-        "disableOrganizeImports": True,
-        "disableTaggedHints": False,
-    },
-})
-PYRIGHT_INITIALIZATION_OPTIONS = _freeze_pyright_profile_value(
-    {"files": {"exclude": []}}
-)
-
-PYRIGHT_INSTALL_MANIFEST_SCHEMA = "pyright-install/v2"
-PYRIGHT_CONFIGURATION_SHA256 = sha256_bytes(
-    canonical_json_bytes(thaw_pyright_profile_value(PYRIGHT_CONFIGURATION))
-)
-PYRIGHT_INITIALIZATION_OPTIONS_SHA256 = sha256_bytes(
-    canonical_json_bytes(thaw_pyright_profile_value(PYRIGHT_INITIALIZATION_OPTIONS))
-)
 
 # Files read while qualifying a Pyright install (sizes measured 2026-09-27): package.json 1.4 KB,
 # the install manifest 749 bytes, the largest package-lock.json on this host 205 KB, the
@@ -142,7 +127,7 @@ NODE_PROBE_TIMEOUT_SECONDS = 2.0
 NODE_PROBE_CLEANUP_SECONDS = 0.5
 # `node --version` probes still being reaped at once; one per qualification is usual, so 8
 # refuses a leak. Value predates measurement.
-_MAX_NODE_PROBE_OWNERS = 8
+MAX_NODE_PROBE_OWNERS = 8
 # How long one `node --version` answer stands for the executable it was taken
 # from. A version-manager shim can change what it runs without changing itself,
 # so the answer is not kept for the life of the process.
@@ -194,7 +179,7 @@ _MANIFEST_KEYS = frozenset(
 # The nine-key receipt every installed vault carries today. It cannot be
 # upgraded in place -- the digest would attest whatever is on disk rather than
 # the pinned bytes -- so it is named and the operator reinstalls.
-_MANIFEST_KEYS_BEFORE_TREE_DIGEST = _MANIFEST_KEYS - {"executed_tree_sha256"}
+MANIFEST_KEYS_BEFORE_TREE_DIGEST = _MANIFEST_KEYS - {"executed_tree_sha256"}
 
 
 class _SubprocessFacade:
@@ -214,7 +199,7 @@ _PENDING_NODE_PROBE_CLEANUPS: dict[object, object] = {}
 _NODE_PROBE_CACHE_LOCK = threading.Lock()
 # executable identity -> (expiry, (node, version, major)). Successful probes
 # only; bounded by `_MAX_NODE_PROBE_CACHE`, cleared whole when it is reached.
-_NODE_PROBE_CACHE: dict[
+NODE_PROBE_CACHE: dict[
     tuple[object, ...], tuple[float, tuple[Path | None, str | None, int | None]]
 ] = {}
 
@@ -241,12 +226,6 @@ class PyrightCandidates:
     project_local: tuple[Path, ...]
     managed: tuple[Path, ...]
     system: tuple[Path, ...]
-
-
-class _MetadataError(ValueError):
-    def __init__(self, code: str) -> None:
-        super().__init__(code)
-        self.code = code
 
 
 class _ManifestValidationError(ValueError):
@@ -292,8 +271,8 @@ def build_pyright_install_manifest(
             executed_tree_sha256, "executed_tree_sha256"
         ),
         "initialization_options_sha256": PYRIGHT_INITIALIZATION_OPTIONS_SHA256,
-        "package_integrity": PYRIGHT_PACKAGE_INTEGRITY,
-        "package_sha256": PYRIGHT_PACKAGE_SHA256,
+        "package_integrity": pyright_configuration.PYRIGHT_PACKAGE_INTEGRITY,
+        "package_sha256": pyright_configuration.PYRIGHT_PACKAGE_SHA256,
         "package_url": PYRIGHT_PACKAGE_URL,
         "schema_version": PYRIGHT_INSTALL_MANIFEST_SCHEMA,
         "server_relative_path": PYRIGHT_SERVER_RELATIVE.as_posix(),
@@ -334,7 +313,7 @@ def _manifest_shape_is_valid(value: object) -> bool:
 
 def _require_tree_digest_era(value: object) -> None:
     """A receipt from before the executed-tree digest is named, not guessed at."""
-    if isinstance(value, dict) and set(value) == _MANIFEST_KEYS_BEFORE_TREE_DIGEST:
+    if isinstance(value, dict) and set(value) == MANIFEST_KEYS_BEFORE_TREE_DIGEST:
         raise _ManifestValidationError("pyright_manifest_predates_tree_digest")
 
 
@@ -353,7 +332,7 @@ def validate_pyright_install_manifest(value: object) -> dict[str, str]:
     return {field: value[field] for field in sorted(_MANIFEST_KEYS)}
 
 
-def _validated_deadline(deadline: float | None) -> float | None:
+def validated_deadline(deadline: float | None) -> float | None:
     if deadline is None:
         return None
     if (
@@ -365,7 +344,7 @@ def _validated_deadline(deadline: float | None) -> float | None:
     return float(deadline)
 
 
-def _check_deadline(deadline: float | None) -> None:
+def check_deadline(deadline: float | None) -> None:
     if deadline is not None and time.monotonic() >= deadline:
         raise TimeoutError("Pyright discovery deadline expired")
 
@@ -385,207 +364,12 @@ def _require_windows_system_root(values: Mapping[str, str]) -> None:
         raise ValueError("SYSTEMROOT must be an inherited existing directory on Windows")
 
 
-def _node_environment() -> dict[str, str]:
+def node_environment() -> dict[str, str]:
     values = os.environ
     for name, value in values.items():
         _require_environment_entry(name, value)
     _require_windows_system_root(values)
     return {name: values[name] for name in sorted(_NODE_ENV_ALLOWLIST) if name in values}
-
-
-def _reject_duplicate_keys(pairs: list[tuple[str, object]]) -> dict[str, object]:
-    result: dict[str, object] = {}
-    for key, value in pairs:
-        if key in result:
-            raise ValueError("duplicate JSON key")
-        result[key] = value
-    return result
-
-
-def _reject_json_number(_value: str) -> object:
-    raise ValueError("non-integral JSON number")
-
-
-def _strict_json_object(
-    raw: bytes,
-    malformed_code: str,
-    *,
-    recursion_code: str | None = None,
-) -> dict[str, object]:
-    try:
-        text = raw.decode("utf-8", errors="strict")
-        value = json.loads(
-            text,
-            object_pairs_hook=_reject_duplicate_keys,
-            parse_float=_reject_json_number,
-            parse_constant=_reject_json_number,
-        )
-    except RecursionError as exc:
-        raise _MetadataError(recursion_code or malformed_code) from exc
-    except (UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
-        raise _MetadataError(malformed_code) from exc
-    if not isinstance(value, dict):
-        raise _MetadataError(malformed_code)
-    return value
-
-
-def _blank_unless_newline(character: str) -> str:
-    if character in "\r\n":
-        return character
-    return " "
-
-
-class _CommentStripper:
-    """Replace JSONC comments with spaces (newlines kept) outside strings."""
-
-    def __init__(self, text: str, malformed_code: str) -> None:
-        self.text = text
-        self.code = malformed_code
-        self.out: list[str] = []
-        self.index = 0
-        self.in_string = False
-        self.escaped = False
-
-    def run(self) -> list[str]:
-        while self.index < len(self.text):
-            self._step()
-        return self.out
-
-    def _keep(self, character: str) -> None:
-        self.out.append(character)
-        self.index += 1
-
-    def _advance_string_state(self, character: str) -> None:
-        if self.escaped:
-            self.escaped = False
-            return
-        self._unescaped_string_character(character)
-
-    def _unescaped_string_character(self, character: str) -> None:
-        if character == "\\":
-            self.escaped = True
-            return
-        if character == '"':
-            self.in_string = False
-
-    def _step(self) -> None:
-        character = self.text[self.index]
-        if self.in_string:
-            self._advance_string_state(character)
-            self._keep(character)
-            return
-        self._step_outside_string(character)
-
-    def _step_outside_string(self, character: str) -> None:
-        if character == '"':
-            self.in_string = True
-            self._keep(character)
-            return
-        if character != "/" or self.index + 1 >= len(self.text):
-            self._keep(character)
-            return
-        self._comment_or_slash(self.text[self.index + 1], character)
-
-    def _comment_or_slash(self, marker: str, character: str) -> None:
-        if marker == "/":
-            self._skip_line_comment()
-            return
-        if marker != "*":
-            self._keep(character)
-            return
-        self._skip_block_comment()
-
-    def _skip_line_comment(self) -> None:
-        self.out.extend((" ", " "))
-        self.index += 2
-        while self.index < len(self.text) and self.text[self.index] not in "\r\n":
-            self.out.append(" ")
-            self.index += 1
-
-    def _at_block_end(self) -> bool:
-        return self.text[self.index] == "*" and self.text[self.index + 1 : self.index + 2] == "/"
-
-    def _skip_block_comment(self) -> None:
-        self.out.extend((" ", " "))
-        self.index += 2
-        while self.index < len(self.text):
-            if self._at_block_end():
-                self.out.extend((" ", " "))
-                self.index += 2
-                return
-            self.out.append(_blank_unless_newline(self.text[self.index]))
-            self.index += 1
-        raise _MetadataError(self.code)
-
-
-class _TrailingCommaPass:
-    """Blank a comma that directly precedes `}` or `]` outside strings."""
-
-    def __init__(self, normalized: list[str]) -> None:
-        self.normalized = normalized
-        self.pending_comma: int | None = None
-        self.previous: str | None = None
-        self.in_string = False
-        self.escaped = False
-
-    def run(self) -> list[str]:
-        for index, character in enumerate(self.normalized):
-            self._step(index, character)
-        return self.normalized
-
-    def _string_character(self, character: str) -> None:
-        if self.escaped:
-            self.escaped = False
-            return
-        self._unescaped_string_character(character)
-
-    def _unescaped_string_character(self, character: str) -> None:
-        if character == "\\":
-            self.escaped = True
-            return
-        if character == '"':
-            self.in_string = False
-            self.previous = character
-
-    def _comma(self, index: int) -> None:
-        if self.previous in {None, "{", "[", ",", ":"}:
-            self.pending_comma = None
-        else:
-            self.pending_comma = index
-        self.previous = ","
-
-    def _significant(self, character: str) -> None:
-        if character in "}]" and self.pending_comma is not None:
-            self.normalized[self.pending_comma] = " "
-        self.pending_comma = None
-        self.previous = character
-
-    def _step(self, index: int, character: str) -> None:
-        if self.in_string:
-            self._string_character(character)
-            return
-        if character == '"':
-            self.pending_comma = None
-            self.previous = character
-            self.in_string = True
-            return
-        self._step_outside_string(index, character)
-
-    def _step_outside_string(self, index: int, character: str) -> None:
-        if character == ",":
-            self._comma(index)
-            return
-        if character not in " \t\r\n":
-            self._significant(character)
-
-
-def _normalize_jsonc(raw: bytes, malformed_code: str) -> bytes:
-    try:
-        text = raw.decode("utf-8", errors="strict")
-    except UnicodeDecodeError as exc:
-        raise _MetadataError(malformed_code) from exc
-    normalized = _CommentStripper(text, malformed_code).run()
-    return "".join(_TrailingCommaPass(normalized).run()).encode("utf-8")
 
 
 def _read_json_object(
@@ -596,20 +380,20 @@ def _read_json_object(
     deadline: float | None,
     recursion_code: str | None = None,
 ) -> tuple[dict[str, object], bytes]:
-    _check_deadline(deadline)
+    check_deadline(deadline)
     try:
         raw = read_stable_bytes(path, max_bytes, label=prefix.replace("_", " "))
     except FileNotFoundError as exc:
-        raise _MetadataError(f"{prefix}_missing") from exc
+        raise MetadataError(f"{prefix}_missing") from exc
     except PermissionError as exc:
-        raise _MetadataError(f"{prefix}_unsafe") from exc
+        raise MetadataError(f"{prefix}_unsafe") from exc
     except ValueError as exc:
-        raise _MetadataError(f"{prefix}_oversized") from exc
+        raise MetadataError(f"{prefix}_oversized") from exc
     except OSError as exc:
-        raise _MetadataError(f"{prefix}_unreadable") from exc
-    _check_deadline(deadline)
+        raise MetadataError(f"{prefix}_unreadable") from exc
+    check_deadline(deadline)
     return (
-        _strict_json_object(
+        strict_json_object(
             raw,
             f"{prefix}_malformed",
             recursion_code=recursion_code,
@@ -620,14 +404,14 @@ def _read_json_object(
 
 def _require_domain_bounds(nodes: int, depth: int, prefix: str, max_depth: int, max_nodes: int) -> None:
     if nodes > max_nodes:
-        raise _MetadataError(f"{prefix}_too_many_nodes")
+        raise MetadataError(f"{prefix}_too_many_nodes")
     if depth > max_depth:
-        raise _MetadataError(f"{prefix}_too_deep")
+        raise MetadataError(f"{prefix}_too_deep")
 
 
 def _object_children(item: dict, prefix: str) -> tuple:
     if any(not isinstance(key, str) for key in item):
-        raise _MetadataError(f"{prefix}_unsupported_value")
+        raise MetadataError(f"{prefix}_unsupported_value")
     return tuple(item.values())
 
 
@@ -643,14 +427,14 @@ def _container_children(item: object, prefix: str) -> tuple:
         return _object_children(item, prefix)
     if isinstance(item, list):
         return tuple(item)
-    raise _MetadataError(f"{prefix}_unsupported_value")
+    raise MetadataError(f"{prefix}_unsupported_value")
 
 
 def _push_domain_children(
     stack: list, children: tuple, nodes: int, depth: int, prefix: str, max_nodes: int
 ) -> None:
     if nodes + len(stack) + len(children) > max_nodes:
-        raise _MetadataError(f"{prefix}_too_many_nodes")
+        raise MetadataError(f"{prefix}_too_many_nodes")
     stack.extend((child, depth + 1) for child in reversed(children))
 
 
@@ -669,16 +453,16 @@ def _validate_canonical_domain(
         nodes += 1
         _require_domain_bounds(nodes, depth, prefix, max_depth, max_nodes)
         if nodes & 255 == 0:
-            _check_deadline(deadline)
+            check_deadline(deadline)
         children = _domain_children(item, prefix)
         if children is None:
             continue
         _push_domain_children(stack, children, nodes, depth, prefix, max_nodes)
-    _check_deadline(deadline)
+    check_deadline(deadline)
 
 
 def _server_digest(path: Path, deadline: float | None) -> tuple[str | None, str | None]:
-    _check_deadline(deadline)
+    check_deadline(deadline)
     try:
         content = read_stable_bytes(path, MAX_SERVER_BYTES, label="Pyright server")
     except FileNotFoundError:
@@ -689,7 +473,7 @@ def _server_digest(path: Path, deadline: float | None) -> tuple[str | None, str 
         return None, "pyright_server_oversized"
     except OSError:
         return None, "pyright_server_unreadable"
-    _check_deadline(deadline)
+    check_deadline(deadline)
     return sha256_bytes(content), None
 
 
@@ -701,15 +485,15 @@ def _repository_config_entrypoint(
         repository_root / "pyrightconfig.json",
         repository_root / "pyproject.toml",
     ):
-        _check_deadline(deadline)
+        check_deadline(deadline)
         try:
             path.lstat()
         except FileNotFoundError:
             continue
         except PermissionError as exc:
-            raise _MetadataError("pyright_repository_config_unsafe") from exc
+            raise MetadataError("pyright_repository_config_unsafe") from exc
         except OSError as exc:
-            raise _MetadataError("pyright_repository_config_unreadable") from exc
+            raise MetadataError("pyright_repository_config_unreadable") from exc
         return path
     return None
 
@@ -718,13 +502,13 @@ def _read_config_bytes(path: Path) -> bytes:
     try:
         return read_stable_bytes(path, MAX_PYRIGHT_CONFIG_BYTES, label="Pyright repository config")
     except FileNotFoundError as exc:
-        raise _MetadataError("pyright_repository_config_missing") from exc
+        raise MetadataError("pyright_repository_config_missing") from exc
     except PermissionError as exc:
-        raise _MetadataError("pyright_repository_config_unsafe") from exc
+        raise MetadataError("pyright_repository_config_unsafe") from exc
     except ValueError as exc:
-        raise _MetadataError("pyright_repository_config_oversized") from exc
+        raise MetadataError("pyright_repository_config_oversized") from exc
     except OSError as exc:
-        raise _MetadataError("pyright_repository_config_unreadable") from exc
+        raise MetadataError("pyright_repository_config_unreadable") from exc
 
 
 def _validate_repository_domain(configuration: dict[str, object], deadline: float | None) -> None:
@@ -738,8 +522,8 @@ def _validate_repository_domain(configuration: dict[str, object], deadline: floa
 
 
 def _json_repository_config(raw: bytes, deadline: float | None) -> dict[str, object]:
-    configuration = _strict_json_object(
-        _normalize_jsonc(raw, "pyright_repository_config_malformed"),
+    configuration = strict_json_object(
+        normalize_jsonc(raw, "pyright_repository_config_malformed"),
         "pyright_repository_config_malformed",
         recursion_code="pyright_repository_config_too_deep",
     )
@@ -751,9 +535,9 @@ def _toml_document(raw: bytes) -> dict:
     try:
         return tomllib.loads(raw.decode("utf-8", errors="strict"))
     except RecursionError as exc:
-        raise _MetadataError("pyright_repository_config_too_deep") from exc
+        raise MetadataError("pyright_repository_config_too_deep") from exc
     except (UnicodeDecodeError, ValueError) as exc:
-        raise _MetadataError("pyright_repository_config_malformed") from exc
+        raise MetadataError("pyright_repository_config_malformed") from exc
 
 
 def _toml_pyright_table(document: dict, root_pyproject: bool) -> dict[str, object]:
@@ -762,8 +546,8 @@ def _toml_pyright_table(document: dict, root_pyproject: bool) -> dict[str, objec
     if isinstance(configuration, dict):
         return configuration
     if root_pyproject:
-        raise _MetadataError("pyright_repository_config_ancestor_search")
-    raise _MetadataError("pyright_repository_config_malformed")
+        raise MetadataError("pyright_repository_config_ancestor_search")
+    raise MetadataError("pyright_repository_config_malformed")
 
 
 def _toml_repository_config(
@@ -782,9 +566,9 @@ def _read_repository_config(
 ) -> tuple[dict[str, object], bytes]:
     suffix = path.suffix.casefold()
     if suffix not in {".json", ".toml"}:
-        raise _MetadataError("pyright_repository_config_unsupported_format")
+        raise MetadataError("pyright_repository_config_unsupported_format")
     raw = _read_config_bytes(path)
-    _check_deadline(deadline)
+    check_deadline(deadline)
     if suffix == ".json":
         return _json_repository_config(raw, deadline), raw
     return _toml_repository_config(raw, root_pyproject, deadline), raw
@@ -792,13 +576,13 @@ def _read_repository_config(
 
 def _relative_extends_path(value: str) -> Path:
     if not value or "\0" in value:
-        raise _MetadataError("pyright_repository_config_extends_invalid")
+        raise MetadataError("pyright_repository_config_extends_invalid")
     try:
         relative = Path(value)
     except (TypeError, ValueError) as exc:
-        raise _MetadataError("pyright_repository_config_extends_invalid") from exc
+        raise MetadataError("pyright_repository_config_extends_invalid") from exc
     if relative.is_absolute():
-        raise _MetadataError("pyright_repository_config_extends_absolute")
+        raise MetadataError("pyright_repository_config_extends_absolute")
     return relative
 
 
@@ -813,9 +597,9 @@ def _contained_repository_config_path(
     try:
         candidate.relative_to(repository_root)
     except ValueError as exc:
-        raise _MetadataError("pyright_repository_config_outside_repository") from exc
+        raise MetadataError("pyright_repository_config_outside_repository") from exc
     if candidate.suffix.casefold() not in {".json", ".toml"}:
-        raise _MetadataError("pyright_repository_config_unsupported_format")
+        raise MetadataError("pyright_repository_config_unsupported_format")
     return candidate
 
 
@@ -830,9 +614,9 @@ class _ConfigChain:
 
 def _require_chain_step(chain: _ConfigChain, current: Path) -> None:
     if current in chain.visited:
-        raise _MetadataError("pyright_repository_config_extends_cycle")
+        raise MetadataError("pyright_repository_config_extends_cycle")
     if len(chain.configurations) >= MAX_PYRIGHT_CONFIG_FILES:
-        raise _MetadataError("pyright_repository_config_extends_too_deep")
+        raise MetadataError("pyright_repository_config_extends_too_deep")
 
 
 def _record_configuration(
@@ -840,7 +624,7 @@ def _record_configuration(
 ) -> None:
     chain.total_bytes += len(raw)
     if chain.total_bytes > MAX_PYRIGHT_CONFIG_TOTAL_BYTES:
-        raise _MetadataError("pyright_repository_config_total_oversized")
+        raise MetadataError("pyright_repository_config_total_oversized")
     relative_path = current.relative_to(repository_root)
     chain.configurations.append(
         {
@@ -853,9 +637,9 @@ def _record_configuration(
 
 def _require_extends(chain: _ConfigChain, extends: object) -> None:
     if not isinstance(extends, str):
-        raise _MetadataError("pyright_repository_config_extends_invalid")
+        raise MetadataError("pyright_repository_config_extends_invalid")
     if len(chain.configurations) - 1 >= MAX_PYRIGHT_CONFIG_EXTENDS_DEPTH:
-        raise _MetadataError("pyright_repository_config_extends_too_deep")
+        raise MetadataError("pyright_repository_config_extends_too_deep")
 
 
 def _next_extends(
@@ -880,7 +664,7 @@ def _repository_configuration_chain(
         return None
     chain = _ConfigChain()
     while current is not None:
-        _check_deadline(deadline)
+        check_deadline(deadline)
         _require_chain_step(chain, current)
         chain.visited.add(current)
         root_pyproject = not chain.configurations and current.name == "pyproject.toml"
@@ -897,10 +681,10 @@ def _repository_configuration_identity(
     repository: RepositoryScope,
     deadline: float | None,
 ) -> tuple[str, set[str]]:
-    _check_deadline(deadline)
+    check_deadline(deadline)
     try:
         configuration_chain = _repository_configuration_chain(repository, deadline)
-    except _MetadataError as exc:
+    except MetadataError as exc:
         return PYRIGHT_CONFIGURATION_SHA256, {exc.code}
     if configuration_chain is None:
         return PYRIGHT_CONFIGURATION_SHA256, set()
@@ -916,7 +700,7 @@ def _repository_configuration_identity(
         return PYRIGHT_CONFIGURATION_SHA256, {
             "pyright_repository_config_unsupported_value"
         }
-    _check_deadline(deadline)
+    check_deadline(deadline)
     return fingerprint, set()
 
 
@@ -939,7 +723,7 @@ def _package_identity(
             prefix="pyright_package_json",
             deadline=deadline,
         )
-    except _MetadataError as exc:
+    except MetadataError as exc:
         return None, {exc.code}
     codes: set[str] = set()
     name = package.get("name")
@@ -996,7 +780,9 @@ def _entry_field_codes(entry: dict) -> set[str]:
     codes = {
         _entry_field_code(entry.get("version"), PYRIGHT_VERSION, "pyright_version_mismatch"),
         _entry_field_code(
-            entry.get("integrity"), PYRIGHT_PACKAGE_INTEGRITY, "pyright_integrity_mismatch"
+            entry.get("integrity"),
+            pyright_configuration.PYRIGHT_PACKAGE_INTEGRITY,
+            "pyright_integrity_mismatch",
         ),
     }
     return {code for code in codes if code is not None}
@@ -1024,7 +810,7 @@ def _lockfile_codes(
         value, _raw = _read_json_object(
             lockfile, MAX_PACKAGE_LOCK_BYTES, prefix="pyright_lockfile", deadline=deadline
         )
-    except _MetadataError as exc:
+    except MetadataError as exc:
         return {exc.code}
     entry = _lockfile_entry(value)
     if isinstance(entry, str):
@@ -1120,7 +906,7 @@ def _executed_tree_names(directory: Path) -> list[str]:
 def _executed_tree_entry(
     directory: Path, name: str, budget: list[int], deadline: float | None
 ) -> tuple[str, str]:
-    _check_deadline(deadline)
+    check_deadline(deadline)
     content = read_stable_bytes(
         directory / name, budget[0], label="Pyright executed tree"
     )
@@ -1149,7 +935,7 @@ def _measured_executed_tree(
         raise
     except (OSError, ValueError) as exc:
         return None, _executed_tree_read_code(exc)
-    _check_deadline(deadline)
+    check_deadline(deadline)
     return executed_tree_digest(entries), None
 
 
@@ -1191,7 +977,7 @@ def _managed_manifest(
         codes.add("pyright_server_relative_mismatch")
     try:
         value, raw = _read_managed_manifest(server.parent.parent, deadline)
-    except _MetadataError as exc:
+    except MetadataError as exc:
         return None, {exc.code, *codes}
     codes |= _canonical_form_codes(value, raw)
     codes |= _manifest_validation_codes(value)
@@ -1202,10 +988,10 @@ def _managed_manifest(
     return _hex_digest_or_none(value.get("package_sha256")), codes
 
 
-def _reserve_node_probe_owner() -> object | None:
+def reserve_node_probe_owner() -> object | None:
     owner = object()
     with _NODE_PROBE_OWNERS_LOCK:
-        if len(_NODE_PROBE_OWNERS) >= _MAX_NODE_PROBE_OWNERS:
+        if len(_NODE_PROBE_OWNERS) >= MAX_NODE_PROBE_OWNERS:
             return None
         _NODE_PROBE_OWNERS.add(owner)
     return owner
@@ -1217,14 +1003,14 @@ def _release_node_probe_owner(owner: object) -> None:
         _NODE_PROBE_OWNERS.discard(owner)
 
 
-def _retain_node_probe_owner(owner: object, owned: object) -> None:
+def retain_node_probe_owner(owner: object, owned: object) -> None:
     with _NODE_PROBE_OWNERS_LOCK:
         if owner not in _NODE_PROBE_OWNERS:
             raise RuntimeError("Node probe cleanup owner was not reserved")
         _PENDING_NODE_PROBE_CLEANUPS[owner] = owned
 
 
-def _pending_node_probe_cleanup_snapshot() -> tuple[object, ...]:
+def pending_node_probe_cleanup_snapshot() -> tuple[object, ...]:
     with _NODE_PROBE_OWNERS_LOCK:
         return tuple(_PENDING_NODE_PROBE_CLEANUPS.values())
 
@@ -1268,13 +1054,13 @@ def _release_node_probe_tree(tree: object) -> bool:
     return True
 
 
-def _close_spawn_error_job(owned: _lsp_process_tree._ProcessTreeSpawnError) -> bool:
+def _close_spawn_error_job(owned: _lsp_process_tree.ProcessTreeSpawnError) -> bool:
     """A spawn that failed leaves at most its Windows job handle to close."""
     job = owned.windows_job
     if job is None:
         return True
     try:
-        _lsp_process_tree._close_windows_handle(job)
+        _lsp_process_tree.close_windows_handle(job)
     except _NODE_PROBE_ERRORS:
         return False
     owned.windows_job = None
@@ -1282,7 +1068,7 @@ def _close_spawn_error_job(owned: _lsp_process_tree._ProcessTreeSpawnError) -> b
 
 
 def _cleanup_node_probe_owner(owned: object, cleanup_deadline: float) -> bool:
-    if isinstance(owned, _lsp_process_tree._ProcessTreeSpawnError):
+    if isinstance(owned, _lsp_process_tree.ProcessTreeSpawnError):
         return _close_spawn_error_job(owned)
     if not _terminate_node_probe_tree(owned, cleanup_deadline):
         return False
@@ -1305,9 +1091,9 @@ def _drain_pending_cleanups(cleanup_deadline: float) -> None:
         _retry_one_cleanup(owner, owned, cleanup_deadline)
 
 
-def _retry_node_probe_cleanups(cleanup_deadline: float | None = None) -> None:
+def retry_node_probe_cleanups(cleanup_deadline: float | None = None) -> None:
     """Retry all retained probes within one shared cleanup budget."""
-    if not _pending_node_probe_cleanup_snapshot():
+    if not pending_node_probe_cleanup_snapshot():
         return
     if not _NODE_PROBE_DRAIN_LOCK.acquire(blocking=False):
         return
@@ -1325,7 +1111,7 @@ def _node_probe_cleanup_deadline(cleanup_deadline: float | None) -> float:
 
 def _atexit_cleanup_node_probes() -> None:
     try:
-        _retry_node_probe_cleanups()
+        retry_node_probe_cleanups()
     except BaseException:
         pass
 
@@ -1341,7 +1127,7 @@ def _parents_are_plain_directories(node: Path, deadline: float | None) -> bool:
     for parent in node.parents:
         if parent == Path(parent.anchor):
             return True
-        _check_deadline(deadline)
+        check_deadline(deadline)
         if not _lstat_is_plain(parent.lstat(), stat.S_ISDIR):
             return False
     return True
@@ -1350,14 +1136,14 @@ def _parents_are_plain_directories(node: Path, deadline: float | None) -> bool:
 def _node_path_is_plain(node: Path, deadline: float | None) -> bool:
     if not _parents_are_plain_directories(node, deadline):
         return False
-    _check_deadline(deadline)
+    check_deadline(deadline)
     if not _lstat_is_plain(node.lstat(), stat.S_ISREG):
         return False
-    return not _known_network_path(node)
+    return not known_network_path(node)
 
 
 def _node_shape_is_safe(node: Path) -> bool:
-    if not _is_local_absolute_path(node):
+    if not is_local_absolute_path(node):
         return False
     return not (os.name == "nt" and node.suffix.casefold() in {".bat", ".cmd"})
 
@@ -1371,7 +1157,7 @@ def _node_executable_is_safe(node: Path, deadline: float | None) -> bool:
         return False
     if not plain:
         return False
-    _check_deadline(deadline)
+    check_deadline(deadline)
     return True
 
 
@@ -1381,7 +1167,7 @@ def _node_from_path(environment: dict[str, str], deadline: float | None) -> tupl
         found = shutil.which("node", path=environment.get("PATH", ""))
     except _NODE_PROBE_ERRORS:
         return None, "pyright_node_probe_failed"
-    _check_deadline(deadline)
+    check_deadline(deadline)
     if found is None:
         return None, "pyright_node_missing"
     try:
@@ -1395,7 +1181,7 @@ def _node_from_path(environment: dict[str, str], deadline: float | None) -> tupl
 
 def _located_node(deadline: float | None) -> tuple[dict[str, str] | None, Path | None, str | None]:
     try:
-        environment = _node_environment()
+        environment = node_environment()
     except (OSError, TypeError, ValueError):
         return None, None, "pyright_node_probe_failed"
     node, code = _node_from_path(environment, deadline)
@@ -1416,7 +1202,7 @@ def _probe_window(deadline: float | None) -> tuple[float, float] | None:
     if probe_deadline - now <= 0:
         return None
     hard_cleanup_deadline = probe_deadline + NODE_PROBE_CLEANUP_SECONDS
-    _retry_node_probe_cleanups(
+    retry_node_probe_cleanups(
         min(time.monotonic() + NODE_PROBE_CLEANUP_SECONDS, hard_cleanup_deadline)
     )
     if time.monotonic() >= probe_deadline:
@@ -1433,8 +1219,8 @@ def _spawn_probe(node: Path, environment: dict[str, str], probe_deadline: float,
             env=environment,
             deadline=probe_deadline,
         )
-    except _lsp_process_tree._ProcessTreeSpawnError as error:
-        _retain_node_probe_owner(owner, error.tree if error.tree is not None else error)
+    except _lsp_process_tree.ProcessTreeSpawnError as error:
+        retain_node_probe_owner(owner, error.tree if error.tree is not None else error)
         return None
     except _NODE_PROBE_ERRORS:
         _release_node_probe_owner(owner)
@@ -1464,7 +1250,7 @@ def _node_version_result(node: Path, output: bytes) -> tuple[Path, str | None, i
     return node, version, major, codes
 
 
-class _ProbeRun:
+class ProbeRun:
     """One spawned `node --version`: observe it, end its tree, grade the outcome."""
 
     def __init__(self, tree: object, probe_deadline: float, hard_cleanup_deadline: float) -> None:
@@ -1499,7 +1285,10 @@ class _ProbeRun:
     def _wait_parent(self) -> None:
         try:
             self.parent_returncode = self.process.wait(
-                timeout=max(0.0, self.probe_deadline - time.monotonic())
+                timeout=min(
+                    NODE_PROBE_TIMEOUT_SECONDS,
+                    max(0.0, self.probe_deadline - time.monotonic()),
+                )
             )
         except subprocess.TimeoutExpired:
             if self.degradation_code is None:
@@ -1563,7 +1352,7 @@ class _ProbeRun:
     def settle(self, owner: object) -> None:
         """Release the ended tree and its owner, or retain both for a later retry."""
         if not self.tree_empty:
-            _retain_node_probe_owner(owner, self.tree)
+            retain_node_probe_owner(owner, self.tree)
             return
         released = False
         try:
@@ -1572,7 +1361,7 @@ class _ProbeRun:
             if released:
                 _release_node_probe_owner(owner)
             else:
-                _retain_node_probe_owner(owner, self.tree)
+                retain_node_probe_owner(owner, self.tree)
                 self.degradation_code = "pyright_node_probe_failed"
 
     def result(self, node: Path) -> tuple[Path, str | None, int | None, set[str]]:
@@ -1583,8 +1372,8 @@ class _ProbeRun:
         return _node_version_result(node, self.output)
 
 
-def _run_probe(tree: object, owner: object, probe_deadline: float, hard_cleanup_deadline: float) -> _ProbeRun:
-    run = _ProbeRun(tree, probe_deadline, hard_cleanup_deadline)
+def _run_probe(tree: object, owner: object, probe_deadline: float, hard_cleanup_deadline: float) -> ProbeRun:
+    run = ProbeRun(tree, probe_deadline, hard_cleanup_deadline)
     try:
         try:
             run.observe()
@@ -1614,7 +1403,7 @@ def _cached_node_probe(
     if key is None:
         return None
     with _NODE_PROBE_CACHE_LOCK:
-        entry = _NODE_PROBE_CACHE.get(key)
+        entry = NODE_PROBE_CACHE.get(key)
     if entry is None or entry[0] <= time.monotonic():
         return None
     node, version, major = entry[1]
@@ -1629,15 +1418,15 @@ def _remember_node_probe(
     if key is None or result[3]:
         return
     with _NODE_PROBE_CACHE_LOCK:
-        if len(_NODE_PROBE_CACHE) >= _MAX_NODE_PROBE_CACHE:
-            _NODE_PROBE_CACHE.clear()
-        _NODE_PROBE_CACHE[key] = (
+        if len(NODE_PROBE_CACHE) >= _MAX_NODE_PROBE_CACHE:
+            NODE_PROBE_CACHE.clear()
+        NODE_PROBE_CACHE[key] = (
             time.monotonic() + NODE_PROBE_CACHE_SECONDS,
             result[:3],
         )
 
 
-def _probe_node(
+def probe_node(
     deadline: float | None,
 ) -> tuple[Path | None, str | None, int | None, set[str]]:
     """Probe Node within its deadline plus one fixed tree-cleanup allowance.
@@ -1646,7 +1435,7 @@ def _probe_node(
     query is a cost the answer does not need: the answer belongs to the Node
     executable, so it is kept for it while the file stays as it was.
     """
-    _check_deadline(deadline)
+    check_deadline(deadline)
     environment, node, code = _located_node(deadline)
     if code is not None:
         return node, None, None, {code}
@@ -1675,7 +1464,7 @@ def _fresh_node_probe(
 def _probe_in_window(
     node: Path | None, environment: dict, window: tuple[float, float]
 ) -> tuple[Path | None, str | None, int | None, set[str]]:
-    owner = _reserve_node_probe_owner()
+    owner = reserve_node_probe_owner()
     if owner is None:
         return node, None, None, {"pyright_node_probe_failed"}
     tree = _spawn_probe(node, environment, window[0], owner)
@@ -1685,26 +1474,26 @@ def _probe_in_window(
 
 
 def _candidate_exists(path: Path, deadline: float | None) -> tuple[bool, str | None]:
-    _check_deadline(deadline)
+    check_deadline(deadline)
     try:
         path.lstat()
     except FileNotFoundError:
         return False, None
     except OSError:
         return True, "pyright_candidate_unreadable"
-    _check_deadline(deadline)
+    check_deadline(deadline)
     return True, None
 
 
 def _path_exists_no_follow(path: Path, deadline: float | None) -> bool:
-    _check_deadline(deadline)
+    check_deadline(deadline)
     try:
         path.lstat()
     except FileNotFoundError:
         return False
     except OSError:
         return True
-    _check_deadline(deadline)
+    check_deadline(deadline)
     return True
 
 
@@ -1719,17 +1508,17 @@ def _lock_mentions_pyright(
             prefix="pyright_lockfile",
             deadline=deadline,
         )
-    except _MetadataError:
+    except MetadataError:
         return False
     lockfile_version = value.get("lockfileVersion")
     if lockfile_version == 1:
-        entries = value.get("dependencies")
-        key = "pyright"
-    elif lockfile_version in {2, 3}:
-        entries = value.get("packages")
-        key = "node_modules/pyright"
-    else:
-        return False
+        return _contains_lock_entry(value.get("dependencies"), "pyright")
+    if lockfile_version in {2, 3}:
+        return _contains_lock_entry(value.get("packages"), "node_modules/pyright")
+    return False
+
+
+def _contains_lock_entry(entries: object, key: str) -> bool:
     return isinstance(entries, dict) and key in entries
 
 
@@ -1794,14 +1583,9 @@ def _expected_source_server(
     return None
 
 
-def _windows_name_is_reserved(raw: str) -> bool:
+def windows_name_is_reserved(raw: str) -> bool:
     """Windows rules for one path text; a pure function, so it runs anywhere."""
-    is_reserved = getattr(ntpath, "isreserved", None)
-    if is_reserved is not None:
-        return bool(is_reserved(raw))
-    # Below 3.13 only: from 3.13 the branch above answers, and the pathlib
-    # method is removed in 3.15.
-    return PureWindowsPath(raw).is_reserved()
+    return bool(ntpath.isreserved(raw))
 
 
 def _path_is_reserved(raw: str) -> bool:
@@ -1811,10 +1595,10 @@ def _path_is_reserved(raw: str) -> bool:
     """
     if os.name != "nt":
         return False
-    return _windows_name_is_reserved(raw)
+    return windows_name_is_reserved(raw)
 
 
-def _is_local_absolute_path(path: Path) -> bool:
+def is_local_absolute_path(path: Path) -> bool:
     raw = os.fspath(path)
     if not path.is_absolute() or raw.startswith(("\\\\", "//")):
         return False
@@ -1888,7 +1672,7 @@ def _symlink_is_pyright(candidate: Path) -> bool:
 
 
 def _resolved_symlink_target(candidate: Path, deadline: float | None) -> Path | None:
-    _check_deadline(deadline)
+    check_deadline(deadline)
     try:
         raw_target = os.readlink(candidate)
     except (OSError, ValueError):
@@ -1897,12 +1681,12 @@ def _resolved_symlink_target(candidate: Path, deadline: float | None) -> Path | 
     if not target.is_absolute():
         target = candidate.parent / target
     target = _lexical_absolute_path(target)
-    _check_deadline(deadline)
+    check_deadline(deadline)
     return target
 
 
 def _target_matches(target: Path | None, expected: Path) -> bool:
-    if target is None or not _is_local_absolute_path(target):
+    if target is None or not is_local_absolute_path(target):
         return False
     return target == expected
 
@@ -1927,7 +1711,7 @@ def _system_candidate_server(
     candidate: Path,
     deadline: float | None,
 ) -> tuple[Path | None, set[str], bool]:
-    if not _is_local_absolute_path(candidate):
+    if not is_local_absolute_path(candidate):
         return None, _mismatch(), True
     if _is_node_modules_server(candidate):
         return candidate, set(), False
@@ -1980,7 +1764,7 @@ def _fixed_source_candidate(
     if expected is None:
         raise AssertionError(f"unsupported Pyright source: {source}")
     if candidate != expected:
-        return None, _mismatch(), not _is_local_absolute_path(candidate)
+        return None, _mismatch(), not is_local_absolute_path(candidate)
     return expected, set(), False
 
 
@@ -2039,18 +1823,18 @@ def _default_paths(
     state_root: Path,
     deadline: float | None,
 ) -> tuple[Path, ...]:
-    _check_deadline(deadline)
+    check_deadline(deadline)
     expected = _expected_source_server(source, repository, state_root)
     if expected is not None:
         result = (expected,)
     else:
         try:
-            environment = _node_environment()
+            environment = node_environment()
         except (OSError, TypeError, ValueError):
             return ()
         found = shutil.which("pyright-langserver", path=environment.get("PATH", ""))
         result = () if found is None else (Path(found),)
-    _check_deadline(deadline)
+    check_deadline(deadline)
     return result
 
 
@@ -2093,7 +1877,7 @@ def _inspect_candidate(
             repository, source, server, deadline, codes
         )
 
-    node_executable, node_version, node_major, node_codes = _probe_node(deadline)
+    node_executable, node_version, node_major, node_codes = probe_node(deadline)
     codes.update(node_codes)
     degradation_codes = tuple(sorted(codes))
     qualified = not degradation_codes
@@ -2221,8 +2005,8 @@ def discover_pyright(
 ) -> PyrightIdentity:
     """Discover one candidate by fixed precedence without mutation or installation."""
     _require_discovery_arguments(repository, state_root)
-    deadline = _validated_deadline(deadline)
-    _check_deadline(deadline)
+    deadline = validated_deadline(deadline)
+    check_deadline(deadline)
     configuration_sha256, profile_codes = _repository_configuration_identity(
         repository, deadline
     )

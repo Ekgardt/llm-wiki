@@ -30,12 +30,12 @@ def test_a_classifier_that_keeps_most_sessions_is_not_called_too_strict(tmp_path
 
     counts = session_start_context.capture_tier_counts(tmp_path)
 
-    assert (counts, session_start_context._flush_line(counts)) == ({"ok": 23, "major": 22, "minor": 11}, "")
+    assert (counts, session_start_context.flush_line(counts)) == ({"ok": 23, "major": 22, "minor": 11}, "")
 
 
 def test_a_classifier_that_keeps_almost_nothing_is_still_flagged(tmp_path):
     _decisions(tmp_path, ["ok"] * 9 + ["major"])
 
-    line = session_start_context._flush_line(session_start_context.capture_tier_counts(tmp_path))
+    line = session_start_context.flush_line(session_start_context.capture_tier_counts(tmp_path))
 
     assert "9/10 sessions returned FLUSH_OK" in line

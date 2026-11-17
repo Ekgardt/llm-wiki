@@ -1,0 +1,1 @@
+"""Immutable pinned Pyright defaults."""

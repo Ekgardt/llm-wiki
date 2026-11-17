@@ -1,0 +1,161 @@
+{
+  "encoding": "o200k_base",
+  "max_tokens": 100000,
+  "serialization": "exact-duplicates/v1",
+  "files": [
+    "AGENTS.md",
+    "CLAUDE.md",
+    "docs/AGENTS.md",
+    "docs/STRUCTURE.md",
+    "docs/modules/context-bundle.md",
+    "docs/modules/context-records.md",
+    "docs/modules/context-tooling.md",
+    "docs/modules/graph-hint-context.json",
+    "docs/modules/graph-hint.md",
+    "docs/modules/memory-state-tests-repository-index-helpers.md",
+    "docs/modules/model-choice.md",
+    "docs/modules/product-structure.md",
+    "docs/modules/project-governance.md",
+    "docs/modules/test-support.md",
+    "rules/development-laws.md",
+    "scripts/__init__.py",
+    "scripts/graph_hint.py",
+    "scripts/llm_wiki/__init__.py",
+    "scripts/llm_wiki/context_bundle.py",
+    "tests/__init__.py",
+    "tests/conftest.py",
+    "tests/module_context.py",
+    "tests/module_context_paths.py",
+    "tests/module_interface.py",
+    "tests/module_interface_render.py",
+    "tests/module_qualification.py",
+    "tests/module_record_context.py",
+    "tests/module_records.py",
+    "tests/repository_index_helpers.py",
+    "tests/shared_fixtures.py",
+    "tests/slow_machine.py",
+    "tests/test_graph_hint.py"
+  ],
+  "ownership": {
+    "files": [
+      "docs/modules/graph-hint-context.json",
+      "docs/modules/graph-hint.md",
+      "scripts/graph_hint.py",
+      "tests/test_graph_hint.py"
+    ]
+  },
+  "qualified_dependencies": [
+    {
+      "provider": "scripts/code_hints.py",
+      "names": [
+        "HINT_LABEL",
+        "REMINDER_MODES",
+        "TOOL_NAME",
+        "hint_meta",
+        "hint_text",
+        "hints_path",
+        "lookup_symbol",
+        "read_meta",
+        "reminder_text",
+        "write_hints"
+      ],
+      "contract_sha256": "70051cab8dcc913ab3d0a2890f86b9ab9e7344a027e949b21de6612d30cf972a",
+      "integration_tests": [
+        "tests/test_graph_hint.py"
+      ]
+    },
+    {
+      "provider": "scripts/codex_hook_identity.py",
+      "names": [
+        "is_llm_wiki_hook"
+      ],
+      "contract_sha256": "26a1e85f5e4031f5791092f80327dbdeee8911bacd901843129f67b0cdeb493b",
+      "integration_tests": [
+        "tests/test_graph_hint.py"
+      ]
+    },
+    {
+      "provider": "scripts/install_smoke.py",
+      "names": [
+        "EXPECTED_TOOL_NAMES"
+      ],
+      "contract_sha256": "338626e9db3262f915856d2dbe9316ed7bc49a45d09e08a7e2a5ba748fa678ed",
+      "integration_tests": [
+        "tests/test_graph_hint.py"
+      ]
+    },
+    {
+      "provider": "scripts/integration_hook_config.py",
+      "names": [
+        "claude_command_is_ours"
+      ],
+      "contract_sha256": "73d3b5614d50022514740bd91c7a41894bcbe57e5abfc17ce0c599e1a31bbc50",
+      "integration_tests": [
+        "tests/test_graph_hint.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/generation_catalog_store.py",
+      "names": [
+        "GenerationCatalog"
+      ],
+      "contract_sha256": "b18194ebe04bf988b4474379fcb5243516550d43b745a00eaed1453f7844c983",
+      "integration_tests": [
+        "tests/test_a_blocked_task_has_a_way_back.py",
+        "tests/test_a_build_in_flight_is_not_an_orphan.py",
+        "tests/test_a_capacity_refusal_does_not_corrupt_a_generation.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/model_choice.py",
+      "names": [
+        "using_root"
+      ],
+      "contract_sha256": "d45f2655cb61963e77617d1dfd7d617b134ad77cc770b59b335d0856e5d65019",
+      "integration_tests": [
+        "tests/test_graph_hint.py"
+      ]
+    },
+    {
+      "provider": "scripts/mcp_server.py",
+      "names": [
+        "TOOL_INPUT_SCHEMAS"
+      ],
+      "contract_sha256": "d0a7a0bdd1a0aa13c79cd64a2bb84c52a36b36b9fbb52e2886227cc826fc05d0",
+      "integration_tests": [
+        "tests/test_graph_hint.py"
+      ]
+    },
+    {
+      "provider": "scripts/reliable_memory.py",
+      "names": [
+        "validate_state_root"
+      ],
+      "contract_sha256": "8680515cd873056a7c8a36e0057d91f2f83f23c48841263697676ff91f7ff964",
+      "integration_tests": [
+        "tests/test_graph_hint.py"
+      ]
+    },
+    {
+      "provider": "scripts/repository_indexing.py",
+      "names": [
+        "state_root_path"
+      ],
+      "contract_sha256": "22acc4e7a1caefe5de2f36a3eb90ec877b8ba485bf935759bddcabb90c9c9541",
+      "integration_tests": [
+        "tests/test_graph_hint.py"
+      ]
+    },
+    {
+      "provider": "scripts/repository_scope.py",
+      "names": [
+        "resolve_repository_scope",
+        "sanitized_git_environment"
+      ],
+      "contract_sha256": "983dd096d99bafff98ca0aaa2cd722477333e30eed4bfa9297d1830c635e8d90",
+      "integration_tests": [
+        "tests/test_graph_hint.py"
+      ]
+    }
+  ]
+}

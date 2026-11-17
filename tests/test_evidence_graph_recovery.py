@@ -10,225 +10,16 @@ from pathlib import Path
 
 import pytest
 
+from tests.evidence_graph_recovery_helpers import _publish, _rich_graph_records
+
 SCRIPTS = Path(__file__).resolve().parent.parent / "scripts"
 if str(SCRIPTS) not in sys.path:
     sys.path.insert(0, str(SCRIPTS))
 
 
-_DEFAULT_CONTENT = b"def f(): pass\n"
-
-_EMPTY_GRAPH_RECORDS = {
-    "nodes": [],
-    "occurrences": [],
-    "assertions": [],
-    "evidence": [],
-    "observations": [],
-    "dependencies": [],
-}
-
-
-def _default_sources():
-    return [
-        {
-            "source_id": "source",
-            "relative_path": "app.py",
-            "sha256": hashlib.sha256(_DEFAULT_CONTENT).hexdigest(),
-            "size": len(_DEFAULT_CONTENT),
-            "media_type": "text/x-python",
-            "language": "python",
-            "git_oid": None,
-        }
-    ]
-
-
-def _publish_inputs(sources, source_bytes, graph_records):
-    """The three ways a caller can describe a generation, resolved to one shape."""
-    records = _EMPTY_GRAPH_RECORDS if graph_records is None else graph_records
-    if graph_records is not None:
-        return graph_records["sources"], graph_records["source_bytes"], records
-    resolved_sources = _default_sources() if sources is None else sources
-    resolved_bytes = (
-        {"source": _DEFAULT_CONTENT} if source_bytes is None else source_bytes
-    )
-    return resolved_sources, resolved_bytes, records
-
-
-def _publish(
-    catalog,
-    generation_id: str,
-    *,
-    parent: str | None = None,
-    sources=None,
-    source_bytes=None,
-    graph_records=None,
-    repository_scope=None,
-):
-    import corpus_snapshot
-    import evidence_graph
-    from reliable_memory import canonical_json_bytes
-
-    directory = catalog.generations_path / generation_id
-    directory.mkdir(parents=True)
-    sources, source_bytes, records = _publish_inputs(
-        sources, source_bytes, graph_records
-    )
-    policy = {
-        "daily_paths": [],
-        "code_roots": [],
-        "include_historical": False,
-        "as_of": None,
-    }
-    shared_sources = [
-        {
-            "logical_id": source["source_id"],
-            "relative_path": source["relative_path"],
-            "sha256": source["sha256"],
-        }
-        for source in sources
-    ]
-    source_manifest = corpus_snapshot.canonical_source_manifest(shared_sources, policy)
-    source_manifest_bytes = canonical_json_bytes(source_manifest)
-    (directory / "source-manifest.json").write_bytes(source_manifest_bytes)
-    database_path = directory / "evidence.sqlite3"
-    evidence_graph.create_generation_database(
-        database_path,
-        sources=sources,
-        source_bytes=source_bytes,
-        nodes=records["nodes"],
-        occurrences=records["occurrences"],
-        assertions=records["assertions"],
-        evidence=records["evidence"],
-        observations=records["observations"],
-        dependencies=records["dependencies"],
-    )
-    payload = database_path.read_bytes()
-    manifest = {
-        "generation_id": generation_id,
-        "schema_version": "corpus-generation/v1",
-        "collector_version": corpus_snapshot.COLLECTOR_VERSION,
-        "extractor_version": corpus_snapshot.EXTRACTOR_VERSION,
-        "tokenizer_version": "tokenizer/v1",
-        "tokenizer_config_sha256": hashlib.sha256(b"config").hexdigest(),
-        "embedding_model_id": None,
-        "embedding_model_revision": None,
-        "vector_dimensions": None,
-        "graph_schema_version": "evidence-graph/v2",
-        "graph_extractor_version": "graph-extractor/v1",
-        "source_manifest_sha256": hashlib.sha256(source_manifest_bytes).hexdigest(),
-        "artifacts": [
-            {
-                "path": "evidence.sqlite3",
-                "size": len(payload),
-                "sha256": hashlib.sha256(payload).hexdigest(),
-            },
-            {
-                "path": "source-manifest.json",
-                "size": len(source_manifest_bytes),
-                "sha256": hashlib.sha256(source_manifest_bytes).hexdigest(),
-            },
-        ],
-        "vector_state": "absent",
-    }
-    if parent is not None:
-        manifest["parent_generation_id"] = parent
-    if repository_scope is not None:
-        manifest["repository_scope"] = repository_scope
-    (directory / "manifest.json").write_bytes(canonical_json_bytes(manifest))
-    return manifest
-
-
-def _rich_graph_records():
-    content = b"def caller():\n    callee()\n"
-    return {
-        "sources": [
-            {
-                "source_id": "source",
-                "relative_path": "app.py",
-                "sha256": hashlib.sha256(content).hexdigest(),
-                "size": len(content),
-                "media_type": "text/x-python",
-                "language": "python",
-                "git_oid": None,
-            }
-        ],
-        "source_bytes": {"source": content},
-        "nodes": [
-            {
-                "node_id": "caller",
-                "kind": "function",
-                "identity_scheme": "python/v1",
-                "identity_key": "app:caller",
-                "metadata": {"name": "caller"},
-            },
-            {
-                "node_id": "callee",
-                "kind": "function",
-                "identity_scheme": "python/v1",
-                "identity_key": "app:callee",
-                "metadata": {"name": "callee"},
-            },
-        ],
-        "occurrences": [
-            {
-                "occurrence_id": "occurrence",
-                "node_id": "caller",
-                "source_id": "source",
-                "role": "definition",
-                "byte_start": 0,
-                "byte_end": 12,
-                "line_start": 1,
-                "line_end": 1,
-            }
-        ],
-        "assertions": [
-            {
-                "assertion_id": "assertion",
-                "source_node_id": "caller",
-                "edge_type": "CALLS",
-                "target_node_id": "callee",
-                "literal": None,
-                "confidence": "high",
-                "authority": "ai-derived",
-                "resolution": "resolved",
-                "extractor": "python/v1",
-            }
-        ],
-        "evidence": [
-            {
-                "evidence_id": "evidence",
-                "assertion_id": "assertion",
-                "observation_id": None,
-                "source_id": "source",
-                "byte_start": 18,
-                "byte_end": 26,
-                "span_sha256": hashlib.sha256(content[18:26]).hexdigest(),
-            }
-        ],
-        "observations": [
-            {
-                "observation_id": "observation",
-                "source_node_id": "caller",
-                "edge_type": "CALLS",
-                "target_text": "dynamic",
-                "reason": "dynamic_dispatch",
-                "extractor": "python/v1",
-            }
-        ],
-        "dependencies": [
-            {
-                "dependency_id": "dependency",
-                "dependent_node_id": "caller",
-                "dependency_node_id": "callee",
-                "kind": "imports",
-                "source_id": "source",
-            }
-        ],
-    }
-
-
 def test_open_active_reuses_generation_catalog_and_falls_back_from_corruption(tmp_path):
     import evidence_graph
-    from generation_catalog import GenerationCatalog
+    from llm_wiki.generation_catalog_store import GenerationCatalog
 
     catalog = GenerationCatalog(tmp_path / "state")
     _publish(catalog, "gen-1")
@@ -249,7 +40,7 @@ def test_open_active_reuses_generation_catalog_and_falls_back_from_corruption(tm
 
 def test_open_active_for_repository_uses_only_an_exact_scope(tmp_path, monkeypatch):
     import evidence_graph
-    from generation_catalog import GenerationCatalog
+    from llm_wiki.generation_catalog_store import GenerationCatalog
     from repository_scope import resolve_repository_scope
 
     repository = tmp_path / "repository"
@@ -282,7 +73,7 @@ def test_open_active_for_repository_rejects_ineligible_active_without_catalog_mu
     tmp_path, bound
 ):
     import evidence_graph
-    from generation_catalog import GenerationCatalog
+    from llm_wiki.generation_catalog_store import GenerationCatalog
     from repository_scope import resolve_repository_scope
 
     requested = tmp_path / "requested" / "project"
@@ -322,7 +113,7 @@ def test_repository_mismatch_does_not_recover_corrupt_active_from_other_repo_his
     tmp_path,
 ):
     import evidence_graph
-    from generation_catalog import GenerationCatalog
+    from llm_wiki.generation_catalog_store import GenerationCatalog
     from repository_scope import resolve_repository_scope
 
     repository_a = tmp_path / "a" / "project"
@@ -369,7 +160,7 @@ def test_repository_mismatch_does_not_recover_corrupt_active_from_other_repo_his
 
 def test_open_active_for_repository_preserves_same_scope_corruption_recovery(tmp_path):
     import evidence_graph
-    from generation_catalog import GenerationCatalog
+    from llm_wiki.generation_catalog_store import GenerationCatalog
     from repository_scope import resolve_repository_scope
 
     repository = tmp_path / "repository"
@@ -402,7 +193,7 @@ def test_open_active_rechecks_exact_catalog_seal_after_database_open(
     tmp_path, monkeypatch, member
 ):
     import evidence_graph
-    from generation_catalog import GenerationCatalog
+    from llm_wiki.generation_catalog_store import GenerationCatalog
 
     catalog = GenerationCatalog(tmp_path / "state")
     _publish(catalog, "gen-1")
@@ -436,7 +227,7 @@ def test_open_active_rechecks_exact_catalog_seal_after_database_open(
 
 def test_open_active_rechecks_catalog_pointer_after_database_open(tmp_path, monkeypatch):
     import evidence_graph
-    from generation_catalog import GenerationCatalog
+    from llm_wiki.generation_catalog_store import GenerationCatalog
 
     catalog = GenerationCatalog(tmp_path / "state")
     _publish(catalog, "gen-1")
@@ -471,7 +262,7 @@ def test_open_active_rechecks_catalog_pointer_after_database_open(tmp_path, monk
 
 def test_open_active_returns_none_without_pointer_and_rejects_wrong_graph_contract(tmp_path):
     import evidence_graph
-    from generation_catalog import GenerationCatalog
+    from llm_wiki.generation_catalog_store import GenerationCatalog
 
     catalog = GenerationCatalog(tmp_path / "state")
     assert evidence_graph.EvidenceGraph.open_active(catalog) is None
@@ -510,7 +301,7 @@ def _rebind_registered_manifest(catalog, generation_id: str) -> None:
 
 def test_catalog_skips_hash_valid_graph_with_wrong_schema_and_repairs_to_prior(tmp_path):
     import evidence_graph
-    from generation_catalog import GenerationCatalog
+    from llm_wiki.generation_catalog_store import GenerationCatalog
 
     catalog = GenerationCatalog(tmp_path / "state")
     _publish(catalog, "gen-1")
@@ -532,7 +323,7 @@ def test_catalog_skips_hash_valid_graph_with_wrong_schema_and_repairs_to_prior(t
 
 
 def test_registration_and_orphan_recovery_reject_malformed_hash_valid_graph(tmp_path):
-    from generation_catalog import GenerationCatalog
+    from llm_wiki.generation_catalog_store import GenerationCatalog
 
     catalog = GenerationCatalog(tmp_path / "state")
     _publish(catalog, "malformed")
@@ -553,7 +344,7 @@ def test_registration_and_orphan_recovery_reject_malformed_hash_valid_graph(tmp_
 
 
 def test_registration_rejects_wrong_index_definition_with_expected_name(tmp_path):
-    from generation_catalog import GenerationCatalog
+    from llm_wiki.generation_catalog_store import GenerationCatalog
     from reliable_memory import canonical_json_bytes
 
     catalog = GenerationCatalog(tmp_path / "state")
@@ -573,7 +364,7 @@ def test_registration_rejects_wrong_index_definition_with_expected_name(tmp_path
 
 
 def test_graph_extra_source_fields_remain_independently_validated(tmp_path):
-    from generation_catalog import GenerationCatalog
+    from llm_wiki.generation_catalog_store import GenerationCatalog
 
     catalog = GenerationCatalog(tmp_path / "state")
     _publish(catalog, "bad-extra")
@@ -597,7 +388,7 @@ def test_graph_extra_source_fields_remain_independently_validated(tmp_path):
 
 def test_registration_accepts_canonical_multi_source_membership_and_rejects_mismatch(tmp_path):
     import corpus_snapshot
-    from generation_catalog import GenerationCatalog
+    from llm_wiki.generation_catalog_store import GenerationCatalog
     from reliable_memory import canonical_json_bytes
 
     first = b"alpha"
@@ -663,7 +454,7 @@ def test_registration_accepts_canonical_multi_source_membership_and_rejects_mism
 
 def test_source_membership_drift_falls_back_and_orphan_probe_skips_mismatch(tmp_path):
     import evidence_graph
-    from generation_catalog import GenerationCatalog
+    from llm_wiki.generation_catalog_store import GenerationCatalog
     from reliable_memory import canonical_json_bytes
 
     catalog = GenerationCatalog(tmp_path / "state")
@@ -727,7 +518,7 @@ def test_source_membership_drift_falls_back_and_orphan_probe_skips_mismatch(tmp_
 )
 def test_hash_rebound_malformed_records_fall_back_to_prior_valid_generation(tmp_path, mutation):
     import evidence_graph
-    from generation_catalog import GenerationCatalog
+    from llm_wiki.generation_catalog_store import GenerationCatalog
 
     catalog = GenerationCatalog(tmp_path / "state")
     _publish(catalog, "valid", graph_records=_rich_graph_records())

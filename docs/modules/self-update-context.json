@@ -1,0 +1,192 @@
+{
+  "encoding": "o200k_base",
+  "max_tokens": 100000,
+  "serialization": "exact-duplicates/v1",
+  "files": [
+    "AGENTS.md",
+    "CLAUDE.md",
+    "docs/AGENTS.md",
+    "docs/STRUCTURE.md",
+    "docs/modules/context-bundle.md",
+    "docs/modules/context-records.md",
+    "docs/modules/context-tooling.md",
+    "docs/modules/installer-checks.md",
+    "docs/modules/model-choice.md",
+    "docs/modules/product-structure.md",
+    "docs/modules/project-governance.md",
+    "docs/modules/self-update-context.json",
+    "docs/modules/self-update-helpers.md",
+    "docs/modules/self-update.md",
+    "docs/modules/test-support.md",
+    "rules/development-laws.md",
+    "scripts/__init__.py",
+    "scripts/llm_wiki/__init__.py",
+    "scripts/llm_wiki/context_bundle.py",
+    "scripts/self_update.py",
+    "tests/__init__.py",
+    "tests/an_untracked_copy_of_the_update_does_not_stop_it_helpers.py",
+    "tests/conftest.py",
+    "tests/installer_bootstrap_helpers.py",
+    "tests/module_context.py",
+    "tests/module_context_paths.py",
+    "tests/module_interface.py",
+    "tests/module_interface_render.py",
+    "tests/module_qualification.py",
+    "tests/module_record_context.py",
+    "tests/module_records.py",
+    "tests/powershell_literal.py",
+    "tests/self_update_helpers.py",
+    "tests/shared_fixtures.py",
+    "tests/slow_machine.py",
+    "tests/test_a_sync_removes_what_the_lock_no_longer_names.py",
+    "tests/test_a_verified_first_install_then_follows_main.py",
+    "tests/test_an_untracked_copy_of_the_update_does_not_stop_it.py",
+    "tests/test_an_update_keeps_what_is_installed.py",
+    "tests/test_an_update_only_to_what_main_holds.py",
+    "tests/test_an_update_says_what_it_did_not_bring_into_force.py",
+    "tests/test_self_update.py"
+  ],
+  "ownership": {
+    "files": [
+      "docs/modules/self-update-context.json",
+      "docs/modules/self-update.md",
+      "scripts/self_update.py",
+      "tests/an_untracked_copy_of_the_update_does_not_stop_it_helpers.py",
+      "tests/test_a_sync_removes_what_the_lock_no_longer_names.py",
+      "tests/test_a_verified_first_install_then_follows_main.py",
+      "tests/test_an_untracked_copy_of_the_update_does_not_stop_it.py",
+      "tests/test_an_update_keeps_what_is_installed.py",
+      "tests/test_an_update_only_to_what_main_holds.py",
+      "tests/test_an_update_says_what_it_did_not_bring_into_force.py",
+      "tests/test_self_update.py"
+    ]
+  },
+  "qualified_dependencies": [
+    {
+      "provider": "scripts/installer_config.py",
+      "names": [
+        "uv_sync_arguments"
+      ],
+      "contract_sha256": "ab39bf99bc4653523ca6941ffdf7cb5b5fcc09b792b5884e6071bfb462703abf",
+      "integration_tests": [
+        "tests/test_a_sync_removes_what_the_lock_no_longer_names.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/generation_catalog_store.py",
+      "names": [
+        "GenerationCatalog"
+      ],
+      "contract_sha256": "b18194ebe04bf988b4474379fcb5243516550d43b745a00eaed1453f7844c983",
+      "integration_tests": [
+        "tests/test_a_blocked_task_has_a_way_back.py",
+        "tests/test_a_build_in_flight_is_not_an_orphan.py",
+        "tests/test_a_capacity_refusal_does_not_corrupt_a_generation.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/model_choice.py",
+      "names": [
+        "using_root"
+      ],
+      "contract_sha256": "d45f2655cb61963e77617d1dfd7d617b134ad77cc770b59b335d0856e5d65019",
+      "integration_tests": [
+        "tests/test_a_sync_removes_what_the_lock_no_longer_names.py",
+        "tests/test_a_verified_first_install_then_follows_main.py",
+        "tests/test_an_untracked_copy_of_the_update_does_not_stop_it.py",
+        "tests/test_an_update_keeps_what_is_installed.py",
+        "tests/test_an_update_only_to_what_main_holds.py",
+        "tests/test_an_update_says_what_it_did_not_bring_into_force.py",
+        "tests/test_self_update.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/step_budgets.py",
+      "names": [
+        "FETCH_TIMEOUT_SECONDS",
+        "GIT_TIMEOUT_SECONDS",
+        "PYTHON_PROBE_TIMEOUT_SECONDS",
+        "SYNC_TIMEOUT_SECONDS"
+      ],
+      "contract_sha256": "7796c7787ae7657eed4950440d5d4d8d9ce05ba1e6cb550d2b6fc2e513ff757d",
+      "integration_tests": [
+        "tests/test_a_sync_removes_what_the_lock_no_longer_names.py",
+        "tests/test_a_verified_first_install_then_follows_main.py",
+        "tests/test_an_untracked_copy_of_the_update_does_not_stop_it.py",
+        "tests/test_an_update_keeps_what_is_installed.py",
+        "tests/test_an_update_only_to_what_main_holds.py",
+        "tests/test_an_update_says_what_it_did_not_bring_into_force.py",
+        "tests/test_self_update.py"
+      ]
+    },
+    {
+      "provider": "scripts/reliable_memory.py",
+      "names": [
+        "validate_state_root"
+      ],
+      "contract_sha256": "8680515cd873056a7c8a36e0057d91f2f83f23c48841263697676ff91f7ff964",
+      "integration_tests": [
+        "tests/test_a_sync_removes_what_the_lock_no_longer_names.py",
+        "tests/test_a_verified_first_install_then_follows_main.py",
+        "tests/test_an_untracked_copy_of_the_update_does_not_stop_it.py",
+        "tests/test_an_update_keeps_what_is_installed.py",
+        "tests/test_an_update_only_to_what_main_holds.py",
+        "tests/test_an_update_says_what_it_did_not_bring_into_force.py",
+        "tests/test_self_update.py"
+      ]
+    },
+    {
+      "provider": "scripts/repository_scope.py",
+      "names": [
+        "sanitized_git_environment"
+      ],
+      "contract_sha256": "fd550ae20761afad50b37fa3a71044a162485b0e4d4b3e2af9b5b22e143c2bec",
+      "integration_tests": [
+        "tests/test_a_sync_removes_what_the_lock_no_longer_names.py",
+        "tests/test_a_verified_first_install_then_follows_main.py",
+        "tests/test_an_untracked_copy_of_the_update_does_not_stop_it.py",
+        "tests/test_an_update_keeps_what_is_installed.py",
+        "tests/test_an_update_only_to_what_main_holds.py",
+        "tests/test_an_update_says_what_it_did_not_bring_into_force.py",
+        "tests/test_self_update.py"
+      ]
+    },
+    {
+      "provider": "scripts/scheduled_nightly.py",
+      "names": [
+        "log_update_aftermath"
+      ],
+      "contract_sha256": "e72a5592d3fe8ae5929212b3a2f6d0572f4755340ae039006cbf3eb0f5b1872f",
+      "integration_tests": [
+        "tests/test_an_update_says_what_it_did_not_bring_into_force.py"
+      ]
+    },
+    {
+      "provider": "scripts/secret_redact.py",
+      "names": [
+        "describe_error",
+        "redact_secrets"
+      ],
+      "contract_sha256": "15e80f37cf33a095390aff6e606c20403cc8c70ffb9983c3c8594ba3d1d1ae67",
+      "integration_tests": [
+        "tests/test_a_sync_removes_what_the_lock_no_longer_names.py",
+        "tests/test_a_verified_first_install_then_follows_main.py",
+        "tests/test_an_untracked_copy_of_the_update_does_not_stop_it.py",
+        "tests/test_an_update_keeps_what_is_installed.py",
+        "tests/test_an_update_only_to_what_main_holds.py",
+        "tests/test_an_update_says_what_it_did_not_bring_into_force.py",
+        "tests/test_self_update.py"
+      ]
+    },
+    {
+      "provider": "scripts/sync_memory.py",
+      "names": [
+        "SYNC_STEP"
+      ],
+      "contract_sha256": "d57506cf7fe6ad708808de1603173e4a51c36017bf27a2afdf480a7a0b6498be",
+      "integration_tests": [
+        "tests/test_an_update_keeps_what_is_installed.py"
+      ]
+    }
+  ]
+}

@@ -5,7 +5,7 @@ See `docs/research/2026-09-17-a-session-is-filed-under-the-day-it-happened.md`.
 from __future__ import annotations
 
 import sys
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -15,8 +15,8 @@ import episode_consolidation  # noqa: E402
 import flush_memory  # noqa: E402
 import integration_adapter  # noqa: E402
 
-YESTERDAY = datetime(2026, 9, 16, 22, 30, tzinfo=timezone.utc)
-THIS_MORNING = datetime(2026, 9, 17, 9, 0, tzinfo=timezone.utc)
+YESTERDAY = datetime(2026, 9, 16, 22, 30, tzinfo=UTC)
+THIS_MORNING = datetime(2026, 9, 17, 9, 0, tzinfo=UTC)
 
 
 def _record(occurred_at: object) -> dict[str, object]:
@@ -31,7 +31,7 @@ def _record(occurred_at: object) -> dict[str, object]:
 
 
 def _day_of(record: dict[str, object]) -> str:
-    return flush_memory._session_time(record, lambda: THIS_MORNING).strftime("%Y-%m-%d")
+    return flush_memory.session_time(record, lambda: THIS_MORNING).strftime("%Y-%m-%d")
 
 
 def test_the_intent_carries_the_moment_the_session_ended():
@@ -41,9 +41,9 @@ def test_the_intent_carries_the_moment_the_session_ended():
         {"session_id": "s-1", "reason": "clear", "timestamp": YESTERDAY.isoformat()},
     )
 
-    source = integration_adapter._capture_source_record(envelope, "slug", "clear", "text")
+    source = integration_adapter.capture_source_record(envelope, "slug", "clear", "text")
 
-    assert source["occurred_at"] == YESTERDAY.isoformat()
+    assert source["occurred_at"] == YESTERDAY.isoformat(timespec="microseconds")
 
 
 def test_a_session_drained_the_next_morning_keeps_its_own_day():
@@ -64,9 +64,9 @@ def test_an_intent_with_no_time_or_an_unbelievable_one_uses_the_workers_clock():
 
 def test_the_daily_entry_of_a_late_session_is_written_under_its_own_day():
     record = _record(YESTERDAY.isoformat())
-    chosen = flush_memory._session_time(record, lambda: THIS_MORNING)
+    chosen = flush_memory.session_time(record, lambda: THIS_MORNING)
 
-    plan = flush_memory._capture_operation_plan(record, "minor", "a lesson", chosen)
+    plan = flush_memory.capture_operation_plan(record, "minor", "a lesson", chosen)
 
     assert plan[0]["path"] == f"knowledge/daily/{YESTERDAY.astimezone():%Y-%m-%d}.md"
 
@@ -94,7 +94,7 @@ def test_a_day_that_gained_a_late_record_is_consolidated_once_more(tmp_path):
     outcomes = (
         episode_consolidation.pending_days(vault, covered, today="2026-09-17"),
         episode_consolidation.pending_days(vault, late, today="2026-09-17"),
-        episode_consolidation._skip_reason(vault, day, late),
+        episode_consolidation.skip_reason(vault, day, late),
     )
 
     assert outcomes == ([], [day], None)

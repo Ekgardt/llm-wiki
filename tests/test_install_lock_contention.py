@@ -33,9 +33,9 @@ def test_a_contended_lock_is_a_lost_race(
     def refuse(_parent: object, _name: str) -> object:
         raise OSError(code, "cannot create Windows component: .install-pyright-lock")
 
-    monkeypatch.setattr(install_pyright, "_create_child_file", refuse)
+    monkeypatch.setattr(install_pyright, "create_child_file", refuse)
 
-    assert install_pyright._created_lock_file(object()) is None
+    assert install_pyright.created_lock_file(object()) is None
 
 
 def test_an_existing_lock_is_still_a_lost_race(
@@ -44,9 +44,9 @@ def test_an_existing_lock_is_still_a_lost_race(
     def refuse(_parent: object, _name: str) -> object:
         raise FileExistsError(17, "file exists")
 
-    monkeypatch.setattr(install_pyright, "_create_child_file", refuse)
+    monkeypatch.setattr(install_pyright, "create_child_file", refuse)
 
-    assert install_pyright._created_lock_file(object()) is None
+    assert install_pyright.created_lock_file(object()) is None
 
 
 def test_a_real_failure_still_surfaces(
@@ -57,10 +57,10 @@ def test_a_real_failure_still_surfaces(
     def refuse(_parent: object, _name: str) -> object:
         raise OSError(112, "there is not enough space on the disk")
 
-    monkeypatch.setattr(install_pyright, "_create_child_file", refuse)
+    monkeypatch.setattr(install_pyright, "create_child_file", refuse)
 
     with pytest.raises(OSError):
-        install_pyright._created_lock_file(object())
+        install_pyright.created_lock_file(object())
 
 
 @pytest.mark.parametrize("code", CONTENTION_CODES)
@@ -73,7 +73,7 @@ def test_posix_reads_none_of_these_as_contention(
     def refuse(_parent: object, _name: str) -> object:
         raise OSError(code, "an ordinary POSIX failure")
 
-    monkeypatch.setattr(install_pyright, "_create_child_file", refuse)
+    monkeypatch.setattr(install_pyright, "create_child_file", refuse)
 
     with pytest.raises(OSError):
-        install_pyright._created_lock_file(object())
+        install_pyright.created_lock_file(object())

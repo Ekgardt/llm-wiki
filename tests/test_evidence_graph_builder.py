@@ -27,14 +27,11 @@ import os
 import sqlite3
 import sys
 from contextlib import closing
-from dataclasses import replace
 from pathlib import Path
 
 import pytest
 
-from tests.code_kernel_helpers import (
-    build_fixture_generation,
-)
+from tests.evidence_graph_records import build_fixture_generation
 
 SCRIPTS = Path(__file__).resolve().parent.parent / "scripts"
 if str(SCRIPTS) not in sys.path:
@@ -50,22 +47,22 @@ def test_parent_records_releases_database(tmp_path: Path) -> None:
 
     database_path = tmp_path / "parent.sqlite3"
     with closing(sqlite3.connect(database_path)) as database:
-        for collection in evidence_graph_builder._RECORD_COLLECTIONS:
+        for collection in evidence_graph_builder.RECORD_COLLECTIONS:
             table = (
                 "dependency"
                 if collection == "dependencies"
                 else collection.removesuffix("s")
             )
-            key = evidence_graph_builder._RECORD_KEYS[collection]
+            key = evidence_graph_builder.RECORD_KEYS[collection]
             database.execute(f"CREATE TABLE {table} ({key} TEXT PRIMARY KEY)")
 
-    assert evidence_graph_builder._parent_records(
+    assert evidence_graph_builder.parent_records(
         database_path,
         {},
         set(),
         deadline=None,
         cancelled=None,
-    ) == {collection: {} for collection in evidence_graph_builder._RECORD_COLLECTIONS}
+    ) == {collection: {} for collection in evidence_graph_builder.RECORD_COLLECTIONS}
 
     replacement = database_path.with_suffix(".replacement")
     replacement.write_bytes(database_path.read_bytes())
@@ -80,26 +77,6 @@ def test_omitted_builder_schema_keeps_legacy_v2_manifest(tmp_path: Path) -> None
         result.generation_path / "evidence.sqlite3"
     ) as database:
         assert database.execute("PRAGMA user_version").fetchone()[0] == 2
-
-
-_FIELD_DAMAGE = {
-    "source_id": ("source_id", "source:other"),
-    "relative_path": ("relative_path", "other.py"),
-    "sha256": ("sha256", "f" * 64),
-}
-
-
-def _damaged_values(original, damage: str) -> dict:
-    values = {
-        name: getattr(original, name)
-        for name in ("source_id", "relative_path", "sha256", "stat")
-    }
-    if damage not in _FIELD_DAMAGE:
-        values["stat"] = replace(original.stat, size=original.stat.size + 1)
-        return values
-    name, value = _FIELD_DAMAGE[damage]
-    values[name] = value
-    return values
 
 
 def _basic_records():
@@ -252,7 +229,7 @@ def _publish_baseline(catalog, generation_id: str = "gen-1") -> None:
 
 
 def _catalog(tmp_path):
-    from generation_catalog import GenerationCatalog
+    from llm_wiki.generation_catalog_store import GenerationCatalog
 
     return GenerationCatalog(tmp_path / "state")
 
@@ -262,7 +239,7 @@ def test_complete_publication_semantically_validates_each_artifact_once(
 ):
     import corpus_snapshot
     import evidence_graph
-    import search_memory
+    import generation_fts_validation
     from evidence_graph_builder import build_full_generation
     from repository_scope import resolve_repository_scope
 
@@ -287,7 +264,7 @@ def test_complete_publication_semantically_validates_each_artifact_once(
     ]
     calls = {"evidence": 0, "fts": 0}
     real_evidence = evidence_graph.validate_generation_artifact
-    real_fts = search_memory.validate_generation_fts_artifact
+    real_fts = generation_fts_validation.validate_generation_fts_artifact
 
     def validate_evidence(*args, **kwargs):
         calls["evidence"] += 1
@@ -298,7 +275,7 @@ def test_complete_publication_semantically_validates_each_artifact_once(
         return real_fts(*args, **kwargs)
 
     monkeypatch.setattr(evidence_graph, "validate_generation_artifact", validate_evidence)
-    monkeypatch.setattr(search_memory, "validate_generation_fts_artifact", validate_fts)
+    monkeypatch.setattr(generation_fts_validation, "validate_generation_fts_artifact", validate_fts)
 
     result = build_full_generation(
         _catalog(tmp_path),
@@ -326,8 +303,8 @@ def test_activation_commit_close_failure_preserves_authoritative_generation(
     import sqlite3
 
     import corpus_snapshot
-    import generation_catalog
     from evidence_graph_builder import build_full_generation
+    from llm_wiki import generation_seal
     from repository_scope import resolve_repository_scope
 
     vault = tmp_path / "vault"
@@ -350,7 +327,7 @@ def test_activation_commit_close_failure_preserves_authoritative_generation(
         for source in snapshot.sources
     ]
     catalog = _catalog(tmp_path)
-    real_close = generation_catalog._GenerationSealCapability.close
+    real_close = generation_seal.GenerationSealCapability.close
     closes = 0
 
     def fail_after_activation_close(capability):
@@ -361,7 +338,7 @@ def test_activation_commit_close_failure_preserves_authoritative_generation(
             raise OSError("activation descriptor close failure")
 
     monkeypatch.setattr(
-        generation_catalog._GenerationSealCapability,
+        generation_seal.GenerationSealCapability,
         "close",
         fail_after_activation_close,
     )
@@ -457,7 +434,7 @@ def test_complete_publication_rechecks_live_sources_after_semantic_validation(
     tmp_path, monkeypatch
 ):
     import corpus_snapshot
-    import search_memory
+    import generation_search
     from evidence_graph_builder import build_full_generation
     from repository_scope import resolve_repository_scope
 
@@ -482,7 +459,7 @@ def test_complete_publication_rechecks_live_sources_after_semantic_validation(
         for source in snapshot.sources
     ]
     catalog = _catalog(tmp_path)
-    real_publish = search_memory._publish_validated_generation
+    real_publish = generation_search.publish_validated_generation
 
     def mutate_then_publish(*args, **kwargs):
         page.write_text(
@@ -491,7 +468,7 @@ def test_complete_publication_rechecks_live_sources_after_semantic_validation(
         return real_publish(*args, **kwargs)
 
     monkeypatch.setattr(
-        search_memory, "_publish_validated_generation", mutate_then_publish
+        generation_search, "publish_validated_generation", mutate_then_publish
     )
 
     built = build_full_generation(
@@ -847,7 +824,7 @@ def test_orphan_directory_from_during_extraction_is_ignored_after_restart(tmp_pa
     """A crash mid-extraction leaves an orphan directory; a new catalog process
     must ignore it and continue serving the prior active generation."""
     from evidence_graph_builder import KillPointError, build_full_generation
-    from generation_catalog import GenerationCatalog
+    from llm_wiki.generation_catalog_store import GenerationCatalog
 
     catalog = _catalog(tmp_path)
     _publish_baseline(catalog)
@@ -883,7 +860,7 @@ def test_orphan_directory_from_after_database_commit_is_ignored_after_restart(tm
     """A crash after the database commit but before manifest write must still
     leave the prior generation reachable."""
     from evidence_graph_builder import KillPointError, build_full_generation
-    from generation_catalog import GenerationCatalog
+    from llm_wiki.generation_catalog_store import GenerationCatalog
 
     catalog = _catalog(tmp_path)
     _publish_baseline(catalog)
@@ -1214,12 +1191,12 @@ def test_builder_cancellation_stops_lazy_iterable_materialization_before_disk_wr
 def test_builder_rejects_generator_overflow_before_generation_create(
     tmp_path, monkeypatch, field
 ):
-    import evidence_graph
     from evidence_graph_builder import build_full_generation
+    from llm_wiki import evidence_graph_limits
 
     catalog = _catalog(tmp_path)
     records = _basic_records()
-    monkeypatch.setattr(evidence_graph, "MAX_VALIDATION_ROWS", 2)
+    monkeypatch.setattr(evidence_graph_limits, "MAX_VALIDATION_ROWS", 2)
     records[field] = ({} for _ in range(3))
 
     with pytest.raises(ValueError, match=f"{field}.*ceiling"):
@@ -1258,17 +1235,18 @@ def test_repeated_cas_losers_are_unregistered_and_removed_durably(tmp_path):
 
 def test_builder_propagates_real_file_fsync_failure(tmp_path, monkeypatch):
     import evidence_graph_builder
+    from llm_wiki import runtime_sync
 
     catalog = _catalog(tmp_path)
     records = _basic_records()
-    real_fsync = evidence_graph_builder.fsync_file
+    real_fsync = runtime_sync.fsync_file
 
     def fail_fsync(path):
         if Path(path).name == "source-manifest.json":
             raise OSError("durability failure")
         return real_fsync(path)
 
-    monkeypatch.setattr(evidence_graph_builder, "fsync_file", fail_fsync)
+    monkeypatch.setattr(runtime_sync, "fsync_file", fail_fsync)
 
     with pytest.raises(OSError, match="durability failure"):
         evidence_graph_builder.build_full_generation(

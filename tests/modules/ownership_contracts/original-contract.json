@@ -1,0 +1,155 @@
+{
+  "classes": {
+    "OperationalOwnershipError": "gASVNwAAAAAAAACMFW9wZXJhdGlvbmFsX293bmVyc2hpcJSMGU9wZXJhdGlvbmFsT3duZXJzaGlwRXJyb3KUk5Qu",
+    "ProcessIdentity": "gASVLQAAAAAAAACMFW9wZXJhdGlvbmFsX293bmVyc2hpcJSMD1Byb2Nlc3NJZGVudGl0eZSTlC4=",
+    "OwnerLease": "gASVKAAAAAAAAACMFW9wZXJhdGlvbmFsX293bmVyc2hpcJSMCk93bmVyTGVhc2WUk5Qu",
+    "MarkerIdentity": "gASVLAAAAAAAAACMFW9wZXJhdGlvbmFsX293bmVyc2hpcJSMDk1hcmtlcklkZW50aXR5lJOULg=="
+  },
+  "fields": {
+    "ProcessIdentity": [
+      {
+        "name": "pid",
+        "type": "int",
+        "default": {
+          "missing": true
+        }
+      },
+      {
+        "name": "start_identity",
+        "type": "str",
+        "default": {
+          "missing": true
+        }
+      }
+    ],
+    "OwnerLease": [
+      {
+        "name": "state_root",
+        "type": "Path",
+        "default": {
+          "missing": true
+        }
+      },
+      {
+        "name": "role",
+        "type": "OwnerRole",
+        "default": {
+          "missing": true
+        }
+      },
+      {
+        "name": "scope",
+        "type": "str",
+        "default": {
+          "missing": true
+        }
+      },
+      {
+        "name": "actor_id",
+        "type": "str",
+        "default": {
+          "missing": true
+        }
+      },
+      {
+        "name": "token",
+        "type": "str",
+        "default": {
+          "missing": true
+        }
+      },
+      {
+        "name": "epoch",
+        "type": "int",
+        "default": {
+          "missing": true
+        }
+      },
+      {
+        "name": "process",
+        "type": "ProcessIdentity",
+        "default": {
+          "missing": true
+        }
+      },
+      {
+        "name": "acquired_at",
+        "type": "datetime",
+        "default": {
+          "missing": true
+        }
+      },
+      {
+        "name": "heartbeat_at",
+        "type": "datetime",
+        "default": {
+          "missing": true
+        }
+      },
+      {
+        "name": "expires_at",
+        "type": "datetime",
+        "default": {
+          "missing": true
+        }
+      },
+      {
+        "name": "ttl_seconds",
+        "type": "int",
+        "default": {
+          "missing": true
+        }
+      },
+      {
+        "name": "heartbeat_seconds",
+        "type": "int",
+        "default": {
+          "missing": true
+        }
+      }
+    ],
+    "MarkerIdentity": [
+      {
+        "name": "relative_path",
+        "type": "str",
+        "default": {
+          "missing": true
+        }
+      },
+      {
+        "name": "sha256",
+        "type": "str",
+        "default": {
+          "missing": true
+        }
+      },
+      {
+        "name": "file_identity",
+        "type": "RuntimeFileIdentity",
+        "default": {
+          "missing": true
+        }
+      },
+      {
+        "name": "pid",
+        "type": "int",
+        "default": {
+          "missing": true
+        }
+      }
+    ]
+  },
+  "errors": {
+    "OperationalOwnershipError": {
+      "arguments": [
+        "busy",
+        "detail"
+      ],
+      "message": "detail",
+      "attributes": {
+        "code": "busy"
+      },
+      "pickle": "gASVSwAAAAAAAACMFW9wZXJhdGlvbmFsX293bmVyc2hpcJSMGU9wZXJhdGlvbmFsT3duZXJzaGlwRXJyb3KUk5SMBGJ1c3mUjAZkZXRhaWyUhpRSlC4="
+    }
+  }
+}

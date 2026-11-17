@@ -14,19 +14,23 @@ for directory in (TESTS.parent / "scripts", TESTS):
     if str(directory) not in sys.path:
         sys.path.insert(0, str(directory))
 
-from test_repository_index import ALPHA, _repository, vault  # noqa: E402,F401
+from tests.repository_index_helpers import (  # noqa: E402,F401
+    ALPHA,
+    _repository,
+    vault,  # noqa: E402,F401
+)
 
 
 def test_a_module_under_a_repositorys_knowledge_root_is_extracted_as_code(
     vault, tmp_path  # noqa: F811
 ):
-    import repository_index
+    import repository_indexing
     from code_graph import find_callers
 
     _root, state = vault
     repository = _repository(tmp_path / "repo", {"knowledge/alpha.py": ALPHA})
 
-    receipt = repository_index.index_repository(
+    receipt = repository_indexing.index_repository(
         repository, roots=["knowledge"], state_root=state
     )
     answer = find_callers("helper", repository, with_report=True)

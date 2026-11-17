@@ -1,0 +1,324 @@
+{
+  "encoding": "o200k_base",
+  "max_tokens": 100000,
+  "serialization": "exact-duplicates/v1",
+  "files": [
+    "AGENTS.md",
+    "CLAUDE.md",
+    "docs/AGENTS.md",
+    "docs/STRUCTURE.md",
+    "docs/modules/compile-lock-context.json",
+    "docs/modules/compile-lock.md",
+    "docs/modules/compile-memory.md",
+    "docs/modules/compile-paths.md",
+    "docs/modules/context-bundle.md",
+    "docs/modules/context-records.md",
+    "docs/modules/context-tooling.md",
+    "docs/modules/maybe-compile.md",
+    "docs/modules/model-choice.md",
+    "docs/modules/product-structure.md",
+    "docs/modules/project-governance.md",
+    "docs/modules/reliable-memory-tests-compile-transactions-helpers.md",
+    "docs/modules/reliable-memory-tests-one-bad-day-does-not-hold-the-rest-helpers.md",
+    "docs/modules/script-sources.md",
+    "docs/modules/test-support.md",
+    "rules/development-laws.md",
+    "scripts/__init__.py",
+    "scripts/compile_lock.py",
+    "scripts/compile_memory.py",
+    "scripts/llm_wiki/__init__.py",
+    "scripts/llm_wiki/context_bundle.py",
+    "scripts/maybe_compile.py",
+    "tests/__init__.py",
+    "tests/compile_paths.py",
+    "tests/compile_transactions_helpers.py",
+    "tests/conftest.py",
+    "tests/module_context.py",
+    "tests/module_context_paths.py",
+    "tests/module_interface.py",
+    "tests/module_interface_render.py",
+    "tests/module_qualification.py",
+    "tests/module_record_context.py",
+    "tests/module_records.py",
+    "tests/one_bad_day_does_not_hold_the_rest_helpers.py",
+    "tests/script_sources.py",
+    "tests/shared_fixtures.py",
+    "tests/slow_machine.py",
+    "tests/test_a_spawned_compile_knows_its_lock.py",
+    "tests/test_one_bad_day_does_not_hold_the_rest.py",
+    "tests/test_the_small_integrity_gaps.py"
+  ],
+  "ownership": {
+    "files": [
+      "docs/modules/compile-lock-context.json",
+      "docs/modules/compile-lock.md",
+      "scripts/compile_lock.py",
+      "tests/test_a_spawned_compile_knows_its_lock.py",
+      "tests/test_one_bad_day_does_not_hold_the_rest.py",
+      "tests/test_the_small_integrity_gaps.py"
+    ]
+  },
+  "qualified_dependencies": [
+    {
+      "provider": "scripts/compile_leased_run.py",
+      "names": [
+        "leased_compile_processor"
+      ],
+      "contract_sha256": "863aec0b7901984e1b393865374d1be4a4c05c6bd98ff719e9832d94f4d180bb",
+      "integration_tests": [
+        "tests/test_a_spawned_compile_knows_its_lock.py",
+        "tests/test_one_bad_day_does_not_hold_the_rest.py",
+        "tests/test_the_small_integrity_gaps.py"
+      ]
+    },
+    {
+      "provider": "scripts/compile_pipeline.py",
+      "names": [
+        "require_compile_active",
+        "run"
+      ],
+      "contract_sha256": "b3b0fe89c363afcf177cfea5bafd887dbc38506f6304869b7187dc745ef8c505",
+      "integration_tests": [
+        "tests/test_one_bad_day_does_not_hold_the_rest.py"
+      ]
+    },
+    {
+      "provider": "scripts/compile_receipts.py",
+      "names": [
+        "daily_is_compiled",
+        "open_daily_source",
+        "receipt_predicate"
+      ],
+      "contract_sha256": "e995b668e2c5959bb4358f60caa026683b9a2e89b1d7f3448eeb2441f8aff309",
+      "integration_tests": [
+        "tests/test_a_spawned_compile_knows_its_lock.py",
+        "tests/test_one_bad_day_does_not_hold_the_rest.py",
+        "tests/test_the_small_integrity_gaps.py"
+      ]
+    },
+    {
+      "provider": "scripts/generation_maintenance.py",
+      "names": [
+        "run_generation_maintenance"
+      ],
+      "contract_sha256": "f993c23c1e2b938d88bee02a716a716c4bb2c99dfcb153bbb47aacab7a37f71b",
+      "integration_tests": [
+        "tests/test_a_spawned_compile_knows_its_lock.py",
+        "tests/test_one_bad_day_does_not_hold_the_rest.py",
+        "tests/test_the_small_integrity_gaps.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/compile_pipeline_selection.py",
+      "names": [
+        "SPAWNED_LOCK",
+        "acquire_compile_lock",
+        "compile_task_payload",
+        "compile_under_lock",
+        "discard_unusable_receipts",
+        "lock_lines",
+        "mark_finished",
+        "parse_args",
+        "release_compile_lock",
+        "report_deprecated_flags"
+      ],
+      "contract_sha256": "6a428f05bcacde4e6e54bf6d804e27ddca5b2a8804149ba0d68423086feb4f49",
+      "integration_tests": [
+        "tests/test_a_spawned_compile_knows_its_lock.py",
+        "tests/test_one_bad_day_does_not_hold_the_rest.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/generation_catalog_store.py",
+      "names": [
+        "GenerationCatalog"
+      ],
+      "contract_sha256": "b18194ebe04bf988b4474379fcb5243516550d43b745a00eaed1453f7844c983",
+      "integration_tests": [
+        "tests/test_a_blocked_task_has_a_way_back.py",
+        "tests/test_a_build_in_flight_is_not_an_orphan.py",
+        "tests/test_a_capacity_refusal_does_not_corrupt_a_generation.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/model_choice.py",
+      "names": [
+        "using_root"
+      ],
+      "contract_sha256": "d45f2655cb61963e77617d1dfd7d617b134ad77cc770b59b335d0856e5d65019",
+      "integration_tests": [
+        "tests/test_a_spawned_compile_knows_its_lock.py",
+        "tests/test_one_bad_day_does_not_hold_the_rest.py",
+        "tests/test_the_small_integrity_gaps.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/queue_contracts.py",
+      "names": [
+        "LeaseProcessor"
+      ],
+      "contract_sha256": "65beb9b24756c7432bcfbdb61f10fd40deaba6d9b24f671089b198571d775864",
+      "integration_tests": [
+        "tests/test_a_spawned_compile_knows_its_lock.py",
+        "tests/test_one_bad_day_does_not_hold_the_rest.py",
+        "tests/test_the_small_integrity_gaps.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/reliability_defaults.py",
+      "names": [
+        "DEFAULTS"
+      ],
+      "contract_sha256": "f37296a83c15073e42a6cc8b86b88c2d19c548ac19a4ef6d0ca2f7af925c90c8",
+      "integration_tests": [
+        "tests/test_a_spawned_compile_knows_its_lock.py",
+        "tests/test_one_bad_day_does_not_hold_the_rest.py",
+        "tests/test_the_small_integrity_gaps.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/runtime_publication.py",
+      "names": [
+        "write_all"
+      ],
+      "contract_sha256": "0c87cf7b659cca5738ba41c3cc77c42118959b9c2283b24a345d862f8901dcd1",
+      "integration_tests": [
+        "tests/test_a_spawned_compile_knows_its_lock.py",
+        "tests/test_one_bad_day_does_not_hold_the_rest.py",
+        "tests/test_the_small_integrity_gaps.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/runtime_roots.py",
+      "names": [
+        "state_root",
+        "vault_root"
+      ],
+      "contract_sha256": "904b31835161d11b79ab937c4651d91dd6966bdaa1f33e93b9ea768f519d2d3b",
+      "integration_tests": [
+        "tests/test_a_continuation_keeps_its_original_entry.py",
+        "tests/test_a_prompt_checkpoint_does_not_outwait_its_host.py",
+        "tests/test_a_session_marker_survives_a_busy_writer.py"
+      ]
+    },
+    {
+      "provider": "scripts/markdown_transaction.py",
+      "names": [
+        "active_or_legacy_coordinator"
+      ],
+      "contract_sha256": "c925a7d2a81ec95533c80abc3906d8b8f0c1422d98e7175814de9a57f0ec45ec",
+      "integration_tests": [
+        "tests/test_a_spawned_compile_knows_its_lock.py",
+        "tests/test_one_bad_day_does_not_hold_the_rest.py",
+        "tests/test_the_small_integrity_gaps.py"
+      ]
+    },
+    {
+      "provider": "scripts/memory_state.py",
+      "names": [
+        "atomic_write",
+        "closed_daily_logs",
+        "daily_logs",
+        "file_hash",
+        "load_state",
+        "retire_stale_lock",
+        "spawn_detached"
+      ],
+      "contract_sha256": "4e40e05fd76a21d5a9312694edbd4e2821d2f9de14aaa7bd394bdce9cee4b2fe",
+      "integration_tests": [
+        "tests/test_a_spawned_compile_knows_its_lock.py",
+        "tests/test_one_bad_day_does_not_hold_the_rest.py",
+        "tests/test_the_small_integrity_gaps.py"
+      ]
+    },
+    {
+      "provider": "scripts/operational_ownership.py",
+      "names": [
+        "OwnerLease",
+        "heartbeat_owner"
+      ],
+      "contract_sha256": "c4582c6d1bbabcef579a4c3046b13d8d5245cb46712fbce11b1e2594acf2617f",
+      "integration_tests": [
+        "tests/test_a_spawned_compile_knows_its_lock.py",
+        "tests/test_one_bad_day_does_not_hold_the_rest.py",
+        "tests/test_the_small_integrity_gaps.py"
+      ]
+    },
+    {
+      "provider": "scripts/process_liveness.py",
+      "names": [
+        "owner_alive",
+        "pid_alive",
+        "process_start_identity"
+      ],
+      "contract_sha256": "a2c8f5c8c08187e5bfaac1623884abf867b5cdad8bf86bdce0201bd403b825f7",
+      "integration_tests": [
+        "tests/test_a_spawned_compile_knows_its_lock.py",
+        "tests/test_one_bad_day_does_not_hold_the_rest.py",
+        "tests/test_the_small_integrity_gaps.py"
+      ]
+    },
+    {
+      "provider": "scripts/queue_core.py",
+      "names": [
+        "active_memory_queue",
+        "retry_available_at",
+        "run_processor_child",
+        "uses_compile_journal",
+        "work_claimed"
+      ],
+      "contract_sha256": "be6a0b7f9424cce063301f0e30ddf0e8d0deba600a169ab96b134c03c40c485d",
+      "integration_tests": [
+        "tests/test_the_small_integrity_gaps.py"
+      ]
+    },
+    {
+      "provider": "scripts/reliable_memory.py",
+      "names": [
+        "canonical_json_bytes",
+        "sha256_bytes",
+        "validate_state_root"
+      ],
+      "contract_sha256": "4243e32fa6ecab88fca1a2d2b3214c0a36944fc23129138102dfaebf6d99457f",
+      "integration_tests": [
+        "tests/test_one_bad_day_does_not_hold_the_rest.py"
+      ]
+    },
+    {
+      "provider": "scripts/repository_scope.py",
+      "names": [
+        "sanitized_git_environment"
+      ],
+      "contract_sha256": "fd550ae20761afad50b37fa3a71044a162485b0e4d4b3e2af9b5b22e143c2bec",
+      "integration_tests": [
+        "tests/test_a_spawned_compile_knows_its_lock.py",
+        "tests/test_one_bad_day_does_not_hold_the_rest.py",
+        "tests/test_the_small_integrity_gaps.py"
+      ]
+    },
+    {
+      "provider": "scripts/secret_redact.py",
+      "names": [
+        "describe_error"
+      ],
+      "contract_sha256": "fb304f29eb5f060ccb0503f24561dd6ee4cfb07e2c36b130c00ad9e1c9000eaf",
+      "integration_tests": [
+        "tests/test_a_spawned_compile_knows_its_lock.py",
+        "tests/test_one_bad_day_does_not_hold_the_rest.py",
+        "tests/test_the_small_integrity_gaps.py"
+      ]
+    },
+    {
+      "provider": "scripts/settings.py",
+      "names": [
+        "setting_value"
+      ],
+      "contract_sha256": "ec6d2a43d91dba48c174aad5e9505790a05fd66f1bf1e5292264857f320a9881",
+      "integration_tests": [
+        "tests/test_a_spawned_compile_knows_its_lock.py",
+        "tests/test_one_bad_day_does_not_hold_the_rest.py",
+        "tests/test_the_small_integrity_gaps.py"
+      ]
+    }
+  ]
+}

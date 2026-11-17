@@ -112,6 +112,6 @@ def test_a_page_that_is_not_utf8_is_that_pages_error_in_the_tier_build(tmp_path)
     # read names none, so the prune that follows cannot mistake one for residue.
     current: set = set()
 
-    bucket = build_tiers._build_page_tier(page, verbose=False, current=current)
+    bucket = build_tiers.build_page_tier(page, verbose=False, current=current)
 
     assert (bucket, current) == ("errors", set())

@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from code_extractor import extract_code
 
-from tests.test_a_decorator_is_a_call_until_it_is_a_route import _call_target_names, _source
+from tests.a_decorator_is_a_call_until_it_is_a_route_helpers import _call_target_names, _source
 
 APP = b"from lib import compute\n\n\ndef run():\n    return compute()\n"
 DEFINITION = b"def compute():\n    return 1\n"

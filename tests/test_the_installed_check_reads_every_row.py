@@ -10,15 +10,15 @@ from __future__ import annotations
 
 import sqlite3
 import time
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
-import installed_memory_repair
+import reliability_v3_validation
 
+from tests.reliability_v3_adoption_helpers import _vault, build_adopted_reliability_v3
 from tests.slow_machine import LONG_TIMEOUT
-from tests.test_reliability_v3_adoption import _vault, build_adopted_reliability_v3
 
-NOW = datetime(2026, 9, 27, 12, 0, tzinfo=timezone.utc)
+NOW = datetime(2026, 9, 27, 12, 0, tzinfo=UTC)
 PAST_THE_OLD_CAP = 10_050
 _INSERT = (
     'INSERT INTO "transaction"(id, operation_id, request_hash, state, preconditions_json,'
@@ -45,7 +45,7 @@ def _old_committed(count: int) -> list[tuple[str, ...]]:
 
 
 def _coordinator_blockers(state_root: Path) -> list[str]:
-    return installed_memory_repair.validate_coordinator_v3_runtime(
+    return reliability_v3_validation.validate_coordinator_v3_runtime(
         state_root=state_root, now=NOW, deadline=time.monotonic() + LONG_TIMEOUT, excluded_owner=None
     )
 

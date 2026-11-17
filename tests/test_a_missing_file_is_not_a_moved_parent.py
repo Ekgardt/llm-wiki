@@ -1,6 +1,6 @@
 """A containment failure is named by its type, never by words in a message.
 
-`_is_target_boundary_error` used to search the text of an exception for eight
+`is_target_boundary_error` used to search the text of an exception for eight
 phrases — "parent identity", "outside the vault", "stable directory" — and to
 answer True for every `FileNotFoundError` besides. Two ordinary things then read
 as a moved parent and were quarantined, which is the one disposition an operator
@@ -22,6 +22,7 @@ if str(SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_DIR))
 
 import markdown_transaction  # noqa: E402
+from llm_wiki import markdown_store  # noqa: E402
 from markdown_transaction import (  # noqa: E402
     MarkdownChange,
     MarkdownCoordinator,
@@ -89,7 +90,7 @@ def test_only_the_two_boundary_types_answer_the_boundary_question() -> None:
         markdown_transaction.TargetStateMismatch("before", "a parent identity.md"),
     )
     answers = tuple(
-        markdown_transaction._is_target_boundary_error(error) for error in errors
+        markdown_store.is_target_boundary_error(error) for error in errors
     )
 
     assert answers == (True, True, False, False)

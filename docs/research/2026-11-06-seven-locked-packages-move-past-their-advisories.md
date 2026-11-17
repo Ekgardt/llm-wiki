@@ -111,6 +111,13 @@ once `requires-python` no longer admits 3.10.
 - The test results of this change are listed in its pull request; Python 3.10,
   3.11, 3.13, 3.14, Windows and macOS legs run in CI.
 
+Update 2026-11-09. The per-interpreter matrix below and
+`tests/test_the_audit_reads_every_locked_pin.py` were retired with the move to
+Python 3.14 as the only interpreter; see
+`docs/research/2026-11-03-all-marker-dependency-audit.md`. No Python 3.10 fork and no
+accepted filelock advisory is left. The lock now holds filelock 4.2.9, virtualenv
+21.15.6 and python-discovery 1.9.5.
+
 ## Trade-offs
 
 - Python 3.10 keeps filelock 3.29.7 with nine known advisories, as `main` did with

@@ -1,0 +1,143 @@
+{
+  "encoding": "o200k_base",
+  "max_tokens": 100000,
+  "serialization": "exact-duplicates/v1",
+  "files": [
+    "AGENTS.md",
+    "CLAUDE.md",
+    "docs/AGENTS.md",
+    "docs/STRUCTURE.md",
+    "docs/modules/code-graph-tests-a-cut-says-what-it-left-out-context.json",
+    "docs/modules/code-graph-tests-a-cut-says-what-it-left-out.md",
+    "docs/modules/context-bundle.md",
+    "docs/modules/context-records.md",
+    "docs/modules/context-tooling.md",
+    "docs/modules/model-choice.md",
+    "docs/modules/product-structure.md",
+    "docs/modules/project-governance.md",
+    "docs/modules/test-support.md",
+    "rules/development-laws.md",
+    "scripts/__init__.py",
+    "scripts/llm_wiki/__init__.py",
+    "scripts/llm_wiki/context_bundle.py",
+    "tests/__init__.py",
+    "tests/conftest.py",
+    "tests/module_context.py",
+    "tests/module_context_paths.py",
+    "tests/module_interface.py",
+    "tests/module_interface_render.py",
+    "tests/module_qualification.py",
+    "tests/module_record_context.py",
+    "tests/module_records.py",
+    "tests/shared_fixtures.py",
+    "tests/slow_machine.py",
+    "tests/test_a_cut_says_what_it_left_out.py"
+  ],
+  "ownership": {
+    "files": [
+      "docs/modules/code-graph-tests-a-cut-says-what-it-left-out-context.json",
+      "docs/modules/code-graph-tests-a-cut-says-what-it-left-out.md",
+      "tests/test_a_cut_says_what_it_left_out.py"
+    ]
+  },
+  "qualified_dependencies": [
+    {
+      "provider": "scripts/code_graph.py",
+      "names": [
+        "FLOW_MAX_ROWS",
+        "PATH_MAX_ROWS",
+        "flow_cut_report",
+        "paths_between"
+      ],
+      "contract_sha256": "0d3e4edcef5cda4f98bbd93b585d06dbf9708e02e55e651ac660dd2ca6df5346",
+      "integration_tests": [
+        "tests/test_a_code_root_named_knowledge_is_code.py",
+        "tests/test_a_cut_says_what_it_left_out.py",
+        "tests/test_a_dead_code_claim_names_what_it_checked.py"
+      ]
+    },
+    {
+      "provider": "scripts/episode_consolidation.py",
+      "names": [
+        "grounded_lessons"
+      ],
+      "contract_sha256": "b55be52a4eb7b838fae2af858f53831bcb6b89f87f0e2f88ea5ad42483ea72e8",
+      "integration_tests": [
+        "tests/test_a_cut_says_what_it_left_out.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/generation_catalog_store.py",
+      "names": [
+        "GenerationCatalog"
+      ],
+      "contract_sha256": "b18194ebe04bf988b4474379fcb5243516550d43b745a00eaed1453f7844c983",
+      "integration_tests": [
+        "tests/test_a_blocked_task_has_a_way_back.py",
+        "tests/test_a_build_in_flight_is_not_an_orphan.py",
+        "tests/test_a_capacity_refusal_does_not_corrupt_a_generation.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/model_choice.py",
+      "names": [
+        "using_root"
+      ],
+      "contract_sha256": "d45f2655cb61963e77617d1dfd7d617b134ad77cc770b59b335d0856e5d65019",
+      "integration_tests": [
+        "tests/test_a_cut_says_what_it_left_out.py"
+      ]
+    },
+    {
+      "provider": "scripts/provenance_join.py",
+      "names": [
+        "join_symbol_provenance"
+      ],
+      "contract_sha256": "0047aa81871df9b5c57086e418d456ef5958d2d074e8dd8263886b7500250ea0",
+      "integration_tests": [
+        "tests/test_a_cut_says_what_it_left_out.py"
+      ]
+    },
+    {
+      "provider": "scripts/reliable_memory.py",
+      "names": [
+        "validate_state_root"
+      ],
+      "contract_sha256": "8680515cd873056a7c8a36e0057d91f2f83f23c48841263697676ff91f7ff964",
+      "integration_tests": [
+        "tests/test_a_cut_says_what_it_left_out.py"
+      ]
+    },
+    {
+      "provider": "scripts/repository_scope.py",
+      "names": [
+        "sanitized_git_environment"
+      ],
+      "contract_sha256": "fd550ae20761afad50b37fa3a71044a162485b0e4d4b3e2af9b5b22e143c2bec",
+      "integration_tests": [
+        "tests/test_a_cut_says_what_it_left_out.py"
+      ]
+    },
+    {
+      "provider": "scripts/repository_worktrees.py",
+      "names": [
+        "list_worktrees"
+      ],
+      "contract_sha256": "b60a6bd17ee3479db9d94f546186ee358199dd6e2488ce2312f3fbcb4726d1b8",
+      "integration_tests": [
+        "tests/test_a_cut_says_what_it_left_out.py"
+      ]
+    },
+    {
+      "provider": "scripts/retrieval_disposition.py",
+      "names": [
+        "MAX_PRINTED_PAGES",
+        "print_counts"
+      ],
+      "contract_sha256": "eca662ecb023d65b44bfe857d547b43f2194f780c7674c66a224a1efab836c04",
+      "integration_tests": [
+        "tests/test_a_cut_says_what_it_left_out.py"
+      ]
+    }
+  ]
+}

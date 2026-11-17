@@ -29,13 +29,10 @@ from context_budget import (  # noqa: E402
     ContextItem,
 )
 from context_compiler import compile_context_items  # noqa: E402
+from llm_wiki import runtime_roots  # noqa: E402
 from markdown_transaction import mutate_knowledge, stable_operation_id  # noqa: E402
-from memory_state import ROOT, load_state  # noqa: E402
+from memory_state import load_state  # noqa: E402
 from secret_redact import redact_secrets  # noqa: E402
-
-KNOWLEDGE = ROOT / "knowledge" / "notes"
-DAILY_DIR = ROOT / "knowledge" / "daily"
-PROJECTS_DIR = ROOT / "knowledge" / "projects"
 
 FRONTMATTER_RE = re.compile(r"^---\s*\n(.*?)\n---\s*\n?", re.DOTALL)
 PROJECT_FIELD_RE = re.compile(r"^project:\s*[\"']?([^\"'\n]+)[\"']?\s*$", re.MULTILINE)
@@ -71,11 +68,11 @@ def _frontmatter_value(content: str, field: str) -> str | None:
     return match.group(1).strip()
 
 
-def _find_project_pages(slug: str) -> list[dict]:
+def find_project_pages(slug: str) -> list[dict]:
     """Find all knowledge pages tagged with `project: <slug>`."""
-    if not KNOWLEDGE.exists():
+    if not runtime_roots.notes_dir().exists():
         return []
-    pages = (_project_page(md, slug) for md in sorted(KNOWLEDGE.rglob("*.md")))
+    pages = (_project_page(md, slug) for md in sorted(runtime_roots.notes_dir().rglob("*.md")))
     return [page for page in pages if page is not None]
 
 
@@ -93,7 +90,7 @@ def _page_record(md: Path, content: str) -> dict:
     title_match = H1_RE.search(content)
     summary_match = SUMMARY_RE.search(content)
     return {
-        "path": md.relative_to(ROOT).as_posix(),
+        "path": md.relative_to(runtime_roots.vault_root()).as_posix(),
         "type": _extract_frontmatter_field(content, TYPE_FIELD_RE) or "unknown",
         "status": _extract_frontmatter_field(content, STATUS_FIELD_RE) or "active",
         "title": title_match.group(1).strip() if title_match else md.stem,
@@ -101,13 +98,13 @@ def _page_record(md: Path, content: str) -> dict:
     }
 
 
-def _find_recent_daily_activity(slug: str, days: int = 7) -> list[str]:
+def find_recent_daily_activity(slug: str, days: int = 7) -> list[str]:
     """Find recent daily-log breadcrumbs mentioning this slug."""
-    if not DAILY_DIR.exists():
+    if not runtime_roots.daily_dir().exists():
         return []
     cutoff = datetime.now().timestamp() - (days * 86400)
     results: list[str] = []
-    for md in sorted(DAILY_DIR.glob("*.md"), reverse=True):
+    for md in sorted(runtime_roots.daily_dir().glob("*.md"), reverse=True):
         results.extend(_slug_lines(md, slug, cutoff))
         if len(results) >= 10:
             return results[:10]
@@ -135,11 +132,11 @@ def _recent_text(md: Path, cutoff: float) -> str | None:
         return None
 
 
-def _read_state_handoff(slug: str) -> str:
+def read_state_handoff(slug: str) -> str:
     """Read the 'Where we left off' section from project state.md."""
-    state_path = PROJECTS_DIR / slug / "state.md"
+    state_path = runtime_roots.projects_dir() / slug / "state.md"
     # Containment guard: slug must not escape PROJECTS_DIR (no .., no abs).
-    if not state_path.resolve().is_relative_to(PROJECTS_DIR.resolve()):
+    if not state_path.resolve().is_relative_to(runtime_roots.projects_dir().resolve()):
         print(f"build_context: slug escapes PROJECTS_DIR: {slug!r}", file=sys.stderr)
         return ""
     content = _existing_text(state_path)
@@ -185,9 +182,9 @@ def _detect_agent_strengths(agent: str) -> list[str] | None:
 
 def _count_authored_types(agent: str, type_counts: dict[str, int]) -> None:
     """Count knowledge pages whose source_authority names the agent, by page type."""
-    if not KNOWLEDGE.exists():
+    if not runtime_roots.notes_dir().exists():
         return
-    for md in KNOWLEDGE.rglob("*.md"):
+    for md in runtime_roots.notes_dir().rglob("*.md"):
         page_type = _authored_page_type(md, agent)
         if page_type is not None:
             type_counts[page_type] = type_counts.get(page_type, 0) + 1
@@ -240,7 +237,7 @@ def _project_context_item(
     )
 
 
-def _pack_project_context(parts: list[tuple[str, str]], max_chars: int) -> str:
+def pack_project_context(parts: list[tuple[str, str]], max_chars: int) -> str:
     """Pack project-context sections under one shared token budget.
 
     Replaces the independent character cap with a shared budget; the legacy
@@ -288,18 +285,18 @@ def build_context(slug: str, max_chars: int = 2000, agent: str | None = None) ->
         *_activity_part(slug),  # 3. Recent activity
         *_heartbeat_part(slug),  # 4. Heartbeat from state.json
     ]
-    return _pack_project_context(parts, max_chars)
+    return pack_project_context(parts, max_chars)
 
 
 def _handoff_part(slug: str) -> list[tuple[str, str]]:
-    handoff = _read_state_handoff(slug)
+    handoff = read_state_handoff(slug)
     if not handoff:
         return []
     return [("handoff", f"### Where you left off\n{handoff}\n")]
 
 
 def _knowledge_part(slug: str, agent: str | None) -> list[tuple[str, str]]:
-    active_pages = [p for p in _find_project_pages(slug) if p["status"] != "superseded"]
+    active_pages = [p for p in find_project_pages(slug) if p["status"] != "superseded"]
     if agent:
         _order_by_strengths(active_pages, agent.lower())
     if not active_pages:
@@ -336,7 +333,7 @@ def _knowledge_section(active_pages: list[dict]) -> str:
 
 
 def _activity_part(slug: str) -> list[tuple[str, str]]:
-    activity = _find_recent_daily_activity(slug)
+    activity = find_recent_daily_activity(slug)
     if not activity:
         return []
     recent = ["### Recent activity (last 7 days)", *(f"- {line}" for line in activity[:5])]
@@ -376,9 +373,9 @@ def _context_output_path(slug: str) -> Path | None:
     if not re.match(r"^[a-zA-Z0-9_-]+$", slug):
         print("build_context: slug must be alphanumeric+hyphens only", file=sys.stderr)
         return None
-    out = PROJECTS_DIR / slug / "context.md"
+    out = runtime_roots.projects_dir() / slug / "context.md"
     # Containment guard: slug must not escape PROJECTS_DIR (no .., no abs).
-    if not out.resolve().is_relative_to(PROJECTS_DIR.resolve()):
+    if not out.resolve().is_relative_to(runtime_roots.projects_dir().resolve()):
         print(f"build_context: slug escapes PROJECTS_DIR: {slug!r}", file=sys.stderr)
         return None
     return out
@@ -404,7 +401,7 @@ def _write_project_context(slug: str, context: str) -> int:
         return 1
     encoded = redact_secrets(_rendered_project_context(slug, context)).encode("utf-8")
     mutate_knowledge(stable_operation_id("project-context", slug, encoded), {out: encoded})
-    print(f"Written: {out.relative_to(ROOT)}")
+    print(f"Written: {out.relative_to(runtime_roots.vault_root())}")
     return 0
 
 

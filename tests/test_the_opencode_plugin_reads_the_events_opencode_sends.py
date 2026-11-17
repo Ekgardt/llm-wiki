@@ -87,8 +87,8 @@ def test_an_idle_with_nothing_new_is_not_forwarded_twice(tmp_path: Path) -> None
     ],
 )
 def test_the_adapter_reads_an_opencode_tool_target_from_args(raw, expected) -> None:
-    assert integration_adapter._tool_payload("opencode", raw)["target"] == expected
+    assert integration_adapter.tool_payload("opencode", raw)["target"] == expected
 
 
 def test_the_adapter_reads_the_session_from_info() -> None:
-    assert integration_adapter._session("opencode", {"info": {"id": "s1"}}) == "s1"
+    assert integration_adapter.session("opencode", {"info": {"id": "s1"}}) == "s1"

@@ -18,7 +18,7 @@ if str(SCRIPTS_DIR) not in sys.path:
 
 from project_journal import ProjectLeaseBusy, ProjectStore  # noqa: E402
 
-from tests.test_project_journal import checkpoint_event  # noqa: E402
+from tests.project_journal_helpers import checkpoint_event  # noqa: E402
 
 _SLUG = "demo"
 

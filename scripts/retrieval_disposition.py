@@ -32,7 +32,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from retrieval_telemetry import TELEMETRY_DB, hash_query  # noqa: E402
+from retrieval_telemetry import hash_query, telemetry_db  # noqa: E402
 
 # A vault answers from a small set of pages, and a disposition built from more
 # than this is not a disposition, it is the whole corpus.
@@ -78,7 +78,7 @@ def cited_counts(query: str | None = None, *, db_path: Path | None = None) -> di
     strong as evidence gets. Without it, every answer counts: weak, and it
     applies everywhere. Those are deliberately different signals.
     """
-    database = _read_only(Path(db_path or TELEMETRY_DB))
+    database = _read_only(Path(db_path or telemetry_db()))
     if database is None:
         return {}
     try:
@@ -133,7 +133,7 @@ def refused_counts(*, db_path: Path | None = None) -> dict[str, int]:
     nothing survived, which is a place to look, not a fact about the page. It is
     deliberately not fed into any ranking.
     """
-    database = _read_only(Path(db_path or TELEMETRY_DB))
+    database = _read_only(Path(db_path or telemetry_db()))
     if database is None:
         return {}
     try:
@@ -157,7 +157,7 @@ def _counted_refusals(database: sqlite3.Connection) -> dict[str, int]:
 
 def refusal_gates(*, db_path: Path | None = None) -> dict[str, int]:
     """Which gate refused, and how often. The question the manual count answered."""
-    database = _read_only(Path(db_path or TELEMETRY_DB))
+    database = _read_only(Path(db_path or telemetry_db()))
     if database is None:
         return {}
     try:
@@ -184,7 +184,7 @@ def _counted_gates(database: sqlite3.Connection) -> dict[str, int]:
 MAX_PRINTED_PAGES = 20
 
 
-def _print_counts(title: str, counts: dict[str, int]) -> None:
+def print_counts(title: str, counts: dict[str, int]) -> None:
     print(title)
     for name, count in list(counts.items())[:MAX_PRINTED_PAGES]:
         print(f"  {count:>5}  {name}")
@@ -201,9 +201,9 @@ def _print_rest(total: int) -> None:
 
 def main() -> int:
     """What has carried answers, what was refused, and which gate refused it."""
-    _print_counts("cited (a published answer named this page):", cited_counts())
-    _print_counts("present when every claim was refused:", refused_counts())
-    _print_counts("the gate that refused:", refusal_gates())
+    print_counts("cited (a published answer named this page):", cited_counts())
+    print_counts("present when every claim was refused:", refused_counts())
+    print_counts("the gate that refused:", refusal_gates())
     return 0
 
 

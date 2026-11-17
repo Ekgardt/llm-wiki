@@ -15,7 +15,11 @@ for directory in (TESTS.parent / "scripts", TESTS):
     if str(directory) not in sys.path:
         sys.path.insert(0, str(directory))
 
-from test_repository_index import ALPHA, _repository, vault  # noqa: E402,F401
+from tests.repository_index_helpers import (  # noqa: E402,F401
+    ALPHA,
+    _repository,
+    vault,  # noqa: E402,F401
+)
 
 
 def _manifest(state: Path, generation_id: str) -> dict:
@@ -24,12 +28,12 @@ def _manifest(state: Path, generation_id: str) -> dict:
 
 
 def test_a_code_generation_says_its_vectors_are_absent(vault) -> None:  # noqa: F811 - the fixture
-    import repository_index
+    import repository_indexing
 
     root, state = vault
     _repository(root, {"scripts/alpha.py": ALPHA})
 
-    receipt = repository_index.index_repository(root, roots=["scripts"], state_root=state)
+    receipt = repository_indexing.index_repository(root, roots=["scripts"], state_root=state)
 
     directory = state / "cache/evidence-graph/generations" / receipt["generation_id"]
     manifest = _manifest(state, receipt["generation_id"])
@@ -41,7 +45,7 @@ def test_the_builder_keeps_the_corpus_for_a_memory_generation() -> None:
 
     snapshot = object()
 
-    kept = evidence_graph_builder._vector_snapshot(snapshot, {"code_roots": []})
-    dropped = evidence_graph_builder._vector_snapshot(snapshot, {"code_roots": ["scripts"]})
+    kept = evidence_graph_builder.vector_snapshot(snapshot, {"code_roots": []})
+    dropped = evidence_graph_builder.vector_snapshot(snapshot, {"code_roots": ["scripts"]})
 
     assert (kept, dropped) == (snapshot, None)

@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import importlib.util
 import json
 import re
 import shutil
@@ -10,10 +9,11 @@ import time
 from pathlib import Path
 from types import SimpleNamespace
 
+import process_tree
 import pytest
 
-ROOT = Path(__file__).resolve().parent.parent
-SYNC_SCRIPT = ROOT / "scripts" / "sync_memory.py"
+from tests.sync_memory_helpers import ROOT, SYNC_SCRIPT, _load_sync_memory
+
 EXPECTED_ACTIONS = (
     "environment",
     "dependencies",
@@ -23,14 +23,6 @@ EXPECTED_ACTIONS = (
     "indexes",
     "doctor",
 )
-
-
-def _load_sync_memory():
-    spec = importlib.util.spec_from_file_location("sync_memory_under_test", SYNC_SCRIPT)
-    assert spec is not None and spec.loader is not None
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
 
 
 def _tree_paths(tree, *, read_only: bool) -> list:
@@ -65,18 +57,6 @@ def _sync_apply_line(script: str) -> str:
         for line in script.splitlines()
         if "sync_memory.py" in line and "--apply" in line
     )
-
-
-def _apply_knowledge_change(root, original, change: str) -> None:
-    """One way the knowledge tree can differ from the built index."""
-    if change == "added":
-        added = root / "knowledge" / "notes" / "added.md"
-        added.write_text("---\ntype: concept\n---\n# Added\n", encoding="utf-8")
-        return
-    if change == "removed":
-        original.unlink()
-        return
-    original.write_text("---\ntype: concept\n---\n# Modified\n", encoding="utf-8")
 
 
 def _action(report, identifier: str) -> dict:
@@ -178,13 +158,13 @@ def _build_vault(tmp_path: Path) -> tuple[Path, Path, Path]:
     )
     (root / "pyproject.toml").write_text(
         '[project]\nrequires-python = ">=3.10"\n'
-        'dependencies = ["mcp>=1.29,<2"]\n'
+        'dependencies = ["mcp>=1.30,<2"]\n'
         '[project.optional-dependencies]\nmcp-server = []\n',
         encoding="utf-8",
     )
     (root / "uv.lock").write_text(
         'version = 1\nrequires-python = ">=3.10"\n'
-        '[[package]]\nname = "mcp"\nversion = "1.29.0"\n'
+        '[[package]]\nname = "mcp"\nversion = "1.30.0"\n'
         '[[package]]\nname = "llm-wiki"\nprovides-extras = ["mcp-server"]\n',
         encoding="utf-8",
     )
@@ -208,7 +188,7 @@ def test_check_is_default_dry_run_and_actions_are_ordered(tmp_path, monkeypatch)
         "run_doctor",
         lambda **kwargs: calls.append(kwargs) or _doctor_report(),
     )
-    monkeypatch.setattr(sync_memory, "_dependency_action", lambda **kwargs: _dependency_result())
+    monkeypatch.setattr(sync_memory, "dependency_action", lambda **kwargs: _dependency_result())
 
     report = sync_memory.run_sync(root=tmp_path, state_root=tmp_path, home=tmp_path)
 
@@ -223,12 +203,12 @@ def test_check_is_default_dry_run_and_actions_are_ordered(tmp_path, monkeypatch)
 def test_dependency_action_checks_lock_and_baseline_environment(tmp_path):
     sync_memory = _load_sync_memory()
     (tmp_path / "pyproject.toml").write_text(
-        '[project]\ndependencies = ["mcp>=1.29,<2"]\n'
+        '[project]\ndependencies = ["mcp>=1.30,<2"]\n'
         '[project.optional-dependencies]\nmcp-server = []\n',
         encoding="utf-8",
     )
     (tmp_path / "uv.lock").write_text(
-        'version = 1\n[[package]]\nname = "mcp"\nversion = "1.29.0"\n',
+        'version = 1\n[[package]]\nname = "mcp"\nversion = "1.30.0"\n',
         encoding="utf-8",
     )
     commands = []
@@ -238,7 +218,7 @@ def test_dependency_action_checks_lock_and_baseline_environment(tmp_path):
         stdout = json.dumps({"sync": {"changes": []}}) if "--dry-run" in command else ""
         return subprocess.CompletedProcess(command, 0, stdout, "")
 
-    result = sync_memory._dependency_action(root=tmp_path, apply=False, run_uv=run_uv)
+    result = sync_memory.dependency_action(root=tmp_path, apply=False, run_uv=run_uv)
 
     assert result["status"] == "ok"
     assert result["details"] == {"lock": "current", "environment": "current"}
@@ -246,10 +226,11 @@ def test_dependency_action_checks_lock_and_baseline_environment(tmp_path):
     assert commands[0][1]["timeout"] <= sync_memory.DEPENDENCY_TIMEOUT_SECONDS
 
 
-def test_production_baseline_declares_python310_tomli_parser():
+def test_production_baseline_uses_stdlib_toml():
     project = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
 
-    assert 'tomli>=2.4.1,<3; python_version < \'3.11\'' in project
+    assert 'requires-python = ">=3.14,<3.15"' in project
+    assert '"tomli>=' not in project
 
 
 def test_importable_wrong_mcp_version_is_planned_and_repaired(tmp_path, monkeypatch):
@@ -257,7 +238,7 @@ def test_importable_wrong_mcp_version_is_planned_and_repaired(tmp_path, monkeypa
 
     sync_memory = _load_sync_memory()
     (tmp_path / "pyproject.toml").write_text(
-        'dependencies = ["mcp>=1.29,<2"]\nmcp-server = []\n', encoding="utf-8"
+        'dependencies = ["mcp>=1.30,<2"]\nmcp-server = []\n', encoding="utf-8"
     )
     (tmp_path / "uv.lock").write_text('name = "mcp"\nmcp-server\n', encoding="utf-8")
     commands = []
@@ -273,7 +254,7 @@ def test_importable_wrong_mcp_version_is_planned_and_repaired(tmp_path, monkeypa
             )
         return subprocess.CompletedProcess(command, 0, "", "")
 
-    result = sync_memory._dependency_action(root=tmp_path, apply=True, run_uv=run_uv)
+    result = sync_memory.dependency_action(root=tmp_path, apply=True, run_uv=run_uv)
 
     assert (result["status"], result["details"]) == (
         "changed",
@@ -289,7 +270,7 @@ def test_importable_wrong_mcp_version_is_planned_and_repaired(tmp_path, monkeypa
 def test_current_locked_environment_is_noop_even_without_import_probe(tmp_path):
     sync_memory = _load_sync_memory()
     (tmp_path / "pyproject.toml").write_text(
-        'dependencies = ["mcp>=1.29,<2"]\nmcp-server = []\n', encoding="utf-8"
+        'dependencies = ["mcp>=1.30,<2"]\nmcp-server = []\n', encoding="utf-8"
     )
     (tmp_path / "uv.lock").write_text('name = "mcp"\nmcp-server\n', encoding="utf-8")
     commands = []
@@ -298,7 +279,7 @@ def test_current_locked_environment_is_noop_even_without_import_probe(tmp_path):
         stdout = json.dumps({"sync": {"changes": []}}) if "--dry-run" in command else ""
         return subprocess.CompletedProcess(command, 0, stdout, "")
 
-    result = sync_memory._dependency_action(root=tmp_path, apply=True, run_uv=run_uv)
+    result = sync_memory.dependency_action(root=tmp_path, apply=True, run_uv=run_uv)
 
     assert result["status"] == "ok"
     assert result["details"] == {"lock": "current", "environment": "current"}
@@ -309,7 +290,7 @@ def test_current_locked_environment_is_noop_even_without_import_probe(tmp_path):
 def test_check_reports_planned_dependency_changes_without_applying(tmp_path):
     sync_memory = _load_sync_memory()
     (tmp_path / "pyproject.toml").write_text(
-        'dependencies = ["mcp>=1.29,<2"]\nmcp-server = []\n', encoding="utf-8"
+        'dependencies = ["mcp>=1.30,<2"]\nmcp-server = []\n', encoding="utf-8"
     )
     (tmp_path / "uv.lock").write_text('name = "mcp"\nmcp-server\n', encoding="utf-8")
     commands = []
@@ -323,7 +304,7 @@ def test_check_reports_planned_dependency_changes_without_applying(tmp_path):
         )
         return subprocess.CompletedProcess(command, 0, stdout, "")
 
-    result = sync_memory._dependency_action(root=tmp_path, apply=False, run_uv=run_uv)
+    result = sync_memory.dependency_action(root=tmp_path, apply=False, run_uv=run_uv)
 
     assert result["status"] == "skipped"
     assert result["details"] == {"lock": "current", "environment": "stale"}
@@ -338,7 +319,7 @@ def test_dependency_action_rejects_missing_lock_inputs(tmp_path, missing):
         if name != missing:
             (tmp_path / name).write_text("version = 1\n", encoding="utf-8")
 
-    result = sync_memory._dependency_action(
+    result = sync_memory.dependency_action(
         root=tmp_path,
         apply=False,
         run_uv=lambda *args, **kwargs: pytest.fail("uv ran without lock inputs"),
@@ -351,7 +332,7 @@ def test_dependency_action_rejects_missing_lock_inputs(tmp_path, missing):
 def test_apply_syncs_only_locked_production_baseline_without_models(tmp_path):
     sync_memory = _load_sync_memory()
     (tmp_path / "pyproject.toml").write_text(
-        'dependencies = ["mcp>=1.29,<2"]\nmcp-server = []\n', encoding="utf-8"
+        'dependencies = ["mcp>=1.30,<2"]\nmcp-server = []\n', encoding="utf-8"
     )
     (tmp_path / "uv.lock").write_text('name = "mcp"\nmcp-server\n', encoding="utf-8")
     commands = []
@@ -364,7 +345,7 @@ def test_apply_syncs_only_locked_production_baseline_without_models(tmp_path):
         )
         return subprocess.CompletedProcess(command, 0, stdout, "")
 
-    result = sync_memory._dependency_action(root=tmp_path, apply=True, run_uv=run_uv)
+    result = sync_memory.dependency_action(root=tmp_path, apply=True, run_uv=run_uv)
 
     assert result["status"] == "changed"
     assert commands == [
@@ -398,7 +379,7 @@ def test_apply_syncs_only_locked_production_baseline_without_models(tmp_path):
 def test_dependency_commands_share_one_deadline(tmp_path):
     sync_memory = _load_sync_memory()
     (tmp_path / "pyproject.toml").write_text(
-        'dependencies = ["mcp>=1.29,<2"]\nmcp-server = []\n', encoding="utf-8"
+        'dependencies = ["mcp>=1.30,<2"]\nmcp-server = []\n', encoding="utf-8"
     )
     (tmp_path / "uv.lock").write_text('name = "mcp"\nmcp-server\n', encoding="utf-8")
     timeouts = []
@@ -418,7 +399,7 @@ def test_dependency_commands_share_one_deadline(tmp_path):
     # The budget only has to outlast three commands plus process overhead;
     # 0.2 s left no room on a loaded macOS runner and the action reported
     # "error" for a machine-speed reason, not a contract one.
-    result = sync_memory._dependency_action(
+    result = sync_memory.dependency_action(
         root=tmp_path,
         apply=True,
         run_uv=run_uv,
@@ -436,7 +417,7 @@ def test_uv_commands_use_process_tree_runner(tmp_path, monkeypatch):
     calls = []
     monkeypatch.setattr(
         sync_memory,
-        "_run_process_tree",
+        "run_process_tree",
         lambda command, **kwargs: calls.append((command, kwargs))
         or subprocess.CompletedProcess(command, 0, "", ""),
     )
@@ -455,7 +436,7 @@ def test_uv_commands_use_process_tree_runner(tmp_path, monkeypatch):
 def test_apply_rejects_stale_lock_even_when_mcp_is_installed(tmp_path):
     sync_memory = _load_sync_memory()
     (tmp_path / "pyproject.toml").write_text(
-        'dependencies = ["mcp>=1.29,<2"]\nmcp-server = []\n', encoding="utf-8"
+        'dependencies = ["mcp>=1.30,<2"]\nmcp-server = []\n', encoding="utf-8"
     )
     (tmp_path / "uv.lock").write_text('name = "mcp"\nmcp-server\n', encoding="utf-8")
     commands = []
@@ -463,7 +444,7 @@ def test_apply_rejects_stale_lock_even_when_mcp_is_installed(tmp_path):
         commands.append(command)
         return subprocess.CompletedProcess(command, 1, "", "stale lock")
 
-    result = sync_memory._dependency_action(root=tmp_path, apply=True, run_uv=run_uv)
+    result = sync_memory.dependency_action(root=tmp_path, apply=True, run_uv=run_uv)
 
     assert result["status"] == "error"
     assert result["details"]["lock"] == "stale"
@@ -474,7 +455,7 @@ def test_integration_config_state_is_reported_independently(tmp_path, monkeypatc
     sync_memory = _load_sync_memory()
     report = _doctor_report(integrations="degraded")
     monkeypatch.setattr(sync_memory.doctor, "run_doctor", lambda **kwargs: report)
-    monkeypatch.setattr(sync_memory, "_dependency_action", lambda **kwargs: _dependency_result())
+    monkeypatch.setattr(sync_memory, "dependency_action", lambda **kwargs: _dependency_result())
 
     result = sync_memory.run_sync(root=tmp_path, state_root=tmp_path, home=tmp_path)
     integration = next(action for action in result["actions"] if action["id"] == "integrations")
@@ -490,7 +471,7 @@ def test_transaction_queue_and_index_freshness_states_are_independent(tmp_path, 
         "run_doctor",
         lambda **kwargs: _doctor_report(transactions="error", queue="degraded", generation="degraded"),
     )
-    monkeypatch.setattr(sync_memory, "_dependency_action", lambda **kwargs: _dependency_result())
+    monkeypatch.setattr(sync_memory, "dependency_action", lambda **kwargs: _dependency_result())
 
     result = sync_memory.run_sync(root=tmp_path, state_root=tmp_path, home=tmp_path)
     statuses = _statuses(result)
@@ -507,7 +488,9 @@ def test_apply_leaves_prepared_transaction_and_flush_compile_queue_untouched(
     tmp_path, monkeypatch
 ):
     from markdown_transaction import MarkdownChange, MarkdownCoordinator
-    from memory_queue import MemoryQueue
+    from queue_core import (
+        MemoryQueue,
+    )
 
     sync_memory = _load_sync_memory()
     root, state, home = _build_vault(tmp_path)
@@ -529,7 +512,7 @@ def test_apply_leaves_prepared_transaction_and_flush_compile_queue_untouched(
     monkeypatch.setenv("LLM_WIKI_ROOT", str(root))
     monkeypatch.setenv("LLM_WIKI_STATE_ROOT", str(state))
     monkeypatch.setenv("MEMORY_LLM_PROVIDER", "fake")
-    monkeypatch.setattr(sync_memory, "_dependency_action", lambda **kwargs: _dependency_result())
+    monkeypatch.setattr(sync_memory, "dependency_action", lambda **kwargs: _dependency_result())
 
     report = sync_memory.run_sync(
         root=root,
@@ -576,7 +559,7 @@ def test_apply_repairs_only_runtime_and_keeps_diagnostics_idempotent(tmp_path, m
     sync_memory = _load_sync_memory()
     doctor = _RepairOnce()
     monkeypatch.setattr(sync_memory.doctor, "run_doctor", doctor)
-    monkeypatch.setattr(sync_memory, "_dependency_action", lambda **kwargs: _dependency_result())
+    monkeypatch.setattr(sync_memory, "dependency_action", lambda **kwargs: _dependency_result())
 
     first = sync_memory.run_sync(root=tmp_path, state_root=tmp_path, home=tmp_path, apply=True)
     second = sync_memory.run_sync(root=tmp_path, state_root=tmp_path, home=tmp_path, apply=True)
@@ -593,7 +576,6 @@ def test_apply_repairs_only_runtime_and_keeps_diagnostics_idempotent(tmp_path, m
 
 
 def test_process_runner_uses_posix_session_and_killpg(monkeypatch):
-    sync_memory = _load_sync_memory()
     calls = []
 
     class Process:
@@ -608,7 +590,7 @@ def test_process_runner_uses_posix_session_and_killpg(monkeypatch):
             return "", ""
 
     monkeypatch.setattr(
-        sync_memory,
+        process_tree,
         "os",
         SimpleNamespace(
             name="posix",
@@ -617,21 +599,20 @@ def test_process_runner_uses_posix_session_and_killpg(monkeypatch):
         ),
     )
     monkeypatch.setattr(
-        sync_memory.subprocess,
+        process_tree.subprocess,
         "Popen",
         lambda command, **kwargs: calls.append(("popen", kwargs)) or Process(),
     )
 
     with pytest.raises(subprocess.TimeoutExpired):
-        sync_memory._run_process_tree(["cmd"], timeout=0.1)
+        process_tree.run_process_tree(["cmd"], timeout=0.1)
 
     assert next(item for item in calls if item[0] == "popen")[1]["start_new_session"] is True
     assert ("killpg", 42) in calls
-    assert calls[-1] == ("communicate", sync_memory.PROCESS_CLEANUP_TIMEOUT_SECONDS)
+    assert calls[-1] == ("communicate", process_tree.PROCESS_CLEANUP_TIMEOUT_SECONDS)
 
 
 def test_process_runner_uses_windows_group_and_tree_termination(monkeypatch):
-    sync_memory = _load_sync_memory()
     calls = []
 
     class Process:
@@ -646,27 +627,26 @@ def test_process_runner_uses_windows_group_and_tree_termination(monkeypatch):
             self.returncode = 1
             return "", ""
 
-    monkeypatch.setattr(sync_memory, "os", SimpleNamespace(name="nt"))
+    monkeypatch.setattr(process_tree, "os", SimpleNamespace(name="nt"))
     monkeypatch.setattr(
-        sync_memory.subprocess,
+        process_tree.subprocess,
         "Popen",
         lambda command, **kwargs: calls.append(kwargs) or Process(),
     )
     monkeypatch.setattr(
-        sync_memory,
-        "_terminate_windows_tree",
+        process_tree,
+        "terminate_windows_tree",
         lambda process: calls.append(("terminate-tree", process.pid)),
     )
 
     with pytest.raises(subprocess.TimeoutExpired):
-        sync_memory._run_process_tree(["cmd"], timeout=0.1)
+        process_tree.run_process_tree(["cmd"], timeout=0.1)
 
-    assert calls[0]["creationflags"] & sync_memory.WINDOWS_NEW_PROCESS_GROUP
+    assert calls[0]["creationflags"] & process_tree.WINDOWS_NEW_PROCESS_GROUP
     assert ("terminate-tree", 42) in calls
 
 
 def test_windows_failed_taskkill_kills_direct_process_and_reports_cleanup_failure(monkeypatch):
-    sync_memory = _load_sync_memory()
     calls = []
 
     class Pipe:
@@ -689,21 +669,20 @@ def test_windows_failed_taskkill_kills_direct_process_and_reports_cleanup_failur
         def kill(self):
             calls.append("kill")
 
-    monkeypatch.setattr(sync_memory, "os", SimpleNamespace(name="nt"))
-    monkeypatch.setattr(sync_memory.subprocess, "Popen", lambda *args, **kwargs: Process())
-    monkeypatch.setattr(sync_memory, "_terminate_windows_tree", lambda process: "taskkill_failed")
+    monkeypatch.setattr(process_tree, "os", SimpleNamespace(name="nt"))
+    monkeypatch.setattr(process_tree.subprocess, "Popen", lambda *args, **kwargs: Process())
+    monkeypatch.setattr(process_tree, "terminate_windows_tree", lambda process: "taskkill_failed")
 
-    with pytest.raises(sync_memory.ProcessTreeTimeout) as error:
-        sync_memory._run_process_tree(["uv"], timeout=0.1)
+    with pytest.raises(process_tree.ProcessTreeTimeout) as error:
+        process_tree.run_process_tree(["uv"], timeout=0.1)
 
     assert error.value.cleanup_error == "taskkill_failed"
     assert "kill" in calls
     assert calls[-1][0] == "communicate"
-    assert calls[-1][1] <= sync_memory.PROCESS_CLEANUP_TIMEOUT_SECONDS
+    assert calls[-1][1] <= process_tree.PROCESS_CLEANUP_TIMEOUT_SECONDS
 
 
 def test_windows_taskkill_nonzero_return_is_bounded_failure(monkeypatch):
-    sync_memory = _load_sync_memory()
     calls = []
 
     class Terminator:
@@ -713,21 +692,20 @@ def test_windows_taskkill_nonzero_return_is_bounded_failure(monkeypatch):
             calls.append(("communicate", timeout))
             return "", ""
 
-    monkeypatch.setattr(sync_memory.subprocess, "Popen", lambda *args, **kwargs: Terminator())
+    monkeypatch.setattr(process_tree.subprocess, "Popen", lambda *args, **kwargs: Terminator())
     monkeypatch.setattr(
-        sync_memory,
+        process_tree,
         "os",
         SimpleNamespace(name="nt", environ={"SystemRoot": r"C:\Windows"}),
     )
 
-    result = sync_memory._terminate_windows_tree(SimpleNamespace(pid=42))
+    result = process_tree.terminate_windows_tree(SimpleNamespace(pid=42))
 
     assert result == "taskkill_failed"
-    assert calls == [("communicate", sync_memory.PROCESS_CLEANUP_TIMEOUT_SECONDS)]
+    assert calls == [("communicate", process_tree.PROCESS_CLEANUP_TIMEOUT_SECONDS)]
 
 
 def test_retained_descendant_pipes_are_closed_without_unbounded_communicate(monkeypatch):
-    sync_memory = _load_sync_memory()
     calls = []
 
     class Pipe:
@@ -755,28 +733,28 @@ def test_retained_descendant_pipes_are_closed_without_unbounded_communicate(monk
             self.returncode = 1
             return 1
 
-    monkeypatch.setattr(sync_memory, "os", SimpleNamespace(name="nt"))
-    monkeypatch.setattr(sync_memory.subprocess, "Popen", lambda *args, **kwargs: Process())
-    monkeypatch.setattr(sync_memory, "_terminate_windows_tree", lambda process: "taskkill_failed")
+    monkeypatch.setattr(process_tree, "os", SimpleNamespace(name="nt"))
+    monkeypatch.setattr(process_tree.subprocess, "Popen", lambda *args, **kwargs: Process())
+    monkeypatch.setattr(process_tree, "terminate_windows_tree", lambda process: "taskkill_failed")
 
-    with pytest.raises(sync_memory.ProcessTreeTimeout) as error:
-        sync_memory._run_process_tree(["uv"], timeout=0.1, capture_output=True)
+    with pytest.raises(process_tree.ProcessTreeTimeout) as error:
+        process_tree.run_process_tree(["uv"], timeout=0.1, capture_output=True)
 
     assert error.value.cleanup_error == "taskkill_failed;retained_pipes"
-    assert {("close", "stdout"), ("close", "stderr"), ("wait", sync_memory.PROCESS_CLEANUP_TIMEOUT_SECONDS)} <= set(calls)
+    assert {("close", "stdout"), ("close", "stderr"), ("wait", process_tree.PROCESS_CLEANUP_TIMEOUT_SECONDS)} <= set(calls)
     assert ("communicate", None) not in calls
 
 
 def test_dependency_timeout_exposes_cleanup_failure(tmp_path):
     sync_memory = _load_sync_memory()
     (tmp_path / "pyproject.toml").write_text(
-        'dependencies = ["mcp>=1.29,<2"]\nmcp-server = []\n', encoding="utf-8"
+        'dependencies = ["mcp>=1.30,<2"]\nmcp-server = []\n', encoding="utf-8"
     )
     (tmp_path / "uv.lock").write_text('name = "mcp"\nmcp-server\n', encoding="utf-8")
     def timed_out(*args, **kwargs):
-        raise sync_memory.ProcessTreeTimeout(["uv"], 1, cleanup_error="taskkill_failed")
+        raise process_tree.ProcessTreeTimeout(["uv"], 1, cleanup_error="taskkill_failed")
 
-    result = sync_memory._dependency_action(root=tmp_path, apply=False, run_uv=timed_out)
+    result = sync_memory.dependency_action(root=tmp_path, apply=False, run_uv=timed_out)
 
     assert result["status"] == "error"
     assert result["details"]["cleanup_error"] == "taskkill_failed"
@@ -785,11 +763,11 @@ def test_dependency_timeout_exposes_cleanup_failure(tmp_path):
 def test_dependency_action_reports_expired_deadline_without_starting_uv(tmp_path):
     sync_memory = _load_sync_memory()
     (tmp_path / "pyproject.toml").write_text(
-        'dependencies = ["mcp>=1.29,<2"]\nmcp-server = []\n', encoding="utf-8"
+        'dependencies = ["mcp>=1.30,<2"]\nmcp-server = []\n', encoding="utf-8"
     )
     (tmp_path / "uv.lock").write_text('name = "mcp"\nmcp-server\n', encoding="utf-8")
 
-    result = sync_memory._dependency_action(
+    result = sync_memory.dependency_action(
         root=tmp_path,
         apply=False,
         run_uv=lambda *args, **kwargs: pytest.fail("uv started after deadline"),
@@ -808,7 +786,7 @@ def test_apply_is_bounded_by_explicit_action_limit(tmp_path, monkeypatch):
         "run_doctor",
         lambda **kwargs: doctor_calls.append(kwargs) or _doctor_report(),
     )
-    monkeypatch.setattr(sync_memory, "_dependency_action", lambda **kwargs: _dependency_result())
+    monkeypatch.setattr(sync_memory, "dependency_action", lambda **kwargs: _dependency_result())
 
     report = sync_memory.run_sync(
         root=tmp_path,
@@ -830,7 +808,7 @@ def test_apply_never_writes_under_read_only_knowledge_tree(tmp_path, monkeypatch
     knowledge = root / "knowledge"
     before = _snapshot(knowledge)
     _set_tree_mode(knowledge, read_only=True)
-    monkeypatch.setattr(sync_memory, "_dependency_action", lambda **kwargs: _dependency_result())
+    monkeypatch.setattr(sync_memory, "dependency_action", lambda **kwargs: _dependency_result())
 
     try:
         report = sync_memory.run_sync(
@@ -1024,7 +1002,7 @@ $syncWarning = $false
 def test_generation_timeout_does_not_claim_nonexistent_continuation(tmp_path, monkeypatch):
     sync_memory = _load_sync_memory()
     monkeypatch.setattr(
-        sync_memory.doctor,
+        sync_memory.generation_maintenance,
         "run_generation_maintenance",
         lambda **kwargs: {
             "status": "deferred",
@@ -1034,7 +1012,7 @@ def test_generation_timeout_does_not_claim_nonexistent_continuation(tmp_path, mo
         },
     )
 
-    result = sync_memory._run_generation_builder(
+    result = sync_memory.run_generation_builder(
         root=tmp_path,
         state_root=tmp_path,
         timeout=30,

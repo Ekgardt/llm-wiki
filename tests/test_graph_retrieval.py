@@ -13,6 +13,7 @@ from corpus_snapshot import (
     SourceMetadata,
     SourceRecord,
 )
+from llm_wiki import runtime_roots
 from retrieval import candidates_to_legacy, expand_evidence_graph, retrieve
 
 
@@ -522,12 +523,13 @@ def test_generation_search_seals_graph_artifact_and_uses_same_generation(
     tmp_path, monkeypatch
 ) -> None:
     import evidence_graph
+    import generation_search
     import retrieval
-    import search_memory
     from repository_scope import resolve_repository_scope
 
     sealed: list[tuple[str, ...]] = []
     closed: list[str] = []
+    connection_seals = []
 
     class Connection:
         def close(self):
@@ -548,7 +550,7 @@ def test_generation_search_seals_graph_artifact_and_uses_same_generation(
 
     manifest = {
         "generation_id": "gen-22",
-        "repository_scope": resolve_repository_scope(search_memory.ROOT).as_dict(),
+        "repository_scope": resolve_repository_scope(runtime_roots.vault_root()).as_dict(),
         "vector_state": "absent",
         "artifacts": [
             {"path": "search.sqlite3", "size": 1, "sha256": "0" * 64},
@@ -564,23 +566,26 @@ def test_generation_search_seals_graph_artifact_and_uses_same_generation(
             return manifest
 
     monkeypatch.setattr(
-        search_memory,
-        "_generation_consumption_seal",
+        generation_search,
+        "generation_consumption_seal",
         lambda _catalog, _manifest, names: sealed.append(tuple(names)) or ("seal",),
     )
-    monkeypatch.setattr(search_memory, "_generation_consumption_unchanged", lambda *_a: True)
-    monkeypatch.setattr(search_memory, "_generation_connection", lambda *_a: Connection())
+    monkeypatch.setattr(generation_search, "generation_consumption_unchanged", lambda *_a: True)
+    def connection(*_args, seal=None):
+        connection_seals.append(seal)
+        return Connection()
+
+    monkeypatch.setattr(generation_search, "generation_connection", connection)
     monkeypatch.setattr(
-        search_memory,
-        "_generation_fts_search",
+        generation_search,
+        "generation_fts_search",
         lambda *_a, **_k: [
             _hit("seed", "seed.py", 1.0, retrieval_confidence="high", content="seed")
         ],
     )
     monkeypatch.setattr(evidence_graph, "EvidenceGraph", Graph)
     monkeypatch.setattr(
-        retrieval,
-        "expand_evidence_graph",
+        "llm_wiki.retrieval_graph.expand_evidence_graph",
         lambda graph, **_options: (
             _expansion("target", seed_id="seed", content="target"),
         ),
@@ -599,6 +604,7 @@ def test_generation_search_seals_graph_artifact_and_uses_same_generation(
     assert any("evidence.sqlite3" in names for names in sealed)
     assert next(row for row in rows if row["candidate_id"] == "target")["generation"] == "gen-22"
     assert closed == ["graph", "search"]
+    assert connection_seals == [("seal",)]
 
 
 def test_graph_expansion_honors_cancellation_before_query() -> None:

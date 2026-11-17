@@ -1,0 +1,668 @@
+{
+  "encoding": "o200k_base",
+  "max_tokens": 100000,
+  "serialization": "exact-duplicates/v1",
+  "files": [
+    "AGENTS.md",
+    "CLAUDE.md",
+    "docs/AGENTS.md",
+    "docs/STRUCTURE.md",
+    "docs/modules/compile-pipeline-apply-context.json",
+    "docs/modules/compile-pipeline-apply.md",
+    "docs/modules/context-bundle.md",
+    "docs/modules/context-records.md",
+    "docs/modules/context-tooling.md",
+    "docs/modules/formats.md",
+    "docs/modules/model-choice.md",
+    "docs/modules/product-structure.md",
+    "docs/modules/project-governance.md",
+    "docs/modules/test-support.md",
+    "rules/development-laws.md",
+    "scripts/__init__.py",
+    "scripts/llm_wiki/__init__.py",
+    "scripts/llm_wiki/compile_pipeline_apply.py",
+    "scripts/llm_wiki/context_bundle.py",
+    "scripts/llm_wiki/formats/__init__.py",
+    "tests/__init__.py",
+    "tests/conftest.py",
+    "tests/module_context.py",
+    "tests/module_context_paths.py",
+    "tests/module_interface.py",
+    "tests/module_interface_render.py",
+    "tests/module_qualification.py",
+    "tests/module_record_context.py",
+    "tests/module_records.py",
+    "tests/shared_fixtures.py",
+    "tests/slow_machine.py"
+  ],
+  "ownership": {
+    "files": [
+      "docs/modules/compile-pipeline-apply-context.json",
+      "docs/modules/compile-pipeline-apply.md",
+      "scripts/llm_wiki/compile_pipeline_apply.py"
+    ]
+  },
+  "qualified_dependencies": [
+    {
+      "provider": "scripts/claim_tree_manifest.py",
+      "names": [
+        "snapshot_claim_tree",
+        "snapshot_claim_tree_with_content"
+      ],
+      "contract_sha256": "82bcb45cf1bc7ebd630f1dd3226d2760a0d49930d90b26a1294fb09dc7ab639a",
+      "integration_tests": [
+        "tests/test_a_journal_is_readable_by_every_reader.py",
+        "tests/test_claim_ceiling_counts_only_claim_pages.py",
+        "tests/test_guardrails.py"
+      ]
+    },
+    {
+      "provider": "scripts/claims.py",
+      "names": [
+        "ClaimIndex",
+        "IndexedClaim",
+        "NormalizedClaim",
+        "claim_ledger_fingerprint",
+        "parse_claim_ledger"
+      ],
+      "contract_sha256": "3ef87421f7cbf07fa2070c5d81fb412b7003c7ecca2d881f655de82ca7903ed1",
+      "integration_tests": [
+        "tests/a_continuation_keeps_its_original_entry_helpers.py",
+        "tests/a_split_day_is_archived_with_every_part_helpers.py",
+        "tests/archive_daily_bagit_helpers.py",
+        "tests/compile_publication_checkpoint_helpers.py",
+        "tests/evidence_resolver_helpers.py",
+        "tests/native_compile_uses_whole_container_helpers.py",
+        "tests/test_a_blank_line_before_the_next_section.py",
+        "tests/test_a_committed_source_resolves_an_older_compile_plan.py",
+        "tests/test_compile_publication_completion.py",
+        "tests/test_compile_publication_execution.py",
+        "tests/test_compile_publication_writer_contention.py",
+        "tests/test_compile_receipt_evidence_preserves_distinct_claims.py",
+        "tests/test_compile_related_links_share_the_response_budget.py",
+        "tests/test_doctor_reads_the_supported_daily_size.py",
+        "tests/test_generic_breadcrumb_is_not_a_native_event.py",
+        "tests/test_the_vault_log_rotates_before_its_cap.py",
+        "tests/test_verified_claims_share_the_compile_budget.py"
+      ]
+    },
+    {
+      "provider": "scripts/compile_receipts.py",
+      "names": [
+        "SourceSnapshot",
+        "all_present_parts",
+        "parts_with_digest",
+        "receipt_predicate",
+        "require_compile_active"
+      ],
+      "contract_sha256": "1dcf34c56cb9b084f3567c4f854ed967683398e4823a36ddab15747e9123a626",
+      "integration_tests": [
+        "tests/a_continuation_keeps_its_original_entry_helpers.py",
+        "tests/a_split_day_is_archived_with_every_part_helpers.py",
+        "tests/archive_daily_bagit_helpers.py",
+        "tests/compile_publication_checkpoint_helpers.py",
+        "tests/evidence_resolver_helpers.py",
+        "tests/native_compile_uses_whole_container_helpers.py",
+        "tests/test_a_blank_line_before_the_next_section.py",
+        "tests/test_a_committed_source_resolves_an_older_compile_plan.py",
+        "tests/test_compile_publication_completion.py",
+        "tests/test_compile_publication_execution.py",
+        "tests/test_compile_publication_writer_contention.py",
+        "tests/test_compile_receipt_evidence_preserves_distinct_claims.py",
+        "tests/test_compile_related_links_share_the_response_budget.py",
+        "tests/test_doctor_reads_the_supported_daily_size.py",
+        "tests/test_generic_breadcrumb_is_not_a_native_event.py",
+        "tests/test_the_vault_log_rotates_before_its_cap.py",
+        "tests/test_verified_claims_share_the_compile_budget.py"
+      ]
+    },
+    {
+      "provider": "scripts/contradiction_pipeline.py",
+      "names": [
+        "ContradictionPipeline",
+        "StaleLifecycleTarget",
+        "default_secondary_search",
+        "supersede_claims_in_page"
+      ],
+      "contract_sha256": "40a5ee90bed7a1fb25bb9054ae2d43100ec07b9607b5db59be22cdfa2836b954",
+      "integration_tests": [
+        "tests/a_continuation_keeps_its_original_entry_helpers.py",
+        "tests/a_split_day_is_archived_with_every_part_helpers.py",
+        "tests/archive_daily_bagit_helpers.py",
+        "tests/compile_publication_checkpoint_helpers.py",
+        "tests/evidence_resolver_helpers.py",
+        "tests/native_compile_uses_whole_container_helpers.py",
+        "tests/test_a_blank_line_before_the_next_section.py",
+        "tests/test_a_committed_source_resolves_an_older_compile_plan.py",
+        "tests/test_compile_publication_completion.py",
+        "tests/test_compile_publication_execution.py",
+        "tests/test_compile_publication_writer_contention.py",
+        "tests/test_compile_receipt_evidence_preserves_distinct_claims.py",
+        "tests/test_compile_related_links_share_the_response_budget.py",
+        "tests/test_doctor_reads_the_supported_daily_size.py",
+        "tests/test_generic_breadcrumb_is_not_a_native_event.py",
+        "tests/test_the_vault_log_rotates_before_its_cap.py",
+        "tests/test_verified_claims_share_the_compile_budget.py"
+      ]
+    },
+    {
+      "provider": "scripts/evidence_resolver.py",
+      "names": [
+        "MAX_DAILY_PART_BYTES"
+      ],
+      "contract_sha256": "2229315e10eb1a00417983157ec35174084bcf73a4d8967c0d755ecba66b9117",
+      "integration_tests": [
+        "tests/a_continuation_keeps_its_original_entry_helpers.py",
+        "tests/a_split_day_is_archived_with_every_part_helpers.py",
+        "tests/archive_daily_bagit_helpers.py",
+        "tests/compile_publication_checkpoint_helpers.py",
+        "tests/evidence_resolver_helpers.py",
+        "tests/native_compile_uses_whole_container_helpers.py",
+        "tests/test_a_blank_line_before_the_next_section.py",
+        "tests/test_a_committed_source_resolves_an_older_compile_plan.py",
+        "tests/test_compile_publication_completion.py",
+        "tests/test_compile_publication_execution.py",
+        "tests/test_compile_publication_writer_contention.py",
+        "tests/test_compile_receipt_evidence_preserves_distinct_claims.py",
+        "tests/test_compile_related_links_share_the_response_budget.py",
+        "tests/test_doctor_reads_the_supported_daily_size.py",
+        "tests/test_generic_breadcrumb_is_not_a_native_event.py",
+        "tests/test_the_vault_log_rotates_before_its_cap.py",
+        "tests/test_verified_claims_share_the_compile_budget.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/compile_pipeline_base.py",
+      "names": [
+        "COMPILE_PUBLICATION_ATTEMPTS",
+        "LOG_ARCHIVE_DIRECTORY",
+        "LOG_ROTATE_BYTES",
+        "MAX_AFTER_IMAGE_BYTES",
+        "MAX_LOG_BYTES"
+      ],
+      "contract_sha256": "1ce039c66e07e1056554751dbaf9a7fa3a48f23a00abd6222d7fa51a7d5946bf",
+      "integration_tests": [
+        "tests/a_continuation_keeps_its_original_entry_helpers.py",
+        "tests/a_split_day_is_archived_with_every_part_helpers.py",
+        "tests/archive_daily_bagit_helpers.py",
+        "tests/compile_publication_checkpoint_helpers.py",
+        "tests/evidence_resolver_helpers.py",
+        "tests/native_compile_uses_whole_container_helpers.py",
+        "tests/test_a_blank_line_before_the_next_section.py",
+        "tests/test_a_committed_source_resolves_an_older_compile_plan.py",
+        "tests/test_compile_publication_completion.py",
+        "tests/test_compile_publication_execution.py",
+        "tests/test_compile_publication_writer_contention.py",
+        "tests/test_compile_receipt_evidence_preserves_distinct_claims.py",
+        "tests/test_compile_related_links_share_the_response_budget.py",
+        "tests/test_doctor_reads_the_supported_daily_size.py",
+        "tests/test_generic_breadcrumb_is_not_a_native_event.py",
+        "tests/test_the_vault_log_rotates_before_its_cap.py",
+        "tests/test_verified_claims_share_the_compile_budget.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/compile_pipeline_batches.py",
+      "names": [
+        "read_compile_receipt"
+      ],
+      "contract_sha256": "e975f57d97018b89850fa9332655036b5256ecbb7fda9cad520a05fa947662d1",
+      "integration_tests": [
+        "tests/a_continuation_keeps_its_original_entry_helpers.py",
+        "tests/a_split_day_is_archived_with_every_part_helpers.py",
+        "tests/archive_daily_bagit_helpers.py",
+        "tests/compile_publication_checkpoint_helpers.py",
+        "tests/evidence_resolver_helpers.py",
+        "tests/native_compile_uses_whole_container_helpers.py",
+        "tests/test_a_blank_line_before_the_next_section.py",
+        "tests/test_a_committed_source_resolves_an_older_compile_plan.py",
+        "tests/test_compile_publication_completion.py",
+        "tests/test_compile_publication_execution.py",
+        "tests/test_compile_publication_writer_contention.py",
+        "tests/test_compile_receipt_evidence_preserves_distinct_claims.py",
+        "tests/test_compile_related_links_share_the_response_budget.py",
+        "tests/test_doctor_reads_the_supported_daily_size.py",
+        "tests/test_generic_breadcrumb_is_not_a_native_event.py",
+        "tests/test_the_vault_log_rotates_before_its_cap.py",
+        "tests/test_verified_claims_share_the_compile_budget.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/compile_pipeline_claims.py",
+      "names": [
+        "append_log_bytes",
+        "render_page",
+        "with_claim_ledger"
+      ],
+      "contract_sha256": "5a5d11ce14d350599dad7fdd07b96e95769e21724a42ab7f5cfd87239f768b4f",
+      "integration_tests": [
+        "tests/a_continuation_keeps_its_original_entry_helpers.py",
+        "tests/a_split_day_is_archived_with_every_part_helpers.py",
+        "tests/archive_daily_bagit_helpers.py",
+        "tests/compile_publication_checkpoint_helpers.py",
+        "tests/evidence_resolver_helpers.py",
+        "tests/native_compile_uses_whole_container_helpers.py",
+        "tests/test_a_blank_line_before_the_next_section.py",
+        "tests/test_a_committed_source_resolves_an_older_compile_plan.py",
+        "tests/test_compile_publication_completion.py",
+        "tests/test_compile_publication_execution.py",
+        "tests/test_compile_publication_writer_contention.py",
+        "tests/test_compile_receipt_evidence_preserves_distinct_claims.py",
+        "tests/test_compile_related_links_share_the_response_budget.py",
+        "tests/test_doctor_reads_the_supported_daily_size.py",
+        "tests/test_generic_breadcrumb_is_not_a_native_event.py",
+        "tests/test_the_vault_log_rotates_before_its_cap.py",
+        "tests/test_verified_claims_share_the_compile_budget.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/compile_pipeline_operations.py",
+      "names": [
+        "target_snapshot"
+      ],
+      "contract_sha256": "cde45b00deeca1ac5a81fa0572dd3b386d3aff4b2f6457454f815dbff3233a95",
+      "integration_tests": [
+        "tests/a_continuation_keeps_its_original_entry_helpers.py",
+        "tests/a_split_day_is_archived_with_every_part_helpers.py",
+        "tests/archive_daily_bagit_helpers.py",
+        "tests/compile_publication_checkpoint_helpers.py",
+        "tests/evidence_resolver_helpers.py",
+        "tests/native_compile_uses_whole_container_helpers.py",
+        "tests/test_a_blank_line_before_the_next_section.py",
+        "tests/test_a_committed_source_resolves_an_older_compile_plan.py",
+        "tests/test_compile_publication_completion.py",
+        "tests/test_compile_publication_execution.py",
+        "tests/test_compile_publication_writer_contention.py",
+        "tests/test_compile_receipt_evidence_preserves_distinct_claims.py",
+        "tests/test_compile_related_links_share_the_response_budget.py",
+        "tests/test_doctor_reads_the_supported_daily_size.py",
+        "tests/test_generic_breadcrumb_is_not_a_native_event.py",
+        "tests/test_the_vault_log_rotates_before_its_cap.py",
+        "tests/test_verified_claims_share_the_compile_budget.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/compile_pipeline_prompts.py",
+      "names": [
+        "require_ready_compile_batch",
+        "validate_semantic_operation"
+      ],
+      "contract_sha256": "82385a31e10fc9b8e877b27bf0c535cdcf23e9e59db85411b7a0527345679f03",
+      "integration_tests": [
+        "tests/a_continuation_keeps_its_original_entry_helpers.py",
+        "tests/a_split_day_is_archived_with_every_part_helpers.py",
+        "tests/archive_daily_bagit_helpers.py",
+        "tests/compile_publication_checkpoint_helpers.py",
+        "tests/evidence_resolver_helpers.py",
+        "tests/native_compile_uses_whole_container_helpers.py",
+        "tests/test_a_blank_line_before_the_next_section.py",
+        "tests/test_a_committed_source_resolves_an_older_compile_plan.py",
+        "tests/test_compile_publication_completion.py",
+        "tests/test_compile_publication_execution.py",
+        "tests/test_compile_publication_writer_contention.py",
+        "tests/test_compile_receipt_evidence_preserves_distinct_claims.py",
+        "tests/test_compile_related_links_share_the_response_budget.py",
+        "tests/test_doctor_reads_the_supported_daily_size.py",
+        "tests/test_generic_breadcrumb_is_not_a_native_event.py",
+        "tests/test_the_vault_log_rotates_before_its_cap.py",
+        "tests/test_verified_claims_share_the_compile_budget.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/compile_pipeline_receipts.py",
+      "names": [
+        "bound_evidence",
+        "companion_receipt_precondition",
+        "compile_writer_gate",
+        "context_dispositions",
+        "context_source_for",
+        "operation_content",
+        "preflight_context_receipts",
+        "receipt_bytes",
+        "receipt_v4_bytes",
+        "require_apply_arguments",
+        "require_current_compile_targets",
+        "utc_now",
+        "v4_manifest",
+        "v4_source_descriptor"
+      ],
+      "contract_sha256": "60854d0fcf87b53e6fee13da0d89046e931fbeb081d336f213a25369d008751a",
+      "integration_tests": [
+        "tests/a_continuation_keeps_its_original_entry_helpers.py",
+        "tests/a_split_day_is_archived_with_every_part_helpers.py",
+        "tests/archive_daily_bagit_helpers.py",
+        "tests/compile_publication_checkpoint_helpers.py",
+        "tests/evidence_resolver_helpers.py",
+        "tests/native_compile_uses_whole_container_helpers.py",
+        "tests/test_a_blank_line_before_the_next_section.py",
+        "tests/test_a_committed_source_resolves_an_older_compile_plan.py",
+        "tests/test_compile_publication_completion.py",
+        "tests/test_compile_publication_execution.py",
+        "tests/test_compile_publication_writer_contention.py",
+        "tests/test_compile_receipt_evidence_preserves_distinct_claims.py",
+        "tests/test_compile_related_links_share_the_response_budget.py",
+        "tests/test_doctor_reads_the_supported_daily_size.py",
+        "tests/test_generic_breadcrumb_is_not_a_native_event.py",
+        "tests/test_the_vault_log_rotates_before_its_cap.py",
+        "tests/test_verified_claims_share_the_compile_budget.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/compile_pipeline_sources.py",
+      "names": [
+        "CompileApplyResult",
+        "CompileBatch",
+        "CompileInputs",
+        "TargetSnapshot",
+        "compile_source_snapshot",
+        "pending_daily_parts"
+      ],
+      "contract_sha256": "d8cf67a556d17a80caeaab5c09d25a330910368eff49a96263436ba5343a0281",
+      "integration_tests": [
+        "tests/a_continuation_keeps_its_original_entry_helpers.py",
+        "tests/a_split_day_is_archived_with_every_part_helpers.py",
+        "tests/archive_daily_bagit_helpers.py",
+        "tests/compile_publication_checkpoint_helpers.py",
+        "tests/evidence_resolver_helpers.py",
+        "tests/native_compile_uses_whole_container_helpers.py",
+        "tests/test_a_blank_line_before_the_next_section.py",
+        "tests/test_a_committed_source_resolves_an_older_compile_plan.py",
+        "tests/test_compile_publication_completion.py",
+        "tests/test_compile_publication_execution.py",
+        "tests/test_compile_publication_writer_contention.py",
+        "tests/test_compile_receipt_evidence_preserves_distinct_claims.py",
+        "tests/test_compile_related_links_share_the_response_budget.py",
+        "tests/test_doctor_reads_the_supported_daily_size.py",
+        "tests/test_generic_breadcrumb_is_not_a_native_event.py",
+        "tests/test_the_vault_log_rotates_before_its_cap.py",
+        "tests/test_verified_claims_share_the_compile_budget.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/compile_receipt_authority.py",
+      "names": [
+        "MAX_RECEIPT_BYTES"
+      ],
+      "contract_sha256": "e3ea23b37f410b2e9e052eed1e91b387bd7b4336018753bec385258c4a95cf79",
+      "integration_tests": [
+        "tests/a_continuation_keeps_its_original_entry_helpers.py",
+        "tests/a_split_day_is_archived_with_every_part_helpers.py",
+        "tests/archive_daily_bagit_helpers.py",
+        "tests/compile_publication_checkpoint_helpers.py",
+        "tests/evidence_resolver_helpers.py",
+        "tests/native_compile_uses_whole_container_helpers.py",
+        "tests/test_a_blank_line_before_the_next_section.py",
+        "tests/test_a_committed_source_resolves_an_older_compile_plan.py",
+        "tests/test_compile_publication_completion.py",
+        "tests/test_compile_publication_execution.py",
+        "tests/test_compile_publication_writer_contention.py",
+        "tests/test_compile_receipt_evidence_preserves_distinct_claims.py",
+        "tests/test_compile_related_links_share_the_response_budget.py",
+        "tests/test_doctor_reads_the_supported_daily_size.py",
+        "tests/test_generic_breadcrumb_is_not_a_native_event.py",
+        "tests/test_the_vault_log_rotates_before_its_cap.py",
+        "tests/test_verified_claims_share_the_compile_budget.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/formats/canonical.py",
+      "names": [
+        "canonical_json_bytes",
+        "sha256_bytes"
+      ],
+      "contract_sha256": "2e42a7aefcb66ac2515f6665a03feae34e6f7bad4807787a789ce031f9f3a9c1",
+      "integration_tests": [
+        "tests/modules/formats/test_primitives.py",
+        "tests/modules/formats/test_queue_payload.py",
+        "tests/modules/pyright_configuration/test_configuration.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/formats/receipts.py",
+      "names": [
+        "compile_context_source_identity",
+        "compile_operation_id"
+      ],
+      "contract_sha256": "bba2ac8548690a8513b3e43f5f750746775b13be3e7a562bcd47d8bee8b45cdd",
+      "integration_tests": [
+        "tests/modules/formats/test_receipts.py",
+        "tests/test_compile_hardening.py",
+        "tests/test_native_compile_uses_whole_container.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/formats/source.py",
+      "names": [
+        "SourceDescriptor"
+      ],
+      "contract_sha256": "9c77bf1a84b6d30e32a7ed40ced285f21295eadb207b4af4d48c1152914388ca",
+      "integration_tests": [
+        "tests/modules/formats/test_primitives.py",
+        "tests/test_reliable_memory.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/generation_catalog_store.py",
+      "names": [
+        "GenerationCatalog"
+      ],
+      "contract_sha256": "b18194ebe04bf988b4474379fcb5243516550d43b745a00eaed1453f7844c983",
+      "integration_tests": [
+        "tests/test_a_blocked_task_has_a_way_back.py",
+        "tests/test_a_build_in_flight_is_not_an_orphan.py",
+        "tests/test_a_capacity_refusal_does_not_corrupt_a_generation.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/model_choice.py",
+      "names": [
+        "using_root"
+      ],
+      "contract_sha256": "d45f2655cb61963e77617d1dfd7d617b134ad77cc770b59b335d0856e5d65019",
+      "integration_tests": [
+        "tests/a_continuation_keeps_its_original_entry_helpers.py",
+        "tests/a_split_day_is_archived_with_every_part_helpers.py",
+        "tests/archive_daily_bagit_helpers.py",
+        "tests/compile_publication_checkpoint_helpers.py",
+        "tests/evidence_resolver_helpers.py",
+        "tests/native_compile_uses_whole_container_helpers.py",
+        "tests/test_a_blank_line_before_the_next_section.py",
+        "tests/test_a_committed_source_resolves_an_older_compile_plan.py",
+        "tests/test_compile_publication_completion.py",
+        "tests/test_compile_publication_execution.py",
+        "tests/test_compile_publication_writer_contention.py",
+        "tests/test_compile_receipt_evidence_preserves_distinct_claims.py",
+        "tests/test_compile_related_links_share_the_response_budget.py",
+        "tests/test_doctor_reads_the_supported_daily_size.py",
+        "tests/test_generic_breadcrumb_is_not_a_native_event.py",
+        "tests/test_the_vault_log_rotates_before_its_cap.py",
+        "tests/test_verified_claims_share_the_compile_budget.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/runtime_roots.py",
+      "names": [
+        "index_file",
+        "vault_root"
+      ],
+      "contract_sha256": "4a4180231b218b8c89cfb204414a696dd6ce8303a32b19d4a729aad2e1e84792",
+      "integration_tests": [
+        "tests/test_a_continuation_keeps_its_original_entry.py",
+        "tests/test_a_prompt_checkpoint_does_not_outwait_its_host.py",
+        "tests/test_a_session_marker_survives_a_busy_writer.py"
+      ]
+    },
+    {
+      "provider": "scripts/markdown_transaction.py",
+      "names": [
+        "MarkdownChange",
+        "MarkdownCoordinator",
+        "TransactionFailure"
+      ],
+      "contract_sha256": "54965060277ca45074d2aa0fb784e6d2a315ad770daf369db0cd1a0c1978589a",
+      "integration_tests": [
+        "tests/a_continuation_keeps_its_original_entry_helpers.py",
+        "tests/a_split_day_is_archived_with_every_part_helpers.py",
+        "tests/archive_daily_bagit_helpers.py",
+        "tests/compile_publication_checkpoint_helpers.py",
+        "tests/evidence_resolver_helpers.py",
+        "tests/native_compile_uses_whole_container_helpers.py",
+        "tests/test_a_blank_line_before_the_next_section.py",
+        "tests/test_a_committed_source_resolves_an_older_compile_plan.py",
+        "tests/test_compile_publication_completion.py",
+        "tests/test_compile_publication_execution.py",
+        "tests/test_compile_publication_writer_contention.py",
+        "tests/test_compile_receipt_evidence_preserves_distinct_claims.py",
+        "tests/test_compile_related_links_share_the_response_budget.py",
+        "tests/test_doctor_reads_the_supported_daily_size.py",
+        "tests/test_generic_breadcrumb_is_not_a_native_event.py",
+        "tests/test_the_vault_log_rotates_before_its_cap.py",
+        "tests/test_verified_claims_share_the_compile_budget.py"
+      ]
+    },
+    {
+      "provider": "scripts/operational_ownership.py",
+      "names": [
+        "OwnerLease"
+      ],
+      "contract_sha256": "7e48dfb05434c2c448a04b79b773b33da0786c3efbd0e2f3c100df849b1f3d0d",
+      "integration_tests": [
+        "tests/a_continuation_keeps_its_original_entry_helpers.py",
+        "tests/a_split_day_is_archived_with_every_part_helpers.py",
+        "tests/archive_daily_bagit_helpers.py",
+        "tests/compile_publication_checkpoint_helpers.py",
+        "tests/evidence_resolver_helpers.py",
+        "tests/native_compile_uses_whole_container_helpers.py",
+        "tests/test_a_blank_line_before_the_next_section.py",
+        "tests/test_a_committed_source_resolves_an_older_compile_plan.py",
+        "tests/test_compile_publication_completion.py",
+        "tests/test_compile_publication_execution.py",
+        "tests/test_compile_publication_writer_contention.py",
+        "tests/test_compile_receipt_evidence_preserves_distinct_claims.py",
+        "tests/test_compile_related_links_share_the_response_budget.py",
+        "tests/test_doctor_reads_the_supported_daily_size.py",
+        "tests/test_generic_breadcrumb_is_not_a_native_event.py",
+        "tests/test_the_vault_log_rotates_before_its_cap.py",
+        "tests/test_verified_claims_share_the_compile_budget.py"
+      ]
+    },
+    {
+      "provider": "scripts/queue_core.py",
+      "names": [
+        "active_or_legacy_memory_queue"
+      ],
+      "contract_sha256": "5fbd5ab2089d4430890ba7c20d902469debeb43890daaad0a754596413a4f51b",
+      "integration_tests": [
+        "tests/a_continuation_keeps_its_original_entry_helpers.py",
+        "tests/a_split_day_is_archived_with_every_part_helpers.py",
+        "tests/archive_daily_bagit_helpers.py",
+        "tests/compile_publication_checkpoint_helpers.py",
+        "tests/evidence_resolver_helpers.py",
+        "tests/native_compile_uses_whole_container_helpers.py",
+        "tests/test_a_blank_line_before_the_next_section.py",
+        "tests/test_a_committed_source_resolves_an_older_compile_plan.py",
+        "tests/test_compile_publication_completion.py",
+        "tests/test_compile_publication_execution.py",
+        "tests/test_compile_publication_writer_contention.py",
+        "tests/test_compile_receipt_evidence_preserves_distinct_claims.py",
+        "tests/test_compile_related_links_share_the_response_budget.py",
+        "tests/test_doctor_reads_the_supported_daily_size.py",
+        "tests/test_generic_breadcrumb_is_not_a_native_event.py",
+        "tests/test_the_vault_log_rotates_before_its_cap.py",
+        "tests/test_verified_claims_share_the_compile_budget.py"
+      ]
+    },
+    {
+      "provider": "scripts/rebuild_memory_index.py",
+      "names": [
+        "MAX_INDEX_BYTES",
+        "build_index_bytes",
+        "published_paths"
+      ],
+      "contract_sha256": "24ca7c09fe641ee9cb154f435dc5e311803b646a5ea449b71d532801497185bf",
+      "integration_tests": [
+        "tests/a_continuation_keeps_its_original_entry_helpers.py",
+        "tests/a_split_day_is_archived_with_every_part_helpers.py",
+        "tests/archive_daily_bagit_helpers.py",
+        "tests/compile_publication_checkpoint_helpers.py",
+        "tests/evidence_resolver_helpers.py",
+        "tests/native_compile_uses_whole_container_helpers.py",
+        "tests/test_a_blank_line_before_the_next_section.py",
+        "tests/test_a_committed_source_resolves_an_older_compile_plan.py",
+        "tests/test_compile_publication_completion.py",
+        "tests/test_compile_publication_execution.py",
+        "tests/test_compile_publication_writer_contention.py",
+        "tests/test_compile_receipt_evidence_preserves_distinct_claims.py",
+        "tests/test_compile_related_links_share_the_response_budget.py",
+        "tests/test_doctor_reads_the_supported_daily_size.py",
+        "tests/test_generic_breadcrumb_is_not_a_native_event.py",
+        "tests/test_the_vault_log_rotates_before_its_cap.py",
+        "tests/test_verified_claims_share_the_compile_budget.py"
+      ]
+    },
+    {
+      "provider": "scripts/reliable_memory.py",
+      "names": [
+        "validate_state_root"
+      ],
+      "contract_sha256": "8680515cd873056a7c8a36e0057d91f2f83f23c48841263697676ff91f7ff964",
+      "integration_tests": [
+        "tests/a_continuation_keeps_its_original_entry_helpers.py",
+        "tests/a_split_day_is_archived_with_every_part_helpers.py",
+        "tests/archive_daily_bagit_helpers.py",
+        "tests/compile_publication_checkpoint_helpers.py",
+        "tests/evidence_resolver_helpers.py",
+        "tests/native_compile_uses_whole_container_helpers.py",
+        "tests/test_a_blank_line_before_the_next_section.py",
+        "tests/test_a_committed_source_resolves_an_older_compile_plan.py",
+        "tests/test_compile_publication_completion.py",
+        "tests/test_compile_publication_execution.py",
+        "tests/test_compile_publication_writer_contention.py",
+        "tests/test_compile_receipt_evidence_preserves_distinct_claims.py",
+        "tests/test_compile_related_links_share_the_response_budget.py",
+        "tests/test_doctor_reads_the_supported_daily_size.py",
+        "tests/test_generic_breadcrumb_is_not_a_native_event.py",
+        "tests/test_the_vault_log_rotates_before_its_cap.py",
+        "tests/test_verified_claims_share_the_compile_budget.py"
+      ]
+    },
+    {
+      "provider": "scripts/repository_scope.py",
+      "names": [
+        "sanitized_git_environment"
+      ],
+      "contract_sha256": "fd550ae20761afad50b37fa3a71044a162485b0e4d4b3e2af9b5b22e143c2bec",
+      "integration_tests": [
+        "tests/a_continuation_keeps_its_original_entry_helpers.py",
+        "tests/a_split_day_is_archived_with_every_part_helpers.py",
+        "tests/archive_daily_bagit_helpers.py",
+        "tests/compile_publication_checkpoint_helpers.py",
+        "tests/evidence_resolver_helpers.py",
+        "tests/native_compile_uses_whole_container_helpers.py",
+        "tests/test_a_blank_line_before_the_next_section.py",
+        "tests/test_a_committed_source_resolves_an_older_compile_plan.py",
+        "tests/test_compile_publication_completion.py",
+        "tests/test_compile_publication_execution.py",
+        "tests/test_compile_publication_writer_contention.py",
+        "tests/test_compile_receipt_evidence_preserves_distinct_claims.py",
+        "tests/test_compile_related_links_share_the_response_budget.py",
+        "tests/test_doctor_reads_the_supported_daily_size.py",
+        "tests/test_generic_breadcrumb_is_not_a_native_event.py",
+        "tests/test_the_vault_log_rotates_before_its_cap.py",
+        "tests/test_verified_claims_share_the_compile_budget.py"
+      ]
+    },
+    {
+      "provider": "scripts/vault_log.py",
+      "names": [
+        "vault_log_path"
+      ],
+      "contract_sha256": "7b821b683156be07052675b491ca6624f66a752aa0fb02f5458024890c33685b",
+      "integration_tests": [
+        "tests/modules/vault_editorial/test_policy.py",
+        "tests/modules/vault_editorial/test_publication.py",
+        "tests/test_the_vault_log_is_private.py"
+      ]
+    }
+  ]
+}

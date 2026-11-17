@@ -1,0 +1,22 @@
+{
+  "baseline": "ad59363f",
+  "python": "3.12.3 (main, Aug 31 2026, 10:18:26) [GCC 13.3.0]",
+  "sqlite": "3.45.1",
+  "lines": 888,
+  "tokens": 8534,
+  "counts": {
+    "QUEUE_V3_TABLE_SQL": 22,
+    "QUEUE_V3_INDEX_SQL": 5,
+    "QUEUE_V3_TRIGGER_SQL": 35
+  },
+  "definition_sha256": {
+    "QUEUE_V3_TABLE_SQL": "ec11d59913fd0bf3c97b2ce979b17f36b3e1448f827b609885e5c7c745e58433",
+    "QUEUE_V3_INDEX_SQL": "15752552d67174d7d39cd9db71748d9a06f66a21d9e411a2e170e20c9b36ff79",
+    "QUEUE_V3_TRIGGER_SQL": "c1dd689033cdd983b171d138c5afc31be7bf52de6341cadf747d27fdaf3acfdf"
+  },
+  "queue_schema_sha256": "9384cbb91d1983761f1e803c4ff208108ec20fd07d8a8856263f112521695912",
+  "compile_schema_sha256": "13fff6ff8603a350c3ec528edf3dc4981a9a04fde8fbff013d3d76f66437844d",
+  "external_names": [
+    "tuple"
+  ]
+}

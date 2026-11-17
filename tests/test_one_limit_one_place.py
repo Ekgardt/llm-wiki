@@ -13,6 +13,8 @@ from collections import defaultdict
 from pathlib import Path
 from typing import NamedTuple
 
+from tests.script_sources import script_files
+
 SCRIPTS = Path(__file__).resolve().parent.parent / "scripts"
 LIMIT = re.compile(
     r"^(?P<name>[A-Z][A-Z0-9_]{2,})(?:\s*:\s*[^=]+)?\s*=\s*"
@@ -47,7 +49,7 @@ def _limits(path: Path) -> list[Limit]:
 
 
 def _all_limits() -> list[Limit]:
-    return [limit for path in sorted(SCRIPTS.glob("*.py")) for limit in _limits(path)]
+    return [limit for path in script_files() for limit in _limits(path)]
 
 
 def _grouped(limits: list[Limit]) -> dict[str, list[Limit]]:

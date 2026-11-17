@@ -16,7 +16,7 @@ SCRIPTS_DIR = Path(__file__).resolve().parents[1] / "scripts"
 if str(SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_DIR))
 
-import memory_queue  # noqa: E402
+import queue_core  # noqa: E402
 
 
 def _long_processor(task: dict) -> bool:
@@ -30,8 +30,8 @@ def test_the_child_is_stopped_soon_after_the_lease_is_lost():
     def lease_lost() -> bool:
         return time.monotonic() - started > 3.0
 
-    with pytest.raises(memory_queue.QueueOperationError, match="lease_lost"):
-        memory_queue._run_processor_child(_long_processor, {"payload": {"seconds": 120}}, 90.0, lease_lost=lease_lost)
+    with pytest.raises(queue_core.QueueOperationError, match="lease_lost"):
+        queue_core.run_processor_child(_long_processor, {"payload": {"seconds": 120}}, 90.0, lease_lost=lease_lost)
 
     assert time.monotonic() - started < 30
 
@@ -40,9 +40,9 @@ def test_only_the_child_runner_is_made_interruptible():
     class Heartbeat:
         error = None
 
-    injected = memory_queue._run_processor_inline
+    injected = queue_core.run_processor_inline
 
     assert (
-        memory_queue._interruptible(injected, Heartbeat()) is injected,
-        memory_queue._interruptible(memory_queue._run_processor_child, Heartbeat()).keywords.keys() == {"lease_lost"},
+        queue_core.interruptible(injected, Heartbeat()) is injected,
+        queue_core.interruptible(queue_core.run_processor_child, Heartbeat()).keywords.keys() == {"lease_lost", "cancelled"},
     ) == (True, True)

@@ -1,0 +1,380 @@
+{
+  "encoding": "o200k_base",
+  "max_tokens": 100000,
+  "serialization": "exact-duplicates/v1",
+  "files": [
+    "AGENTS.md",
+    "CLAUDE.md",
+    "docs/AGENTS.md",
+    "docs/STRUCTURE.md",
+    "docs/modules/bounded-io.md",
+    "docs/modules/context-bundle.md",
+    "docs/modules/context-records.md",
+    "docs/modules/context-tooling.md",
+    "docs/modules/formats.md",
+    "docs/modules/model-choice.md",
+    "docs/modules/path-ancestry.md",
+    "docs/modules/product-structure.md",
+    "docs/modules/project-governance.md",
+    "docs/modules/reliable-memory.md",
+    "docs/modules/sqlite-io.md",
+    "docs/modules/test-module-legacy-aliases-context.json",
+    "docs/modules/test-module-legacy-aliases.md",
+    "docs/modules/test-support.md",
+    "rules/development-laws.md",
+    "scripts/__init__.py",
+    "scripts/bounded_io.py",
+    "scripts/llm_wiki/__init__.py",
+    "scripts/llm_wiki/context_bundle.py",
+    "scripts/llm_wiki/formats/__init__.py",
+    "scripts/llm_wiki/path_ancestry.py",
+    "scripts/llm_wiki/sqlite_io.py",
+    "scripts/reliable_memory.py",
+    "tests/__init__.py",
+    "tests/conftest.py",
+    "tests/module_context.py",
+    "tests/module_context_paths.py",
+    "tests/module_interface.py",
+    "tests/module_interface_render.py",
+    "tests/module_legacy_alias_helpers.py",
+    "tests/module_qualification.py",
+    "tests/module_record_context.py",
+    "tests/module_records.py",
+    "tests/shared_fixtures.py",
+    "tests/slow_machine.py",
+    "tests/test_module_legacy_aliases.py"
+  ],
+  "ownership": {
+    "files": [
+      "docs/modules/test-module-legacy-aliases-context.json",
+      "docs/modules/test-module-legacy-aliases.md",
+      "tests/module_legacy_alias_helpers.py",
+      "tests/test_module_legacy_aliases.py"
+    ]
+  },
+  "qualified_dependencies": [
+    {
+      "provider": "scripts/llm_wiki/formats/canonical.py",
+      "names": [
+        "canonical_json_bytes",
+        "sha256_bytes"
+      ],
+      "contract_sha256": "2e42a7aefcb66ac2515f6665a03feae34e6f7bad4807787a789ce031f9f3a9c1",
+      "integration_tests": [
+        "tests/test_module_legacy_aliases.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/formats/schema.py",
+      "names": [
+        "SchemaValidationError",
+        "validate_schema",
+        "validate_schema_object"
+      ],
+      "contract_sha256": "46d24c7a6473d3ea49408722a1dcd3ba46d71ea5a0b5f9caf95082dd7e8baba1",
+      "integration_tests": [
+        "tests/test_module_legacy_aliases.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/generation_catalog_store.py",
+      "names": [
+        "GenerationCatalog"
+      ],
+      "contract_sha256": "b18194ebe04bf988b4474379fcb5243516550d43b745a00eaed1453f7844c983",
+      "integration_tests": [
+        "tests/test_a_blocked_task_has_a_way_back.py",
+        "tests/test_a_build_in_flight_is_not_an_orphan.py",
+        "tests/test_a_capacity_refusal_does_not_corrupt_a_generation.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/lsp_credentials.py",
+      "names": [
+        "redact_private_key_blocks"
+      ],
+      "contract_sha256": "f12b9371b3ce6592ec062a109febbefb3daf916e1be439a785834620e2714eef",
+      "integration_tests": [
+        "tests/test_module_legacy_aliases.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/model_choice.py",
+      "names": [
+        "using_root"
+      ],
+      "contract_sha256": "d45f2655cb61963e77617d1dfd7d617b134ad77cc770b59b335d0856e5d65019",
+      "integration_tests": [
+        "tests/test_module_legacy_aliases.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/reliability_defaults.py",
+      "names": [
+        "DEFAULTS",
+        "MAX_CAPTURE_DECISION_BYTES",
+        "ReliableMemoryDefaults"
+      ],
+      "contract_sha256": "00576c5ace3900bbac5c6f1e329a9463c410f3371bac0050683d1128930a9eb1",
+      "integration_tests": [
+        "tests/test_module_legacy_aliases.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/restricted_paths.py",
+      "names": [
+        "is_posix_relative_text",
+        "require_inside_a_root",
+        "require_normalized_relative",
+        "require_posix_relative_text",
+        "restricted_relative_path",
+        "under_root"
+      ],
+      "contract_sha256": "85d629b86e4d034e2a4f87ffcc9f55ac07a5a2be7534c5ace32af1d3c50dd519",
+      "integration_tests": [
+        "tests/test_module_legacy_aliases.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/runtime_contracts.py",
+      "names": [
+        "MetadataDurabilityUnavailable",
+        "RuntimeFileIdentity",
+        "UnsafeStateRoot"
+      ],
+      "contract_sha256": "f790d8fec138e7a73aeb10ddcce9949319460759efa061fe6be4e07603f38d28",
+      "integration_tests": [
+        "tests/test_module_legacy_aliases.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/runtime_environment.py",
+      "names": [
+        "CLOUD_DIRECTORY_NAMES",
+        "chmod_or_warn",
+        "decode_mount_path",
+        "harden_runtime_owner_only",
+        "has_reparse_attribute",
+        "is_network_filesystem",
+        "known_network_path",
+        "owner_permissions_supported",
+        "parse_darwin_mounts",
+        "parse_posix_mounts",
+        "path_is_under",
+        "platform_system",
+        "posix_mount_table",
+        "posix_network_path",
+        "query_darwin_mounts",
+        "read_posix_mount_data",
+        "require_applied_mode",
+        "require_local_non_reparse_root",
+        "require_owner_only_file",
+        "require_windows_owner_only",
+        "set_owner_only",
+        "warn_if_cloud_synchronized",
+        "windows_network_anchor",
+        "windows_reparse_point"
+      ],
+      "contract_sha256": "35c6e60985600244454435ececa8a0368680e7164b1578a4ea0646ae845688b7",
+      "integration_tests": [
+        "tests/test_module_legacy_aliases.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/runtime_fingerprints.py",
+      "names": [
+        "digest_runtime_descriptor",
+        "fingerprint_metadata",
+        "fingerprint_regular_file",
+        "fingerprint_runtime_file",
+        "require_fingerprint_metadata",
+        "verified_runtime_digest"
+      ],
+      "contract_sha256": "164330508f19dc7e78d2c6e1fbf009862bc7f139833eeb7fa9d67f98ecce58fd",
+      "integration_tests": [
+        "tests/test_module_legacy_aliases.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/runtime_metadata.py",
+      "names": [
+        "validate_operational_db_file"
+      ],
+      "contract_sha256": "e50bd7c769a60646b4281b36122da4d381f6d4c250d60e959e6dea21f7f5ca21",
+      "integration_tests": [
+        "tests/test_module_legacy_aliases.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/runtime_publication.py",
+      "names": [
+        "adopted_or_duplicate",
+        "discard_staged",
+        "durable_publish_file",
+        "fsync_parent_on_posix",
+        "link_then_unlink",
+        "move_into_place",
+        "move_posix",
+        "move_windows",
+        "publication_digest",
+        "publish_runtime_file",
+        "publish_staged",
+        "replace_in_place",
+        "require_create_only_carries_no_evidence",
+        "require_distinct_siblings",
+        "require_publication_arguments",
+        "require_replacement_carries_evidence",
+        "require_replacement_evidence",
+        "require_replacement_shape",
+        "require_runtime_arguments",
+        "require_runtime_mode",
+        "require_runtime_payload",
+        "require_unchanged_identity",
+        "resolved_parents",
+        "resolved_runtime_destination",
+        "resolved_sibling_pair",
+        "settled_publication",
+        "unlink_staged",
+        "verify_published_runtime_permissions",
+        "write_all",
+        "write_staged_bytes"
+      ],
+      "contract_sha256": "313aeb59ddc66ce043b7702c23c88123eea0b87b9bc7afea152d807d1b1fe596",
+      "integration_tests": [
+        "tests/test_module_legacy_aliases.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/runtime_records.py",
+      "names": [
+        "capture_operational_database_identity",
+        "capture_runtime_file_identity",
+        "confirm_runtime_identity",
+        "contained_runtime_metadata",
+        "posix_runtime_identity_names",
+        "read_runtime_bytes",
+        "require_bounded_regular_file",
+        "require_file_size_budget",
+        "require_nonnegative_file_budget",
+        "require_runtime_parent_containment",
+        "require_stable_read",
+        "runtime_identity_from_metadata",
+        "validate_operational_db_file",
+        "validate_runtime_file",
+        "validated_runtime_metadata",
+        "windows_runtime_identity_names"
+      ],
+      "contract_sha256": "bbb2899e154f4aa8ab7d6f9dbad03b5c0e31bba0fe4e20751f5e0768bdd8a8a3",
+      "integration_tests": [
+        "tests/test_module_legacy_aliases.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/runtime_sync.py",
+      "names": [
+        "close_windows_handle",
+        "file_sync_mode",
+        "fsync_directory",
+        "fsync_directory_posix",
+        "fsync_directory_windows",
+        "fsync_file",
+        "metadata_durability_error",
+        "opened_directory_descriptor",
+        "sync_runtime_directory"
+      ],
+      "contract_sha256": "0f2d9c18e2b30fb7d5328583bc0ff9adfc9cf054a2963a8357559e3d687f6e53",
+      "integration_tests": [
+        "tests/test_module_legacy_aliases.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/sqlite_contracts.py",
+      "names": [
+        "MigrationStatement",
+        "OperationalDatabaseContract",
+        "OperationalDatabaseContractError",
+        "quote_sqlite_identifier",
+        "require_migration_text",
+        "require_positive_int"
+      ],
+      "contract_sha256": "be0748b89bfdb7d33cbca2bf3a4206fc79767cbb9a18c1a5a940116a0e264bf6",
+      "integration_tests": [
+        "tests/test_module_legacy_aliases.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/sqlite_deadlines.py",
+      "names": [
+        "OPERATIONAL_PROGRESS_VM_STEPS",
+        "busy_database",
+        "configure_operational_deadline",
+        "operational_busy_ms",
+        "operational_deadline_active",
+        "refresh_operational_deadline"
+      ],
+      "contract_sha256": "98d148a0ce7365cea317c2b0c719f019eb87aae4e0e7973c3b841dae6a83aa13",
+      "integration_tests": [
+        "tests/test_module_legacy_aliases.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/sqlite_migrations.py",
+      "names": [
+        "apply_one_migration_statement",
+        "migration_incomplete",
+        "require_final_invariant",
+        "require_unique_statement_names",
+        "run_resumable_migration"
+      ],
+      "contract_sha256": "1970c8995e439516907e472a39a5bd68f1a9096b16fdcf9f0f114beb4b437271",
+      "integration_tests": [
+        "tests/test_module_legacy_aliases.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/sqlite_pragmas.py",
+      "names": [
+        "apply_operational_pragmas",
+        "apply_readonly_operational_pragmas",
+        "initialized_contract_identity",
+        "pragma_integer",
+        "require_pragma",
+        "validate_or_initialize_operational_contract"
+      ],
+      "contract_sha256": "1738d3b676b1b8b5ed5ae45b40dcebd19055eaa24f86d687a0c3f4747d84cc58",
+      "integration_tests": [
+        "tests/test_module_legacy_aliases.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/sqlite_transactions.py",
+      "names": [
+        "begin_immediate"
+      ],
+      "contract_sha256": "fb9ecde177ce133dd8e6e34a67214ca0c051a02d758e8611dac84b568d955373",
+      "integration_tests": [
+        "tests/test_module_legacy_aliases.py"
+      ]
+    },
+    {
+      "provider": "scripts/lsp_security.py",
+      "names": [
+        "redact_private_key_blocks"
+      ],
+      "contract_sha256": "f12b9371b3ce6592ec062a109febbefb3daf916e1be439a785834620e2714eef",
+      "integration_tests": [
+        "tests/test_module_legacy_aliases.py"
+      ]
+    },
+    {
+      "provider": "scripts/repository_scope.py",
+      "names": [
+        "sanitized_git_environment"
+      ],
+      "contract_sha256": "fd550ae20761afad50b37fa3a71044a162485b0e4d4b3e2af9b5b22e143c2bec",
+      "integration_tests": [
+        "tests/test_module_legacy_aliases.py"
+      ]
+    }
+  ]
+}

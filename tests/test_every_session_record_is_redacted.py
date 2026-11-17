@@ -41,7 +41,7 @@ def test_a_session_id_with_a_line_break_writes_no_header_of_its_own():
 
 def test_a_secret_at_the_record_bound_is_not_left_half_written(monkeypatch):
     monkeypatch.setattr(session_evidence, "MAX_EVIDENCE_BYTES", 2000)
-    prefix = len(session_evidence._frontmatter({"session": "s1"})) + len("\n# Session s1\n\n")
+    prefix = len(session_evidence.frontmatter({"session": "s1"})) + len("\n# Session s1\n\n")
     padding = "x " * ((2000 - prefix - 10) // 2)  # the bound falls ten characters into the token
 
     document = session_evidence.render_session_document({"session": "s1"}, f"{padding} {TOKEN}")

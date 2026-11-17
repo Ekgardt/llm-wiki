@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import subprocess
+import sys
 from argparse import Namespace
 from pathlib import Path
 from types import MappingProxyType
@@ -11,6 +13,9 @@ from llm_client import LLMResult, ProviderDescriptor
 from markdown_transaction import MarkdownCoordinator, TransactionFailure
 from reliable_memory import canonical_json_bytes, sha256_bytes
 
+from tests.compile_paths import compile_pipeline_binds, point_compile_path
+from tests.slow_machine import LONG_TIMEOUT
+
 
 @pytest.fixture
 def vault(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[Path, Path]:
@@ -20,18 +25,11 @@ def vault(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[Path, Path]:
     for relative in ("knowledge/daily/receipts", "knowledge/notes"):
         (root / relative).mkdir(parents=True)
     (root / "knowledge/index.md").write_bytes(b"# Index\n")
-    (root / "knowledge/log.md").write_bytes(b"# Log\n")
+    (root / "knowledge/log.local.md").write_bytes(b"# Log\n")
     (root / "AGENTS.md").write_bytes(b"contract\n")
-    import compile_memory
 
-    monkeypatch.setattr(compile_memory, "ROOT", root)
-    monkeypatch.setattr(compile_memory, "STATE_ROOT", state_root)
-    monkeypatch.setattr(compile_memory, "MEMORY", root / "knowledge")
-    monkeypatch.setattr(compile_memory, "DAILY_DIR", root / "knowledge/daily")
-    monkeypatch.setattr(compile_memory, "KNOWLEDGE", root / "knowledge/notes")
-    monkeypatch.setattr(compile_memory, "INDEX", root / "knowledge/index.md")
-    monkeypatch.setattr(compile_memory, "LOG", root / "knowledge/log.md")
-    monkeypatch.setattr(compile_memory, "AGENTS", root / "AGENTS.md")
+    monkeypatch.setenv("LLM_WIKI_ROOT", str(root))
+    monkeypatch.setenv("LLM_WIKI_STATE_ROOT", str(state_root))
     return root, state_root
 
 
@@ -90,12 +88,16 @@ def _provider(name: str, index: int = 0) -> ProviderDescriptor:
 
 
 def _compile(root: Path, state_root: Path, daily: Path):
-    import compile_memory
+    from llm_wiki import (
+        compile_pipeline_apply,
+        compile_pipeline_batches,
+        compile_pipeline_sources,
+    )
 
     coordinator = MarkdownCoordinator(root, state_root)
-    inputs = compile_memory.snapshot_compile_inputs([daily])
-    batch = compile_memory.pack_compile_batches(inputs, model=None)[0]
-    result = compile_memory.apply_compile_plan(
+    inputs = compile_pipeline_sources.snapshot_compile_inputs([daily])
+    batch = compile_pipeline_batches.pack_compile_batches(inputs, model=None)[0]
+    result = compile_pipeline_apply.apply_compile_plan(
         inputs,
         _plan(),
         action_key="a" * 64,
@@ -112,14 +114,24 @@ def _compile(root: Path, state_root: Path, daily: Path):
     return coordinator, inputs, result
 
 
+def _context_test_receipt_path(source):
+    from llm_wiki import (
+        compile_pipeline_receipts,
+    )
+
+    return compile_pipeline_receipts.context_receipt_path(compile_pipeline_receipts.v4_source_descriptor(source))
+
+
 def test_all_filters_committed_receipts_and_keeps_uncompiled_mixed_source(vault):
     root, state_root = vault
     first = _daily(root)
     coordinator, _inputs, _result = _compile(root, state_root, first)
     second = _daily(root, "2026-07-15.md", "other")
-    import compile_memory
+    from llm_wiki import (
+        compile_pipeline_selection,
+    )
 
-    selected = compile_memory.select_dailies(
+    selected = compile_pipeline_selection.select_dailies(
         Namespace(file=None, all=True), {}, coordinator=coordinator
     )
 
@@ -130,9 +142,12 @@ def test_corrupt_receipt_is_an_error_not_pending(vault):
     root, state_root = vault
     daily = _daily(root)
     digest = sha256_bytes(daily.read_bytes())
-    import compile_memory
+    import compile_pipeline
+    from llm_wiki import (
+        compile_pipeline_selection,
+    )
 
-    identity = compile_memory.compile_source_identity(
+    identity = compile_pipeline.compile_source_identity(
         f"knowledge/daily/{daily.name}", digest
     )
     (root / f"knowledge/daily/receipts/v3-{identity}.md").write_text(
@@ -140,36 +155,43 @@ def test_corrupt_receipt_is_an_error_not_pending(vault):
     )
 
     with pytest.raises(ValueError, match="receipt"):
-        compile_memory.select_dailies(
+        compile_pipeline_selection.select_dailies(
             Namespace(file=None, all=True), {},
             coordinator=MarkdownCoordinator(root, state_root),
         )
 
 
 def test_native_semantic_schema_is_closed_through_evidence_fields():
-    import compile_memory
+    from llm_wiki import compile_pipeline_base
 
-    operation = compile_memory.RAW_PLAN_SCHEMA["properties"]["operations"]["items"]
+    operation = compile_pipeline_base.RAW_PLAN_SCHEMA["properties"]["operations"]["items"]
     evidence = operation["properties"]["evidence"]["items"]
     assert operation["additionalProperties"] is False
-    assert evidence["additionalProperties"] is False
+    assert len(evidence["oneOf"]) == 2
+    assert all(branch["additionalProperties"] is False for branch in evidence["oneOf"])
+    native = evidence["oneOf"][1]["properties"]["native_event"]
+    assert native["additionalProperties"] is False
+    assert set(native["required"]) == {"source_path", "byte_start", "line_index"}
     assert operation["properties"]["action"]["enum"] == ["create", "update"]
     assert operation["properties"]["category"]["enum"] == sorted(
-        compile_memory.ALLOWED_CATEGORIES
+        compile_pipeline_base.ALLOWED_CATEGORIES
     )
 
 
 def test_target_created_after_snapshot_conflicts_instead_of_becoming_update(vault):
     root, state_root = vault
     daily = _daily(root)
-    import compile_memory
+    from llm_wiki import (
+        compile_pipeline_apply,
+        compile_pipeline_sources,
+    )
 
-    inputs = compile_memory.snapshot_compile_inputs([daily])
+    inputs = compile_pipeline_sources.snapshot_compile_inputs([daily])
     target = root / "knowledge/notes/safe-note.md"
     target.write_bytes(b"concurrent\n")
 
     with pytest.raises((FileExistsError, TransactionFailure, ValueError)):
-        compile_memory.apply_compile_plan(
+        compile_pipeline_apply.apply_compile_plan(
             inputs,
             _plan(),
             action_key="b" * 64,
@@ -185,13 +207,16 @@ def test_target_changed_after_snapshot_conflicts_with_frozen_update(vault):
     daily = _daily(root)
     target = root / "knowledge/notes/safe-note.md"
     target.write_bytes(b"before\n")
-    import compile_memory
+    from llm_wiki import (
+        compile_pipeline_apply,
+        compile_pipeline_sources,
+    )
 
-    inputs = compile_memory.snapshot_compile_inputs([daily])
+    inputs = compile_pipeline_sources.snapshot_compile_inputs([daily])
     target.write_bytes(b"concurrent\n")
 
     with pytest.raises((TransactionFailure, ValueError)):
-        compile_memory.apply_compile_plan(
+        compile_pipeline_apply.apply_compile_plan(
             inputs,
             _plan(action="update"),
             action_key="c" * 64,
@@ -202,26 +227,22 @@ def test_target_changed_after_snapshot_conflicts_with_frozen_update(vault):
 
 
 def test_receipt_copy_is_rejected_without_matching_committed_transaction(vault):
+    from dataclasses import replace
+
     root, state_root = vault
     daily = _daily(root)
     coordinator, inputs, _result = _compile(root, state_root, daily)
-    import compile_memory
+    from llm_wiki import compile_receipt_authority
 
     source = inputs.dailies[0]
-    identity = compile_memory.compile_source_identity(
-        source.logical_path, source.sha256
-    )
-    receipt = root / f"knowledge/daily/receipts/v3-{identity}.md"
+    receipt = _context_test_receipt_path(source)
     forged_path = "knowledge/daily/2099-01-01.md"
-    forged_identity = compile_memory.compile_source_identity(
-        forged_path, source.sha256
-    )
-    forged = root / f"knowledge/daily/receipts/v3-{forged_identity}.md"
+    forged = _context_test_receipt_path(replace(source, logical_path=forged_path))
     forged.write_bytes(receipt.read_bytes())
 
     with pytest.raises(ValueError, match="receipt"):
-        compile_memory.read_compile_receipt_v3(
-            forged_path, source.sha256, coordinator
+        compile_receipt_authority.read_compile_receipt_version(
+            forged_path, source.sha256, coordinator, path=forged, vault=root
         )
 
 
@@ -236,40 +257,37 @@ def test_snapshot_rejects_symlinked_and_oversized_sources(vault, monkeypatch):
         link.symlink_to(actual)
     except OSError:
         pytest.skip("file symlinks are unavailable")
-    import compile_memory
+    from llm_wiki import compile_pipeline_sources
 
     with pytest.raises((PermissionError, ValueError), match="symlink|regular"):
-        compile_memory.snapshot_compile_inputs([daily])
+        compile_pipeline_sources.snapshot_compile_inputs([daily])
 
 
 def test_snapshot_and_provider_responses_enforce_byte_caps(vault, monkeypatch):
     root, state_root = vault
     daily = _daily(root)
-    import compile_memory
+    from llm_wiki import (
+        compile_pipeline_batches,
+        compile_pipeline_sources,
+    )
 
-    monkeypatch.setattr(compile_memory, "MAX_SOURCE_BYTES", 8)
+    point_compile_path(monkeypatch, "MAX_SOURCE_BYTES", 8)
     with pytest.raises(ValueError, match="exceeds"):
-        compile_memory.snapshot_compile_inputs([daily])
+        compile_pipeline_sources.snapshot_compile_inputs([daily])
 
-    monkeypatch.setattr(compile_memory, "MAX_SOURCE_BYTES", 4 * 1024 * 1024)
-    inputs = compile_memory.snapshot_compile_inputs([daily])
+    point_compile_path(monkeypatch, "MAX_SOURCE_BYTES", 4 * 1024 * 1024)
+    inputs = compile_pipeline_sources.snapshot_compile_inputs([daily])
     provider = _provider("large")
-    monkeypatch.setattr(
-        compile_memory, "provider_candidates", lambda *args, **kwargs: [provider]
-    )
-    monkeypatch.setattr(compile_memory, "probe_candidate", lambda descriptor: True)
-    monkeypatch.setattr(compile_memory, "MAX_PROVIDER_RESPONSE_BYTES", 32)
-    monkeypatch.setattr(
-        compile_memory,
-        "call_candidate",
-        lambda descriptor, *args, **kwargs: LLMResult(
+    point_compile_path(monkeypatch, "provider_candidates", lambda *args, **kwargs: [provider])
+    point_compile_path(monkeypatch, "probe_candidate", lambda descriptor: True)
+    point_compile_path(monkeypatch, "MAX_PROVIDER_RESPONSE_BYTES", 32)
+    point_compile_path(monkeypatch, "call_candidate", lambda descriptor, *args, **kwargs: LLMResult(
             descriptor, "x" * 33, True, None, "native"
-        ),
-    )
+        ))
     # The lineage is the whole diagnosis: without it this failure says only that
     # nothing worked, which cost hours of guessing on a live vault.
     with pytest.raises(RuntimeError, match=r"validated compile plan: \w+:"):
-        compile_memory.resolve_compile_plan(
+        compile_pipeline_batches.resolve_compile_plan(
             inputs,
             CompileCache(state_root),
             coordinator=MarkdownCoordinator(root, state_root),
@@ -279,13 +297,16 @@ def test_snapshot_and_provider_responses_enforce_byte_caps(vault, monkeypatch):
 def test_after_image_cap_fails_before_transaction_prepare(vault, monkeypatch):
     root, state_root = vault
     daily = _daily(root)
-    import compile_memory
+    from llm_wiki import (
+        compile_pipeline_apply,
+        compile_pipeline_sources,
+    )
 
-    inputs = compile_memory.snapshot_compile_inputs([daily])
-    monkeypatch.setattr(compile_memory, "MAX_AFTER_IMAGE_BYTES", 32)
+    inputs = compile_pipeline_sources.snapshot_compile_inputs([daily])
+    point_compile_path(monkeypatch, "MAX_AFTER_IMAGE_BYTES", 32)
     coordinator = MarkdownCoordinator(root, state_root)
     with pytest.raises(ValueError, match="after-image"):
-        compile_memory.apply_compile_plan(
+        compile_pipeline_apply.apply_compile_plan(
             inputs,
             _plan(),
             action_key="9" * 64,
@@ -301,24 +322,54 @@ def test_resolve_requires_coordinator_and_checks_persisted_gate_before_probe(
 ):
     root, state_root = vault
     daily = _daily(root)
-    import compile_memory
+    from llm_wiki import (
+        compile_pipeline_batches,
+        compile_pipeline_sources,
+    )
 
-    inputs = compile_memory.snapshot_compile_inputs([daily])
+    inputs = compile_pipeline_sources.snapshot_compile_inputs([daily])
     with pytest.raises(TypeError):
-        compile_memory.resolve_compile_plan(inputs, CompileCache(state_root))
+        compile_pipeline_batches.resolve_compile_plan(inputs, CompileCache(state_root))
 
     owner = MarkdownCoordinator(root, state_root)
     observer = MarkdownCoordinator(root, state_root)
-    monkeypatch.setattr(
-        compile_memory,
-        "probe_candidate",
-        lambda descriptor: pytest.fail("probe ran under persisted writer ownership"),
-    )
+    point_compile_path(monkeypatch, "probe_candidate", lambda descriptor: pytest.fail("probe ran under persisted writer ownership"))
     with owner.writer_gate():
         with pytest.raises(RuntimeError, match="writer"):
-            compile_memory.resolve_compile_plan(
+            compile_pipeline_batches.resolve_compile_plan(
                 inputs, CompileCache(state_root), coordinator=observer
             )
+
+
+def test_external_work_can_overlap_an_unrelated_process_writer(vault):
+    import compile_memory
+    from llm_wiki import (
+        compile_pipeline_prompts,
+    )
+
+    root, state_root = vault
+    observer = MarkdownCoordinator(root, state_root)
+    scripts = Path(compile_memory.__file__).parent
+    command = """
+import sys
+from pathlib import Path
+sys.path.insert(0, sys.argv[1])
+from markdown_transaction import MarkdownCoordinator
+owner = MarkdownCoordinator(Path(sys.argv[2]), Path(sys.argv[3]))
+with owner.writer_gate():
+    print('writer-held', flush=True)
+    sys.stdin.read()
+"""
+    process = subprocess.Popen(
+        [sys.executable, "-c", command, str(scripts), str(root), str(state_root)],
+        stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+    )
+    try:
+        assert process.stdout.readline().strip() == "writer-held"
+        compile_pipeline_prompts.assert_external_work_allowed(observer)
+    finally:
+        _, error = process.communicate("", timeout=LONG_TIMEOUT)
+    assert process.returncode == 0, error
 
 
 def test_critique_failure_lineage_records_stage_provider_and_stable_code(
@@ -326,14 +377,15 @@ def test_critique_failure_lineage_records_stage_provider_and_stable_code(
 ):
     root, state_root = vault
     daily = _daily(root)
-    import compile_memory
-
-    inputs = compile_memory.snapshot_compile_inputs([daily])
-    first, second = _provider("first", 0), _provider("second", 1)
-    monkeypatch.setattr(
-        compile_memory, "provider_candidates", lambda *args, **kwargs: [first, second]
+    from llm_wiki import (
+        compile_pipeline_batches,
+        compile_pipeline_sources,
     )
-    monkeypatch.setattr(compile_memory, "probe_candidate", lambda descriptor: True)
+
+    inputs = compile_pipeline_sources.snapshot_compile_inputs([daily])
+    first, second = _provider("first", 0), _provider("second", 1)
+    point_compile_path(monkeypatch, "provider_candidates", lambda *args, **kwargs: [first, second])
+    point_compile_path(monkeypatch, "probe_candidate", lambda descriptor: True)
     draft = json.dumps({"operations": [_semantic()], "audit": {}})
     responses = iter(
         [
@@ -344,6 +396,7 @@ def test_critique_failure_lineage_records_stage_provider_and_stable_code(
                 '{"reviews": [{"slug": "safe-note", "verdict": "pass", "reason": "ok"}]}',
                 None,
             ),
+            (json.dumps({"source_review": {"complete": True, "reason": "Fixture assessment."}}), None),
         ]
     )
 
@@ -351,8 +404,8 @@ def test_critique_failure_lineage_records_stage_provider_and_stable_code(
         text, failure = next(responses)
         return LLMResult(descriptor, text, True, failure, "native")
 
-    monkeypatch.setattr(compile_memory, "call_candidate", call)
-    resolved = compile_memory.resolve_compile_plan(
+    point_compile_path(monkeypatch, "call_candidate", call)
+    resolved = compile_pipeline_batches.resolve_compile_plan(
         inputs,
         CompileCache(state_root),
         coordinator=MarkdownCoordinator(root, state_root),
@@ -380,11 +433,11 @@ def test_normalization_rejects_wrong_types_and_bounds(vault, field, value):
     semantic[field] = value
     plan = _plan()
     plan["operations"][0]["content"] = canonical_json_bytes(semantic).decode()
-    import compile_memory
+    from llm_wiki import compile_pipeline_prompts, compile_pipeline_sources
 
     with pytest.raises(ValueError):
-        compile_memory.validate_compile_plan(
-            plan, compile_memory.snapshot_compile_inputs([daily])
+        compile_pipeline_prompts.validate_compile_plan(
+            plan, compile_pipeline_sources.snapshot_compile_inputs([daily])
         )
 
 
@@ -395,11 +448,11 @@ def test_evidence_requires_exact_date_and_unique_timestamp_block(vault):
         "## [10:00:00] one\ndurable fact\n## [10:00:00] two\ndurable fact\n",
         encoding="utf-8",
     )
-    import compile_memory
+    from llm_wiki import compile_pipeline_prompts, compile_pipeline_sources
 
     with pytest.raises(ValueError, match="ambiguous"):
-        compile_memory.validate_compile_plan(
-            _plan(), compile_memory.snapshot_compile_inputs([daily])
+        compile_pipeline_prompts.validate_compile_plan(
+            _plan(), compile_pipeline_sources.snapshot_compile_inputs([daily])
         )
 
 
@@ -407,25 +460,64 @@ def test_receipt_evidence_is_source_scoped_and_operation_associated(vault):
     root, state_root = vault
     daily = _daily(root)
     coordinator, inputs, _result = _compile(root, state_root, daily)
-    import compile_memory
+    import compile_pipeline
+    from llm_wiki import (
+        compile_pipeline_receipts,
+        compile_receipt_authority,
+    )
 
     source = inputs.dailies[0]
-    record = compile_memory.read_compile_receipt_v3(
-        source.logical_path, source.sha256, coordinator
+    record = compile_receipt_authority.read_compile_receipt_version(
+        source.logical_path, source.sha256, coordinator, path=_context_test_receipt_path(source), vault=root
     )
     assert record is not None
     assert "completed_at" not in record
     assert record["evidence"] == [
         {
-            "source_identity": compile_memory.compile_source_identity(
-                source.logical_path, source.sha256
-            ),
+            "source_identity": compile_pipeline.compile_context_source_identity(compile_pipeline_receipts.v4_source_descriptor(source)),
             "operation_path": "knowledge/notes/safe-note.md",
             "quote_sha256": sha256_bytes(b"durable fact"),
             "source_digest": source.sha256,
             "source_path": "knowledge/daily/2026-07-14.md",
         }
     ]
+
+
+def test_a_verified_committed_receipt_retires_a_retained_source_failure(vault):
+    import compile_pipeline
+    from queue_core import (
+        MemoryQueue,
+    )
+
+    root, state_root = vault
+    daily = _daily(root)
+    coordinator, inputs, _result = _compile(root, state_root, daily)
+    source = inputs.dailies[0]
+    queue = MemoryQueue(state_root)
+    queue.record_source_failure(
+        source.logical_path, source.sha256, error_code="ValueError", producer="compile"
+    )
+    compile_pipeline.retire_stale_source_failures(state_root)
+    assert queue.source_failure_keys() == []
+
+
+def test_a_missing_receipt_preserves_the_current_source_failure(vault):
+    import compile_pipeline
+    from queue_core import (
+        MemoryQueue,
+    )
+
+    root, state_root = vault
+    daily = _daily(root)
+    coordinator, inputs, _result = _compile(root, state_root, daily)
+    source = inputs.dailies[0]
+    queue = MemoryQueue(state_root)
+    queue.record_source_failure(
+        source.logical_path, source.sha256, error_code="ValueError", producer="compile"
+    )
+    _context_test_receipt_path(source).unlink()
+    compile_pipeline.retire_stale_source_failures(state_root)
+    assert queue.source_failure_keys() == [(source.logical_path, source.sha256)]
 
 
 def test_index_rejects_invalid_utf8_instead_of_replacement_decoding(vault):
@@ -438,10 +530,10 @@ def test_index_rejects_invalid_utf8_instead_of_replacement_decoding(vault):
 
 
 def test_diagnostic_state_cas_keeps_newer_commit_last_fields():
-    import compile_memory
+    import compile_pipeline
 
     state: dict[str, object] = {}
-    compile_memory.merge_compile_diagnostics(
+    compile_pipeline.merge_compile_diagnostics(
         state,
         commit_sequence=9,
         committed_at="2026-07-14T12:00:09Z",
@@ -451,7 +543,7 @@ def test_diagnostic_state_cas_keeps_newer_commit_last_fields():
         touched=("new",),
         trigger="auto",
     )
-    compile_memory.merge_compile_diagnostics(
+    compile_pipeline.merge_compile_diagnostics(
         state,
         commit_sequence=8,
         committed_at="2026-07-14T12:00:08Z",
@@ -471,7 +563,7 @@ def test_diagnostic_state_cas_keeps_newer_commit_last_fields():
 
 
 def test_diagnostic_state_cas_does_not_regress_same_daily_hash():
-    import compile_memory
+    import compile_pipeline
 
     state: dict[str, object] = {}
     common = {
@@ -479,7 +571,7 @@ def test_diagnostic_state_cas_does_not_regress_same_daily_hash():
         "trigger": "auto",
         "action_key": "a" * 64,
     }
-    compile_memory.merge_compile_diagnostics(
+    compile_pipeline.merge_compile_diagnostics(
         state,
         commit_sequence=11,
         committed_at="2026-07-14T12:00:11Z",
@@ -487,7 +579,7 @@ def test_diagnostic_state_cas_does_not_regress_same_daily_hash():
         operation_id="compile:new",
         **common,
     )
-    compile_memory.merge_compile_diagnostics(
+    compile_pipeline.merge_compile_diagnostics(
         state,
         commit_sequence=10,
         committed_at="2026-07-14T12:00:10Z",
@@ -500,11 +592,10 @@ def test_diagnostic_state_cas_does_not_regress_same_daily_hash():
 
 
 def test_legacy_direct_mutation_entry_points_are_removed():
-    import compile_memory
 
-    assert not hasattr(compile_memory, "run_compile")
-    assert not hasattr(compile_memory, "_execute_plan")
-    assert not hasattr(compile_memory, "_critique_plan")
+    assert not compile_pipeline_binds("run_compile")
+    assert not compile_pipeline_binds("_execute_plan")
+    assert not compile_pipeline_binds("critique_plan")
 
 
 def test_unusable_receipts_are_discarded_only_when_asked(tmp_path, monkeypatch):
@@ -514,24 +605,27 @@ def test_unusable_receipts_are_discarded_only_when_asked(tmp_path, monkeypatch):
     this vault. Recompiling silently would paper over a corruption; leaving no
     remedy would need a person to guess which file to delete.
     """
-    import compile_memory
+    from llm_wiki import (
+        compile_pipeline_selection,
+    )
 
+    monkeypatch.setenv("LLM_WIKI_ROOT", str(tmp_path))
     receipts = tmp_path / "knowledge/daily/receipts"
     receipts.mkdir(parents=True)
     good = receipts / "v3-good.md"
     bad = receipts / "v3-bad.md"
-    good.write_text('---\n---\n```json\n{"source": {"logical_path": "d.md", "sha256": "a"}}\n```\n', encoding="utf-8")
-    bad.write_text('---\n---\n```json\n{"source": {"logical_path": "d.md", "sha256": "broken"}}\n```\n', encoding="utf-8")
-    monkeypatch.setattr(compile_memory, "DAILY_DIR", tmp_path / "knowledge/daily")
+    good.write_bytes(b'---\n---\n```json\n{"schema_version": "compile-receipt/v3", "source": {"logical_path": "d.md", "sha256": "a"}}\n```\n')
+    bad.write_bytes(b'---\n---\n```json\n{"schema_version": "compile-receipt/v3", "source": {"logical_path": "d.md", "sha256": "broken"}}\n```\n')
 
     def parse(raw, *, logical_path, source_sha256):
         if source_sha256 == "broken":
             raise ValueError("compile receipt evidence scope is invalid")
         return {"ok": True}
 
-    monkeypatch.setattr(compile_memory, "parse_compile_receipt_v3", parse)
+    from llm_wiki.formats import receipts
+    monkeypatch.setattr(receipts, "parse_compile_receipt_v3", parse)
 
-    discarded = compile_memory.discard_unusable_receipts()
+    discarded = compile_pipeline_selection.discard_unusable_receipts()
 
     assert discarded == ["v3-bad.md"]
     assert good.exists()

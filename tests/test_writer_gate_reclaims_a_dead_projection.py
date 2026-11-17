@@ -15,7 +15,7 @@ import contextlib
 import os
 import sqlite3
 import sys
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -27,41 +27,28 @@ if str(SCRIPTS_DIR) not in sys.path:
 import markdown_transaction  # noqa: E402
 import operational_ownership as ownership  # noqa: E402
 
-PROJECT_SCOPE = "project:wedged"
-
-
-def _candidate(state_root: Path) -> Path:
-    return state_root / "run" / "markdown-transactions-v3.candidate.sqlite3"
-
-
-def _coordinator(state_root: Path):
-    markdown_transaction.initialize_coordinator_v3_candidate(
-        _candidate(state_root), source_v2=None
-    )
-    return markdown_transaction.MarkdownCoordinator._from_v3_candidate(
-        _candidate(state_root), state_root=state_root
-    )
+from tests.writer_gate_reclaims_a_dead_projection_helpers import (  # noqa: E402
+    PROJECT_SCOPE,
+    _candidate,
+    _coordinator,
+    _gate_rows,
+)
 
 
 def _dead_identity() -> ownership.ProcessIdentity:
+    from tests.process_identity_fixture import reused_current_process_identity
+
     return ownership.ProcessIdentity(
-        pid=os.getpid(), start_identity="llm-wiki-test:killed-process"
+        pid=os.getpid(), start_identity=reused_current_process_identity()
     )
 
 
 def _expire(database_path: Path, table: str) -> None:
-    when = datetime.now(timezone.utc) - timedelta(seconds=1)
+    when = datetime.now(UTC) - timedelta(seconds=1)
     stamp = when.isoformat().replace("+00:00", "Z")
     with contextlib.closing(sqlite3.connect(database_path)) as database:
         database.execute(f"UPDATE {table} SET expires_at=?", (stamp,))
         database.commit()
-
-
-def _gate_rows(database_path: Path) -> int:
-    with contextlib.closing(sqlite3.connect(database_path)) as database:
-        return int(
-            database.execute("SELECT COUNT(*) FROM writer_owners").fetchone()[0]
-        )
 
 
 def _wedge(state_root: Path, monkeypatch: pytest.MonkeyPatch, *, dead: bool):

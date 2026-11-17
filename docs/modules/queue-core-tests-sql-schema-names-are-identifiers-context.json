@@ -1,0 +1,127 @@
+{
+  "encoding": "o200k_base",
+  "max_tokens": 100000,
+  "serialization": "exact-duplicates/v1",
+  "files": [
+    "AGENTS.md",
+    "CLAUDE.md",
+    "docs/AGENTS.md",
+    "docs/STRUCTURE.md",
+    "docs/modules/context-bundle.md",
+    "docs/modules/context-records.md",
+    "docs/modules/context-tooling.md",
+    "docs/modules/model-choice.md",
+    "docs/modules/product-structure.md",
+    "docs/modules/project-governance.md",
+    "docs/modules/queue-core-tests-sql-schema-names-are-identifiers-context.json",
+    "docs/modules/queue-core-tests-sql-schema-names-are-identifiers.md",
+    "docs/modules/test-support.md",
+    "rules/development-laws.md",
+    "scripts/__init__.py",
+    "scripts/llm_wiki/__init__.py",
+    "scripts/llm_wiki/context_bundle.py",
+    "tests/__init__.py",
+    "tests/conftest.py",
+    "tests/module_context.py",
+    "tests/module_context_paths.py",
+    "tests/module_interface.py",
+    "tests/module_interface_render.py",
+    "tests/module_qualification.py",
+    "tests/module_record_context.py",
+    "tests/module_records.py",
+    "tests/shared_fixtures.py",
+    "tests/slow_machine.py",
+    "tests/test_sql_schema_names_are_identifiers.py"
+  ],
+  "ownership": {
+    "files": [
+      "docs/modules/queue-core-tests-sql-schema-names-are-identifiers-context.json",
+      "docs/modules/queue-core-tests-sql-schema-names-are-identifiers.md",
+      "tests/test_sql_schema_names_are_identifiers.py"
+    ]
+  },
+  "qualified_dependencies": [
+    {
+      "provider": "scripts/llm_wiki/generation_catalog_store.py",
+      "names": [
+        "GenerationCatalog"
+      ],
+      "contract_sha256": "b18194ebe04bf988b4474379fcb5243516550d43b745a00eaed1453f7844c983",
+      "integration_tests": [
+        "tests/test_a_blocked_task_has_a_way_back.py",
+        "tests/test_a_build_in_flight_is_not_an_orphan.py",
+        "tests/test_a_capacity_refusal_does_not_corrupt_a_generation.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/markdown_coordinator_base.py",
+      "names": [
+        "table_column_names"
+      ],
+      "contract_sha256": "96452c96a7ff571f52645d7fd73c792bfa6bf43bce8e04322bc38577ce419d0b",
+      "integration_tests": [
+        "tests/test_sql_schema_names_are_identifiers.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/model_choice.py",
+      "names": [
+        "using_root"
+      ],
+      "contract_sha256": "d45f2655cb61963e77617d1dfd7d617b134ad77cc770b59b335d0856e5d65019",
+      "integration_tests": [
+        "tests/test_sql_schema_names_are_identifiers.py"
+      ]
+    },
+    {
+      "provider": "scripts/markdown_transaction.py",
+      "names": [
+        "coordinator_table_columns",
+        "drop_objects_of_kind",
+        "require_rebuildable_schema",
+        "table_has_rows"
+      ],
+      "contract_sha256": "5241cf8a234879f3f4337d972e83adbef02642a9d8928050451ba2998a94b4af",
+      "integration_tests": [
+        "tests/test_sql_schema_names_are_identifiers.py"
+      ]
+    },
+    {
+      "provider": "scripts/queue_core.py",
+      "names": [
+        "check_no_populated_rebuild",
+        "drop_schema_object",
+        "queue_v2_columns",
+        "table_columns",
+        "table_is_populated"
+      ],
+      "contract_sha256": "8b1f3b5c5b3990096fa1d85faa669b86e885849ae4ceaff053b3e877ab25df0e",
+      "integration_tests": [
+        "tests/test_sql_schema_names_are_identifiers.py"
+      ]
+    },
+    {
+      "provider": "scripts/reliable_memory.py",
+      "names": [
+        "OperationalDatabaseContractError",
+        "validate_state_root"
+      ],
+      "contract_sha256": "8b922cf361c438eff076b8b8c1f0baa208a67a8df1a25ae9b843c039720a0d2c",
+      "integration_tests": [
+        "tests/test_sql_schema_names_are_identifiers.py"
+      ]
+    },
+    {
+      "provider": "scripts/repository_scope.py",
+      "names": [
+        "sanitized_git_environment"
+      ],
+      "contract_sha256": "fd550ae20761afad50b37fa3a71044a162485b0e4d4b3e2af9b5b22e143c2bec",
+      "integration_tests": [
+        "tests/test_a_code_generation_is_not_abandoned.py",
+        "tests/test_a_directory_link_inside_the_checkout_does_not_refuse_the_revision.py",
+        "tests/test_a_document_is_opened_in_its_own_language.py"
+      ]
+    }
+  ]
+}

@@ -5,6 +5,7 @@ Research: `docs/research/2026-09-17-a-document-is-opened-in-its-own-language.md`
 
 from __future__ import annotations
 
+import subprocess
 import sys
 from pathlib import Path
 
@@ -14,6 +15,8 @@ SCRIPTS_DIR = Path(__file__).resolve().parent.parent / "scripts"
 if str(SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_DIR))
 
+from llm_wiki.pyright_session_core import LanguageServerSession  # noqa: E402
+from llm_wiki.pyright_session_values import OpenDocument  # noqa: E402
 from lsp_profiles import (  # noqa: E402
     GOPLS_PROFILE,
     PYRIGHT_PROFILE,
@@ -22,7 +25,6 @@ from lsp_profiles import (  # noqa: E402
 )
 from lsp_security import RepositorySource  # noqa: E402
 from pyright_profile import PyrightIdentity  # noqa: E402
-from pyright_session import LanguageServerSession, OpenDocument  # noqa: E402
 from repository_scope import resolve_repository_scope  # noqa: E402
 
 CASES = [
@@ -65,6 +67,7 @@ def _document(scope, repository: Path, relative: str) -> OpenDocument:
 
 @pytest.mark.parametrize(("profile", "relative", "expected"), CASES)
 def test_did_open_names_the_language_of_the_file(tmp_path, profile, relative, expected):
+    subprocess.run(["git", "init", "--quiet", str(tmp_path)], check=True, capture_output=True)
     scope = resolve_repository_scope(tmp_path)
     session = LanguageServerSession(
         scope, _never_started_identity(), state_root=tmp_path, profile=profile

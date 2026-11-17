@@ -45,11 +45,11 @@ def test_one_run_attempts_no_more_than_its_share_and_the_day_stays_pending(
 ) -> None:
     vault = _vault(tmp_path, ONE_RUN + consolidation.MAX_RECORDS * 2)
     calls: list[str] = []
-    monkeypatch.setattr(consolidation, "_save_progress", lambda day, progress: None)
+    monkeypatch.setattr(consolidation, "save_progress", lambda day, progress: None)
     monkeypatch.setattr(
-        consolidation, "_record_consolidation", lambda *args: pytest.fail("not whole yet")
+        consolidation, "record_consolidation", lambda *args: pytest.fail("not whole yet")
     )
-    monkeypatch.setattr(consolidation, "_write_block", lambda *args: Path("daily.md"))
+    monkeypatch.setattr(consolidation, "write_block", lambda *args: Path("daily.md"))
     monkeypatch.setattr(
         consolidation,
         "grounded_lessons",

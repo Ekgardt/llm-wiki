@@ -13,7 +13,7 @@ for directory in (TESTS.parent / "scripts", TESTS):
     if str(directory) not in sys.path:
         sys.path.insert(0, str(directory))
 
-from test_generation_rebuild_reuse import (  # noqa: E402
+from tests.generation_rebuild_reuse_helpers import (  # noqa: E402
     _PAGE,
     _CountingEmbedder,
     _seal_like_a_published_generation,

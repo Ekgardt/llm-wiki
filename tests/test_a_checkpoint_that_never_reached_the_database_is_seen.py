@@ -5,13 +5,13 @@ docs/research/2026-09-26-a-checkpoint-that-never-reached-the-database-is-seen.md
 from __future__ import annotations
 
 import json
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
-import doctor
 import pytest
+from llm_wiki import doctor_capture
 
-NOW = datetime(2026, 9, 26, 12, tzinfo=timezone.utc)
+NOW = datetime(2026, 9, 26, 12, tzinfo=UTC)
 
 
 def _queue(state_root: Path, occurred_at: datetime) -> None:
@@ -25,7 +25,7 @@ def _queue(state_root: Path, occurred_at: datetime) -> None:
 def test_a_queued_checkpoint_is_judged_by_its_age(tmp_path: Path, age: timedelta, status: str) -> None:
     _queue(tmp_path, NOW - age)
 
-    finding = doctor._checkpoint_check(tmp_path, NOW)
+    finding = doctor_capture.checkpoint_check(tmp_path, NOW)
 
     assert finding["status"] == status
 
@@ -33,4 +33,4 @@ def test_a_queued_checkpoint_is_judged_by_its_age(tmp_path: Path, age: timedelta
 def test_the_finding_names_the_project_whose_events_wait(tmp_path: Path) -> None:
     _queue(tmp_path, NOW - timedelta(days=2))
 
-    assert "demo" in doctor._checkpoint_check(tmp_path, NOW)["message"]
+    assert "demo" in doctor_capture.checkpoint_check(tmp_path, NOW)["message"]

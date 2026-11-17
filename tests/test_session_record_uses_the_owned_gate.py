@@ -19,7 +19,7 @@ if str(SCRIPTS_DIR) not in sys.path:
 import pytest  # noqa: E402
 import session_evidence  # noqa: E402
 
-from tests.test_queue_v3_capture_links import _coordinator, _queue  # noqa: E402
+from tests.queue_v3_capture_links_helpers import _coordinator, _queue  # noqa: E402
 
 
 def _vault(tmp_path: Path) -> Path:

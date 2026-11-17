@@ -20,8 +20,8 @@ import flush_memory  # noqa: E402
 import llm_client  # noqa: E402
 import operational_ownership  # noqa: E402
 
-from tests.test_queue_v3_capture_links import (  # noqa: E402
-    _capture_binding,
+from tests.queue_v3_capture_links_helpers import (  # noqa: E402
+    _capture_binding,  # noqa: E402
     _coordinator,
     _queue,
 )
@@ -37,7 +37,7 @@ def _a_provider_that_cannot_answer(monkeypatch) -> None:
 
 
 def _ask_absent_provider(*_args, **_kwargs):
-    return flush_memory._call_capture_classifier(RECORD, None)
+    return flush_memory.call_capture_classifier(RECORD, None)
 
 
 def test_the_real_chain_with_no_provider_is_a_wait() -> None:
@@ -71,8 +71,8 @@ def test_an_absent_provider_is_named_to_the_queue(tmp_path: Path) -> None:
 
 
 def test_an_absent_provider_states_an_hour_and_other_failures_state_nothing() -> None:
-    absent = flush_memory._capture_queue_failure(flush_memory.CaptureProviderUnavailable("x"))
-    other = flush_memory._capture_queue_failure(RuntimeError("x"))
+    absent = flush_memory.capture_queue_failure(flush_memory.CaptureProviderUnavailable("x"))
+    other = flush_memory.capture_queue_failure(RuntimeError("x"))
 
     assert (absent.error_code, absent.retry_after) == ("provider_unavailable", 3600)
     assert (other.error_code, other.retry_after) == ("processor_failed:x", None)
@@ -81,9 +81,9 @@ def test_an_absent_provider_states_an_hour_and_other_failures_state_nothing() ->
 def test_the_last_attempt_is_raised_as_a_loss_and_an_earlier_one_is_not() -> None:
     cause = RuntimeError("the real failure")
 
-    flush_memory._raise_if_attempts_spent(SimpleNamespace(attempt=7), cause)
+    flush_memory.raise_if_attempts_spent(SimpleNamespace(attempt=7), cause)
     with pytest.raises(capture_diagnostics.DurableWorkExhausted) as raised:
-        flush_memory._raise_if_attempts_spent(SimpleNamespace(attempt=8), cause)
+        flush_memory.raise_if_attempts_spent(SimpleNamespace(attempt=8), cause)
 
     assert raised.value.__cause__ is cause
 
@@ -92,5 +92,5 @@ def test_a_spent_task_is_recorded_lost_and_a_retried_one_deferred() -> None:
     kind = "adapter_capture_worker"
     spent = capture_diagnostics.DurableWorkExhausted("spent")
 
-    assert capture_diagnostics._outcome_of(spent, kind) == "lost"
-    assert capture_diagnostics._outcome_of(RuntimeError("again later"), kind) == "deferred"
+    assert capture_diagnostics.outcome_of(spent, kind) == "lost"
+    assert capture_diagnostics.outcome_of(RuntimeError("again later"), kind) == "deferred"

@@ -447,7 +447,7 @@ def test_module_alias_lookup_uses_index_without_scanning_10k_modules():
             self.lookups += 1
             return super().get(key, default)
 
-    collector = code_extractor._Collector(
+    collector = code_extractor.Collector(
         (), "repo", code_extractor.ExtractionLimits(), None, None
     )
     collector.modules = CountingModules(
@@ -489,7 +489,7 @@ def test_syntax_traversal_checks_cancellation_before_walking_large_fake_tree():
         state["checks"] += 1
         return state["checks"] >= 2
 
-    collector = code_extractor._Collector(
+    collector = code_extractor.Collector(
         (), "repo", code_extractor.ExtractionLimits(), None, cancelled
     )
 
@@ -568,7 +568,7 @@ def test_tree_sitter_languages_extract_when_available_and_degrade_when_absent(mo
     assert {node["kind"] for node in available.nodes} >= {"class", "function"}
     assert "CALLS" in {item["edge_type"] for item in available.assertions}
 
-    monkeypatch.setattr(code_extractor, "_optional_parser", lambda language: None)
+    monkeypatch.setattr(code_extractor, "optional_parser", lambda language: None)
     degraded = code_extractor.extract_code((source,), repository_id="repo")
     assert {item["reason"] for item in degraded.observations} == {"unsupported_semantics"}
 
@@ -610,7 +610,7 @@ def test_a_blank_observation_target_is_refused():
     import code_extractor
 
     with pytest.raises(ValueError, match="must not be empty"):
-        code_extractor._canonical_observation_target(" \r\n\t")
+        code_extractor.canonical_observation_target(" \r\n\t")
 
 
 def test_javascript_observation_targets_are_canonical_and_evidence_stays_exact():
@@ -875,9 +875,9 @@ def test_extraction_is_deterministic_immutable_and_bounded():
 
 
 def test_deep_freeze_recursively_freezes_metadata_containers():
-    from code_extractor import _deep_freeze
+    from code_extractor import deep_freeze
 
-    frozen = _deep_freeze({"nested": {"items": ["one"]}})
+    frozen = deep_freeze({"nested": {"items": ["one"]}})
 
     with pytest.raises(TypeError):
         frozen["nested"]["items"][0] = "changed"
@@ -920,10 +920,10 @@ def test_facade_prefers_store_and_falls_back_to_live_extraction(tmp_path, monkey
         "from a import target\ndef caller(): target()\n", encoding="utf-8"
     )
     stored = [{"file": "stored.py", "line": 7, "function": "target"}]
-    monkeypatch.setattr(code_graph, "_store_find_callers", lambda name, root: stored)
+    monkeypatch.setattr("llm_wiki.code_graph_calls.store_find_callers", lambda name, root: stored)
 
     assert code_graph.find_callers("target", tmp_path) is stored
-    monkeypatch.setattr(code_graph, "_store_find_callers", lambda name, root: None)
+    monkeypatch.setattr("llm_wiki.code_graph_calls.store_find_callers", lambda name, root: None)
     assert any(Path(item["file"]).name == "b.py" for item in code_graph.find_callers("target", tmp_path))
 
 
@@ -936,20 +936,18 @@ def test_remaining_graph_queries_are_store_first_facades(tmp_path, monkeypatch):
         "architecture": {"entry_points": ["stored"]},
         "communities": [["stored"]],
     }
-    monkeypatch.setattr(code_graph, "_store_find_callees", lambda name, root: expected["callees"])
+    monkeypatch.setattr("llm_wiki.code_graph_calls.store_find_callees", lambda name, root: expected["callees"])
     monkeypatch.setattr(
-            code_graph,
-            "_store_find_dead_code",
+            "llm_wiki.code_graph_dead_code.store_find_dead_code",
             # `symbol` travels into the store since 2026-09-12: one name reads
             # only the sources that mention it.
             lambda root, symbol=None: expected["dead"],
         )
     monkeypatch.setattr(
-        code_graph,
-        "_store_get_architecture",
+        "llm_wiki.code_graph_architecture.store_get_architecture",
         lambda root, limit: expected["architecture"],
     )
-    monkeypatch.setattr(code_graph, "_store_detect_communities", lambda root: expected["communities"])
+    monkeypatch.setattr("llm_wiki.code_graph_communities.store_detect_communities", lambda root: expected["communities"])
 
     assert code_graph.find_callees("target", tmp_path) == expected["callees"]
     assert code_graph.find_dead_code(tmp_path) == expected["dead"]

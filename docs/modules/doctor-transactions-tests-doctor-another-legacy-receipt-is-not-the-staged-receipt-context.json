@@ -1,0 +1,141 @@
+{
+  "encoding": "o200k_base",
+  "max_tokens": 100000,
+  "serialization": "exact-duplicates/v1",
+  "files": [
+    "AGENTS.md",
+    "CLAUDE.md",
+    "docs/AGENTS.md",
+    "docs/STRUCTURE.md",
+    "docs/modules/context-bundle.md",
+    "docs/modules/context-records.md",
+    "docs/modules/context-tooling.md",
+    "docs/modules/doctor-another-legacy-receipt-is-not-the-staged-receipt-helpers.md",
+    "docs/modules/doctor-transactions-tests-doctor-another-legacy-receipt-is-not-the-staged-receipt-context.json",
+    "docs/modules/doctor-transactions-tests-doctor-another-legacy-receipt-is-not-the-staged-receipt.md",
+    "docs/modules/model-choice.md",
+    "docs/modules/product-structure.md",
+    "docs/modules/project-governance.md",
+    "docs/modules/test-support.md",
+    "rules/development-laws.md",
+    "scripts/__init__.py",
+    "scripts/llm_wiki/__init__.py",
+    "scripts/llm_wiki/context_bundle.py",
+    "tests/__init__.py",
+    "tests/conftest.py",
+    "tests/doctor_another_legacy_receipt_is_not_the_staged_receipt_helpers.py",
+    "tests/module_context.py",
+    "tests/module_context_paths.py",
+    "tests/module_interface.py",
+    "tests/module_interface_render.py",
+    "tests/module_qualification.py",
+    "tests/module_record_context.py",
+    "tests/module_records.py",
+    "tests/shared_fixtures.py",
+    "tests/slow_machine.py",
+    "tests/test_doctor_another_legacy_receipt_is_not_the_staged_receipt.py"
+  ],
+  "ownership": {
+    "files": [
+      "docs/modules/doctor-transactions-tests-doctor-another-legacy-receipt-is-not-the-staged-receipt-context.json",
+      "docs/modules/doctor-transactions-tests-doctor-another-legacy-receipt-is-not-the-staged-receipt.md",
+      "tests/test_doctor_another_legacy_receipt_is_not_the_staged_receipt.py"
+    ]
+  },
+  "qualified_dependencies": [
+    {
+      "provider": "scripts/compile_receipts.py",
+      "names": [
+        "receipt_predicate"
+      ],
+      "contract_sha256": "887d30814e9f2f6621f57885c35ac1be4e5a70685f238ae2fbae29b5a6b4b171",
+      "integration_tests": [
+        "tests/test_doctor_another_legacy_receipt_is_not_the_staged_receipt.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/compile_pipeline_sources.py",
+      "names": [
+        "daily_parts"
+      ],
+      "contract_sha256": "13ceb0154f0f72f76b66166741abaf41bf36f93ee4515c2a98ac3cf87d01faf7",
+      "integration_tests": [
+        "tests/test_doctor_another_legacy_receipt_is_not_the_staged_receipt.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/doctor_transactions.py",
+      "names": [
+        "CompiledDaySupersession",
+        "attempt_is_history",
+        "compile_snapshot_was_written"
+      ],
+      "contract_sha256": "b70942795d6ccce306923bf359d58ebf783464a43091ebd6d8d535bb1dbfd757",
+      "integration_tests": [
+        "tests/test_doctor_another_legacy_receipt_is_not_the_staged_receipt.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/generation_catalog_store.py",
+      "names": [
+        "GenerationCatalog"
+      ],
+      "contract_sha256": "b18194ebe04bf988b4474379fcb5243516550d43b745a00eaed1453f7844c983",
+      "integration_tests": [
+        "tests/test_a_blocked_task_has_a_way_back.py",
+        "tests/test_a_build_in_flight_is_not_an_orphan.py",
+        "tests/test_a_capacity_refusal_does_not_corrupt_a_generation.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/model_choice.py",
+      "names": [
+        "using_root"
+      ],
+      "contract_sha256": "d45f2655cb61963e77617d1dfd7d617b134ad77cc770b59b335d0856e5d65019",
+      "integration_tests": [
+        "tests/test_doctor_another_legacy_receipt_is_not_the_staged_receipt.py"
+      ]
+    },
+    {
+      "provider": "scripts/markdown_transaction.py",
+      "names": [
+        "MarkdownCoordinator"
+      ],
+      "contract_sha256": "5033973391b97bc338d02eed2a773ad25883e89b8325a9ccc726cd9e537f58ee",
+      "integration_tests": [
+        "tests/test_doctor_another_legacy_receipt_is_not_the_staged_receipt.py"
+      ]
+    },
+    {
+      "provider": "scripts/reliable_memory.py",
+      "names": [
+        "validate_state_root"
+      ],
+      "contract_sha256": "8680515cd873056a7c8a36e0057d91f2f83f23c48841263697676ff91f7ff964",
+      "integration_tests": [
+        "tests/test_doctor_another_legacy_receipt_is_not_the_staged_receipt.py"
+      ]
+    },
+    {
+      "provider": "scripts/repository_scope.py",
+      "names": [
+        "sanitized_git_environment"
+      ],
+      "contract_sha256": "fd550ae20761afad50b37fa3a71044a162485b0e4d4b3e2af9b5b22e143c2bec",
+      "integration_tests": [
+        "tests/test_doctor_another_legacy_receipt_is_not_the_staged_receipt.py"
+      ]
+    },
+    {
+      "provider": "scripts/transaction_lineage.py",
+      "names": [
+        "committed_created_paths"
+      ],
+      "contract_sha256": "459588f532dd5ef017b014d9989e3b272ea280eebe98c693ccacc48eac5d7aac",
+      "integration_tests": [
+        "tests/test_doctor_another_legacy_receipt_is_not_the_staged_receipt.py"
+      ]
+    }
+  ]
+}

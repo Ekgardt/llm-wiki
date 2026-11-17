@@ -7,9 +7,9 @@ from __future__ import annotations
 import shutil
 from pathlib import Path
 
-from tests.test_repository_index import ALPHA, _repository
-from tests.test_repository_refresh import _isolated_reader_cache, adopted_vault  # noqa: F401
-from tests.test_repository_worktrees import _worktree
+from tests.repository_index_helpers import ALPHA, _repository
+from tests.repository_refresh_helpers import _isolated_reader_cache, adopted_vault  # noqa: F401
+from tests.repository_worktrees_helpers import _worktree
 
 
 def _refused_worktrees(repository: Path, count: int) -> None:
@@ -21,11 +21,12 @@ def _refused_worktrees(repository: Path, count: int) -> None:
 
 def test_refused_worktrees_do_not_hold_every_slot_twice(adopted_vault, tmp_path):  # noqa: F811
     import repository_index
+    import repository_indexing
     from repository_worktrees import MAX_FOLLOWED_PER_PASS
 
     _root, state = adopted_vault
     repository = _repository(tmp_path / "repo", {"pkg/alpha.py": ALPHA})
-    repository_index.index_repository(repository, state_root=state)
+    repository_indexing.index_repository(repository, state_root=state)
     _refused_worktrees(repository, MAX_FOLLOWED_PER_PASS)
     wanted = _worktree(repository, "repo-wanted", "wanted")
 

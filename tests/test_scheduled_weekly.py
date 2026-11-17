@@ -9,6 +9,7 @@ from pathlib import Path
 import markdown_transaction
 import operational_ownership
 import scheduled_weekly
+import weekly_budget
 
 
 def _weekly_owner_row(candidate: Path) -> tuple:
@@ -33,7 +34,7 @@ def test_weekly_keeps_its_owner_and_marker_and_never_runs_the_nightly(
     phases: list[str] = []
     outer = (
         original_marker,
-        (lease.token, lease.epoch, operational_ownership._timestamp(lease.expires_at)),
+        (lease.token, lease.epoch, operational_ownership.timestamp(lease.expires_at)),
     )
 
     def assert_outer(phase: str) -> None:
@@ -56,7 +57,7 @@ def test_weekly_keeps_its_owner_and_marker_and_never_runs_the_nightly(
     monkeypatch.setattr(scheduled_weekly.scheduled_nightly, "run_nightly", nested_nightly)
     monkeypatch.setattr(scheduled_weekly.scheduled_nightly, "_run_step", run_step)
     monkeypatch.setattr(scheduled_weekly, "_wait_for_compile_idle", lambda _log: None)
-    monkeypatch.setattr(scheduled_weekly, "REPORTS_DIR", tmp_path / "logs")
+    monkeypatch.setenv("LLM_WIKI_STATE_ROOT", str(tmp_path))
     monkeypatch.setattr(scheduled_weekly, "record_weekly_result", lambda *_a, **_k: None)
     monkeypatch.setitem(
         sys.modules,
@@ -90,7 +91,7 @@ def test_weekly_keeps_its_owner_and_marker_and_never_runs_the_nightly(
 
 def test_the_weekly_pass_ages_session_records_out_of_the_active_tree():
     """The archiver only helps if the pass that runs unattended calls it."""
-    steps = scheduled_weekly._script_steps()
+    steps = weekly_budget.script_steps()
     commands = {label: command for _message, label, command, _timeout in steps}
     labels = list(commands)
     command = commands["sessions"]

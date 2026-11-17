@@ -1,0 +1,169 @@
+{
+  "encoding": "o200k_base",
+  "max_tokens": 100000,
+  "serialization": "exact-duplicates/v1",
+  "files": [
+    "AGENTS.md",
+    "CLAUDE.md",
+    "docs/AGENTS.md",
+    "docs/STRUCTURE.md",
+    "docs/modules/context-bundle.md",
+    "docs/modules/context-records.md",
+    "docs/modules/context-tooling.md",
+    "docs/modules/generation-descriptors.md",
+    "docs/modules/install-provider-files.md",
+    "docs/modules/model-choice.md",
+    "docs/modules/product-structure.md",
+    "docs/modules/project-governance.md",
+    "docs/modules/test-provider-read-proof-keeps-replacement-observable-context.json",
+    "docs/modules/test-provider-read-proof-keeps-replacement-observable.md",
+    "docs/modules/test-support.md",
+    "rules/development-laws.md",
+    "scripts/__init__.py",
+    "scripts/llm_wiki/__init__.py",
+    "scripts/llm_wiki/context_bundle.py",
+    "scripts/llm_wiki/generation_descriptors.py",
+    "scripts/llm_wiki/install_provider_files.py",
+    "tests/__init__.py",
+    "tests/conftest.py",
+    "tests/module_context.py",
+    "tests/module_context_paths.py",
+    "tests/module_interface.py",
+    "tests/module_interface_render.py",
+    "tests/module_qualification.py",
+    "tests/module_record_context.py",
+    "tests/module_records.py",
+    "tests/shared_fixtures.py",
+    "tests/slow_machine.py",
+    "tests/test_provider_read_proof_keeps_replacement_observable.py"
+  ],
+  "ownership": {
+    "files": [
+      "docs/modules/test-provider-read-proof-keeps-replacement-observable-context.json",
+      "docs/modules/test-provider-read-proof-keeps-replacement-observable.md",
+      "tests/test_provider_read_proof_keeps_replacement_observable.py"
+    ]
+  },
+  "qualified_dependencies": [
+    {
+      "provider": "scripts/install_state.py",
+      "names": [
+        "InstallControlError",
+        "active_install_health_for_schema",
+        "transaction_resources"
+      ],
+      "contract_sha256": "2dc72ea46c4c58b84327fa84dbfb82e0e250762774e9bec128a9a29341309c68",
+      "integration_tests": [
+        "tests/test_provider_read_proof_keeps_replacement_observable.py"
+      ]
+    },
+    {
+      "provider": "scripts/integration_hook_config.py",
+      "names": [
+        "codex_projection_bundle"
+      ],
+      "contract_sha256": "f842544c769ede3de9cb4cbbace95e549cbccb0386f9230474d1409eda40114d",
+      "integration_tests": [
+        "tests/test_provider_read_proof_keeps_replacement_observable.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/generation_catalog_store.py",
+      "names": [
+        "GenerationCatalog"
+      ],
+      "contract_sha256": "b18194ebe04bf988b4474379fcb5243516550d43b745a00eaed1453f7844c983",
+      "integration_tests": [
+        "tests/test_a_build_in_flight_is_not_an_orphan.py",
+        "tests/test_a_code_generation_is_not_abandoned.py",
+        "tests/test_a_flow_walk_stops_when_its_caller_has.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/generation_fields.py",
+      "names": [
+        "check_cancelled",
+        "check_monotonic_deadline"
+      ],
+      "contract_sha256": "dd4c2e6077290f05bc0917ffba160d3f8b8dd2564f1f8868eb16b3bf1deae2f4",
+      "integration_tests": [
+        "tests/test_a_blocked_task_has_a_way_back.py",
+        "tests/test_a_build_in_flight_is_not_an_orphan.py",
+        "tests/test_a_capacity_refusal_does_not_corrupt_a_generation.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/generation_limits.py",
+      "names": [
+        "HASH_CHUNK_BYTES"
+      ],
+      "contract_sha256": "b938fc710f1044883f4d9c11d1821c9250e2e2bddcdecbefcbdcf8bf04623136",
+      "integration_tests": [
+        "tests/test_generation_catalog.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/install_record_reader.py",
+      "names": [
+        "require_record_roots"
+      ],
+      "contract_sha256": "522c3f790f0eb480f7ce64bebfe9ce4d58f11745953e1e04b49a623effb6da85",
+      "integration_tests": [
+        "tests/test_claude_settings_ownership.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/install_resource_builder.py",
+      "names": [
+        "codex_hooks_destination"
+      ],
+      "contract_sha256": "21f7756c7a0d0eabb158cab376f399433d16ecd577eb932c8c20dd515f6014cc",
+      "integration_tests": [
+        "tests/test_a_rerun_may_ask_for_fewer_things.py",
+        "tests/test_an_uninstall_names_what_it_leaves.py",
+        "tests/test_claude_settings_ownership.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/model_choice.py",
+      "names": [
+        "using_root"
+      ],
+      "contract_sha256": "d45f2655cb61963e77617d1dfd7d617b134ad77cc770b59b335d0856e5d65019",
+      "integration_tests": [
+        "tests/test_provider_read_proof_keeps_replacement_observable.py"
+      ]
+    },
+    {
+      "provider": "scripts/reliable_memory.py",
+      "names": [
+        "validate_runtime_file",
+        "validate_state_root"
+      ],
+      "contract_sha256": "8d6496bf7c816260fcc296ec050a67bb532dbd88e54cd15a47ff34c033488c8d",
+      "integration_tests": [
+        "tests/test_provider_read_proof_keeps_replacement_observable.py"
+      ]
+    },
+    {
+      "provider": "scripts/repository_scope.py",
+      "names": [
+        "sanitized_git_environment"
+      ],
+      "contract_sha256": "fd550ae20761afad50b37fa3a71044a162485b0e4d4b3e2af9b5b22e143c2bec",
+      "integration_tests": [
+        "tests/test_provider_read_proof_keeps_replacement_observable.py"
+      ]
+    },
+    {
+      "provider": "scripts/windows_workspace.py",
+      "names": [
+        "identity"
+      ],
+      "contract_sha256": "eea4594d179dae7393111a6340168ba899088bcdc388cf8f28e09ae429c047b3",
+      "integration_tests": [
+        "tests/test_provider_read_proof_keeps_replacement_observable.py"
+      ]
+    }
+  ]
+}

@@ -23,7 +23,6 @@ if str(SCRIPTS_DIR) not in sys.path:
 
 mcp_http = pytest.importorskip("mcp_http")
 
-import mcp_server  # noqa: E402
 
 
 @pytest.fixture
@@ -31,13 +30,11 @@ def warmed(monkeypatch) -> dict[str, list]:
     seen: dict[str, list] = {"shared": [], "encoder": []}
 
     monkeypatch.setattr(
-        mcp_server,
-        "warmup_retrieval_path",
+        "mcp_server.warmup_retrieval_path",
         lambda seconds: seen["shared"].append(seconds),
     )
     monkeypatch.setattr(
-        mcp_server,
-        "_start_encoder_warmup",
+        "mcp_server.start_encoder_warmup",
         lambda: seen["encoder"].append(True),
     )
     return seen

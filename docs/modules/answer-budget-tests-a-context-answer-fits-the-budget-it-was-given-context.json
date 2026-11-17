@@ -1,0 +1,139 @@
+{
+  "encoding": "o200k_base",
+  "max_tokens": 100000,
+  "serialization": "exact-duplicates/v1",
+  "files": [
+    "AGENTS.md",
+    "CLAUDE.md",
+    "docs/AGENTS.md",
+    "docs/STRUCTURE.md",
+    "docs/modules/answer-budget-tests-a-context-answer-fits-the-budget-it-was-given-context.json",
+    "docs/modules/answer-budget-tests-a-context-answer-fits-the-budget-it-was-given.md",
+    "docs/modules/context-bundle.md",
+    "docs/modules/context-records.md",
+    "docs/modules/context-tooling.md",
+    "docs/modules/model-choice.md",
+    "docs/modules/product-structure.md",
+    "docs/modules/project-governance.md",
+    "docs/modules/test-support.md",
+    "rules/development-laws.md",
+    "scripts/__init__.py",
+    "scripts/llm_wiki/__init__.py",
+    "scripts/llm_wiki/context_bundle.py",
+    "tests/__init__.py",
+    "tests/conftest.py",
+    "tests/module_context.py",
+    "tests/module_context_paths.py",
+    "tests/module_interface.py",
+    "tests/module_interface_render.py",
+    "tests/module_qualification.py",
+    "tests/module_record_context.py",
+    "tests/module_records.py",
+    "tests/shared_fixtures.py",
+    "tests/slow_machine.py",
+    "tests/test_a_context_answer_fits_the_budget_it_was_given.py"
+  ],
+  "ownership": {
+    "files": [
+      "docs/modules/answer-budget-tests-a-context-answer-fits-the-budget-it-was-given-context.json",
+      "docs/modules/answer-budget-tests-a-context-answer-fits-the-budget-it-was-given.md",
+      "tests/test_a_context_answer_fits_the_budget_it_was_given.py"
+    ]
+  },
+  "qualified_dependencies": [
+    {
+      "provider": "scripts/answer_budget.py",
+      "names": [
+        "estimate_text_tokens",
+        "estimate_tokens"
+      ],
+      "contract_sha256": "1d00a0f5237c8a0c477e0c29a22ce39b7912b66339a2c777f2869e5f3c2ad42e",
+      "integration_tests": [
+        "tests/test_a_context_answer_fits_the_budget_it_was_given.py"
+      ]
+    },
+    {
+      "provider": "scripts/answer_cost.py",
+      "names": [
+        "ESTIMATE_METHOD"
+      ],
+      "contract_sha256": "666ca007a4e41d29755fcb4d52b18fdb4b25d0fcf94ed98b5981ba72a8140e59",
+      "integration_tests": [
+        "tests/test_a_context_answer_fits_the_budget_it_was_given.py"
+      ]
+    },
+    {
+      "provider": "scripts/code_navigation_renderer.py",
+      "names": [
+        "estimate_tokens"
+      ],
+      "contract_sha256": "7ed78ce793581ef6379b0ade57bdf2f8ec515006ca8a29b30afd83ff5953583c",
+      "integration_tests": [
+        "tests/test_a_context_answer_fits_the_budget_it_was_given.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_client.py",
+      "names": [
+        "call_llm_result"
+      ],
+      "contract_sha256": "51fa4e6aa8f3a50698cdef412a4d1c958d9f69d34f3f46698f6ff9148fde82e8",
+      "integration_tests": [
+        "tests/test_a_context_answer_fits_the_budget_it_was_given.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/generation_catalog_store.py",
+      "names": [
+        "GenerationCatalog"
+      ],
+      "contract_sha256": "b18194ebe04bf988b4474379fcb5243516550d43b745a00eaed1453f7844c983",
+      "integration_tests": [
+        "tests/test_a_blocked_task_has_a_way_back.py",
+        "tests/test_a_build_in_flight_is_not_an_orphan.py",
+        "tests/test_a_capacity_refusal_does_not_corrupt_a_generation.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/model_choice.py",
+      "names": [
+        "using_root"
+      ],
+      "contract_sha256": "d45f2655cb61963e77617d1dfd7d617b134ad77cc770b59b335d0856e5d65019",
+      "integration_tests": [
+        "tests/test_a_context_answer_fits_the_budget_it_was_given.py"
+      ]
+    },
+    {
+      "provider": "scripts/mcp_server.py",
+      "names": [
+        "get_context",
+        "validate_tool_arguments"
+      ],
+      "contract_sha256": "b884e5defd0217e8b37437040b6805f4407f86e0b9859cfe3b032a0c17e64251",
+      "integration_tests": [
+        "tests/test_a_context_answer_fits_the_budget_it_was_given.py"
+      ]
+    },
+    {
+      "provider": "scripts/reliable_memory.py",
+      "names": [
+        "validate_state_root"
+      ],
+      "contract_sha256": "8680515cd873056a7c8a36e0057d91f2f83f23c48841263697676ff91f7ff964",
+      "integration_tests": [
+        "tests/test_a_context_answer_fits_the_budget_it_was_given.py"
+      ]
+    },
+    {
+      "provider": "scripts/repository_scope.py",
+      "names": [
+        "sanitized_git_environment"
+      ],
+      "contract_sha256": "fd550ae20761afad50b37fa3a71044a162485b0e4d4b3e2af9b5b22e143c2bec",
+      "integration_tests": [
+        "tests/test_a_context_answer_fits_the_budget_it_was_given.py"
+      ]
+    }
+  ]
+}

@@ -1,0 +1,185 @@
+{
+  "encoding": "o200k_base",
+  "max_tokens": 100000,
+  "serialization": "exact-duplicates/v1",
+  "files": [
+    "AGENTS.md",
+    "CLAUDE.md",
+    "docs/AGENTS.md",
+    "docs/STRUCTURE.md",
+    "docs/modules/build-guardrails-context.json",
+    "docs/modules/build-guardrails.md",
+    "docs/modules/claim-tree-manifest.md",
+    "docs/modules/context-bundle.md",
+    "docs/modules/context-records.md",
+    "docs/modules/context-tooling.md",
+    "docs/modules/formats.md",
+    "docs/modules/model-choice.md",
+    "docs/modules/product-structure.md",
+    "docs/modules/project-governance.md",
+    "docs/modules/test-support.md",
+    "rules/development-laws.md",
+    "scripts/__init__.py",
+    "scripts/build_guardrails.py",
+    "scripts/claim_tree_manifest.py",
+    "scripts/llm_wiki/__init__.py",
+    "scripts/llm_wiki/context_bundle.py",
+    "scripts/llm_wiki/formats/__init__.py",
+    "tests/__init__.py",
+    "tests/conftest.py",
+    "tests/module_context.py",
+    "tests/module_context_paths.py",
+    "tests/module_interface.py",
+    "tests/module_interface_render.py",
+    "tests/module_qualification.py",
+    "tests/module_record_context.py",
+    "tests/module_records.py",
+    "tests/shared_fixtures.py",
+    "tests/slow_machine.py",
+    "tests/test_guardrails.py",
+    "tests/test_the_guard_rails_say_how_many_rules_they_left_out.py"
+  ],
+  "ownership": {
+    "files": [
+      "docs/modules/build-guardrails-context.json",
+      "docs/modules/build-guardrails.md",
+      "scripts/build_guardrails.py",
+      "tests/test_guardrails.py",
+      "tests/test_the_guard_rails_say_how_many_rules_they_left_out.py"
+    ]
+  },
+  "qualified_dependencies": [
+    {
+      "provider": "scripts/bounded_io.py",
+      "names": [
+        "MAX_KNOWLEDGE_PAGE_BYTES",
+        "read_stable_bytes"
+      ],
+      "contract_sha256": "87826f93ff8f76c61d945698c7f5ca82bee5b8701fa1315e9efbe307dda3587f",
+      "integration_tests": [
+        "tests/test_guardrails.py",
+        "tests/test_the_guard_rails_say_how_many_rules_they_left_out.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/formats/canonical.py",
+      "names": [
+        "canonical_json_bytes",
+        "sha256_bytes"
+      ],
+      "contract_sha256": "2e42a7aefcb66ac2515f6665a03feae34e6f7bad4807787a789ce031f9f3a9c1",
+      "integration_tests": [
+        "tests/test_guardrails.py",
+        "tests/test_the_guard_rails_say_how_many_rules_they_left_out.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/generation_catalog_store.py",
+      "names": [
+        "GenerationCatalog"
+      ],
+      "contract_sha256": "b18194ebe04bf988b4474379fcb5243516550d43b745a00eaed1453f7844c983",
+      "integration_tests": [
+        "tests/test_a_blocked_task_has_a_way_back.py",
+        "tests/test_a_build_in_flight_is_not_an_orphan.py",
+        "tests/test_a_capacity_refusal_does_not_corrupt_a_generation.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/markdown_store.py",
+      "names": [
+        "MAX_KNOWLEDGE_TARGET_BYTES"
+      ],
+      "contract_sha256": "5d4b6ece7f3dfbf36e7899967fc21c0a5a5dde7d61a32e5dca4ee56c341468bf",
+      "integration_tests": [
+        "tests/test_guardrails.py",
+        "tests/test_the_guard_rails_say_how_many_rules_they_left_out.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/model_choice.py",
+      "names": [
+        "using_root"
+      ],
+      "contract_sha256": "d45f2655cb61963e77617d1dfd7d617b134ad77cc770b59b335d0856e5d65019",
+      "integration_tests": [
+        "tests/test_guardrails.py",
+        "tests/test_the_guard_rails_say_how_many_rules_they_left_out.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/restricted_paths.py",
+      "names": [
+        "restricted_relative_path"
+      ],
+      "contract_sha256": "da0f32f3b3897cc6b0a148a0ab7dcad5a82bf356267ecd94c5ab0aaab267fd42",
+      "integration_tests": [
+        "tests/test_guardrails.py",
+        "tests/test_the_guard_rails_say_how_many_rules_they_left_out.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/runtime_roots.py",
+      "names": [
+        "vault_root"
+      ],
+      "contract_sha256": "35ea768c9fd09097366a2ded61783ec66ac8997f3f02255c744c8443405a706b",
+      "integration_tests": [
+        "tests/test_a_continuation_keeps_its_original_entry.py",
+        "tests/test_a_prompt_checkpoint_does_not_outwait_its_host.py",
+        "tests/test_a_session_marker_survives_a_busy_writer.py"
+      ]
+    },
+    {
+      "provider": "scripts/markdown_transaction.py",
+      "names": [
+        "ABSENT",
+        "MarkdownChange",
+        "MarkdownCoordinator",
+        "TransactionFailure",
+        "mutate_knowledge",
+        "stable_operation_id"
+      ],
+      "contract_sha256": "bfa0811143f67805ad5126239c352ac4d465f9d98a139238ade33df932585f9c",
+      "integration_tests": [
+        "tests/test_guardrails.py"
+      ]
+    },
+    {
+      "provider": "scripts/reliable_memory.py",
+      "names": [
+        "canonical_json_bytes",
+        "sha256_bytes",
+        "validate_state_root"
+      ],
+      "contract_sha256": "4243e32fa6ecab88fca1a2d2b3214c0a36944fc23129138102dfaebf6d99457f",
+      "integration_tests": [
+        "tests/test_guardrails.py"
+      ]
+    },
+    {
+      "provider": "scripts/repository_scope.py",
+      "names": [
+        "sanitized_git_environment"
+      ],
+      "contract_sha256": "fd550ae20761afad50b37fa3a71044a162485b0e4d4b3e2af9b5b22e143c2bec",
+      "integration_tests": [
+        "tests/test_a_code_generation_is_not_abandoned.py",
+        "tests/test_a_directory_link_inside_the_checkout_does_not_refuse_the_revision.py",
+        "tests/test_a_document_is_opened_in_its_own_language.py"
+      ]
+    },
+    {
+      "provider": "scripts/settings.py",
+      "names": [
+        "raise_hint",
+        "setting_value"
+      ],
+      "contract_sha256": "6996986733aff8ab379a49ff913796288b35a03330b3f3d67951ced08a779207",
+      "integration_tests": [
+        "tests/test_guardrails.py",
+        "tests/test_the_guard_rails_say_how_many_rules_they_left_out.py"
+      ]
+    }
+  ]
+}

@@ -12,7 +12,6 @@ import os
 from pathlib import Path
 
 import mcp_server
-import memory_state
 import pytest
 
 PAST = 1_000_000_000
@@ -34,9 +33,9 @@ def vault(tmp_path: Path, monkeypatch) -> Path:
     (generation / "source-manifest.json").write_text(json.dumps({"sources": sources}), encoding="utf-8")
     for path in [*root.rglob("*"), *generation.iterdir()]:
         os.utime(path, (PAST, PAST))
-    monkeypatch.setattr(memory_state, "ROOT", root)
-    monkeypatch.setattr(memory_state, "STATE_ROOT", state)
-    mcp_server._recorded_memory_digests.cache_clear()
+    monkeypatch.setenv("LLM_WIKI_ROOT", str(root))
+    monkeypatch.setenv("LLM_WIKI_STATE_ROOT", str(state))
+    mcp_server.recorded_memory_digests.cache_clear()
     return root
 
 
@@ -50,7 +49,7 @@ def _recall(paths: list[str]) -> dict:
 def test_an_uncited_project_state_rewrite_leaves_the_answer_fresh(vault: Path) -> None:
     (vault / STATE).write_text("# rewritten by a session\n", encoding="utf-8")
 
-    components = mcp_server._recall_components(_recall([NOTE]))
+    components = mcp_server.recall_components(_recall([NOTE]))
 
     assert (components["lexical"]["freshness"], components["dense"]["freshness"]) == ("fresh", "missing")
 
@@ -58,22 +57,22 @@ def test_an_uncited_project_state_rewrite_leaves_the_answer_fresh(vault: Path) -
 def test_a_cited_project_state_rewrite_makes_the_answer_stale(vault: Path) -> None:
     (vault / STATE).write_text("# rewritten by a session\n", encoding="utf-8")
 
-    assert mcp_server._recall_components(_recall([STATE]))["lexical"]["freshness"] == "stale"
+    assert mcp_server.recall_components(_recall([STATE]))["lexical"]["freshness"] == "stale"
 
 
 def test_a_cited_source_that_vanished_makes_the_answer_stale(vault: Path) -> None:
     (vault / STATE).unlink()
 
-    assert mcp_server._answer_freshness(GENERATION, [STATE]) == "stale"
+    assert mcp_server.answer_freshness(GENERATION, [STATE]) == "stale"
 
 
 def test_a_note_compiled_after_the_build_still_makes_any_answer_stale(vault: Path) -> None:
     (vault / "knowledge/notes/new.md").write_text("# New\n", encoding="utf-8")
 
-    assert mcp_server._answer_freshness(GENERATION, [STATE]) == "stale"
+    assert mcp_server.answer_freshness(GENERATION, [STATE]) == "stale"
 
 
 def test_an_unreadable_source_manifest_is_unknown_not_fresh(vault: Path, tmp_path: Path) -> None:
     (tmp_path / "state/cache/evidence-graph/generations" / GENERATION / "source-manifest.json").unlink()
 
-    assert mcp_server._answer_freshness(GENERATION, [NOTE]) == "unknown"
+    assert mcp_server.answer_freshness(GENERATION, [NOTE]) == "unknown"

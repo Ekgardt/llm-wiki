@@ -1,0 +1,367 @@
+{
+  "encoding": "o200k_base",
+  "max_tokens": 100000,
+  "serialization": "exact-duplicates/v1",
+  "files": [
+    "AGENTS.md",
+    "CLAUDE.md",
+    "docs/AGENTS.md",
+    "docs/STRUCTURE.md",
+    "docs/modules/adoption-admission.md",
+    "docs/modules/compile-progress-tests-context.json",
+    "docs/modules/compile-progress-tests.md",
+    "docs/modules/context-bundle.md",
+    "docs/modules/context-records.md",
+    "docs/modules/context-tooling.md",
+    "docs/modules/formats.md",
+    "docs/modules/installed-memory-repair-tests.md",
+    "docs/modules/model-choice.md",
+    "docs/modules/product-structure.md",
+    "docs/modules/project-governance.md",
+    "docs/modules/test-support.md",
+    "rules/development-laws.md",
+    "scripts/__init__.py",
+    "scripts/llm_wiki/__init__.py",
+    "scripts/llm_wiki/adoption_admission.py",
+    "scripts/llm_wiki/context_bundle.py",
+    "scripts/llm_wiki/formats/__init__.py",
+    "tests/__init__.py",
+    "tests/adopted_vault.py",
+    "tests/compile_call_controller_helpers.py",
+    "tests/compile_progress_admission_helpers.py",
+    "tests/conftest.py",
+    "tests/legacy_adopted_vault.py",
+    "tests/module_context.py",
+    "tests/module_context_paths.py",
+    "tests/module_interface.py",
+    "tests/module_interface_render.py",
+    "tests/module_qualification.py",
+    "tests/module_record_context.py",
+    "tests/module_records.py",
+    "tests/shared_fixtures.py",
+    "tests/slow_machine.py",
+    "tests/test_compile_progress_admission.py",
+    "tests/test_compile_progress_health.py",
+    "tests/test_compile_progress_queue_fencing.py"
+  ],
+  "ownership": {
+    "files": [
+      "docs/modules/compile-progress-tests-context.json",
+      "docs/modules/compile-progress-tests.md",
+      "tests/compile_call_controller_helpers.py",
+      "tests/compile_progress_admission_helpers.py",
+      "tests/test_compile_progress_admission.py",
+      "tests/test_compile_progress_health.py",
+      "tests/test_compile_progress_queue_fencing.py"
+    ]
+  },
+  "qualified_dependencies": [
+    {
+      "provider": "scripts/compile_progress.py",
+      "names": [
+        "CompileEvent",
+        "ProgressConflict",
+        "ProgressCorrupt",
+        "SCHEMA_STATEMENTS",
+        "make_source_scope"
+      ],
+      "contract_sha256": "575721b4293ae88a43311b98f6ccada38fb126068ee1099c5fa526ca229ec7ae",
+      "integration_tests": [
+        "tests/test_compile_progress_admission.py",
+        "tests/test_compile_progress_health.py",
+        "tests/test_compile_progress_queue_fencing.py"
+      ]
+    },
+    {
+      "provider": "scripts/compile_progress_migration.py",
+      "names": [
+        "migrate_candidate"
+      ],
+      "contract_sha256": "9fb4b3b645d47db7ba07afa96b3ea3eb03d0e946b9744af3d59dabbf32a2984a",
+      "integration_tests": [
+        "tests/test_compile_progress_admission.py",
+        "tests/test_compile_progress_health.py",
+        "tests/test_compile_progress_queue_fencing.py"
+      ]
+    },
+    {
+      "provider": "scripts/installed_memory_repair.py",
+      "names": [
+        "repair_installed_vault"
+      ],
+      "contract_sha256": "6ab4497d3ed56413bc24ea5ae9e993acf118980056b046072877a80df4f52a18",
+      "integration_tests": [
+        "tests/test_a_check_is_judged_when_it_ends.py",
+        "tests/test_a_check_names_its_cause.py",
+        "tests/test_a_claude_prompt_takes_the_ingest_path.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/coordinator_invariants.py",
+      "names": [
+        "require_v3_invariants"
+      ],
+      "contract_sha256": "faa90f63db4e736666ce2015fb8f4284986825caeb4170332744d3fb0d902179",
+      "integration_tests": [
+        "tests/test_compile_progress_admission.py",
+        "tests/test_compile_progress_health.py",
+        "tests/test_compile_progress_queue_fencing.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/coordinator_schema.py",
+      "names": [
+        "COORDINATOR_V3_SCHEMA_SHA256",
+        "coordinator_v3_schema_complete"
+      ],
+      "contract_sha256": "e18cb78342cf3dbda9c434cfc0729ff2023b756986a6209c843caa3bca89a464",
+      "integration_tests": [
+        "tests/test_compile_progress_admission.py",
+        "tests/test_compile_progress_health.py",
+        "tests/test_compile_progress_queue_fencing.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/doctor_queue.py",
+      "names": [
+        "queue_v2_check"
+      ],
+      "contract_sha256": "770e7681777fed2b142fc2e65bc42dbf3634edcbe32993d141953c6adeff2346",
+      "integration_tests": [
+        "tests/test_compile_progress_admission.py",
+        "tests/test_compile_progress_health.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/formats/canonical.py",
+      "names": [
+        "canonical_json_bytes",
+        "sha256_bytes"
+      ],
+      "contract_sha256": "2e42a7aefcb66ac2515f6665a03feae34e6f7bad4807787a789ce031f9f3a9c1",
+      "integration_tests": [
+        "tests/test_compile_progress_admission.py",
+        "tests/test_compile_progress_health.py",
+        "tests/test_compile_progress_queue_fencing.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/formats/schema.py",
+      "names": [
+        "validate_schema"
+      ],
+      "contract_sha256": "753e4abefcf29389d3fc0c051070bfaa66db14ecb88e1c98fc9b85588a6017cb",
+      "integration_tests": [
+        "tests/test_compile_progress_admission.py",
+        "tests/test_compile_progress_health.py",
+        "tests/test_compile_progress_queue_fencing.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/generation_catalog_store.py",
+      "names": [
+        "GenerationCatalog"
+      ],
+      "contract_sha256": "b18194ebe04bf988b4474379fcb5243516550d43b745a00eaed1453f7844c983",
+      "integration_tests": [
+        "tests/test_a_blocked_task_has_a_way_back.py",
+        "tests/test_a_build_in_flight_is_not_an_orphan.py",
+        "tests/test_a_capacity_refusal_does_not_corrupt_a_generation.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/model_choice.py",
+      "names": [
+        "using_root"
+      ],
+      "contract_sha256": "d45f2655cb61963e77617d1dfd7d617b134ad77cc770b59b335d0856e5d65019",
+      "integration_tests": [
+        "tests/test_compile_progress_admission.py",
+        "tests/test_compile_progress_health.py",
+        "tests/test_compile_progress_queue_fencing.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/queue_database_contract.py",
+      "names": [
+        "QUEUE_COMPILE_CONTRACT",
+        "QUEUE_COMPILE_SCHEMA_SHA256",
+        "QUEUE_V3_SCHEMA_SHA256"
+      ],
+      "contract_sha256": "5797d90f9036764219ebbd8ecb9ced4d000fe0a385b92ca8e113ff490e303ef0",
+      "integration_tests": [
+        "tests/test_compile_progress_admission.py",
+        "tests/test_compile_progress_health.py",
+        "tests/test_compile_progress_queue_fencing.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/queue_schema_operations.py",
+      "names": [
+        "queue_v3_schema_complete"
+      ],
+      "contract_sha256": "db4e115ba61cb917ec7b7ece12ccb0930457a77d2ee885afb7f94c44f73e2eb2",
+      "integration_tests": [
+        "tests/test_compile_progress_admission.py",
+        "tests/test_compile_progress_health.py",
+        "tests/test_compile_progress_queue_fencing.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/queue_v3_readers.py",
+      "names": [
+        "audit_compile_progress",
+        "open_queue_v3_readonly"
+      ],
+      "contract_sha256": "2b9e3618a2c1192056d4afaeeccfe9a721a5665fe076bf154c79a2752d859554",
+      "integration_tests": [
+        "tests/test_compile_progress_health.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/reliability_defaults.py",
+      "names": [
+        "DEFAULTS"
+      ],
+      "contract_sha256": "f37296a83c15073e42a6cc8b86b88c2d19c548ac19a4ef6d0ca2f7af925c90c8",
+      "integration_tests": [
+        "tests/test_compile_progress_admission.py",
+        "tests/test_compile_progress_health.py",
+        "tests/test_compile_progress_queue_fencing.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/sqlite_contracts.py",
+      "names": [
+        "OperationalDatabaseContract"
+      ],
+      "contract_sha256": "819cca1e291f921a6fb6e6e90a16fb4a05b0659e020227653689af60d484a1a8",
+      "integration_tests": [
+        "tests/test_compile_progress_admission.py",
+        "tests/test_compile_progress_health.py",
+        "tests/test_compile_progress_queue_fencing.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/sqlite_deadlines.py",
+      "names": [
+        "operational_deadline_active"
+      ],
+      "contract_sha256": "b6a31ad07e6c587aeabfc49f66f512ca222ed88ce0bd8a29eafe6eaca6ed4838",
+      "integration_tests": [
+        "tests/test_compile_progress_admission.py",
+        "tests/test_compile_progress_health.py",
+        "tests/test_compile_progress_queue_fencing.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/sqlite_io.py",
+      "names": [
+        "open_readonly_operational_db"
+      ],
+      "contract_sha256": "ee94d29558e055bbff68f8247575ed84ab6d84b559eebf24b508977d35bc91db",
+      "integration_tests": [
+        "tests/modules/coordinator_validation/test_database.py",
+        "tests/modules/sqlite_io/test_connections.py",
+        "tests/modules/sqlite_io/test_probe.py"
+      ]
+    },
+    {
+      "provider": "scripts/markdown_transaction.py",
+      "names": [
+        "active_markdown_coordinator",
+        "mutate_owned_knowledge"
+      ],
+      "contract_sha256": "75d2b9922342dd6643bb82f8e621e38b91d5daf2d79816f49f7b78c3efeda318",
+      "integration_tests": [
+        "tests/test_compile_progress_admission.py"
+      ]
+    },
+    {
+      "provider": "scripts/operational_ownership.py",
+      "names": [
+        "parse_timestamp"
+      ],
+      "contract_sha256": "7340c77affed782203f09da71e156eebb3cbdf0d91749b26ca7e0871ba40354d",
+      "integration_tests": [
+        "tests/test_compile_progress_admission.py",
+        "tests/test_compile_progress_health.py",
+        "tests/test_compile_progress_queue_fencing.py"
+      ]
+    },
+    {
+      "provider": "scripts/private_vault_backup.py",
+      "names": [
+        "BackupError",
+        "staged_backup_image",
+        "validate_backup_image",
+        "validated_databases"
+      ],
+      "contract_sha256": "9116e70141978600d80399b1df7ceb81cf2b68e21b9bd825c824cf0cd2f99efe",
+      "integration_tests": [
+        "tests/test_compile_progress_admission.py",
+        "tests/test_compile_progress_health.py"
+      ]
+    },
+    {
+      "provider": "scripts/queue_core.py",
+      "names": [
+        "LeaseFenceError",
+        "QUEUE_V3_SCHEMA_SHA256",
+        "QueueLease",
+        "QueueOperationError",
+        "active_memory_queue",
+        "active_or_legacy_memory_queue",
+        "validate_queue_v3_database"
+      ],
+      "contract_sha256": "986f62693877294f707fa07b52287e651bc153a8fbbac780b29a4792b9fcad94",
+      "integration_tests": [
+        "tests/test_compile_progress_admission.py",
+        "tests/test_compile_progress_health.py",
+        "tests/test_compile_progress_queue_fencing.py"
+      ]
+    },
+    {
+      "provider": "scripts/reliability_v3_validation.py",
+      "names": [
+        "artifact_record",
+        "blackboard_claim_blockers",
+        "coordinator_database_blockers",
+        "queue_database_blockers"
+      ],
+      "contract_sha256": "1444c99a0530a8a678d585023e313f9ebf0f0e25708f5620a76a582107eb35d7",
+      "integration_tests": [
+        "tests/test_compile_progress_admission.py",
+        "tests/test_compile_progress_health.py"
+      ]
+    },
+    {
+      "provider": "scripts/reliable_memory.py",
+      "names": [
+        "canonical_json_bytes",
+        "capture_operational_database_identity",
+        "capture_runtime_file_identity",
+        "read_runtime_bytes",
+        "sha256_bytes",
+        "validate_schema",
+        "validate_state_root"
+      ],
+      "contract_sha256": "9b3eddc127037c09c2c2bbb1d31b6e9a491fd90fccec94da6b2aae97a9f953e7",
+      "integration_tests": [
+        "tests/test_compile_progress_admission.py"
+      ]
+    },
+    {
+      "provider": "scripts/repository_scope.py",
+      "names": [
+        "sanitized_git_environment"
+      ],
+      "contract_sha256": "fd550ae20761afad50b37fa3a71044a162485b0e4d4b3e2af9b5b22e143c2bec",
+      "integration_tests": [
+        "tests/test_compile_progress_admission.py",
+        "tests/test_compile_progress_health.py",
+        "tests/test_compile_progress_queue_fencing.py"
+      ]
+    }
+  ]
+}

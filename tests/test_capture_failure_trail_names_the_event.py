@@ -27,19 +27,19 @@ def _args(**overrides) -> argparse.Namespace:
 
 
 def test_a_capture_worker_failure_names_the_capture_worker() -> None:
-    assert integration_adapter._failed_operation(_args(capture_worker=True)) == (
+    assert integration_adapter.failed_operation(_args(capture_worker=True)) == (
         "capture_worker"
     )
 
 
 def test_a_maintenance_failure_names_maintenance() -> None:
-    assert integration_adapter._failed_operation(_args(maintenance=True)) == (
+    assert integration_adapter.failed_operation(_args(maintenance=True)) == (
         "maintenance"
     )
 
 
 def test_a_lifecycle_failure_still_names_its_event() -> None:
-    assert integration_adapter._failed_operation(_args(event="session_end")) == (
+    assert integration_adapter.failed_operation(_args(event="session_end")) == (
         "session_end"
     )
 
@@ -47,8 +47,8 @@ def test_a_lifecycle_failure_still_names_its_event() -> None:
 def test_an_unparsed_argv_is_not_confused_with_a_missing_event() -> None:
     """`--help` and a malformed argv fail before `args` exists; say so."""
     assert (
-        integration_adapter._failed_operation(None),
-        integration_adapter._failed_operation(_args()),
+        integration_adapter.failed_operation(None),
+        integration_adapter.failed_operation(_args()),
     ) == ("unparsed", "unknown")
 
 
@@ -64,7 +64,7 @@ def test_the_trail_records_the_worker_label(monkeypatch) -> None:
     )
     error = RuntimeError("intent_fence_lost")
 
-    integration_adapter._record_cli_capture_failure(_args(capture_worker=True), error)
+    integration_adapter.record_cli_capture_failure(_args(capture_worker=True), error)
 
     # The exception itself travels with the record, so the outcome (lost or
     # deferred by a writer race) is decided by its type, not its text.

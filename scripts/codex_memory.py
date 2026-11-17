@@ -14,20 +14,18 @@ Usage examples:
 from __future__ import annotations
 
 import argparse
+import copy
 import io
 import json
 import os
+import re
 import subprocess
 import sys
+import tomllib
 from collections.abc import Iterator
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
-
-try:
-    import tomllib
-except ModuleNotFoundError:  # Python 3.10
-    import tomli as tomllib
 
 if hasattr(sys.stdout, "reconfigure"):
     try:
@@ -36,18 +34,18 @@ if hasattr(sys.stdout, "reconfigure"):
         pass
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from memory_state import ROOT, STATE_ROOT, update_state  # noqa: E402
+from llm_wiki import runtime_roots  # noqa: E402
+from memory_state import update_state  # noqa: E402
 
-SCRIPTS_DIR = ROOT / "scripts"
+
+def scripts_dir() -> Path:
+    return runtime_roots.vault_root() / "scripts"
+
+
 # A hook must not wait on a contended state file; without the lock the turn is captured.
 TURN_END_LOCK_SECONDS = 0.5
-PROJECTS_DIR = ROOT / "knowledge" / "projects"
 SCRIPT_TIMEOUT_SECONDS = 10
 MAX_HOOK_INPUT_BYTES = 64 * 1024
-# Codex's config.toml and hooks.json are read whole before a merge; 256 KiB refuses a file that is
-# not a hand-kept configuration. Basis unknown: value predates measurement; review when a real
-# Codex config nears it.
-MAX_HOOK_CONFIG_BYTES = 256 * 1024
 CODEX_PERMISSION_MODES = frozenset(
     {"default", "acceptEdits", "plan", "dontAsk", "bypassPermissions"}
 )
@@ -104,16 +102,25 @@ CODEX_HOOK_FIELDS = {
     ),
 }
 
-sys.path.insert(0, str(SCRIPTS_DIR))
-
+from codex_config_state import (  # noqa: E402
+    codex_mcp_config_state,
+    mcp_expected_args,
+    read_codex_toml,
+    require_safe_config,
+)
+from codex_hook_identity import (  # noqa: E402
+    is_llm_wiki_hook,
+)
 from integration_adapter import (  # noqa: E402
-    _observe_checkpoint_fail_open,
     ingest_event,
     normalize_occurrence_event,
 )
 from integration_config_backup import publish_configuration  # noqa: E402
+from project_checkpoint import (  # noqa: E402
+    observe_checkpoint_fail_open,
+)
 from secret_redact import redact_secrets  # noqa: E402
-from session_start_project_state import _compute_slug  # type: ignore  # noqa: E402
+from session_start_project_state import compute_slug  # type: ignore  # noqa: E402
 
 
 def parse_args() -> argparse.Namespace:
@@ -138,9 +145,24 @@ def parse_args() -> argparse.Namespace:
     hooks_state.add_argument("--source", required=True)
     hooks_state.add_argument("--config", required=True)
 
+    config_block = sub.add_parser("config-block")
+    config_block.add_argument("--vault-root", required=True)
+
     config_state = sub.add_parser("config-state")
     config_state.add_argument("--config", required=True)
     config_state.add_argument("--vault-root", required=True)
+
+    config_advice = sub.add_parser("config-advice")
+    config_advice.add_argument("--state", required=True)
+
+    config_replace = sub.add_parser("config-replace")
+    config_replace.add_argument("--config", required=True)
+    config_replace.add_argument("--vault-root", required=True)
+    config_replace.add_argument(
+        "--foreign",
+        action="store_true",
+        help="also replace an entry this product did not write (the installer's --replace-codex-mcp)",
+    )
 
     daily = sub.add_parser("daily-log", parents=[common])
     daily.add_argument(
@@ -185,18 +207,18 @@ def _project_dir(raw: str) -> Path:
 
 def _hook_env(project_dir: Path) -> dict[str, str]:
     env = os.environ.copy()
-    env["LLM_WIKI_ROOT"] = str(ROOT)
-    env["LLM_WIKI_STATE_ROOT"] = str(STATE_ROOT)
+    env["LLM_WIKI_ROOT"] = str(runtime_roots.vault_root())
+    env["LLM_WIKI_STATE_ROOT"] = str(runtime_roots.state_root())
     env["CLAUDE_PROJECT_DIR"] = str(project_dir)
     return env
 
 
-def _run_script(name: str, project_dir: Path, stdin_text: str = "") -> subprocess.CompletedProcess[str]:
-    script = SCRIPTS_DIR / name
+def run_script(name: str, project_dir: Path, stdin_text: str = "") -> subprocess.CompletedProcess[str]:
+    script = scripts_dir() / name
     try:
         return subprocess.run(
             [sys.executable, str(script)],
-            cwd=str(ROOT),
+            cwd=str(runtime_roots.vault_root()),
             env=_hook_env(project_dir),
             input=stdin_text,
             capture_output=True,
@@ -210,9 +232,9 @@ def _run_script(name: str, project_dir: Path, stdin_text: str = "") -> subproces
         return subprocess.CompletedProcess([sys.executable, str(script)], 124, "", "")
 
 
-def _state_path(project_dir: Path) -> tuple[str, Path]:
-    slug = _compute_slug(project_dir, PROJECTS_DIR)
-    return slug, PROJECTS_DIR / slug / "state.md"
+def project_state_path(project_dir: Path) -> tuple[str, Path]:
+    slug = compute_slug(project_dir, runtime_roots.projects_dir())
+    return slug, runtime_roots.projects_dir() / slug / "state.md"
 
 
 def _invalid_hook() -> ValueError:
@@ -356,7 +378,7 @@ def _hook_output(event_name: object, result: dict[str, Any]) -> dict[str, Any]:
 
 
 def _utc_now() -> datetime:
-    return datetime.now(timezone.utc)
+    return datetime.now(UTC)
 
 
 def _claim_capture(state: dict[str, Any], raw: dict[str, Any], now: datetime) -> bool:
@@ -371,7 +393,7 @@ def _claim_capture(state: dict[str, Any], raw: dict[str, Any], now: datetime) ->
     return True
 
 
-def _turn_end_plan(raw: dict[str, Any], now: datetime) -> dict[str, Any]:
+def turn_end_plan(raw: dict[str, Any], now: datetime) -> dict[str, Any]:
     """What this hook captures: its own session, and one other session's quiet tail.
 
     Without the state lock the turn is captured as it always was: a duplicate is
@@ -438,7 +460,7 @@ def _capture_quiet_tail(tail: dict[str, Any] | None) -> None:
 def _ingest_codex_hook(raw: dict[str, Any], now: datetime) -> tuple[dict[str, Any], Any]:
     """(the result of this hook's own event, the quiet tail still to capture)."""
     normalize_codex_hook(raw)
-    plan = _turn_end_plan(raw, now)
+    plan = turn_end_plan(raw, now)
     stop_event = "session_end" if plan["capture"] else "stop"
     envelope = normalize_codex_hook(raw, stop_event=stop_event)
     return _ingest_claimed(envelope, raw["session_id"], plan), plan["tail"]
@@ -484,16 +506,6 @@ def command_hook(args: argparse.Namespace) -> int:
         _record_hook_failure(error)
         _report_hook_failure(seen.get("event_name"))
     return 0
-
-
-def _is_llm_wiki_hook(handler: object) -> bool:
-    """Ours when either platform's command is one of ours (`codex_hook_identity`)."""
-    from codex_hook_identity import is_our_codex_command
-
-    if not isinstance(handler, dict):
-        return False
-    commands = (handler.get("command"), handler.get("commandWindows"))
-    return any(is_our_codex_command(command) for command in commands)
 
 
 def _invalid_hooks_config() -> ValueError:
@@ -567,7 +579,7 @@ def _hook_signatures(document: dict[str, Any]) -> list[tuple[Any, ...]]:
     signatures = [
         _handler_signature(event_name, group, handler)
         for event_name, group, handler in _iter_handlers(document)
-        if _is_llm_wiki_hook(handler)
+        if is_llm_wiki_hook(handler)
     ]
     return sorted(signatures, key=repr)
 
@@ -577,22 +589,6 @@ def _has_active_inline_hooks(document: dict[str, Any]) -> bool:
         handler.get("enabled", True) is not False
         for _event_name, _group, handler in _iter_handlers(document)
     )
-
-
-def _require_safe_config(path: Path, error: str) -> None:
-    if path.is_symlink() or not path.is_file() or path.stat().st_size > MAX_HOOK_CONFIG_BYTES:
-        raise ValueError(error)
-
-
-def _read_codex_toml(config: Path) -> dict[str, Any]:
-    _require_safe_config(config, "invalid Codex config")
-    try:
-        document = tomllib.loads(config.read_text(encoding="utf-8"))
-    except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError) as exc:
-        raise ValueError("invalid Codex config") from exc
-    if not isinstance(document, dict):
-        raise ValueError("invalid Codex config")
-    return document
 
 
 def _codex_hooks_feature_value(features: dict[str, Any]) -> object:
@@ -608,7 +604,7 @@ def _codex_features(document: dict[str, Any]) -> dict[str, Any]:
     return features
 
 
-def _codex_hooks_feature_state(document: dict[str, Any]) -> str:
+def codex_hooks_feature_state(document: dict[str, Any]) -> str:
     enabled = _codex_hooks_feature_value(_codex_features(document))
     if not isinstance(enabled, bool):
         raise ValueError("invalid Codex config")
@@ -617,14 +613,14 @@ def _codex_hooks_feature_state(document: dict[str, Any]) -> str:
     return "disabled"
 
 
-def _inline_hook_state(config: Path, template: dict[str, Any]) -> str:
+def inline_hook_state(config: Path, template: dict[str, Any]) -> str:
     if not config.exists():
         return "absent"
-    return _document_hook_state(_read_codex_toml(config), template)
+    return _document_hook_state(read_codex_toml(config), template)
 
 
 def _document_hook_state(document: dict[str, Any], template: dict[str, Any]) -> str:
-    if _codex_hooks_feature_state(document) == "disabled":
+    if codex_hooks_feature_state(document) == "disabled":
         return "disabled"
     if not _has_active_inline_hooks(document):
         return "absent"
@@ -632,80 +628,91 @@ def _document_hook_state(document: dict[str, Any], template: dict[str, Any]) -> 
     return "equivalent" if inline == _hook_signatures(template) else "conflict"
 
 
-def _mcp_servers(document: dict[str, Any]) -> dict[str, Any] | str:
-    servers = document.get("mcp_servers")
-    if servers is None:
-        return "absent"
-    if not isinstance(servers, dict):
-        return "conflict"
-    return servers
+# `[mcp_servers.llm-wiki]` or `[mcp_servers."llm-wiki"]` on its own line: the only form
+# the entry is rewritten in. Inline or dotted-key forms are left alone.
+_MCP_TABLE_HEADER = re.compile(r'^\[\s*mcp_servers\s*\.\s*(?:llm-wiki|"llm-wiki")\s*\]\s*(?:#.*)?$')
+_TABLE_START = re.compile(r"^\s*\[")
 
 
-def _mcp_entry(document: dict[str, Any]) -> dict[str, Any] | str:
-    servers = _mcp_servers(document)
-    if isinstance(servers, str):
-        return servers
-    return _llm_wiki_table(servers.get("llm-wiki"))
+def mcp_block(vault_root: Path) -> str:
+    """The entry this product writes, as `install.sh` and `install.ps1` append it."""
+    args = ", ".join(json.dumps(item) for item in mcp_expected_args(vault_root))
+    return f'[mcp_servers.llm-wiki]\ncommand = "uv"\nargs = [{args}]\n'
 
 
-def _llm_wiki_table(table: object) -> dict[str, Any] | str:
-    if table is None:
-        return "absent"
-    if not isinstance(table, dict):
-        return "conflict"
-    return table
+def _entry_span(lines: list[str]) -> tuple[int, int] | None:
+    """(first line, end) of the one standalone entry table, or None."""
+    headers = [index for index, line in enumerate(lines) if _MCP_TABLE_HEADER.match(line.strip())]
+    if len(headers) != 1:
+        return None
+    start = headers[0]
+    return start, _before_leading_comments(lines, start, _next_table(lines, start))
 
 
-def _mcp_expected_args(vault_root: Path) -> list[str]:
-    return [
-        "run",
-        "--locked",
-        "--no-sync",
-        "--directory",
-        str(vault_root),
-        "python",
-        "scripts/mcp_server.py",
-    ]
+def _next_table(lines: list[str], start: int) -> int:
+    following = (index for index in range(start + 1, len(lines)) if _TABLE_START.match(lines[index]))
+    return next(following, len(lines))
 
 
-def _mcp_entry_state(table: dict[str, Any], vault_root: Path) -> str:
-    equivalent = (
-        table.get("command") == "uv"
-        and table.get("args") == _mcp_expected_args(vault_root)
-        and table.get("enabled", True) is True
-    )
-    if equivalent:
-        return "equivalent"
-    return "conflict"
+def _before_leading_comments(lines: list[str], start: int, end: int) -> int:
+    """Blank and comment lines just above the next table belong to that table."""
+    while end > start + 1 and lines[end - 1].strip()[:1] in {"", "#"}:
+        end -= 1
+    return end
 
 
-def _read_codex_document(config: Path) -> dict[str, Any] | str:
+def _rewritten_text(text: str, vault_root: Path) -> str | None:
+    lines = text.splitlines(keepends=True)
+    span = _entry_span(lines)
+    if span is None:
+        return None
+    start, end = span
+    separator = "\n" if end < len(lines) else ""
+    return "".join(lines[:start]) + mcp_block(vault_root) + separator + "".join(lines[end:])
+
+
+def _only_the_entry_changed(document: dict[str, Any], rewritten: str, vault_root: Path) -> bool:
+    """The rewritten file parses to the old document with only the entry replaced."""
+    expected = copy.deepcopy(document)
+    expected["mcp_servers"]["llm-wiki"] = {"command": "uv", "args": mcp_expected_args(vault_root)}
     try:
-        return _read_codex_toml(config)
-    except ValueError:
-        return "invalid"
+        return tomllib.loads(rewritten) == expected
+    except tomllib.TOMLDecodeError:
+        return False
 
 
-def codex_mcp_config_state(config: Path, vault_root: Path) -> str:
-    """Classify the existing Codex MCP entry without modifying TOML."""
-    if not config.exists():
-        return "absent"
-    return _document_mcp_state(_read_codex_document(config), vault_root)
+_REPLACEABLE = {"stale": False, "conflict": True}
 
 
-def _document_mcp_state(document: dict[str, Any] | str, vault_root: Path) -> str:
-    if isinstance(document, str):
-        return document
-    entry = _mcp_entry(document)
-    if isinstance(entry, str):
-        return entry
-    return _mcp_entry_state(entry, vault_root)
+def replace_codex_mcp_entry(config: Path, vault_root: Path, *, foreign: bool) -> str:
+    """Rewrite the entry to this vault's, keeping a verified preimage beside the file.
+
+    `stale` is always rewritten; `conflict` only when the operator asked (`foreign`).
+    Returns `replaced`, `refused-foreign`, `not-rewritable`, or the unchanged state.
+    """
+    state = codex_mcp_config_state(config, vault_root)
+    if state not in _REPLACEABLE:
+        return state
+    if _REPLACEABLE[state] and not foreign:
+        return "refused-foreign"
+    return _publish_rewritten_entry(config, vault_root)
+
+
+def _publish_rewritten_entry(config: Path, vault_root: Path) -> str:
+    original = config.read_bytes()
+    rewritten = _rewritten_text(original.decode("utf-8"), vault_root)
+    if rewritten is None:
+        return "not-rewritable"
+    if not _only_the_entry_changed(read_codex_toml(config), rewritten, vault_root):
+        return "not-rewritable"
+    publish_configuration(config, rewritten.encode("utf-8"), expected_original=original)
+    return "replaced"
 
 
 def _read_hooks_document(path: Path, *, missing_ok: bool) -> dict[str, Any]:
     if missing_ok and not path.exists():
         return {}
-    _require_safe_config(path, "invalid Codex hooks config")
+    require_safe_config(path, "invalid Codex hooks config")
     value = json.loads(path.read_text(encoding="utf-8"))
     if not isinstance(value, dict):
         raise _invalid_hooks_config()
@@ -713,7 +720,7 @@ def _read_hooks_document(path: Path, *, missing_ok: bool) -> dict[str, Any]:
 
 
 def _kept_group(group: dict[str, Any]) -> dict[str, Any] | None:
-    handlers = [handler for handler in _valid_handlers(group) if not _is_llm_wiki_hook(handler)]
+    handlers = [handler for handler in _valid_handlers(group) if not is_llm_wiki_hook(handler)]
     if not handlers:
         return None
     return {**group, "hooks": handlers}
@@ -746,7 +753,7 @@ def _inline_outcome(config: Path | None, template: dict[str, Any]) -> str | None
     """What the inline `config.toml` hooks decide, or None to write the file."""
     if config is None:
         return None
-    state = _inline_hook_state(config, template)
+    state = inline_hook_state(config, template)
     if state == "conflict":
         raise ValueError("inline Codex hooks: manual merge and trust review required")
     return _INLINE_RESULTS.get(state)
@@ -848,14 +855,14 @@ def command_project_state(args: argparse.Namespace) -> int:
         "session_start",
         {"cwd": str(project_dir), "reason": "codex-session-start"},
     )
-    _observe_checkpoint_fail_open(envelope)
-    result = _run_script("session_start_project_state.py", project_dir)
+    observe_checkpoint_fail_open(envelope)
+    result = run_script("session_start_project_state.py", project_dir)
     if result.returncode != 0:
         print(result.stderr.strip() or result.stdout.strip(), file=sys.stderr)
         return result.returncode
     payload = _script_payload(result.stdout)
     context = payload.get("hookSpecificOutput", {}).get("additionalContext", "")
-    slug, state_path = _state_path(project_dir)
+    slug, state_path = project_state_path(project_dir)
     if args.json:
         report = _project_state_report(project_dir, slug, state_path, context)
         print(json.dumps(report, ensure_ascii=False, indent=2))
@@ -866,7 +873,7 @@ def command_project_state(args: argparse.Namespace) -> int:
 
 def command_state_path(args: argparse.Namespace) -> int:
     project_dir = _project_dir(args.cwd)
-    slug, state_path = _state_path(project_dir)
+    slug, state_path = project_state_path(project_dir)
     out = {
         "cwd": str(project_dir),
         "slug": slug,
@@ -884,7 +891,7 @@ def command_state_path(args: argparse.Namespace) -> int:
 
 def command_lookup_tier(args: argparse.Namespace) -> int:
     del args
-    result = _run_script("lookup_mode.py", ROOT)
+    result = run_script("lookup_mode.py", runtime_roots.vault_root())
     if result.returncode == 124:
         print("codex_memory: lookup timed out", file=sys.stderr)
         return result.returncode
@@ -931,7 +938,7 @@ def _daily_ingest(envelope, args: argparse.Namespace, reason: str):
 def _daily_state_path(slug: object) -> str | None:
     if not slug:
         return None
-    return str(PROJECTS_DIR / str(slug) / "state.md")
+    return str(runtime_roots.projects_dir() / str(slug) / "state.md")
 
 
 def _daily_report(
@@ -959,8 +966,11 @@ def _print_heartbeat(result: dict[str, Any], reason: str) -> None:
     print(f"Reason: {reason}")
 
 
-def _print_daily_tag(result: dict[str, Any], reason: str, session_id: str) -> None:
-    print(f"Daily log tagged for slug: {result.get('slug')}")
+def _print_daily_capture(result: dict[str, Any], reason: str, session_id: str) -> None:
+    if result["daily_log_written"]:
+        print(f"Daily log tagged for slug: {result.get('slug')}")
+    else:
+        print(f"Daily log not written for slug: {result.get('slug')}")
     print(f"Reason: {reason}")
     print(f"Session id: {session_id}")
     if result["flush_spawned"]:
@@ -971,7 +981,7 @@ def _print_daily_result(result: dict[str, Any], reason: str, session_id: str) ->
     if result["heartbeat_recorded"]:
         _print_heartbeat(result, reason)
         return
-    _print_daily_tag(result, reason, session_id)
+    _print_daily_capture(result, reason, session_id)
 
 
 def _daily_outcome(
@@ -1013,15 +1023,55 @@ def command_hooks_state(args: argparse.Namespace) -> int:
     """
     try:
         template = _read_hooks_document(Path(args.source), missing_ok=False)
-        print(_inline_hook_state(Path(args.config), template))
+        print(inline_hook_state(Path(args.config), template))
     except (OSError, ValueError, json.JSONDecodeError):
         print("unknown")
         return 1
     return 0
 
 
+# One plain line per state the entry can be left in; none asks for a manual merge.
+# Both installers print it, so they say the same thing.
+# See docs/research/2026-09-28-a-check-names-its-cause.md.
+_REPLACE_HINT = "rerun the installer with --replace-codex-mcp (install.ps1: -ReplaceCodexMcp)"
+CODEX_MCP_ADVICE = {
+    "conflict": (
+        "Codex already has an 'llm-wiki' MCP entry that LLM-Wiki did not write; it was left "
+        f"as it is. To use this vault instead, {_REPLACE_HINT}; the current file is kept beside it."
+    ),
+    "disabled": "The Codex 'llm-wiki' MCP entry is switched off (enabled = false); left as you set it.",
+    "not-rewritable": (
+        "The Codex 'llm-wiki' MCP entry is written in a form the installer does not rewrite "
+        "(inline or split tables); config.toml was not changed."
+    ),
+    "invalid": "Codex config.toml is not valid TOML; it was not changed.",
+}
+CODEX_MCP_ADVICE["refused-foreign"] = CODEX_MCP_ADVICE["conflict"]
+
+
+def command_config_advice(args: argparse.Namespace) -> int:
+    default = "Codex MCP config could not be verified; config.toml was not changed."
+    print(CODEX_MCP_ADVICE.get(args.state, default))
+    return 0
+
+
+def _write_config_status(status: str) -> None:
+    """Machine-readable installer states use LF on every host, including Windows."""
+    sys.stdout.buffer.write((status + "\n").encode("utf-8"))
+
+
+def command_config_block(args: argparse.Namespace) -> int:
+    sys.stdout.buffer.write(mcp_block(Path(args.vault_root)).encode("utf-8"))
+    return 0
+
+
+def command_config_replace(args: argparse.Namespace) -> int:
+    _write_config_status(replace_codex_mcp_entry(Path(args.config), Path(args.vault_root), foreign=args.foreign))
+    return 0
+
+
 def command_config_state(args: argparse.Namespace) -> int:
-    print(codex_mcp_config_state(Path(args.config), Path(args.vault_root)))
+    _write_config_status(codex_mcp_config_state(Path(args.config), Path(args.vault_root)))
     return 0
 
 
@@ -1034,6 +1084,9 @@ _COMMANDS = {
     "merge-hooks": command_merge_hooks,
     "hooks-state": command_hooks_state,
     "config-state": command_config_state,
+    "config-replace": command_config_replace,
+    "config-block": command_config_block,
+    "config-advice": command_config_advice,
 }
 
 

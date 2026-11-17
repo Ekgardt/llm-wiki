@@ -131,7 +131,7 @@ def _build(catalog, generation_id, files, extractor, *, parent=None, config=None
 
 
 def _catalog(tmp_path):
-    from generation_catalog import GenerationCatalog
+    from llm_wiki.generation_catalog_store import GenerationCatalog
 
     return GenerationCatalog(tmp_path / "state")
 
@@ -289,18 +289,18 @@ def _extraction_paths(selected) -> set[str]:
 def test_the_builder_and_the_extractor_agree_on_where_the_boundary_is():
     """The narrowing is sound only while the extractor splits on the same line.
 
-    `_workspace_source_ids` is the builder's declaration of the code universe.
+    `workspace_source_ids` is the builder's declaration of the code universe.
     `doctor._SourceExtractionAdapter` is the only extractor any production or
     benchmark caller passes, and it routes by the same prefix. If that ever
     stops being true, this test fails before a wrong reuse ships.
     """
-    import doctor
     import evidence_graph_builder as builder
+    import generation_maintenance
 
     snapshot = _Snapshot(BOUNDARY_PATHS)
-    code = _extraction_paths(doctor._code_extraction_sources(snapshot))
-    knowledge = _extraction_paths(doctor._knowledge_extraction_sources(snapshot))
-    workspace = builder._workspace_source_ids(
+    code = _extraction_paths(generation_maintenance.code_extraction_sources(snapshot))
+    knowledge = _extraction_paths(generation_maintenance.knowledge_extraction_sources(snapshot))
+    workspace = builder.workspace_source_ids(
         {path: {"relative_path": path} for path in BOUNDARY_PATHS}, ()
     )
 
@@ -314,17 +314,17 @@ def test_a_repository_whose_knowledge_is_a_code_root_extracts_it_as_code():
     Decision:
     `docs/research/2026-09-17-a-question-is-answered-by-its-own-kind-of-generation.md`.
     """
-    import doctor
     import evidence_graph_builder as builder
+    import generation_maintenance
 
     roots = ("knowledge", "scripts")
     snapshot = _Snapshot(BOUNDARY_PATHS, roots)
-    workspace = builder._workspace_source_ids(
+    workspace = builder.workspace_source_ids(
         {path: {"relative_path": path} for path in BOUNDARY_PATHS}, roots
     )
 
     assert (
-        _extraction_paths(doctor._code_extraction_sources(snapshot)),
-        _extraction_paths(doctor._knowledge_extraction_sources(snapshot)),
+        _extraction_paths(generation_maintenance.code_extraction_sources(snapshot)),
+        _extraction_paths(generation_maintenance.knowledge_extraction_sources(snapshot)),
         workspace,
     ) == (set(BOUNDARY_PATHS), set(), set(BOUNDARY_PATHS))

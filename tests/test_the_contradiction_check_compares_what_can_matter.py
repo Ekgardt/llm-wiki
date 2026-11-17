@@ -11,18 +11,14 @@ from __future__ import annotations
 from pathlib import Path
 from types import SimpleNamespace
 
-import compile_memory
 from claims import ClaimIndex, NormalizedClaim
 from contradiction_pipeline import intervals_overlap
+from llm_wiki import compile_pipeline_apply
 from reliable_memory import canonical_json_bytes, sha256_bytes
 
-from tests.test_claims import ledger_page
-from tests.test_compile_transactions import (
-    _claim_record,
-    _daily,
-    vault,  # noqa: F401 - the fixture is used by name
-)
-from tests.test_contradiction_pipeline import claim, indexed
+from tests.claims_helpers import ledger_page
+from tests.compile_transactions_helpers import _claim_record, _daily, vault  # noqa: F401
+from tests.contradiction_pipeline_helpers import claim, indexed
 
 SEMANTIC_KEYS = ("subject", "relation", "value", "qualifiers", "validity")
 
@@ -63,7 +59,7 @@ def test_the_compile_asks_no_model_for_a_verdict_it_cannot_use(monkeypatch) -> N
     asked = []
     monkeypatch.setattr(llm_client, "call_candidate", lambda *args, **kwargs: asked.append(args))
     plan = SimpleNamespace(claim_index=None, coordinator=None)
-    pipeline = compile_memory._ApplyPlan._pipeline(plan, "knowledge/notes/page.md")
+    pipeline = compile_pipeline_apply.ApplyPlan._pipeline(plan, "knowledge/notes/page.md")
 
     result = pipeline.assess(claim("red"), candidates=[indexed("blue", relation="owned-by")], commit=False)
 

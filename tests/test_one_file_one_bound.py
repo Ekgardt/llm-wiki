@@ -7,11 +7,13 @@ from __future__ import annotations
 import ast
 from pathlib import Path
 
-import memory_queue
 import operational_ownership
+import queue_core
+import reliability_v3_validation
 from reliable_memory import canonical_json_bytes, publish_runtime_file, sha256_bytes
 
-from tests.test_queue_v3_capture_links import _capture_binding, _coordinator, _queue
+from tests.queue_engine_sources import queue_engine_tree
+from tests.queue_v3_capture_links_helpers import _capture_binding, _coordinator, _queue
 
 SCRIPTS = Path(__file__).resolve().parents[1] / "scripts"
 
@@ -28,7 +30,7 @@ def test_a_decision_larger_than_the_old_reader_bound_is_indexed(tmp_path: Path) 
     (tmp_path / decision_path).parent.mkdir(parents=True, exist_ok=True)
     publish_runtime_file(tmp_path / decision_path, decision, state_root=tmp_path, create_only=True)
     owner = registry.acquire("queue-worker", scope="worker:flush")
-    with queue.queue_owner(role="queue-worker", scope="worker:flush", parent=owner), memory_queue.capture_task_fences(
+    with queue.queue_owner(role="queue-worker", scope="worker:flush", parent=owner), queue_core.capture_task_fences(
         queue, coordinator, binding.task_id, intent_id=intent_id, mode="worker", owner=owner
     ) as (task_fence, intent_fence):
         indexed = queue.publish_semantic_decision(
@@ -66,11 +68,21 @@ def _decision_read_bounds(tree: ast.AST) -> list[str]:
 
 def test_every_decision_reader_uses_the_one_bound() -> None:
     bounds = {
-        name: _decision_read_bounds(ast.parse((SCRIPTS / name).read_text(encoding="utf-8")))
-        for name in ("memory_queue.py", "flush_memory.py")
+        "queue engine": _decision_read_bounds(queue_engine_tree()),
+        "flush_memory.py": _decision_read_bounds(ast.parse((SCRIPTS / "flush_memory.py").read_text(encoding="utf-8"))),
     }
 
     assert {name: set(found) for name, found in bounds.items()} == {
-        "memory_queue.py": {"MAX_CAPTURE_DECISION_BYTES"},
+        "queue engine": {"MAX_CAPTURE_DECISION_BYTES"},
         "flush_memory.py": {"MAX_CAPTURE_DECISION_BYTES"},
     }
+
+
+def test_capture_policy_aliases_and_repair_reader_share_the_leaf_values():
+    import memory_state
+    import reliable_memory
+    from llm_wiki import reliability_defaults
+
+    assert memory_state.MAX_CAPTURE_INTENT_BYTES is reliability_defaults.MAX_CAPTURE_INTENT_BYTES
+    assert reliable_memory.MAX_CAPTURE_DECISION_BYTES is reliability_defaults.MAX_CAPTURE_DECISION_BYTES
+    assert reliability_v3_validation.MAX_CAPTURE_INTENT_BYTES is reliability_defaults.MAX_CAPTURE_INTENT_BYTES

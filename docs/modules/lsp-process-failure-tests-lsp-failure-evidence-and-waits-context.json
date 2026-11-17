@@ -1,0 +1,172 @@
+{
+  "encoding": "o200k_base",
+  "max_tokens": 100000,
+  "serialization": "exact-duplicates/v1",
+  "files": [
+    "AGENTS.md",
+    "CLAUDE.md",
+    "docs/AGENTS.md",
+    "docs/STRUCTURE.md",
+    "docs/modules/context-bundle.md",
+    "docs/modules/context-records.md",
+    "docs/modules/context-tooling.md",
+    "docs/modules/lsp-process-failure-tests-lsp-failure-evidence-and-waits-context.json",
+    "docs/modules/lsp-process-failure-tests-lsp-failure-evidence-and-waits.md",
+    "docs/modules/lsp-process-failure.md",
+    "docs/modules/model-choice.md",
+    "docs/modules/product-structure.md",
+    "docs/modules/project-governance.md",
+    "docs/modules/test-support.md",
+    "rules/development-laws.md",
+    "scripts/__init__.py",
+    "scripts/llm_wiki/__init__.py",
+    "scripts/llm_wiki/context_bundle.py",
+    "scripts/llm_wiki/lsp_process_failure.py",
+    "tests/__init__.py",
+    "tests/conftest.py",
+    "tests/module_context.py",
+    "tests/module_context_paths.py",
+    "tests/module_interface.py",
+    "tests/module_interface_render.py",
+    "tests/module_qualification.py",
+    "tests/module_record_context.py",
+    "tests/module_records.py",
+    "tests/shared_fixtures.py",
+    "tests/slow_machine.py",
+    "tests/test_lsp_failure_evidence_and_waits.py"
+  ],
+  "ownership": {
+    "files": [
+      "docs/modules/lsp-process-failure-tests-lsp-failure-evidence-and-waits-context.json",
+      "docs/modules/lsp-process-failure-tests-lsp-failure-evidence-and-waits.md",
+      "tests/test_lsp_failure_evidence_and_waits.py"
+    ]
+  },
+  "qualified_dependencies": [
+    {
+      "provider": "scripts/llm_wiki/generation_catalog_store.py",
+      "names": [
+        "GenerationCatalog"
+      ],
+      "contract_sha256": "b18194ebe04bf988b4474379fcb5243516550d43b745a00eaed1453f7844c983",
+      "integration_tests": [
+        "tests/test_a_blocked_task_has_a_way_back.py",
+        "tests/test_a_build_in_flight_is_not_an_orphan.py",
+        "tests/test_a_capacity_refusal_does_not_corrupt_a_generation.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/lsp_process_limits.py",
+      "names": [
+        "PROCESS_EXITED",
+        "STDERR_REDACTION_WINDOW_BYTES",
+        "STDERR_TAIL_BYTES"
+      ],
+      "contract_sha256": "154c116e3b9407bd41a993c587c9355b1753585c4aa70989c86c96ca4ffc628c",
+      "integration_tests": [
+        "tests/test_a_dead_owner_root_is_swept_when_the_next_server_starts.py",
+        "tests/test_a_document_is_opened_in_its_own_language.py",
+        "tests/test_a_failed_server_leaves_its_redacted_last_words.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/lsp_process_owner.py",
+      "names": [
+        "OwnerDirectory"
+      ],
+      "contract_sha256": "2c686e21ebf05f4663ceee2afcc660a187ac20ef27561c68d79be41f33e332fa",
+      "integration_tests": [
+        "tests/test_a_dead_owner_root_is_swept_when_the_next_server_starts.py",
+        "tests/test_a_document_is_opened_in_its_own_language.py",
+        "tests/test_a_failed_server_leaves_its_redacted_last_words.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/lsp_process_state.py",
+      "names": [
+        "CleanupResult",
+        "FailureEvidenceIdentity",
+        "FailureIntent",
+        "Generation",
+        "LifecycleCoordinator",
+        "LifecyclePhase",
+        "LspProcessHandle",
+        "ProcessState",
+        "StderrWake",
+        "acknowledge_failure_intent",
+        "acquire_lease",
+        "acquire_lifecycle",
+        "acquire_terminal_intent",
+        "assign_candidate",
+        "drain_stderr",
+        "enqueue_failure_intent",
+        "generations_locked",
+        "lsp_environment",
+        "mark_generation_expected_exit",
+        "new_stderr_wake",
+        "notify_lifecycle_locked",
+        "queue_generation_failure",
+        "release_lifecycle",
+        "release_terminal_intent",
+        "subprocess",
+        "validate_failure_record",
+        "write_failure_record"
+      ],
+      "contract_sha256": "74b6c0bcb2788d312fc5ae0525f22c7cf9eda3b683cb29ac7c74b5cae11e1de4",
+      "integration_tests": [
+        "tests/test_a_dead_owner_root_is_swept_when_the_next_server_starts.py",
+        "tests/test_a_document_is_opened_in_its_own_language.py",
+        "tests/test_a_failed_server_is_started_again.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/model_choice.py",
+      "names": [
+        "using_root"
+      ],
+      "contract_sha256": "d45f2655cb61963e77617d1dfd7d617b134ad77cc770b59b335d0856e5d65019",
+      "integration_tests": [
+        "tests/test_a_block_opens_one_entry.py",
+        "tests/test_a_blocked_task_has_a_way_back.py",
+        "tests/test_a_build_in_flight_is_not_an_orphan.py"
+      ]
+    },
+    {
+      "provider": "scripts/lsp_security.py",
+      "names": [
+        "redact_lsp_text",
+        "redact_private_key_blocks"
+      ],
+      "contract_sha256": "a4f94a1406877dccadd26313d7302c97ddd4e05d410b5a6cf8e0515a0b2a0755",
+      "integration_tests": [
+        "tests/test_a_context_answer_fits_the_budget_it_was_given.py",
+        "tests/test_a_cut_in_the_core_says_what_it_left_out.py",
+        "tests/test_a_dead_owner_root_is_swept_when_the_next_server_starts.py"
+      ]
+    },
+    {
+      "provider": "scripts/reliable_memory.py",
+      "names": [
+        "validate_state_root"
+      ],
+      "contract_sha256": "8680515cd873056a7c8a36e0057d91f2f83f23c48841263697676ff91f7ff964",
+      "integration_tests": [
+        "tests/test_a_backup_image_carries_what_git_does_not.py",
+        "tests/test_a_backup_snapshots_what_hooks_write.py",
+        "tests/test_a_backup_takes_what_any_installed_vault_holds.py"
+      ]
+    },
+    {
+      "provider": "scripts/repository_scope.py",
+      "names": [
+        "sanitized_git_environment"
+      ],
+      "contract_sha256": "fd550ae20761afad50b37fa3a71044a162485b0e4d4b3e2af9b5b22e143c2bec",
+      "integration_tests": [
+        "tests/modules/cleanup_worktrees/test_git_refusal.py",
+        "tests/test_a_blocked_task_has_a_way_back.py",
+        "tests/test_a_build_in_flight_is_not_an_orphan.py"
+      ]
+    }
+  ]
+}

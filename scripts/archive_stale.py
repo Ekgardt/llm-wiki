@@ -32,19 +32,23 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from bounded_io import read_stable_bytes  # noqa: E402
+from llm_wiki import runtime_roots  # noqa: E402
+from llm_wiki.formats.canonical import sha256_bytes  # noqa: E402
+from llm_wiki.markdown_store import MAX_KNOWLEDGE_TARGET_BYTES  # noqa: E402
 from markdown_transaction import ABSENT, mutate_knowledge, stable_operation_id  # noqa: E402
-from memory_state import ROOT  # noqa: E402
 from okf_types import (  # noqa: E402
     DEFAULT_AGE_DAYS,
     NEVER_ARCHIVE_TYPES,
     TYPE_AGE_DAYS,
 )
 from page_status import is_retired, normalized_status  # noqa: E402
-from reliable_memory import sha256_bytes  # noqa: E402
 
-KNOWLEDGE = ROOT / "knowledge" / "notes"
 # Stay inside knowledge zone (three-zone layout forbids root archive/).
-ARCHIVE_ROOT = ROOT / "knowledge" / "notes" / "archive"
+
+
+def archive_root() -> Path:
+    return runtime_roots.vault_root() / "knowledge" / "notes" / "archive"
+
 
 FRONTMATTER_RE = re.compile(r"^---\s*\n(.*?)\n---\s*\n?", re.DOTALL)
 STATUS_RE = re.compile(r"^status:\s*(.+?)\s*$", re.MULTILINE)
@@ -64,11 +68,6 @@ _STATUS_LINE_RE = re.compile(r"^status:\s*.+$", re.MULTILINE)
 # shape restore may therefore remove whole.
 _INSERTED_FIELD = "status: archived"
 _INSERTED_BLOCK = f"---\n{_INSERTED_FIELD}\n---"
-
-# The largest page archiving or restore will read whole. Basis unknown: value predates
-# measurement and is twice bounded_io.MAX_KNOWLEDGE_PAGE_BYTES (8 MiB), which a page
-# written by the product cannot exceed; review when the two bounds are reconciled.
-MAX_ARCHIVE_PAGE_BYTES = 16 * 1024 * 1024
 
 # One read-only git question may not hold the weekly pass up: the whole set of
 # them costs 0.14 s on this vault, and a hang here would stall the archiver.
@@ -203,7 +202,7 @@ def committed_content_times(root: Path) -> dict[str, float]:
     }
 
 
-def _get_type_threshold(page_type: str) -> int:
+def get_type_threshold(page_type: str) -> int:
     """Get archive age threshold for a page type."""
     return TYPE_AGE_DAYS.get(page_type, DEFAULT_AGE_DAYS)
 
@@ -224,7 +223,7 @@ def _kept_by_frontmatter(frontmatter: str) -> bool:
 
 def _committed_time(md: Path, committed: Mapping[str, float], default: float) -> float:
     try:
-        relative = md.relative_to(ROOT).as_posix()
+        relative = md.relative_to(runtime_roots.vault_root()).as_posix()
     except ValueError:
         return default
     return committed.get(relative, default)
@@ -283,7 +282,7 @@ def _stale_with_frontmatter(
         return False
     page_type = _field_value(frontmatter, TYPE_RE)
     threshold_ts = datetime.now().timestamp() - (
-        _get_type_threshold(page_type) * 86400
+        get_type_threshold(page_type) * 86400
     )
     if not _stale_by_age(md, threshold_ts, committed):
         return False
@@ -291,7 +290,7 @@ def _stale_with_frontmatter(
     return not _access_keeps_alive(md, page_type, confidence)
 
 
-def _is_stale(
+def is_stale(
     md: Path,
     default_cutoff_ts: float,
     default_days: int,
@@ -369,22 +368,22 @@ def _archive_destination(md: Path) -> tuple[Path, Path]:
     """(destination subdirectory, archive path) for one page."""
     year = datetime.now().strftime("%Y")
     try:
-        dest_subdir = md.relative_to(KNOWLEDGE).parent
+        dest_subdir = md.relative_to(runtime_roots.notes_dir()).parent
     except ValueError:
-        dest_subdir = md.relative_to(ROOT).parent
-    return dest_subdir, ARCHIVE_ROOT / year / dest_subdir / md.name
+        dest_subdir = md.relative_to(runtime_roots.vault_root()).parent
+    return dest_subdir, archive_root() / year / dest_subdir / md.name
 
 
 def _committed_archive(md: Path, archive_path: Path, source_bytes: bytes, content: str) -> bool:
     encoded = content.encode("utf-8")
-    relative = md.relative_to(ROOT).as_posix()
+    relative = md.relative_to(runtime_roots.vault_root()).as_posix()
     try:
         mutate_knowledge(
             stable_operation_id("archive-stale", relative, encoded),
             {archive_path: encoded, md: None},
             preconditions={
                 relative: sha256_bytes(source_bytes),
-                archive_path.relative_to(ROOT).as_posix(): ABSENT,
+                archive_path.relative_to(runtime_roots.vault_root()).as_posix(): ABSENT,
             },
         )
     except (OSError, RuntimeError, ValueError):
@@ -392,15 +391,15 @@ def _committed_archive(md: Path, archive_path: Path, source_bytes: bytes, conten
     return True
 
 
-def _archive_page(md: Path, apply: bool) -> str:
+def archive_page(md: Path, apply: bool) -> str:
     """Move page to archive/YYYY/ and add status: archived to frontmatter."""
-    rel = md.relative_to(ROOT)
+    rel = md.relative_to(runtime_roots.vault_root())
     dest_subdir, archive_path = _archive_destination(md)
     if not apply:
         return f"WOULD ARCHIVE: {rel}"
     try:
         source_bytes = read_stable_bytes(
-            md, MAX_ARCHIVE_PAGE_BYTES, label="stale archive source"
+            md, MAX_KNOWLEDGE_TARGET_BYTES, label="stale archive source"
         )
         content = _with_archived_status(source_bytes.decode("utf-8"))
     except (OSError, UnicodeDecodeError, ValueError):
@@ -413,28 +412,28 @@ def _archive_page(md: Path, apply: bool) -> str:
 
 def _scanned_pages() -> list[Path]:
     """Every active note, without the archive and the editorial files."""
-    if not KNOWLEDGE.exists():
+    if not runtime_roots.notes_dir().exists():
         return []
     skip = {"readme.md", "index.md", "log.md"}
     return [
         md
-        for md in KNOWLEDGE.rglob("*.md")
+        for md in runtime_roots.notes_dir().rglob("*.md")
         if "archive" not in md.parts and md.name.lower() not in skip
     ]
 
 
-def _stale_pages(
+def stale_pages(
     cutoff: float, days: int, committed: Mapping[str, float] | None = None
 ) -> list[Path]:
-    known = committed_content_times(ROOT) if committed is None else committed
-    return [md for md in _scanned_pages() if _is_stale(md, cutoff, days, known)]
+    known = committed_content_times(runtime_roots.vault_root()) if committed is None else committed
+    return [md for md in _scanned_pages() if is_stale(md, cutoff, days, known)]
 
 
 def _archive_all(stale: list[Path], apply: bool) -> int:
     """Archive each page, printing what happened; returns the failure count."""
     failures = 0
     for md in stale:
-        result = _archive_page(md, apply)
+        result = archive_page(md, apply)
         print(f"  {result}")
         failures += int(apply and "_ERROR:" in result)
     return failures
@@ -452,9 +451,9 @@ def _print_outcome(count: int, failures: int, apply: bool) -> None:
 
 def _archived_pages(slug: str) -> list[Path]:
     """Every archived copy of one slug, newest archive year first."""
-    if not ARCHIVE_ROOT.is_dir():
+    if not archive_root().is_dir():
         return []
-    return sorted(ARCHIVE_ROOT.rglob(f"{slug}.md"), reverse=True)
+    return sorted(archive_root().rglob(f"{slug}.md"), reverse=True)
 
 
 def _without_archived_status(content: str) -> str:
@@ -497,20 +496,20 @@ def _previous_status(content: str, previous: str) -> str:
 
 def _restore_destination(archived: Path) -> Path:
     """Where an archived page belongs: `archive/<year>/<subdir>/<name>`."""
-    relative = archived.relative_to(ARCHIVE_ROOT).parts
-    return KNOWLEDGE.joinpath(*relative[1:])
+    relative = archived.relative_to(archive_root()).parts
+    return runtime_roots.notes_dir().joinpath(*relative[1:])
 
 
 def _committed_restore(archived: Path, destination: Path, source_bytes: bytes) -> bool:
     content = _without_archived_status(source_bytes.decode("utf-8")).encode("utf-8")
-    relative = archived.relative_to(ROOT).as_posix()
+    relative = archived.relative_to(runtime_roots.vault_root()).as_posix()
     try:
         mutate_knowledge(
             stable_operation_id("restore-page", relative, content),
             {destination: content, archived: None},
             preconditions={
                 relative: sha256_bytes(source_bytes),
-                destination.relative_to(ROOT).as_posix(): ABSENT,
+                destination.relative_to(runtime_roots.vault_root()).as_posix(): ABSENT,
             },
         )
     except (OSError, RuntimeError, ValueError):
@@ -535,22 +534,22 @@ def _restore_one(source: Path, apply: bool) -> str:
     """One archived copy, checked against the active tree before it moves."""
     destination = _restore_destination(source)
     if destination.exists():
-        return f"ALREADY ACTIVE: {destination.relative_to(ROOT).as_posix()}"
+        return f"ALREADY ACTIVE: {destination.relative_to(runtime_roots.vault_root()).as_posix()}"
     if not apply:
-        return f"WOULD RESTORE: {source.relative_to(ROOT).as_posix()}"
+        return f"WOULD RESTORE: {source.relative_to(runtime_roots.vault_root()).as_posix()}"
     return _restored(source, destination)
 
 
 def _restored(source: Path, destination: Path) -> str:
     try:
         source_bytes = read_stable_bytes(
-            source, MAX_ARCHIVE_PAGE_BYTES, label="restore source"
+            source, MAX_KNOWLEDGE_TARGET_BYTES, label="restore source"
         )
     except (OSError, ValueError):
         return f"READ_ERROR: {source}"
     if not _committed_restore(source, destination, source_bytes):
         return f"WRITE_ERROR: {destination}"
-    return f"RESTORED: {destination.relative_to(ROOT).as_posix()}"
+    return f"RESTORED: {destination.relative_to(runtime_roots.vault_root()).as_posix()}"
 
 
 def _parsed_arguments() -> argparse.Namespace:
@@ -586,12 +585,12 @@ def main() -> int:
         print(f"  {outcome}")
         return 1 if "ERROR" in outcome else 0
     cutoff = datetime.now().timestamp() - (args.days * 86400)
-    committed = committed_content_times(ROOT)
+    committed = committed_content_times(runtime_roots.vault_root())
     print(
         f"Age from committed content for {len(committed)} page(s); "
         "the rest age by their file clock."
     )
-    stale = _stale_pages(cutoff, args.days, committed)
+    stale = stale_pages(cutoff, args.days, committed)
     if not stale:
         print(f"No stale pages found (threshold: {args.days} days).")
         return 0

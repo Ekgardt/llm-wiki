@@ -1,0 +1,176 @@
+{
+  "encoding": "o200k_base",
+  "max_tokens": 100000,
+  "serialization": "exact-duplicates/v1",
+  "files": [
+    "AGENTS.md",
+    "CLAUDE.md",
+    "docs/AGENTS.md",
+    "docs/STRUCTURE.md",
+    "docs/modules/a-changed-task-setting-reaches-an-installed-machine-helpers.md",
+    "docs/modules/context-bundle.md",
+    "docs/modules/context-records.md",
+    "docs/modules/context-tooling.md",
+    "docs/modules/formats.md",
+    "docs/modules/install-control-tests-a-changed-task-setting-reaches-an-installed-machine-context.json",
+    "docs/modules/install-control-tests-a-changed-task-setting-reaches-an-installed-machine.md",
+    "docs/modules/install-windows.md",
+    "docs/modules/installer-checks.md",
+    "docs/modules/model-choice.md",
+    "docs/modules/product-structure.md",
+    "docs/modules/project-governance.md",
+    "docs/modules/test-support.md",
+    "docs/modules/the-scheduler-outlasts-the-pass-helpers.md",
+    "rules/development-laws.md",
+    "scripts/__init__.py",
+    "scripts/llm_wiki/__init__.py",
+    "scripts/llm_wiki/context_bundle.py",
+    "scripts/llm_wiki/formats/__init__.py",
+    "scripts/llm_wiki/install_windows.py",
+    "tests/__init__.py",
+    "tests/a_changed_task_setting_reaches_an_installed_machine_helpers.py",
+    "tests/conftest.py",
+    "tests/module_context.py",
+    "tests/module_context_paths.py",
+    "tests/module_interface.py",
+    "tests/module_interface_render.py",
+    "tests/module_qualification.py",
+    "tests/module_record_context.py",
+    "tests/module_records.py",
+    "tests/powershell_literal.py",
+    "tests/shared_fixtures.py",
+    "tests/slow_machine.py",
+    "tests/test_a_changed_task_setting_reaches_an_installed_machine.py",
+    "tests/the_scheduler_outlasts_the_pass_helpers.py"
+  ],
+  "ownership": {
+    "files": [
+      "docs/modules/install-control-tests-a-changed-task-setting-reaches-an-installed-machine-context.json",
+      "docs/modules/install-control-tests-a-changed-task-setting-reaches-an-installed-machine.md",
+      "tests/test_a_changed_task_setting_reaches_an_installed_machine.py"
+    ]
+  },
+  "qualified_dependencies": [
+    {
+      "provider": "scripts/install_state.py",
+      "names": [
+        "InstallControlError",
+        "MAX_PREIMAGE_BYTES",
+        "MAX_RECORD_BYTES",
+        "ManagedResource",
+        "read_managed_file",
+        "same_snapshot",
+        "strict_json_object"
+      ],
+      "contract_sha256": "41b35030689dc1939a29b4cb334ce6b63a8e9eccfdf6e24267f4869d7c229e6c",
+      "integration_tests": [
+        "tests/test_a_changed_task_setting_reaches_an_installed_machine.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/formats/canonical.py",
+      "names": [
+        "canonical_json_bytes"
+      ],
+      "contract_sha256": "679597eaf19bb4eef12b405f35978a452a06007dd565b01d3f0d04a4f1116c49",
+      "integration_tests": [
+        "tests/test_a_changed_task_setting_reaches_an_installed_machine.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/generation_catalog_store.py",
+      "names": [
+        "GenerationCatalog"
+      ],
+      "contract_sha256": "b18194ebe04bf988b4474379fcb5243516550d43b745a00eaed1453f7844c983",
+      "integration_tests": [
+        "tests/test_a_build_in_flight_is_not_an_orphan.py",
+        "tests/test_a_code_generation_is_not_abandoned.py",
+        "tests/test_a_flow_walk_stops_when_its_caller_has.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/install_records.py",
+      "names": [
+        "CommandRunner",
+        "default_command_runner",
+        "require_command"
+      ],
+      "contract_sha256": "53939e104114f0b2ccfda3e02c9f923fbc726a206b3b0ec578e1a36e1892973c",
+      "integration_tests": [
+        "tests/test_an_update_honors_explicit_resource_adoption.py",
+        "tests/test_lock_writes_are_complete.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/install_scheduler_projection.py",
+      "names": [
+        "read_scheduler_projections",
+        "require_projection_before_write",
+        "require_scheduler_projection"
+      ],
+      "contract_sha256": "406053ff8e93388f161d0785181757be65a220f56ac3dcb36751bd7f801ff9ea",
+      "integration_tests": [
+        "tests/test_install_control.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/install_scheduler_render.py",
+      "names": [
+        "SCHEDULER_LIMIT_HOURS",
+        "installer_stable_uv_path",
+        "provider_items",
+        "scheduler_limit_hours"
+      ],
+      "contract_sha256": "d2d8e6e7eca3eedb4f72d98f399b9ee18de8be70ec150f537c6844dadf90c961",
+      "integration_tests": [
+        "tests/test_a_scheduled_run_keeps_the_uv_link.py",
+        "tests/test_a_weekly_waits_for_the_nightly.py",
+        "tests/test_an_update_replaces_what_it_owns.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/install_v2_transactions.py",
+      "names": [
+        "install_resources"
+      ],
+      "contract_sha256": "074664d4c33ddcaaa76fbe45b137f8f494dc7de80f4f3c32abd52b035eade17b",
+      "integration_tests": [
+        "tests/test_a_changed_task_setting_reaches_an_installed_machine.py",
+        "tests/test_a_rerun_may_ask_for_fewer_things.py",
+        "tests/test_a_rollback_undoes_only_what_it_did.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/model_choice.py",
+      "names": [
+        "using_root"
+      ],
+      "contract_sha256": "d45f2655cb61963e77617d1dfd7d617b134ad77cc770b59b335d0856e5d65019",
+      "integration_tests": [
+        "tests/test_a_changed_task_setting_reaches_an_installed_machine.py"
+      ]
+    },
+    {
+      "provider": "scripts/reliable_memory.py",
+      "names": [
+        "canonical_json_bytes",
+        "validate_state_root"
+      ],
+      "contract_sha256": "7bba4b535d3f0a73445fece541c540939989b41456c9a79a67f82634748be36b",
+      "integration_tests": [
+        "tests/test_a_changed_task_setting_reaches_an_installed_machine.py"
+      ]
+    },
+    {
+      "provider": "scripts/repository_scope.py",
+      "names": [
+        "sanitized_git_environment"
+      ],
+      "contract_sha256": "fd550ae20761afad50b37fa3a71044a162485b0e4d4b3e2af9b5b22e143c2bec",
+      "integration_tests": [
+        "tests/test_a_changed_task_setting_reaches_an_installed_machine.py"
+      ]
+    }
+  ]
+}

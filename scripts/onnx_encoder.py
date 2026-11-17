@@ -47,7 +47,7 @@ def cached_file(repo_id: str, filename: str, revision: str) -> Path:
     return Path(found)
 
 
-def _tokenizer(path: Path) -> Any:
+def load_tokenizer(path: Path) -> Any:
     from tokenizers import Tokenizer
 
     tokenizer = Tokenizer.from_file(str(path))
@@ -125,6 +125,6 @@ def load_encoder(repo_id: str, revision: str) -> OnnxEncoder:
     import onnxruntime
 
     model = cached_file(repo_id, MODEL_FILE, revision)
-    tokenizer = _tokenizer(cached_file(repo_id, TOKENIZER_FILE, revision))
+    tokenizer = load_tokenizer(cached_file(repo_id, TOKENIZER_FILE, revision))
     session = onnxruntime.InferenceSession(str(model), providers=["CPUExecutionProvider"])
     return OnnxEncoder(session, tokenizer)

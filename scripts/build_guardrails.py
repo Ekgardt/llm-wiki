@@ -35,17 +35,16 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from bounded_io import read_stable_bytes  # noqa: E402
 from claim_tree_manifest import snapshot_guardrail_sources_with_content  # noqa: E402
-from markdown_transaction import (  # noqa: E402
-    ABSENT,
-    MAX_KNOWLEDGE_TARGET_BYTES,
-    mutate_knowledge,
-    stable_operation_id,
-)
-from memory_state import ROOT  # noqa: E402
-from reliable_memory import sha256_bytes  # noqa: E402
+from llm_wiki import runtime_roots  # noqa: E402
+from llm_wiki.formats.canonical import sha256_bytes  # noqa: E402
+from llm_wiki.markdown_store import MAX_KNOWLEDGE_TARGET_BYTES  # noqa: E402
+from markdown_transaction import ABSENT, mutate_knowledge, stable_operation_id  # noqa: E402
 
-KNOWLEDGE = ROOT / "knowledge" / "notes"
-GUARDRAILS_FILE = ROOT / "knowledge" / "guardrails.md"
+
+def guardrails_file() -> Path:
+    return runtime_roots.vault_root() / "knowledge" / "guardrails.md"
+
+
 MAX_GUARDRAILS_BYTES = MAX_KNOWLEDGE_TARGET_BYTES
 
 FRONTMATTER_RE = re.compile(r"^---\s*\n(.*?)\n---\s*\n?", re.DOTALL)
@@ -66,7 +65,7 @@ _RULE_TYPES = ("pattern", "decision", "qa", "debugging")
 _RULE_WORDS = re.compile(r"\b(do not|don'?t|always|never|must|should)\b", re.IGNORECASE)
 
 
-def _collect_corrections(
+def collect_corrections(
     project: str | None = None,
     *,
     source_contents: Mapping[str, bytes] | None = None,
@@ -82,7 +81,7 @@ def _collect_corrections(
     daily log (docs/research/2026-09-25-corrections-are-learned-by-compile-not-by-candidates.md).
     """
     if source_contents is None:
-        _, source_contents = snapshot_guardrail_sources_with_content(ROOT)
+        _, source_contents = snapshot_guardrail_sources_with_content(runtime_roots.vault_root())
     return _entries(_selected(source_contents, "knowledge/notes/", ".md"), _knowledge_correction, project)
 
 
@@ -126,7 +125,7 @@ def _retired(fm_text: str) -> bool:
 
 
 def _states_a_rule(content: str) -> bool:
-    return _RULE_WORDS.search(_summary_of(content)) is not None
+    return _RULE_WORDS.search(summary_of(content)) is not None
 
 
 def _in_scope(page_project: str | None, project: str | None) -> bool:
@@ -141,7 +140,7 @@ def _in_scope(page_project: str | None, project: str | None) -> bool:
 SUMMARY_MAX_CHARS = 150
 
 
-def _clipped(text: str, limit: int = SUMMARY_MAX_CHARS) -> str:
+def clipped(text: str, limit: int = SUMMARY_MAX_CHARS) -> str:
     """At most `limit` characters, cut at a word boundary with an ellipsis when cut.
 
     See `docs/research/2026-09-14-less-noise-at-session-start.md`.
@@ -154,14 +153,14 @@ def _clipped(text: str, limit: int = SUMMARY_MAX_CHARS) -> str:
 
 
 def _knowledge_rule(relative: str, content: str, page_type: str) -> dict:
-    md = ROOT / relative
+    md = runtime_roots.vault_root() / relative
     title_m = H1_RE.search(content)
     return {
         "type": page_type,
         "title": title_m.group(1).strip() if title_m else md.stem,
-        "summary": _clipped(_summary_of(content)),
+        "summary": clipped(summary_of(content)),
         "source": "knowledge",
-        "path": md.relative_to(ROOT).as_posix(),
+        "path": md.relative_to(runtime_roots.vault_root()).as_posix(),
         "authority": _extract(content, AUTHORITY_RE) or "inferred",
         "stated_at": _extract(content, TIMESTAMP_RE) or "",
     }
@@ -172,7 +171,7 @@ def _extract(text: str, pattern: re.Pattern) -> str | None:
     return m.group(1).strip() if m else None
 
 
-def _summary_of(content: str) -> str:
+def summary_of(content: str) -> str:
     """The one-sentence summary with its wrapped continuation lines joined.
 
     Markdown joins a paragraph's lines (CommonMark 0.31.2 §4.8); the block
@@ -208,7 +207,7 @@ def build_guardrails(
     This is the "learned instincts" — rules the agent must follow
     because they were learned from past corrections.
     """
-    corrections = _collect_corrections(project, source_contents=source_contents)
+    corrections = collect_corrections(project, source_contents=source_contents)
     if not corrections:
         return ""
     lines = ["## Guard rails (learned rules — do NOT repeat these mistakes)\n"]
@@ -298,7 +297,7 @@ def main() -> int:
     p.add_argument("--apply", action="store_true", help="Write to knowledge/guardrails.md")
     args = p.parse_args()
 
-    source_manifest, source_contents = snapshot_guardrail_sources_with_content(ROOT)
+    source_manifest, source_contents = snapshot_guardrail_sources_with_content(runtime_roots.vault_root())
     guardrails = build_guardrails(
         args.project,
         args.max_rules,
@@ -323,7 +322,7 @@ def main() -> int:
         try:
             before_hash = sha256_bytes(
                 read_stable_bytes(
-                    GUARDRAILS_FILE,
+                    guardrails_file(),
                     MAX_GUARDRAILS_BYTES,
                     label="guardrails target",
                 )
@@ -336,13 +335,13 @@ def main() -> int:
                 f"{before_hash}:{source_manifest['source_manifest_sha256']}",
                 encoded,
             ),
-            {GUARDRAILS_FILE: encoded},
+            {guardrails_file(): encoded},
             preconditions={
                 "guardrails_source_manifest": source_manifest,
-                GUARDRAILS_FILE.relative_to(ROOT).as_posix(): before_hash,
+                guardrails_file().relative_to(runtime_roots.vault_root()).as_posix(): before_hash,
             },
         )
-        print(f"Written: {GUARDRAILS_FILE.relative_to(ROOT)}")
+        print(f"Written: {guardrails_file().relative_to(runtime_roots.vault_root())}")
     else:
         print(guardrails)
 

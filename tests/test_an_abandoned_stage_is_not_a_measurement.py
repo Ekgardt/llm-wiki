@@ -14,6 +14,7 @@ import time
 from pathlib import Path
 
 import pytest
+from llm_wiki import retrieval_optional_stages
 
 SCRIPTS = Path(__file__).resolve().parents[1] / "scripts"
 if str(SCRIPTS) not in sys.path:
@@ -24,11 +25,11 @@ import retrieval  # noqa: E402
 
 @pytest.fixture(autouse=True)
 def forget_observations():
-    with retrieval._OPTIONAL_STAGE_OBSERVED_LOCK:
-        retrieval._OPTIONAL_STAGE_OBSERVED.clear()
+    with retrieval_optional_stages.OPTIONAL_STAGE_OBSERVED_LOCK:
+        retrieval_optional_stages.OPTIONAL_STAGE_OBSERVED.clear()
     yield
-    with retrieval._OPTIONAL_STAGE_OBSERVED_LOCK:
-        retrieval._OPTIONAL_STAGE_OBSERVED.clear()
+    with retrieval_optional_stages.OPTIONAL_STAGE_OBSERVED_LOCK:
+        retrieval_optional_stages.OPTIONAL_STAGE_OBSERVED.clear()
 
 
 def _abandoned() -> list[dict]:
@@ -41,9 +42,9 @@ def _scored() -> list[dict]:
 
 def _ran(value, observes) -> object:
     """One bounded optional run of kind "rerank", waited for to the end."""
-    return retrieval._run_optional_bounded(
+    return retrieval.run_optional_bounded(
         lambda: value,
-        deadline=time.monotonic() + retrieval.OPTIONAL_STAGE_MAX_SECONDS,
+        deadline=time.monotonic() + retrieval_optional_stages.OPTIONAL_STAGE_MAX_SECONDS,
         cancelled=None,
         kind="rerank",
         observes=observes,
@@ -56,7 +57,7 @@ def _generous_deadline() -> float:
     The share, not the caller's budget, is what an unmeasured kind is admitted
     against, so a caller offering exactly the ceiling would be refused the wait.
     """
-    ceiling = retrieval.OPTIONAL_STAGE_MAX_SECONDS + retrieval.OPTIONAL_STAGE_TAIL_RESERVE_SECONDS
+    ceiling = retrieval_optional_stages.OPTIONAL_STAGE_MAX_SECONDS + retrieval.OPTIONAL_STAGE_TAIL_RESERVE_SECONDS
     return time.monotonic() + ceiling / retrieval.OPTIONAL_STAGE_BUDGET_SHARE
 
 
@@ -65,7 +66,7 @@ def _through_the_product(monkeypatch, documents: list[dict]) -> object:
     import reranker
 
     monkeypatch.setattr(reranker, "rerank", lambda *args, **kwargs: documents)
-    return retrieval._run_reranker(
+    return retrieval.run_reranker(
         [{"content": "a"}],
         query="q",
         pool_limit=10,
@@ -78,24 +79,24 @@ def test_a_rerank_that_gave_up_on_its_deadline_records_no_cost(monkeypatch) -> N
     returned = _through_the_product(monkeypatch, _abandoned())
 
     assert returned == _abandoned()
-    assert retrieval._observed_optional_stage_cost("rerank") is None
+    assert retrieval.observed_optional_stage_cost("rerank") is None
 
 
 def test_a_rerank_that_scored_records_its_cost(monkeypatch) -> None:
     _through_the_product(monkeypatch, _scored())
 
-    assert retrieval._observed_optional_stage_cost("rerank") is not None
+    assert retrieval.observed_optional_stage_cost("rerank") is not None
 
 
 def test_an_unmeasured_kind_is_waited_for_only_when_the_whole_ceiling_is_on_offer() -> None:
     """With no usable observation the existing conservative rule decides the wait."""
-    ceiling = retrieval.OPTIONAL_STAGE_MAX_SECONDS
-    _ran(_abandoned(), retrieval._rerank_scored)
+    ceiling = retrieval_optional_stages.OPTIONAL_STAGE_MAX_SECONDS
+    _ran(_abandoned(), retrieval.rerank_scored)
     now = time.monotonic()
 
     fits = (
-        retrieval._optional_stage_fits("rerank", now + ceiling),
-        retrieval._optional_stage_fits("rerank", now + ceiling / 3),
+        retrieval.optional_stage_fits("rerank", now + ceiling),
+        retrieval.optional_stage_fits("rerank", now + ceiling / 3),
     )
 
     assert fits == (True, False)
@@ -103,6 +104,6 @@ def test_an_unmeasured_kind_is_waited_for_only_when_the_whole_ceiling_is_on_offe
 
 def test_a_stage_with_no_verdict_of_its_own_is_measured_by_every_finished_run() -> None:
     """The dense leg returns rows, not a verdict, and keeps the old behaviour."""
-    assert retrieval._every_value_measures(object()) is True
-    _ran([{"id": "a"}], retrieval._every_value_measures)
-    assert retrieval._observed_optional_stage_cost("rerank") is not None
+    assert retrieval.every_value_measures(object()) is True
+    _ran([{"id": "a"}], retrieval.every_value_measures)
+    assert retrieval.observed_optional_stage_cost("rerank") is not None

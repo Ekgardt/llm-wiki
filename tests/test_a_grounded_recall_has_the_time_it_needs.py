@@ -20,10 +20,10 @@ def test_the_provider_call_runs_under_the_time_left(monkeypatch) -> None:
     seen: list[int] = []
 
     def generator(prompt, system_prompt, max_tokens):
-        seen.append(llm_client._timeout_s())
+        seen.append(llm_client.timeout_s())
         return "answer"
 
-    answer = query_memory._generate_before_deadline(generator, "p", "s", time.monotonic() + 7.5)
+    answer = query_memory.generate_before_deadline(generator, "p", "s", time.monotonic() + 7.5)
 
     assert (answer, seen) == ("answer", [8])
 
@@ -41,7 +41,7 @@ def test_a_ceiling_set_in_one_thread_does_not_reach_another(monkeypatch) -> None
     worker = threading.Thread(target=hold_a_ceiling)
     worker.start()
     inside.wait(LONG_TIMEOUT)
-    here = llm_client._timeout_s()
+    here = llm_client.timeout_s()
     release.set()
     worker.join(LONG_TIMEOUT)
 
@@ -50,10 +50,10 @@ def test_a_ceiling_set_in_one_thread_does_not_reach_another(monkeypatch) -> None
 
 def test_a_grounded_recall_has_the_grounded_budget() -> None:
     budgets = (
-        mcp_server._tool_operation_seconds("recall", {"query": "q", "grounded": True}),
-        mcp_server._tool_operation_seconds("recall", {"query": "q"}),
+        mcp_server.tool_operation_seconds("recall", {"query": "q", "grounded": True}),
+        mcp_server.tool_operation_seconds("recall", {"query": "q"}),
     )
 
     # An ungrounded recall has the retrieval budget measured for its reranker (B-9),
     # not the generic tool budget; a grounded one still has the whole QA deadline.
-    assert budgets == (query_memory.QA_DEADLINE_SECONDS, mcp_server._retrieval_operation_seconds())
+    assert budgets == (query_memory.QA_DEADLINE_SECONDS, mcp_server.retrieval_operation_seconds())

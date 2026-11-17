@@ -5,8 +5,12 @@ Research: `docs/research/2026-09-14-the-small-integrity-gaps.md`.
 from __future__ import annotations
 
 import sys
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
+
+import queue_core
+
+from tests.compile_paths import point_compile_path
 
 SCRIPTS = Path(__file__).resolve().parents[1] / "scripts"
 if str(SCRIPTS) not in sys.path:
@@ -25,45 +29,41 @@ def test_a_refused_compile_records_its_refusal_not_the_holders_status(monkeypatc
             "discard_unusable_receipts": False,
             "lock_token": None,
             "all": False,
+            "dry_run": False,
         },
     )
-    monkeypatch.setattr(compile_memory, "parse_args", arguments)
-    monkeypatch.setattr(
-        compile_memory,
-        "_acquire_compile_lock",
-        lambda _token=None: (None, "lock held by another compile"),
-    )
-    monkeypatch.setattr(compile_memory, "_mark_started", lambda trigger: marks.append("started"))
-    monkeypatch.setattr(compile_memory, "_mark_finished", lambda *a, **k: marks.append("finished"))
-    monkeypatch.setattr(compile_memory, "_mark_refused", lambda trigger, reason: marks.append("refused"))
+    point_compile_path(monkeypatch, "parse_args", arguments)
+    point_compile_path(monkeypatch, "acquire_compile_lock", lambda _token=None: (None, "lock held by another compile"))
+    point_compile_path(monkeypatch, "_mark_started", lambda trigger: marks.append("started"))
+    point_compile_path(monkeypatch, "mark_finished", lambda *a, **k: marks.append("finished"))
+    point_compile_path(monkeypatch, "_mark_refused", lambda trigger, reason: marks.append("refused"))
+    monkeypatch.setattr(compile_memory, "refresh_generation_after_compile", lambda: None)
 
     assert (compile_memory.main(), marks) == (1, ["refused"])
 
 
 def test_the_compile_lock_is_created_with_its_content(tmp_path, monkeypatch):
-    import maybe_compile
+    import compile_lock
 
-    lock = tmp_path / "run" / "compile.pid"
-    monkeypatch.setattr(maybe_compile, "LOCK_FILE", lock)
+    monkeypatch.setenv("LLM_WIKI_STATE_ROOT", str(tmp_path))
     seen: list[bytes] = []
-    real_link = maybe_compile.os.link
+    real_link = compile_lock.os.link
 
     def observe(source, destination):
         real_link(source, destination)
         seen.append(Path(destination).read_bytes())
 
-    monkeypatch.setattr(maybe_compile.os, "link", observe)
+    monkeypatch.setattr(compile_lock.os, "link", observe)
 
-    claimed = maybe_compile._try_claim_lock()
+    claimed = compile_lock.try_claim_lock()
 
-    assert (claimed, seen[0].startswith(b"0\n"), maybe_compile._try_claim_lock()) == (True, True, False)
+    assert (claimed, seen[0].startswith(b"0\n"), compile_lock.try_claim_lock()) == (True, True, False)
 
 
 def test_a_v3_task_going_back_to_ready_waits_before_it_is_claimed_again():
-    import memory_queue
 
-    now = datetime(2026, 9, 14, 12, tzinfo=timezone.utc)
-    delays = {memory_queue._retry_available_at("ready", 3, now) > now for _ in range(20)}
-    immediate = [memory_queue._retry_available_at(state, 3, now) for state in ("blocked", "dead")]
+    now = datetime(2026, 9, 14, 12, tzinfo=UTC)
+    delays = {queue_core.retry_available_at("ready", 3, now) > now for _ in range(20)}
+    immediate = [queue_core.retry_available_at(state, 3, now) for state in ("blocked", "dead")]
 
     assert (True in delays, immediate) == (True, [now, now])

@@ -1,0 +1,271 @@
+{
+  "encoding": "o200k_base",
+  "max_tokens": 100000,
+  "serialization": "exact-duplicates/v1",
+  "files": [
+    "AGENTS.md",
+    "CLAUDE.md",
+    "docs/AGENTS.md",
+    "docs/STRUCTURE.md",
+    "docs/modules/compile-progress-migration-context.json",
+    "docs/modules/compile-progress-migration.md",
+    "docs/modules/compile-progress-repair-cli-helpers.md",
+    "docs/modules/context-bundle.md",
+    "docs/modules/context-records.md",
+    "docs/modules/context-tooling.md",
+    "docs/modules/formats.md",
+    "docs/modules/installed-memory-repair-tests.md",
+    "docs/modules/model-choice.md",
+    "docs/modules/product-structure.md",
+    "docs/modules/project-governance.md",
+    "docs/modules/repair-installed-memory-helpers.md",
+    "docs/modules/test-support.md",
+    "rules/development-laws.md",
+    "scripts/__init__.py",
+    "scripts/compile_progress_migration.py",
+    "scripts/llm_wiki/__init__.py",
+    "scripts/llm_wiki/context_bundle.py",
+    "scripts/llm_wiki/formats/__init__.py",
+    "tests/__init__.py",
+    "tests/adopted_vault.py",
+    "tests/compile_progress_repair_cli_helpers.py",
+    "tests/conftest.py",
+    "tests/legacy_adopted_vault.py",
+    "tests/module_context.py",
+    "tests/module_context_paths.py",
+    "tests/module_interface.py",
+    "tests/module_interface_render.py",
+    "tests/module_qualification.py",
+    "tests/module_record_context.py",
+    "tests/module_records.py",
+    "tests/repair_installed_memory_helpers.py",
+    "tests/shared_fixtures.py",
+    "tests/slow_machine.py",
+    "tests/test_compile_progress_migration.py",
+    "tests/test_compile_progress_repair_cli.py"
+  ],
+  "ownership": {
+    "files": [
+      "docs/modules/compile-progress-migration-context.json",
+      "docs/modules/compile-progress-migration.md",
+      "scripts/compile_progress_migration.py",
+      "tests/test_compile_progress_migration.py",
+      "tests/test_compile_progress_repair_cli.py"
+    ]
+  },
+  "qualified_dependencies": [
+    {
+      "provider": "scripts/compile_progress.py",
+      "names": [
+        "QUEUE_SCHEMA_VERSION",
+        "SCHEMA_STATEMENTS",
+        "require_schema"
+      ],
+      "contract_sha256": "cca861ce4e92d19f626df84be1ee2c403d1993818d266d0815749300fd998e28",
+      "integration_tests": [
+        "tests/test_compile_progress_migration.py",
+        "tests/test_compile_progress_repair_cli.py"
+      ]
+    },
+    {
+      "provider": "scripts/installed_memory_repair.py",
+      "names": [
+        "repair_installed_vault"
+      ],
+      "contract_sha256": "6ab4497d3ed56413bc24ea5ae9e993acf118980056b046072877a80df4f52a18",
+      "integration_tests": [
+        "tests/test_a_check_is_judged_when_it_ends.py",
+        "tests/test_a_check_names_its_cause.py",
+        "tests/test_a_claude_prompt_takes_the_ingest_path.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/adoption_admission.py",
+      "names": [
+        "MAX_RECORD_BYTES",
+        "expected_schema_digests",
+        "initial_schema_digests",
+        "load_complete_adoption",
+        "read_adoption_record",
+        "require_reliability_v3_adopted",
+        "validate_active_database_reference",
+        "validate_artifact_identity",
+        "validate_artifact_reference",
+        "validate_upgrade_envelope"
+      ],
+      "contract_sha256": "edab7b68019a1ee561987a6dde2c0621ec12d2d122e07f07825b63a17eb60887",
+      "integration_tests": [
+        "tests/test_compile_progress_migration.py",
+        "tests/test_compile_progress_repair_cli.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/formats/canonical.py",
+      "names": [
+        "canonical_json_bytes",
+        "sha256_bytes"
+      ],
+      "contract_sha256": "2e42a7aefcb66ac2515f6665a03feae34e6f7bad4807787a789ce031f9f3a9c1",
+      "integration_tests": [
+        "tests/test_compile_progress_migration.py",
+        "tests/test_compile_progress_repair_cli.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/generation_catalog_store.py",
+      "names": [
+        "GenerationCatalog"
+      ],
+      "contract_sha256": "b18194ebe04bf988b4474379fcb5243516550d43b745a00eaed1453f7844c983",
+      "integration_tests": [
+        "tests/test_a_blocked_task_has_a_way_back.py",
+        "tests/test_a_build_in_flight_is_not_an_orphan.py",
+        "tests/test_a_capacity_refusal_does_not_corrupt_a_generation.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/model_choice.py",
+      "names": [
+        "using_root"
+      ],
+      "contract_sha256": "d45f2655cb61963e77617d1dfd7d617b134ad77cc770b59b335d0856e5d65019",
+      "integration_tests": [
+        "tests/test_compile_progress_migration.py",
+        "tests/test_compile_progress_repair_cli.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/queue_v3_readers.py",
+      "names": [
+        "audit_compile_progress"
+      ],
+      "contract_sha256": "0cf9ab0c4f239a0f60ed02125216c190cae1dc71a682e29d760f55fa01af3be5",
+      "integration_tests": [
+        "tests/test_compile_progress_migration.py",
+        "tests/test_compile_progress_repair_cli.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/reliability_defaults.py",
+      "names": [
+        "DEFAULTS"
+      ],
+      "contract_sha256": "f37296a83c15073e42a6cc8b86b88c2d19c548ac19a4ef6d0ca2f7af925c90c8",
+      "integration_tests": [
+        "tests/test_compile_progress_migration.py",
+        "tests/test_compile_progress_repair_cli.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/sqlite_contracts.py",
+      "names": [
+        "OperationalDatabaseContractError"
+      ],
+      "contract_sha256": "37cf30c4805b468217bbb3b2ffdc60eaa7f8dc42ef15098f84eb7a00253c52e4",
+      "integration_tests": [
+        "tests/test_compile_progress_migration.py",
+        "tests/test_compile_progress_repair_cli.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/sqlite_deadlines.py",
+      "names": [
+        "operational_deadline_active"
+      ],
+      "contract_sha256": "b6a31ad07e6c587aeabfc49f66f512ca222ed88ce0bd8a29eafe6eaca6ed4838",
+      "integration_tests": [
+        "tests/test_compile_progress_migration.py",
+        "tests/test_compile_progress_repair_cli.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/sqlite_transactions.py",
+      "names": [
+        "begin_immediate"
+      ],
+      "contract_sha256": "fb9ecde177ce133dd8e6e34a67214ca0c051a02d758e8611dac84b568d955373",
+      "integration_tests": [
+        "tests/test_compile_progress_migration.py",
+        "tests/test_compile_progress_repair_cli.py"
+      ]
+    },
+    {
+      "provider": "scripts/private_vault_backup.py",
+      "names": [
+        "build_image",
+        "heartbeat",
+        "held_backup_owner",
+        "read_manifest",
+        "resolve_directory",
+        "resolve_roots",
+        "resolve_staging",
+        "validate_backup_image",
+        "validate_root_locations"
+      ],
+      "contract_sha256": "75a2dbd93c4b312ea7c48378f549dfa5fcd95757efa92776450c1dadbf9053cb",
+      "integration_tests": [
+        "tests/test_compile_progress_repair_cli.py"
+      ]
+    },
+    {
+      "provider": "scripts/queue_core.py",
+      "names": [
+        "QUEUE_COMPILE_SCHEMA_SHA256",
+        "QUEUE_V3_CONTRACT",
+        "active_memory_queue",
+        "initialize_queue_v3_candidate",
+        "queue_v3_invariants_hold",
+        "queue_v3_report",
+        "queue_v3_schema_complete",
+        "require_empty_queue_v3",
+        "require_queue_v3_openable"
+      ],
+      "contract_sha256": "582aeb3fbdded207bf12f143aaacac7a351a0ae265bc4d93cc5f8643b035e348",
+      "integration_tests": [
+        "tests/test_compile_progress_migration.py",
+        "tests/test_compile_progress_repair_cli.py"
+      ]
+    },
+    {
+      "provider": "scripts/reliability_v3_validation.py",
+      "names": [
+        "artifact_record"
+      ],
+      "contract_sha256": "3a4adad396f3e17fbdae971bd0f09e3de3f286bbe731eb0f10564ed7df20eb60",
+      "integration_tests": [
+        "tests/test_compile_progress_migration.py",
+        "tests/test_compile_progress_repair_cli.py"
+      ]
+    },
+    {
+      "provider": "scripts/reliable_memory.py",
+      "names": [
+        "OperationalDatabaseContractError",
+        "RuntimeFileIdentity",
+        "capture_runtime_file_identity",
+        "open_operational_db",
+        "open_readonly_operational_db",
+        "publish_runtime_file",
+        "read_runtime_bytes",
+        "require_runtime_parent_containment",
+        "validate_operational_db_file",
+        "validate_state_root"
+      ],
+      "contract_sha256": "0273c59611f0e0519daa9eff28206341eda5f80dc2ce6767b5ea8646df213e83",
+      "integration_tests": [
+        "tests/test_compile_progress_migration.py"
+      ]
+    },
+    {
+      "provider": "scripts/repository_scope.py",
+      "names": [
+        "sanitized_git_environment"
+      ],
+      "contract_sha256": "fd550ae20761afad50b37fa3a71044a162485b0e4d4b3e2af9b5b22e143c2bec",
+      "integration_tests": [
+        "tests/test_compile_progress_migration.py",
+        "tests/test_compile_progress_repair_cli.py"
+      ]
+    }
+  ]
+}

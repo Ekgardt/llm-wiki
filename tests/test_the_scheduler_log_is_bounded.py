@@ -12,10 +12,10 @@ import re
 import time
 from pathlib import Path
 
-import install_control
 import maintenance_helpers
 import pytest
 import settings
+from llm_wiki import install_cron, install_scheduler_render
 
 ROOT, STATE, UV = Path("/vault"), Path("/state"), Path("/usr/bin/uv")
 
@@ -26,8 +26,8 @@ def _log_names(text: str) -> set[str]:
 
 def _rendered_log_names() -> set[str]:
     """Every log file name the two POSIX backends write, read from what they render."""
-    plists = [install_control._launchd_job(ROOT, STATE, UV, kind) for kind in ("nightly", "weekly")]
-    cron = install_control.render_cron_block(ROOT, STATE, UV)
+    plists = [install_scheduler_render.launchd_job(ROOT, STATE, UV, kind) for kind in ("nightly", "weekly")]
+    cron = install_cron.render_cron_block(ROOT, STATE, UV)
     return _log_names(b"".join((*plists, cron)).decode("utf-8"))
 
 
@@ -50,8 +50,7 @@ def test_every_scheduler_log_the_installer_renders_is_pruned() -> None:
 def reports(tmp_path: Path, monkeypatch) -> Path:
     directory = tmp_path / "logs"
     directory.mkdir()
-    monkeypatch.setattr(maintenance_helpers, "REPORTS_DIR", directory)
-    monkeypatch.setattr(maintenance_helpers, "ARTIFACT_DIR", directory / "maintenance")
+    monkeypatch.setenv("LLM_WIKI_STATE_ROOT", str(tmp_path))
     return directory
 
 

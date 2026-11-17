@@ -1,0 +1,163 @@
+{
+  "encoding": "o200k_base",
+  "max_tokens": 100000,
+  "serialization": "exact-duplicates/v1",
+  "files": [
+    "AGENTS.md",
+    "CLAUDE.md",
+    "docs/AGENTS.md",
+    "docs/STRUCTURE.md",
+    "docs/modules/context-bundle.md",
+    "docs/modules/context-records.md",
+    "docs/modules/context-tooling.md",
+    "docs/modules/model-choice.md",
+    "docs/modules/product-structure.md",
+    "docs/modules/project-governance.md",
+    "docs/modules/test-graph-retrieval-context.json",
+    "docs/modules/test-graph-retrieval.md",
+    "docs/modules/test-support.md",
+    "rules/development-laws.md",
+    "scripts/__init__.py",
+    "scripts/llm_wiki/__init__.py",
+    "scripts/llm_wiki/context_bundle.py",
+    "tests/__init__.py",
+    "tests/conftest.py",
+    "tests/module_context.py",
+    "tests/module_context_paths.py",
+    "tests/module_interface.py",
+    "tests/module_interface_render.py",
+    "tests/module_qualification.py",
+    "tests/module_record_context.py",
+    "tests/module_records.py",
+    "tests/shared_fixtures.py",
+    "tests/slow_machine.py",
+    "tests/test_graph_retrieval.py"
+  ],
+  "ownership": {
+    "files": [
+      "docs/modules/test-graph-retrieval-context.json",
+      "docs/modules/test-graph-retrieval.md",
+      "tests/test_graph_retrieval.py"
+    ]
+  },
+  "qualified_dependencies": [
+    {
+      "provider": "scripts/context_compiler.py",
+      "names": [
+        "compile_context"
+      ],
+      "contract_sha256": "ffa44d3cb2fd7775d1c8fb5053dacf27f444d8d6e0963be7f9f6f5f35a0a8eb9",
+      "integration_tests": [
+        "tests/test_graph_retrieval.py"
+      ]
+    },
+    {
+      "provider": "scripts/corpus_snapshot.py",
+      "names": [
+        "CapturedSource",
+        "CorpusSnapshot",
+        "SnapshotPolicy",
+        "SourceMetadata",
+        "SourceRecord"
+      ],
+      "contract_sha256": "75a1b27ea7e82513a67ebecfa0706b6279e7e7f5b7dfea7cce493cced2b92267",
+      "integration_tests": [
+        "tests/test_graph_retrieval.py"
+      ]
+    },
+    {
+      "provider": "scripts/evidence_graph.py",
+      "names": [
+        "EvidenceGraph",
+        "create_generation_database"
+      ],
+      "contract_sha256": "3ae18a853f43a4f9019db12c56bb9c89ce5c48f48c788963e9b49541e35579e8",
+      "integration_tests": [
+        "tests/test_graph_retrieval.py"
+      ]
+    },
+    {
+      "provider": "scripts/generation_search.py",
+      "names": [
+        "generation_connection",
+        "generation_consumption_seal",
+        "generation_consumption_unchanged",
+        "generation_fts_search"
+      ],
+      "contract_sha256": "86f0af023ca9913731bfe03ef6a448cdadc3ece973246d4134f8394d4b7088fc",
+      "integration_tests": [
+        "tests/test_graph_retrieval.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/generation_catalog_store.py",
+      "names": [
+        "GenerationCatalog"
+      ],
+      "contract_sha256": "b18194ebe04bf988b4474379fcb5243516550d43b745a00eaed1453f7844c983",
+      "integration_tests": [
+        "tests/test_a_blocked_task_has_a_way_back.py",
+        "tests/test_a_build_in_flight_is_not_an_orphan.py",
+        "tests/test_a_capacity_refusal_does_not_corrupt_a_generation.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/model_choice.py",
+      "names": [
+        "using_root"
+      ],
+      "contract_sha256": "d45f2655cb61963e77617d1dfd7d617b134ad77cc770b59b335d0856e5d65019",
+      "integration_tests": [
+        "tests/test_graph_retrieval.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/runtime_roots.py",
+      "names": [
+        "vault_root"
+      ],
+      "contract_sha256": "35ea768c9fd09097366a2ded61783ec66ac8997f3f02255c744c8443405a706b",
+      "integration_tests": [
+        "tests/test_a_continuation_keeps_its_original_entry.py",
+        "tests/test_a_prompt_checkpoint_does_not_outwait_its_host.py",
+        "tests/test_a_session_marker_survives_a_busy_writer.py"
+      ]
+    },
+    {
+      "provider": "scripts/reliable_memory.py",
+      "names": [
+        "validate_state_root"
+      ],
+      "contract_sha256": "8680515cd873056a7c8a36e0057d91f2f83f23c48841263697676ff91f7ff964",
+      "integration_tests": [
+        "tests/test_graph_retrieval.py"
+      ]
+    },
+    {
+      "provider": "scripts/repository_scope.py",
+      "names": [
+        "resolve_repository_scope",
+        "sanitized_git_environment"
+      ],
+      "contract_sha256": "983dd096d99bafff98ca0aaa2cd722477333e30eed4bfa9297d1830c635e8d90",
+      "integration_tests": [
+        "tests/test_graph_retrieval.py"
+      ]
+    },
+    {
+      "provider": "scripts/retrieval.py",
+      "names": [
+        "GRAPH_EDGE_DECAY",
+        "GRAPH_PROFILE_EDGE_TYPES",
+        "candidates_to_legacy",
+        "expand_evidence_graph",
+        "retrieve",
+        "retrieve_via_search_memory"
+      ],
+      "contract_sha256": "ff0674610ccfb39962f886b92a529da74391bbfa1f1a6db79aff6be1f7936cd5",
+      "integration_tests": [
+        "tests/test_graph_retrieval.py"
+      ]
+    }
+  ]
+}

@@ -8,10 +8,10 @@ provenance, and this vault commits its own runtime — so the comparison means
 
 Two sites made it, and both are fixed (NEW-138, 2026-08-29):
 
-* ``evidence_graph_builder._reuse_config_matches`` — the gate behind commit
+* ``evidence_graph_builder.reuse_config_matches`` — the gate behind commit
   ``283eb3a`` ("idle pass 643s to 3.9s"). Refusing it meant the first build
   after any commit reused no records at all.
-* ``doctor._parent_matches_identity`` — while ``doctor._scope_state`` a
+* ``doctor.parent_matches_identity`` — while ``doctor.scope_state`` a
   thousand lines earlier already documented the distinction and answered
   ``superseded``.
 
@@ -49,13 +49,13 @@ def _scope_dict(commit: str) -> dict[str, str]:
     product's own canonicaliser, as `test_open_active_scope_identity` does.
     """
     from repository_scope import (
-        _local_serialized_path,
         derive_checkout_id,
         derive_repository_id,
+        local_serialized_path,
     )
 
-    root = _local_serialized_path(Path(__file__).resolve().parent / "vault", strict=False)
-    common = _local_serialized_path(
+    root = local_serialized_path(Path(__file__).resolve().parent / "vault", strict=False)
+    common = local_serialized_path(
         Path(__file__).resolve().parent / "vault" / ".git", strict=False
     )
     repository_id = derive_repository_id(checkout_root=root, git_common_dir=common)
@@ -96,7 +96,7 @@ def _reuse_allowed(built_commit: str, current_commit: str) -> bool:
 
     config = _reuse_config()
     generation = {"repository_scope": _scope_dict(built_commit)}
-    return evidence_graph_builder._reuse_config_matches(
+    return evidence_graph_builder.reuse_config_matches(
         _parent_manifest(config), generation, config, _scope_dict(current_commit)
     )
 
@@ -129,10 +129,10 @@ def _doctor_parent(built_commit: str) -> dict[str, object]:
 
 
 def _doctor_identity_matches(built_commit: str, current_commit: str) -> bool:
-    import doctor
+    import generation_maintenance
     from repository_scope import RepositoryScope
 
-    return doctor._parent_matches_identity(
+    return generation_maintenance.parent_matches_identity(
         _doctor_parent(built_commit),
         RepositoryScope.from_dict(_scope_dict(current_commit)),
         _FakeSnapshot(),
@@ -146,7 +146,7 @@ def test_doctor_identity_holds_when_nothing_moved():
 
 
 def test_doctor_identity_survives_a_commit_that_moved_nothing_else():
-    """`_scope_state` calls this case `superseded`; `_parent_matches_identity` should agree."""
+    """`scope_state` calls this case `superseded`; `parent_matches_identity` should agree."""
     assert _doctor_identity_matches(COMMIT_BUILT, COMMIT_NOW) is True
 
 

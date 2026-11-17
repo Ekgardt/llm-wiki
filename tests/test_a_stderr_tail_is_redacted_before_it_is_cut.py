@@ -11,7 +11,7 @@ from types import SimpleNamespace
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 
-from lsp_process import _failure_stderr_tail  # noqa: E402
+from lsp_process import failure_stderr_tail  # noqa: E402
 from lsp_security import redact_private_key_blocks  # noqa: E402
 
 BODY = b"MIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQC7\n"
@@ -21,7 +21,7 @@ END = b"-----END PRIVATE KEY-----\n"
 
 def _tail(*chunks: bytes) -> str:
     generation = SimpleNamespace(stderr=list(chunks), stderr_lock=threading.Lock())
-    return _failure_stderr_tail(generation) or ""
+    return failure_stderr_tail(generation) or ""
 
 
 def test_a_value_whose_key_fell_before_the_cut_is_still_redacted():

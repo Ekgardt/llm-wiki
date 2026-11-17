@@ -12,7 +12,6 @@ SCRIPTS_DIR = Path(__file__).resolve().parent.parent / "scripts"
 if str(SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_DIR))
 
-import code_graph  # noqa: E402
 import graph_query  # noqa: E402
 
 FAR_DEADLINE = time.monotonic() + 3600.0
@@ -85,7 +84,7 @@ class _FakeGraph:
 @pytest.fixture
 def fake_graph(monkeypatch) -> _FakeGraph:
     graph = _FakeGraph()
-    monkeypatch.setattr(code_graph, "_active_evidence_graph", lambda _d: graph)
+    monkeypatch.setattr("llm_wiki.code_graph_generation.active_evidence_graph", lambda _d: graph)
     return graph
 
 
@@ -123,11 +122,10 @@ class TestParseRefusalsAreNamed:
         with pytest.raises(ValueError, match="direction must be 'in' or 'out'"):
             graph_query.parse_graph_query(query)
 
-    def test_more_than_max_hops_is_refused(self) -> None:
+    def test_four_hops_use_the_same_closed_grammar(self) -> None:
         hop = '{"edge": "calls", "direction": "in"}'
         query = f'{{"start": {{"name": "x"}}, "hops": [{hop}, {hop}, {hop}, {hop}]}}'
-        with pytest.raises(ValueError, match="at most 3 hops"):
-            graph_query.parse_graph_query(query)
+        assert len(graph_query.parse_graph_query(query)["hops"]) == 4
 
     def test_limit_bounds_are_enforced(self) -> None:
         with pytest.raises(ValueError, match="between 1 and 200"):
@@ -142,6 +140,11 @@ class TestParseRefusalsAreNamed:
 
 
 class TestBoundedExecution:
+    def test_an_empty_frontier_still_obeys_the_deadline(self, fake_graph: _FakeGraph) -> None:
+        plan = {"hops": [{"edge": "CALLS", "direction": "out"}] * 4, "limit": 50}
+        with pytest.raises(TimeoutError, match="graph query deadline"):
+            graph_query.executed_hops(fake_graph, plan, [], time.monotonic() - 1)
+
     def test_one_hop_in_returns_the_callers(self, fake_graph: _FakeGraph) -> None:
         answer = _run(
             {"start": {"name": "beta"}, "hops": [{"edge": "calls", "direction": "in"}]}
@@ -173,7 +176,7 @@ class TestBoundedExecution:
         assert fake_graph.closed is True
 
     def test_no_active_generation_is_a_named_answer(self, monkeypatch) -> None:
-        monkeypatch.setattr(code_graph, "_active_evidence_graph", lambda _d: None)
+        monkeypatch.setattr("llm_wiki.code_graph_generation.active_evidence_graph", lambda _d: None)
         answer = _run({"start": {"name": "alpha"}})
         assert answer == {
             "status": "error",
@@ -194,7 +197,7 @@ class TestCeilingsRefuseByName:
             raise ValueError("kind is outside the controlled kind set")
 
         graph.find_nodes = _refuse_kind
-        monkeypatch.setattr(code_graph, "_active_evidence_graph", lambda _d: graph)
+        monkeypatch.setattr("llm_wiki.code_graph_generation.active_evidence_graph", lambda _d: graph)
         with pytest.raises(ValueError, match="controlled kind set"):
             _run({"start": {"kind": "nonsense"}})
 
@@ -236,7 +239,7 @@ class TestModeWiring:
 
         enum = mcp_server.TOOL_INPUT_SCHEMAS["get_architecture"]["properties"]["mode"]["enum"]
         assert "query" in enum
-        assert mcp_server._ARCHITECTURE_CONTRACTS["query"] == (
+        assert mcp_server.ARCHITECTURE_CONTRACTS["query"] == (
             {"directory", "mode", "query"},
             {"directory", "mode", "query"},
         )
@@ -245,12 +248,12 @@ class TestModeWiring:
         import mcp_server
 
         arguments = {"directory": "/x", "mode": "query", "query": '{"start": {"name": "a"}}'}
-        assert mcp_server._validate_tool_arguments("get_architecture", arguments) is None
+        assert mcp_server.validate_tool_arguments("get_architecture", arguments) is None
 
     def test_a_call_without_the_query_argument_is_refused(self) -> None:
         import mcp_server
 
-        error = mcp_server._validate_tool_arguments(
+        error = mcp_server.validate_tool_arguments(
             "get_architecture", {"directory": "/x", "mode": "query"}
         )
         assert error == "required arguments are missing for query: query"
@@ -258,7 +261,7 @@ class TestModeWiring:
     def test_a_query_call_refuses_stray_arguments(self) -> None:
         import mcp_server
 
-        error = mcp_server._validate_tool_arguments(
+        error = mcp_server.validate_tool_arguments(
             "get_architecture",
             {"directory": "/x", "mode": "query", "query": "{}", "symbol": "a"},
         )

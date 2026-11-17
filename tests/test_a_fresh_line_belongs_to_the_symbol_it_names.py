@@ -70,14 +70,13 @@ def stale(tmp_path_factory):
     patch.setenv("LLM_WIKI_STATE_ROOT", str(state))
     patch.setenv("LLM_WIKI_ROOT", str(vault))
     import evidence_reader_cache
-    import memory_state
-    import repository_index
+    import repository_indexing
 
-    patch.setattr(memory_state, "ROOT", vault, raising=False)
-    patch.setattr(memory_state, "STATE_ROOT", state, raising=False)
+    patch.setenv("LLM_WIKI_ROOT", str(vault))
+    patch.setenv("LLM_WIKI_STATE_ROOT", str(state))
     evidence_reader_cache.clear()
     repository = _repository(base / "repo")
-    answer = repository_index.index_repository(repository, state_root=state)
+    answer = repository_indexing.index_repository(repository, state_root=state)
     assert answer["status"] == "indexed", answer
     (repository / "pkg/core.py").write_bytes(EDITED.encode("utf-8"))
     yield repository
@@ -98,7 +97,7 @@ def _request(repository: Path, symbol: str, depth=None) -> dict:
 def test_a_one_hop_caller_row_keeps_its_call_site(stale):
     import mcp_server
 
-    answer = mcp_server._architecture_callers(_request(stale, "helper"))
+    answer = mcp_server.architecture_callers(_request(stale, "helper"))
     rows = [(row["qualified_name"], row["line"], "line_read_from" in row) for row in answer["callers"]]
     assert rows == [("pkg.core.caller", 17, False)]
 
@@ -106,7 +105,7 @@ def test_a_one_hop_caller_row_keeps_its_call_site(stale):
 def test_a_walked_caller_row_gets_the_definition_line_on_disk(stale):
     import mcp_server
 
-    answer = mcp_server._architecture_callers(_request(stale, "helper", depth=2))
+    answer = mcp_server.architecture_callers(_request(stale, "helper", depth=2))
     rows = [(row["qualified_name"], row["line"], row.get("line_read_from")) for row in answer["callers"]]
     assert rows == [("pkg.core.caller", 18, "file")]
 

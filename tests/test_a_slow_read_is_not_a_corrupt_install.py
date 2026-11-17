@@ -27,13 +27,13 @@ def test_a_server_read_past_its_deadline_is_a_timeout(tmp_path: Path) -> None:
     server = tmp_path / "server"
     server.write_bytes(b"binary")
     with pytest.raises(TimeoutError):
-        lsp_identity._digest_of(server, 1024, _expired())
+        lsp_identity.digest_of(server, 1024, _expired())
 
 
 def test_a_manifest_read_past_its_deadline_is_a_timeout(tmp_path: Path) -> None:
     (tmp_path / lsp_identity.INSTALL_MANIFEST_NAME).write_text("{}", encoding="utf-8")
     with pytest.raises(TimeoutError):
-        lsp_identity._manifest_codes(GOPLS_PROFILE, tmp_path, "", "", _expired())
+        lsp_identity.manifest_codes(GOPLS_PROFILE, tmp_path, "", "", _expired())
 
 
 def test_the_real_read_failures_keep_their_names(tmp_path: Path) -> None:
@@ -41,8 +41,8 @@ def test_the_real_read_failures_keep_their_names(tmp_path: Path) -> None:
     server.write_bytes(b"binary")
     deadline = time.monotonic() + 10
     reasons = (
-        lsp_identity._digest_of(tmp_path / "absent", 1024, deadline)[1],
-        lsp_identity._digest_of(server, 2, deadline)[1],
-        lsp_identity._digest_of(server, 1024, deadline)[1],
+        lsp_identity.digest_of(tmp_path / "absent", 1024, deadline)[1],
+        lsp_identity.digest_of(server, 2, deadline)[1],
+        lsp_identity.digest_of(server, 1024, deadline)[1],
     )
     assert reasons == ("missing", "oversized", "")

@@ -29,7 +29,7 @@ import query_memory  # noqa: E402
 
 
 def _prompt() -> str:
-    return query_memory._qa_system_prompt()
+    return query_memory.qa_system_prompt()
 
 
 def test_both_directions_of_error_are_named() -> None:

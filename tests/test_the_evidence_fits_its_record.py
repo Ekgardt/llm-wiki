@@ -8,6 +8,8 @@ import json
 import sys
 from pathlib import Path
 
+import memory_state
+
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 
 from tests.adopted_capture_vault import (  # noqa: E402
@@ -41,9 +43,9 @@ def _publish(monkeypatch, tmp_path, size: int) -> tuple[Path, Path]:
     """(state root, transcript) after one pre-compact capture of a transcript this size."""
     import integration_adapter
 
-    state_root, project = adopted_capture_vault(tmp_path, monkeypatch, integration_adapter)
+    state_root, project = adopted_capture_vault(tmp_path, monkeypatch)
     transcript = host_transcript(state_root, "long.jsonl", _escape_heavy_transcript(size))
-    monkeypatch.setattr(integration_adapter, "spawn_detached", lambda _args: 1)
+    monkeypatch.setattr(memory_state, "spawn_detached", lambda _args: 1)
     payload = {"session_id": "long", "cwd": str(project), "transcript_path": str(transcript)}
     integration_adapter.capture_running_session("claude", payload)
     return state_root, transcript
@@ -58,7 +60,7 @@ def test_a_transcript_under_the_bound_that_outgrows_the_record_is_still_captured
 
     sizes = [path.stat().st_size for path in published_intents(state_root)]
     assert transcript.stat().st_size <= integration_adapter.MAX_CAPTURE_EVIDENCE_BYTES
-    assert [size <= integration_adapter.MAX_CAPTURE_INTENT_BYTES for size in sizes] == [True]
+    assert [size <= memory_state.MAX_CAPTURE_INTENT_BYTES for size in sizes] == [True]
 
 
 def test_the_stored_record_of_a_cut_session_says_it_was_cut(monkeypatch, tmp_path):

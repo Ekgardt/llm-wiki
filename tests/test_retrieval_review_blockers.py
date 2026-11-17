@@ -40,9 +40,7 @@ def test_corrupt_generation_still_goes_through_retrieve(tmp_path, monkeypatch):
     notes = vault / "knowledge" / "notes"
     notes.mkdir(parents=True)
     (notes / "page.md").write_text("# Page\nCorrupt needle.\n", encoding="utf-8")
-    monkeypatch.setattr(search_memory, "ROOT", vault)
-    monkeypatch.setattr(search_memory, "KNOWLEDGE_DIR", notes)
-    monkeypatch.setattr(search_memory, "WIKI_DIR", notes)
+    monkeypatch.setenv("LLM_WIKI_ROOT", str(vault))
 
     class Catalog:
         generations_path = tmp_path / "generations"
@@ -57,7 +55,7 @@ def test_corrupt_generation_still_goes_through_retrieve(tmp_path, monkeypatch):
         seen["retrieve"] += 1
         return real(*a, **k)
 
-    monkeypatch.setattr(retrieval, "retrieve", wrap)
+    monkeypatch.setattr("llm_wiki.retrieval_execution.retrieve", wrap)
 
     results = search_memory.search(
         "corrupt needle",
@@ -79,6 +77,8 @@ def test_corrupt_generation_still_goes_through_retrieve(tmp_path, monkeypatch):
 
 
 def test_seal_change_refuses_dense_and_falls_back_base(tmp_path, monkeypatch):
+    import generation_fts_validation
+    import generation_search
     import search_memory
     from repository_scope import resolve_repository_scope
 
@@ -86,9 +86,7 @@ def test_seal_change_refuses_dense_and_falls_back_base(tmp_path, monkeypatch):
     notes = vault / "knowledge" / "notes"
     notes.mkdir(parents=True)
     (notes / "a.md").write_text("# A\nSeal needle.\n", encoding="utf-8")
-    monkeypatch.setattr(search_memory, "ROOT", vault)
-    monkeypatch.setattr(search_memory, "KNOWLEDGE_DIR", notes)
-    monkeypatch.setattr(search_memory, "WIKI_DIR", notes)
+    monkeypatch.setenv("LLM_WIKI_ROOT", str(vault))
 
     # Force generation open path with seal flip after first check.
     seals = {"n": 0}
@@ -97,10 +95,10 @@ def test_seal_change_refuses_dense_and_falls_back_base(tmp_path, monkeypatch):
         seals["n"] += 1
         return ("seal-a",) if seals["n"] == 1 else ("seal-b",)
 
-    monkeypatch.setattr(search_memory, "_generation_consumption_seal", seal)
+    monkeypatch.setattr(generation_search, "generation_consumption_seal", seal)
     monkeypatch.setattr(
-        search_memory,
-        "_generation_consumption_unchanged",
+        generation_search,
+        "generation_consumption_unchanged",
         lambda *_a, **_k: False,
     )
 
@@ -118,13 +116,13 @@ def test_seal_change_refuses_dense_and_falls_back_base(tmp_path, monkeypatch):
                 "source_manifest_sha256": "1" * 64,
                 "collector_version": "c",
                 "extractor_version": "e",
-                "tokenizer_version": search_memory.GENERATION_TOKENIZER_VERSION,
-                "tokenizer_config_sha256": search_memory.GENERATION_TOKENIZER_CONFIG_SHA256,
+                "tokenizer_version": generation_fts_validation.GENERATION_TOKENIZER_VERSION,
+                "tokenizer_config_sha256": generation_fts_validation.GENERATION_TOKENIZER_CONFIG_SHA256,
                 "schema_version": "corpus-generation/v1",
             }
 
     # Open generation fails connection → generation_unavailable path still retrieve.
-    monkeypatch.setattr(search_memory, "_generation_connection", lambda *_a, **_k: None)
+    monkeypatch.setattr(generation_search, "generation_connection", lambda *_a, **_k: None)
 
     results = search_memory.search(
         "seal needle",
@@ -199,7 +197,7 @@ def test_trace_includes_reranker_diagnostics(monkeypatch):
     assert result.trace.reranker_model_revision == "rev"
     assert result.trace.reranker_depth == 20
     assert result.trace.reranker_duration_ms == 3
-    payload = mcp_server._reported_trace(dataclasses.asdict(result.trace))
+    payload = mcp_server.reported_trace(dataclasses.asdict(result.trace))
     validate_schema(payload, SCHEMAS / "retrieval-trace-v1.json")
     rows = retrieval.candidates_to_legacy(result, display_meta=result.display_meta)
     assert rows[0]["reranker_applied"] is True
@@ -279,11 +277,11 @@ def test_should_rerank_refuses_only_for_a_named_reason(monkeypatch):
 @pytest.mark.parametrize(
     ("query", "intent", "profile"),
     [
-        ("Что зависит от search_memory?", "graph_relation", "GRAPH"),
-        ("Покажи карту репозитория scripts", "repo_map", "REPO_MAP"),
-        ("Влияние изменения search_memory.py", "impact", "IMPACT"),
-        ("Синтез архитектуры across all projects", "global_synthesis", "GLOBAL"),
-        ("решения с 2025-01-01", "temporal", "TEMPORAL"),
+        ("\u0427\u0442\u043e \u0437\u0430\u0432\u0438\u0441\u0438\u0442 \u043e\u0442 search_memory?", "graph_relation", "GRAPH"),
+        ("\u041f\u043e\u043a\u0430\u0436\u0438 \u043a\u0430\u0440\u0442\u0443 \u0440\u0435\u043f\u043e\u0437\u0438\u0442\u043e\u0440\u0438\u044f scripts", "repo_map", "REPO_MAP"),
+        ("\u0412\u043b\u0438\u044f\u043d\u0438\u0435 \u0438\u0437\u043c\u0435\u043d\u0435\u043d\u0438\u044f search_memory.py", "impact", "IMPACT"),
+        ("\u0421\u0438\u043d\u0442\u0435\u0437 \u0430\u0440\u0445\u0438\u0442\u0435\u043a\u0442\u0443\u0440\u044b across all projects", "global_synthesis", "GLOBAL"),
+        ("\u0440\u0435\u0448\u0435\u043d\u0438\u044f \u0441 2025-01-01", "temporal", "TEMPORAL"),
         ("什么依赖 search_memory", "graph_relation", "GRAPH"),
         ("显示仓库地图 scripts", "repo_map", "REPO_MAP"),
         ("更改 search_memory.py 的影响", "impact", "IMPACT"),

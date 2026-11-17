@@ -1,0 +1,729 @@
+{
+  "encoding": "o200k_base",
+  "max_tokens": 100000,
+  "serialization": "exact-duplicates/v1",
+  "files": [
+    "AGENTS.md",
+    "CLAUDE.md",
+    "docs/AGENTS.md",
+    "docs/STRUCTURE.md",
+    "docs/modules/context-bundle.md",
+    "docs/modules/context-records.md",
+    "docs/modules/context-tooling.md",
+    "docs/modules/formats.md",
+    "docs/modules/memory-queue-results.md",
+    "docs/modules/model-choice.md",
+    "docs/modules/product-structure.md",
+    "docs/modules/project-governance.md",
+    "docs/modules/queue-artifacts.md",
+    "docs/modules/queue-core.md",
+    "docs/modules/test-memory-queue-results-context.json",
+    "docs/modules/test-memory-queue-results.md",
+    "docs/modules/test-memory-queue.md",
+    "docs/modules/test-support.md",
+    "rules/development-laws.md",
+    "scripts/__init__.py",
+    "scripts/llm_wiki/__init__.py",
+    "scripts/llm_wiki/context_bundle.py",
+    "scripts/llm_wiki/formats/__init__.py",
+    "scripts/llm_wiki/memory_queue_results.py",
+    "scripts/llm_wiki/queue_artifacts.py",
+    "scripts/queue_core.py",
+    "tests/__init__.py",
+    "tests/conftest.py",
+    "tests/memory_queue_scenario_helpers.py",
+    "tests/module_context.py",
+    "tests/module_context_paths.py",
+    "tests/module_interface.py",
+    "tests/module_interface_render.py",
+    "tests/module_qualification.py",
+    "tests/module_record_context.py",
+    "tests/module_records.py",
+    "tests/shared_fixtures.py",
+    "tests/slow_machine.py",
+    "tests/test_memory_queue_results.py"
+  ],
+  "ownership": {
+    "files": [
+      "docs/modules/test-memory-queue-results-context.json",
+      "docs/modules/test-memory-queue-results.md",
+      "tests/test_memory_queue_results.py"
+    ]
+  },
+  "qualified_dependencies": [
+    {
+      "provider": "scripts/compile_progress.py",
+      "names": [
+        "QUEUE_SCHEMA_VERSION"
+      ],
+      "contract_sha256": "79a2c5f096934f895c7832bab6331aa13259f15bb322dfce5fdfcd4b8756a9a6",
+      "integration_tests": [
+        "tests/test_a_backup_image_carries_what_git_does_not.py",
+        "tests/test_a_backup_snapshots_what_hooks_write.py",
+        "tests/test_a_block_opens_one_entry.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/adoption_admission.py",
+      "names": [
+        "adopted_database_path",
+        "read_adoption_record"
+      ],
+      "contract_sha256": "99e65ef426a02087ff3cd12c7a88e581e30a7161c9367487402e0e71b67c23c3",
+      "integration_tests": [
+        "tests/test_a_backup_image_carries_what_git_does_not.py",
+        "tests/test_a_backup_snapshots_what_hooks_write.py",
+        "tests/test_a_backup_takes_what_any_installed_vault_holds.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/formats/canonical.py",
+      "names": [
+        "canonical_json_bytes",
+        "sha256_bytes"
+      ],
+      "contract_sha256": "2e42a7aefcb66ac2515f6665a03feae34e6f7bad4807787a789ce031f9f3a9c1",
+      "integration_tests": [
+        "tests/modules/breadcrumb_decision/test_wire.py",
+        "tests/modules/breadcrumb_documents/test_contract.py",
+        "tests/modules/breadcrumb_documents/test_rendering.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/formats/queue_payload.py",
+      "names": [
+        "PayloadValidation",
+        "validate_payload_blob"
+      ],
+      "contract_sha256": "20f003cddf1108c97252bc51452a23d908eb4bc5afa3b21c194221d695827cf4",
+      "integration_tests": [
+        "tests/modules/formats/test_queue_payload.py",
+        "tests/modules/queue_migration_plan/test_planning.py",
+        "tests/modules/queue_validation/test_capture_checks.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/generation_catalog_store.py",
+      "names": [
+        "GenerationCatalog"
+      ],
+      "contract_sha256": "b18194ebe04bf988b4474379fcb5243516550d43b745a00eaed1453f7844c983",
+      "integration_tests": [
+        "tests/test_a_blocked_task_has_a_way_back.py",
+        "tests/test_a_build_in_flight_is_not_an_orphan.py",
+        "tests/test_a_capacity_refusal_does_not_corrupt_a_generation.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/memory_queue_failures.py",
+      "names": [
+        "MemoryQueueFailures"
+      ],
+      "contract_sha256": "76d58f399a26b707454899a6011eeb72ab60049a808a2e2b6ad00a3ef76e01dd",
+      "integration_tests": [
+        "tests/test_a_blocked_task_has_a_way_back.py",
+        "tests/test_a_claude_prompt_takes_the_ingest_path.py",
+        "tests/test_a_committed_source_resolves_an_older_compile_plan.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/memory_queue_purge.py",
+      "names": [
+        "MemoryQueuePurge"
+      ],
+      "contract_sha256": "feab0a6ba322241380ddebc367d315a2274009b786c32382a6c8b093460beb27",
+      "integration_tests": [
+        "tests/test_a_blocked_task_has_a_way_back.py",
+        "tests/test_a_claude_prompt_takes_the_ingest_path.py",
+        "tests/test_a_committed_source_resolves_an_older_compile_plan.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/memory_queue_sources.py",
+      "names": [
+        "MemoryQueueSourceFences",
+        "insert_source_fence"
+      ],
+      "contract_sha256": "833cec70f55d3f8b1c8f5b47ca1986a07188bce72f7c5343fada4e8c102a2258",
+      "integration_tests": [
+        "tests/test_a_blocked_task_has_a_way_back.py",
+        "tests/test_a_claude_prompt_takes_the_ingest_path.py",
+        "tests/test_a_committed_source_resolves_an_older_compile_plan.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/model_choice.py",
+      "names": [
+        "using_root"
+      ],
+      "contract_sha256": "d45f2655cb61963e77617d1dfd7d617b134ad77cc770b59b335d0856e5d65019",
+      "integration_tests": [
+        "tests/test_a_block_opens_one_entry.py",
+        "tests/test_a_blocked_task_has_a_way_back.py",
+        "tests/test_a_build_in_flight_is_not_an_orphan.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/queue_attempts.py",
+      "names": [
+        "attempt_histories",
+        "failure_state",
+        "take_v3_task_lease"
+      ],
+      "contract_sha256": "f33ca8925e0d6242336aba02ba1146c0df9601fa44811191ed53c7243c2de86d",
+      "integration_tests": [
+        "tests/modules/queue_attempts/test_attempts.py",
+        "tests/test_a_blocked_task_has_a_way_back.py",
+        "tests/test_a_claude_prompt_takes_the_ingest_path.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/queue_child_runtime.py",
+      "names": [
+        "ChildRun",
+        "child_ready_handshake",
+        "decode_processor_frame",
+        "settle_child_exit"
+      ],
+      "contract_sha256": "b0ca493e061962d870bc11f12eddeab129f0ba62013f0933852341a1cf4e9994",
+      "integration_tests": [
+        "tests/modules/queue_child_runtime/test_deadline.py",
+        "tests/modules/queue_child_runtime/test_protocol.py",
+        "tests/modules/queue_child_runtime/test_spawn.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/queue_contracts.py",
+      "names": [
+        "CaptureTaskBinding",
+        "CompileCompletionError",
+        "CorruptExportProgress",
+        "CorruptPurgeProgress",
+        "DeferredResult",
+        "LeaseFenceError",
+        "LeaseProcessor",
+        "MAX_RESULT_BYTES",
+        "PurgeReceipt",
+        "QueueFailure",
+        "QueueLease",
+        "QueueOperationError",
+        "QueueTask",
+        "RestoreReceipt",
+        "ResultConflictError",
+        "WorkerSummary"
+      ],
+      "contract_sha256": "220a8a97982c62e392c05c4b0b8e3db29b9cb25f81d9132220fd4792ada1dcf7",
+      "integration_tests": [
+        "tests/modules/compile_call_runtime/test_lifecycle.py",
+        "tests/modules/queue_artifacts/test_artifacts.py",
+        "tests/modules/queue_attempts/test_attempts.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/queue_database_contract.py",
+      "names": [
+        "QUEUE_COMPILE_CONTRACT",
+        "QUEUE_COMPILE_SCHEMA_SHA256",
+        "QUEUE_V3_CONTRACT",
+        "QUEUE_V3_SCHEMA_SHA256",
+        "queue_contract_for_version"
+      ],
+      "contract_sha256": "4f7f769e909eedea7e32e69c67f48526558ccb6a8449feeac3047ad83b492ded",
+      "integration_tests": [
+        "tests/modules/queue_database_contract/test_contract.py",
+        "tests/test_a_backup_image_carries_what_git_does_not.py",
+        "tests/test_a_backup_snapshots_what_hooks_write.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/queue_heartbeat.py",
+      "names": [
+        "LeaseHeartbeat",
+        "SourceFenceHeartbeat"
+      ],
+      "contract_sha256": "63156574e71d8536a73ec044a890c18fe3f0ce73f4a634ffac49fe4e2ce57d8e",
+      "integration_tests": [
+        "tests/modules/queue_heartbeat/test_renewal.py",
+        "tests/modules/queue_heartbeat/test_stop.py",
+        "tests/test_a_blocked_task_has_a_way_back.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/queue_migration_plan.py",
+      "names": [
+        "parents_before_children",
+        "queue_v2_columns"
+      ],
+      "contract_sha256": "2aca20bfd195e09e65077a1f436e2dbad74a39ef66138364a4acdd388b4b8168",
+      "integration_tests": [
+        "tests/modules/queue_migration_plan/test_planning.py",
+        "tests/test_a_check_is_judged_when_it_ends.py",
+        "tests/test_a_check_names_its_cause.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/queue_process_cleanup.py",
+      "names": [
+        "pid_is_alive",
+        "taskkill"
+      ],
+      "contract_sha256": "a48e9f1df0cd8bb1f606865062e7b565d8531d90220c2e7959a1ae7fb710b387",
+      "integration_tests": [
+        "tests/modules/queue_child_runtime/test_deadline.py",
+        "tests/modules/queue_child_runtime/test_protocol.py",
+        "tests/modules/queue_child_runtime/test_spawn.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/queue_reader_base.py",
+      "names": [
+        "QueueReaderFoundation"
+      ],
+      "contract_sha256": "5803abe63b890764e772b341ccc0318060f277b02cc89c54f52cd19657a8f02e",
+      "integration_tests": [
+        "tests/test_a_blocked_task_has_a_way_back.py",
+        "tests/test_a_claude_prompt_takes_the_ingest_path.py",
+        "tests/test_a_committed_source_resolves_an_older_compile_plan.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/queue_reader_capture.py",
+      "names": [
+        "QueueCaptureOperations"
+      ],
+      "contract_sha256": "4f5794f8b2b0d7861f9914cec9e4c036f04524f212ce8bfb7708c8929919ab7b",
+      "integration_tests": [
+        "tests/test_a_blocked_task_has_a_way_back.py",
+        "tests/test_a_claude_prompt_takes_the_ingest_path.py",
+        "tests/test_a_committed_source_resolves_an_older_compile_plan.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/queue_reader_compile.py",
+      "names": [
+        "QueueCompileOperations"
+      ],
+      "contract_sha256": "3432f6d23314e2b533e7dbdb932139070767fcf6b09df85c47904bdf83c86926",
+      "integration_tests": [
+        "tests/test_a_blocked_task_has_a_way_back.py",
+        "tests/test_a_claude_prompt_takes_the_ingest_path.py",
+        "tests/test_a_committed_source_resolves_an_older_compile_plan.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/queue_reader_purge.py",
+      "names": [
+        "QueuePurgeOperations"
+      ],
+      "contract_sha256": "ecc2c0379516e82f84b7fae8db9a30c800d991f4b23d050fe9bed0cb3c34621c",
+      "integration_tests": [
+        "tests/test_a_blocked_task_has_a_way_back.py",
+        "tests/test_a_claude_prompt_takes_the_ingest_path.py",
+        "tests/test_a_committed_source_resolves_an_older_compile_plan.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/queue_reader_quarantine.py",
+      "names": [
+        "QueueQuarantineOperations"
+      ],
+      "contract_sha256": "dc85ab4a9b5f1740aba31fdc5bc4030e1ea91392b99518783794b223c1ec37c8",
+      "integration_tests": [
+        "tests/test_a_blocked_task_has_a_way_back.py",
+        "tests/test_a_claude_prompt_takes_the_ingest_path.py",
+        "tests/test_a_committed_source_resolves_an_older_compile_plan.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/queue_reader_semantic.py",
+      "names": [
+        "QueueSemanticDecisionOperations"
+      ],
+      "contract_sha256": "af9290799241fe1df6bf11b14efa48cf1a24f472e86f8cbc4bbe97d974ade57b",
+      "integration_tests": [
+        "tests/test_a_blocked_task_has_a_way_back.py",
+        "tests/test_a_claude_prompt_takes_the_ingest_path.py",
+        "tests/test_a_committed_source_resolves_an_older_compile_plan.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/queue_reader_sources.py",
+      "names": [
+        "QueueSourceFenceOperations"
+      ],
+      "contract_sha256": "9e4f92ec4c58ae2e0c9bc0898b0589b6125af1c607dd227e29893cc177103411",
+      "integration_tests": [
+        "tests/test_a_blocked_task_has_a_way_back.py",
+        "tests/test_a_claude_prompt_takes_the_ingest_path.py",
+        "tests/test_a_committed_source_resolves_an_older_compile_plan.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/queue_reader_tasks.py",
+      "names": [
+        "QueueTaskOperations"
+      ],
+      "contract_sha256": "4e9bb377a87de1125ac7350a14e3f0609c4c4e6f6a4e2481664d566f99e441f1",
+      "integration_tests": [
+        "tests/test_a_blocked_task_has_a_way_back.py",
+        "tests/test_a_claude_prompt_takes_the_ingest_path.py",
+        "tests/test_a_committed_source_resolves_an_older_compile_plan.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/queue_schema_operations.py",
+      "names": [
+        "check_no_populated_rebuild",
+        "drop_schema_object",
+        "queue_v3_schema_complete",
+        "table_is_populated"
+      ],
+      "contract_sha256": "9f6e75ef34954126de75519f141a2aa9abf91858caf0cb3b401787797de408bc",
+      "integration_tests": [
+        "tests/modules/queue_schema_operations/test_operations.py",
+        "tests/test_a_backup_image_carries_what_git_does_not.py",
+        "tests/test_a_backup_snapshots_what_hooks_write.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/queue_sources.py",
+      "names": [
+        "queue_v3_source_links",
+        "source_identity_from_payload",
+        "validate_failure_identity",
+        "validate_source_identity"
+      ],
+      "contract_sha256": "79a97bd33e486e44b87c9463eeec3ff0a62420bcd6c320ed123a946c2255b7e4",
+      "integration_tests": [
+        "tests/modules/queue_migration_plan/test_planning.py",
+        "tests/modules/queue_sources/test_sources.py",
+        "tests/test_a_blocked_task_has_a_way_back.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/queue_store.py",
+      "names": [
+        "EXPIRED_LEASE_OUTCOMES",
+        "TaskFence",
+        "age_filter_clause",
+        "payload_references_source",
+        "register_source_reference",
+        "renewed_source_fence",
+        "require_adopted_attempt_limit",
+        "require_adopted_retry_policy",
+        "require_no_source_failure",
+        "same_enqueued_task",
+        "utc_now",
+        "validated_listed_states"
+      ],
+      "contract_sha256": "20dd631fc780a059161de11ccd5a7fc794969cc5e73bddc7a6dd010583f4a9f0",
+      "integration_tests": [
+        "tests/test_a_blocked_task_has_a_way_back.py",
+        "tests/test_a_capture_keeps_its_claim_while_it_asks.py",
+        "tests/test_a_check_is_judged_when_it_ends.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/queue_task_lineage.py",
+      "names": [
+        "redrive_ancestors",
+        "redrive_lineage",
+        "require_inherited_capture_decision"
+      ],
+      "contract_sha256": "59f0e21936ee590a278a422108b71892922279ef5b1bb3021d1ac52eb2992e21",
+      "integration_tests": [
+        "tests/test_a_blocked_task_has_a_way_back.py",
+        "tests/test_a_claude_prompt_takes_the_ingest_path.py",
+        "tests/test_a_committed_source_resolves_an_older_compile_plan.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/queue_task_records.py",
+      "names": [
+        "ExportedRows",
+        "task_record"
+      ],
+      "contract_sha256": "13416ed3b2276fba63fd51ac90fb6a78a97455f50fd43206afaaebbf086f5c7f",
+      "integration_tests": [
+        "tests/modules/queue_task_records/test_records.py",
+        "tests/test_a_blocked_task_has_a_way_back.py",
+        "tests/test_a_claude_prompt_takes_the_ingest_path.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/queue_timing.py",
+      "names": [
+        "as_utc",
+        "parse_timestamp",
+        "retry_available_at",
+        "timestamp"
+      ],
+      "contract_sha256": "70d9d628cbf10ef67f3c83e28f893bc9bfc44a845ea89ef391999da2339c2868",
+      "integration_tests": [
+        "tests/modules/queue_attempts/test_attempts.py",
+        "tests/modules/queue_evidence_records/test_records.py",
+        "tests/modules/queue_task_records/test_records.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/queue_v2_migration.py",
+      "names": [
+        "initialize_queue_v3_candidate",
+        "queue_v3_report",
+        "require_empty_queue_v3",
+        "require_queue_v3_openable",
+        "validate_queue_v3_database"
+      ],
+      "contract_sha256": "45145bc964345524438945c2a447387f0c65e71e5b862aa2bb75554eda680699",
+      "integration_tests": [
+        "tests/test_a_backup_image_carries_what_git_does_not.py",
+        "tests/test_a_backup_snapshots_what_hooks_write.py",
+        "tests/test_a_blocked_task_has_a_way_back.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/queue_v3_candidate.py",
+      "names": [
+        "queue_v3_invariants_hold"
+      ],
+      "contract_sha256": "32cff649cfa77668861e16f02b35578df8b191a4c9ab9a505947b5e4a270ba49",
+      "integration_tests": [
+        "tests/test_a_backup_image_carries_what_git_does_not.py",
+        "tests/test_a_backup_snapshots_what_hooks_write.py",
+        "tests/test_a_blocked_task_has_a_way_back.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/queue_validation.py",
+      "names": [
+        "check_result_operation",
+        "check_result_request",
+        "require_claim_owner_and_lease",
+        "require_legacy_enqueue_arguments",
+        "require_positive_task_lease",
+        "validate_retry_policy",
+        "validate_worker_policy"
+      ],
+      "contract_sha256": "db2f51eaaac4eeaf2fe51a8e08c7fa813e0b2e4ce16714451daec1c59fd575f2",
+      "integration_tests": [
+        "tests/modules/queue_validation/test_capture_checks.py",
+        "tests/modules/queue_validation/test_validation.py",
+        "tests/test_a_blocked_task_has_a_way_back.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/queue_worker.py",
+      "names": [
+        "WORKER_MIN_CLAIM_SECONDS",
+        "bind_lease_processor",
+        "claim_when_reachable",
+        "compat_task",
+        "drive_worker",
+        "interruptible",
+        "is_busy_database",
+        "processor_child_entry",
+        "processor_result_frame",
+        "run_and_settle",
+        "run_processor",
+        "run_processor_child",
+        "run_processor_inline",
+        "unsuccessful_worker_failure",
+        "work_claimed",
+        "work_one"
+      ],
+      "contract_sha256": "0a6bfadef559ecd267b62b18b2c0438e9f574be157cb29af47c449c7f9223d01",
+      "integration_tests": [
+        "tests/test_a_blocked_task_has_a_way_back.py",
+        "tests/test_a_child_that_dies_at_start_does_not_halt_the_worker.py",
+        "tests/test_a_childs_tree_is_read_when_it_is_killed.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/queue_worker_state.py",
+      "names": [
+        "PROCESSOR_ERROR_CODE_BYTES",
+        "ProcessorOutcome",
+        "QueueRetryPolicy",
+        "WorkerProgress",
+        "processor_error_code"
+      ],
+      "contract_sha256": "c72251b20dd33476203ac1c431f886a48a90304b1f02d31a56cc56b4f7d61ad0",
+      "integration_tests": [
+        "tests/modules/queue_worker_state/test_values.py",
+        "tests/test_a_blocked_task_has_a_way_back.py",
+        "tests/test_a_claude_prompt_takes_the_ingest_path.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/reliability_defaults.py",
+      "names": [
+        "DEFAULTS"
+      ],
+      "contract_sha256": "f37296a83c15073e42a6cc8b86b88c2d19c548ac19a4ef6d0ca2f7af925c90c8",
+      "integration_tests": [
+        "tests/modules/breadcrumb_decision/test_wire.py",
+        "tests/modules/breadcrumb_documents/test_contract.py",
+        "tests/modules/breadcrumb_documents/test_rendering.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/runtime_environment.py",
+      "names": [
+        "set_owner_only"
+      ],
+      "contract_sha256": "039dbd41dc0130f6223a349f7802a352611b0ced43feb37bf739b2bb26debe34",
+      "integration_tests": [
+        "tests/modules/coordinator_validation/test_database.py",
+        "tests/modules/queue_artifacts/test_artifacts.py",
+        "tests/modules/runtime_environment/test_environment.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/runtime_roots.py",
+      "names": [
+        "state_root",
+        "vault_root"
+      ],
+      "contract_sha256": "904b31835161d11b79ab937c4651d91dd6966bdaa1f33e93b9ea768f519d2d3b",
+      "integration_tests": [
+        "tests/test_a_backup_image_carries_what_git_does_not.py",
+        "tests/test_a_bad_model_file_is_fetched_again.py",
+        "tests/test_a_block_opens_one_entry.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/runtime_sync.py",
+      "names": [
+        "fsync_directory",
+        "fsync_file"
+      ],
+      "contract_sha256": "88a10c62eeebbefe36772c8097fdd9b3771b52eea8aa09adf0bacb60e49c8d87",
+      "integration_tests": [
+        "tests/modules/queue_artifacts/test_artifacts.py",
+        "tests/modules/runtime_publication/test_publication.py",
+        "tests/modules/runtime_sync/test_sync.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/sqlite_contracts.py",
+      "names": [
+        "OperationalDatabaseContract",
+        "OperationalDatabaseContractError",
+        "migration_error",
+        "quote_sqlite_identifier"
+      ],
+      "contract_sha256": "4c081ccc696f5e6cc76d22959eff9abc2465cc660aefd02bde7b50ca30531c21",
+      "integration_tests": [
+        "tests/modules/coordinator_invariants/test_integrity.py",
+        "tests/modules/coordinator_invariants/test_rows.py",
+        "tests/modules/coordinator_schema/test_contract.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/sqlite_deadlines.py",
+      "names": [
+        "operational_deadline_active",
+        "refresh_operational_deadline"
+      ],
+      "contract_sha256": "0e24bc3194f79287b74b0a784d52ec2c3adb35a870d55c9f6b960a32468e01bd",
+      "integration_tests": [
+        "tests/modules/coordinator_validation/test_database.py",
+        "tests/modules/queue_artifacts/test_artifacts.py",
+        "tests/modules/queue_heartbeat/test_renewal.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/sqlite_transactions.py",
+      "names": [
+        "begin_immediate"
+      ],
+      "contract_sha256": "fb9ecde177ce133dd8e6e34a67214ca0c051a02d758e8611dac84b568d955373",
+      "integration_tests": [
+        "tests/modules/queue_attempts/test_attempts.py",
+        "tests/modules/queue_schema_operations/test_operations.py",
+        "tests/modules/sqlite_migrations/test_migrations.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/windows_acl.py",
+      "names": [
+        "acl_is_owner_only",
+        "acl_owner_lines",
+        "harden_windows_acl",
+        "is_owner_only_windows",
+        "windows_acl_lines"
+      ],
+      "contract_sha256": "20a510217f8dc6e301eb23c0dac2979a1337db95c71709218445b2f6e0ef0609",
+      "integration_tests": [
+        "tests/modules/coordinator_validation/test_database.py",
+        "tests/modules/queue_artifacts/test_artifacts.py",
+        "tests/modules/runtime_environment/test_environment.py"
+      ]
+    },
+    {
+      "provider": "scripts/markdown_transaction.py",
+      "names": [
+        "reliability_v3_records_present",
+        "require_adopted_once"
+      ],
+      "contract_sha256": "e8161c0539a5735a018ef8cd4ba13c5b023adefdb4fc212cb96ecb2b147e9267",
+      "integration_tests": [
+        "tests/test_a_backup_image_carries_what_git_does_not.py",
+        "tests/test_a_backup_snapshots_what_hooks_write.py",
+        "tests/test_a_backup_takes_what_any_installed_vault_holds.py"
+      ]
+    },
+    {
+      "provider": "scripts/operational_ownership.py",
+      "names": [
+        "OwnerLease"
+      ],
+      "contract_sha256": "7e48dfb05434c2c448a04b79b773b33da0786c3efbd0e2f3c100df849b1f3d0d",
+      "integration_tests": [
+        "tests/test_a_backup_image_carries_what_git_does_not.py",
+        "tests/test_a_backup_snapshots_what_hooks_write.py",
+        "tests/test_a_backup_takes_what_any_installed_vault_holds.py"
+      ]
+    },
+    {
+      "provider": "scripts/reliable_memory.py",
+      "names": [
+        "fsync_directory",
+        "fsync_file",
+        "open_operational_db",
+        "sha256_bytes",
+        "validate_state_root"
+      ],
+      "contract_sha256": "2f80cf63621b1310e30b4bbcf1fc2a59327e5c64874fc3c50bb86261ae67fd48",
+      "integration_tests": [
+        "tests/test_a_backup_image_carries_what_git_does_not.py",
+        "tests/test_a_backup_snapshots_what_hooks_write.py",
+        "tests/test_a_backup_takes_what_any_installed_vault_holds.py"
+      ]
+    },
+    {
+      "provider": "scripts/repository_scope.py",
+      "names": [
+        "sanitized_git_environment"
+      ],
+      "contract_sha256": "fd550ae20761afad50b37fa3a71044a162485b0e4d4b3e2af9b5b22e143c2bec",
+      "integration_tests": [
+        "tests/modules/cleanup_worktrees/test_git_refusal.py",
+        "tests/test_a_blocked_task_has_a_way_back.py",
+        "tests/test_a_build_in_flight_is_not_an_orphan.py"
+      ]
+    },
+    {
+      "provider": "scripts/secret_redact.py",
+      "names": [
+        "redact_structure"
+      ],
+      "contract_sha256": "99f834813f94cd91a34f4b0cb1e51e0709d4d8f9ad7b6b523ce1333b7b3e78ee",
+      "integration_tests": [
+        "tests/modules/event_envelope_values/test_baseline.py",
+        "tests/modules/secret_redact/test_pattern_prerequisites.py",
+        "tests/modules/secret_redact/test_security_invariants.py"
+      ]
+    }
+  ]
+}

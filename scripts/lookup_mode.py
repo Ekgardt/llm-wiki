@@ -23,7 +23,7 @@ import argparse
 import io
 import json
 import sys
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 # Force utf-8 on stdout so the en-dash / em-dash don't mojibake on Windows cp1252.
@@ -34,10 +34,8 @@ if hasattr(sys.stdout, "reconfigure"):
         pass
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from memory_state import ROOT  # noqa: E402
+from llm_wiki import runtime_roots  # noqa: E402
 from vault_editorial import EDITORIAL_NAMES, editorial_parents_to_skip  # noqa: E402
-
-WIKI = ROOT / "knowledge" / "notes"
 
 
 def count_wiki_pages() -> int:
@@ -48,10 +46,10 @@ def count_wiki_pages() -> int:
     `knowledge/projects/_template/`. Superseded pages are counted here; search
     excludes them (rule 12), so `search_memory.py --status` counts fewer.
     """
-    if not WIKI.exists():
+    if not runtime_roots.notes_dir().exists():
         return 0
-    skip_parents = editorial_parents_to_skip(WIKI)
-    return sum(1 for p in WIKI.rglob("*.md") if _curated_page(p, skip_parents))
+    skip_parents = editorial_parents_to_skip(runtime_roots.notes_dir())
+    return sum(1 for p in runtime_roots.notes_dir().rglob("*.md") if _curated_page(p, skip_parents))
 
 
 def _curated_page(p: Path, skip_parents: object) -> bool:
@@ -67,9 +65,9 @@ def index_status() -> dict:
     reads Markdown directly (`docs/research/2026-09-23-the-generation-is-the-only-index.md`).
     """
     try:
-        import search_memory
+        import generation_search
 
-        catalog = search_memory._active_generation_catalog()
+        catalog = generation_search.active_generation_catalog()
         manifest = None if catalog is None else catalog.get_active()
     except (ImportError, OSError, ValueError, RuntimeError):
         return {"available": False}
@@ -104,7 +102,7 @@ def main() -> int:
         "wiki_pages": count,
         "search_mode": mode,
         "index": index,
-        "checked_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "checked_at": datetime.now(UTC).isoformat(timespec="seconds"),
     }
     if args.json:
         print(json.dumps(payload, indent=2))

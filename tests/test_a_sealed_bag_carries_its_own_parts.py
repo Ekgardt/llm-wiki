@@ -9,7 +9,11 @@ import shutil
 import pytest
 from markdown_transaction import MarkdownCoordinator
 
-from tests.test_a_split_day_is_archived_with_every_part import _archive, _compile_every_part, _vault
+from tests.a_split_day_is_archived_with_every_part_helpers import (
+    _archive,
+    _compile_every_part,
+    _vault,
+)
 
 
 def _sealed_split_day(tmp_path, monkeypatch):
@@ -35,7 +39,7 @@ def test_a_part_quote_resolves_after_the_rule_changes(tmp_path, monkeypatch) -> 
     from reliable_memory import sha256_bytes
 
     root, state_root, daily, content, _archived = _sealed_split_day(tmp_path, monkeypatch)
-    start, end = evidence_resolver._daily_part_bounds(content)[1]
+    start, end = evidence_resolver.daily_part_bounds(content)[1]
     part = content[start:end]
     block_id, block_start, block_end = evidence_resolver.daily_entries(part)[0]
     ref = evidence_resolver.EvidenceRef(daily.stem, sha256_bytes(part), block_id, block_start, block_end)
@@ -66,13 +70,13 @@ _END = len(_PAYLOAD)
     ids=["gap", "overlap", "late-start", "short-end", "cut-inside-an-entry", "no-parts"],
 )
 def test_a_part_table_that_does_not_tile_the_day_at_entries_is_refused(spans) -> None:
-    from evidence_resolver import EvidenceResolutionError, _require_recorded_parts
+    from evidence_resolver import EvidenceResolutionError, require_recorded_parts
 
     with pytest.raises(EvidenceResolutionError):
-        _require_recorded_parts(spans, _PAYLOAD)
+        require_recorded_parts(spans, _PAYLOAD)
 
 
 def test_a_part_table_cut_where_entries_begin_is_accepted() -> None:
-    from evidence_resolver import _require_recorded_parts
+    from evidence_resolver import require_recorded_parts
 
-    _require_recorded_parts([(0, _CUT), (_CUT, _END)], _PAYLOAD)
+    require_recorded_parts([(0, _CUT), (_CUT, _END)], _PAYLOAD)

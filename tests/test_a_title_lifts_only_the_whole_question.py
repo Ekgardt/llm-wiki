@@ -6,7 +6,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import search_memory
+import generation_search
 
 
 def _page(root: Path, name: str, title: str, body: str) -> Path:
@@ -17,14 +17,14 @@ def _page(root: Path, name: str, title: str, body: str) -> Path:
 
 
 def _ranked(query: str, pages: list[Path]) -> list[str]:
-    hits = search_memory._direct_markdown_hits(
+    hits = generation_search.direct_markdown_hits(
         query, pages, limit=5, project=None, since=None, as_of=None, deadline=None, cancelled=None
     )
     return [Path(hit["path"]).stem for hit in hits]
 
 
 def test_a_page_holding_the_question_outranks_one_sharing_a_title_word(tmp_path, monkeypatch) -> None:
-    monkeypatch.setattr(search_memory, "ROOT", tmp_path)
+    monkeypatch.setenv("LLM_WIKI_ROOT", str(tmp_path))
     pages = [
         _page(tmp_path, "secret-notes", "Secret notes", "Unrelated text."),
         _page(tmp_path, "value-decides", "Value decides", "The redactor judges a secret by its shape."),
@@ -34,7 +34,7 @@ def test_a_page_holding_the_question_outranks_one_sharing_a_title_word(tmp_path,
 
 
 def test_a_title_that_is_the_whole_question_still_lifts_its_page(tmp_path, monkeypatch) -> None:
-    monkeypatch.setattr(search_memory, "ROOT", tmp_path)
+    monkeypatch.setenv("LLM_WIKI_ROOT", str(tmp_path))
     pages = [
         _page(tmp_path, "note-b", "Other", "secret and shape in the body."),
         _page(tmp_path, "note-a", "Secret shape", "Body."),

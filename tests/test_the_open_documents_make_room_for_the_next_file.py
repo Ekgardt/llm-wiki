@@ -13,9 +13,9 @@ from __future__ import annotations
 import time
 from pathlib import Path
 
-import pyright_session as pyright_session_module
 import pytest
-from pyright_session import PyrightSession
+from llm_wiki import pyright_session_documents
+from llm_wiki.pyright_session_core import PyrightSession
 from repository_scope import resolve_repository_scope
 from workspace_revision import compute_workspace_revision
 
@@ -52,7 +52,7 @@ def _sources(repository: Path, count: int) -> list[str]:
 def test_the_file_after_the_limit_evicts_the_least_recently_used_one(
     repository: Path, state_root: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr(pyright_session_module, "_MAX_OPEN_DOCUMENTS", 2)
+    monkeypatch.setattr(pyright_session_documents, "MAX_OPEN_DOCUMENTS", 2)
     fixture = create_semantic_pyright_fixture(repository)
     session = _session(repository, state_root, fixture)
     names = _sources(repository, 3)
@@ -78,7 +78,7 @@ def test_the_file_after_the_limit_evicts_the_least_recently_used_one(
 def test_an_evicted_document_is_announced_again_when_it_is_asked_for(
     repository: Path, state_root: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr(pyright_session_module, "_MAX_OPEN_DOCUMENTS", 1)
+    monkeypatch.setattr(pyright_session_documents, "MAX_OPEN_DOCUMENTS", 1)
     fixture = create_semantic_pyright_fixture(repository)
     session = _session(repository, state_root, fixture)
     names = _sources(repository, 2)
@@ -102,7 +102,7 @@ class _ReadCounter:
 
     def __init__(self, monkeypatch: pytest.MonkeyPatch) -> None:
         self.reads = 0
-        verified = pyright_session_module._verified_document_content
+        verified = pyright_session_documents.verified_document_content
         counter = self
 
         def counted(entry: object, document: object, *, deadline: float) -> bytes:
@@ -110,7 +110,7 @@ class _ReadCounter:
             return verified(entry, document, deadline=deadline)
 
         monkeypatch.setattr(
-            pyright_session_module, "_verified_document_content", counted
+            pyright_session_documents, "verified_document_content", counted
         )
 
 

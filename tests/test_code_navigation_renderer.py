@@ -407,7 +407,7 @@ def test_signature_strips_source_body() -> None:
 
 
 def test_multibyte_signature_stays_on_utf8_boundary_and_reports_original_size() -> None:
-    original = "def пример(" + "😀" * 400 + "):\n    return 1"
+    original = "def 示例(" + "😀" * 400 + "):\n    return 1"
     rendered = render_navigation(
         replace(_result(1), locations=(_location(signature=original),)),
         offset=0,
@@ -418,7 +418,7 @@ def test_multibyte_signature_stays_on_utf8_boundary_and_reports_original_size() 
     one_line = "\n" not in signature
     within_bytes = len(signature.encode("utf-8")) <= 1_024
     assert (
-        signature.startswith("def пример("),
+        signature.startswith("def 示例("),
         one_line,
         within_bytes,
         _warns(
@@ -641,7 +641,7 @@ def test_oversized_metadata_is_rejected_before_tiny_fact_is_rendered(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     location_views = 0
-    location_view = renderer._location_view
+    location_view = renderer.location_view
 
     def counted_location_view(
         location: NavigationLocation,
@@ -650,7 +650,7 @@ def test_oversized_metadata_is_rejected_before_tiny_fact_is_rendered(
         location_views += 1
         return location_view(location)
 
-    monkeypatch.setattr(renderer, "_location_view", counted_location_view)
+    monkeypatch.setattr(renderer, "location_view", counted_location_view)
     result = replace(_result(1), warnings=("warning" * 4_000,))
 
     with pytest.raises(ValueError, match="metadata exceeds token bound"):
@@ -711,8 +711,8 @@ def test_token_fitting_uses_bounded_monotonic_prefix_search(
     )
     diagnostic_views = 0
     payload_attempts = 0
-    diagnostic_view = renderer._diagnostic_view
-    assemble = renderer._assemble
+    diagnostic_view = renderer.diagnostic_view
+    assemble = renderer.assemble
 
     def counted_diagnostic_view(
         diagnostic: NavigationDiagnostic,
@@ -726,8 +726,8 @@ def test_token_fitting_uses_bounded_monotonic_prefix_search(
         payload_attempts += 1
         return assemble(*args, **kwargs)  # type: ignore[arg-type]
 
-    monkeypatch.setattr(renderer, "_diagnostic_view", counted_diagnostic_view)
-    monkeypatch.setattr(renderer, "_assemble", counted_assemble)
+    monkeypatch.setattr(renderer, "diagnostic_view", counted_diagnostic_view)
+    monkeypatch.setattr(renderer, "assemble", counted_assemble)
 
     rendered = render_navigation(
         _diagnostic_result(diagnostics),

@@ -9,7 +9,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from tests.test_private_vault_backup import _staged_image
+from tests.private_vault_backup_helpers import _staged_image
 
 
 def _populated_target(tmp_path: Path) -> Path:
@@ -47,4 +47,4 @@ def test_a_machine_path_or_a_climbing_path_is_never_printed():
 
     details = ("/srv/vault/knowledge/x.md", "vault/../etc/passwd", "vault/", "state/run/a b.md")
 
-    assert backup._safe_error_details(details) == ["state/run/a b.md"]
+    assert backup.safe_error_details(details) == ["state/run/a b.md"]

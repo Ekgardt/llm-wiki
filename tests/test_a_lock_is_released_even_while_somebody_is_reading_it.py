@@ -59,10 +59,7 @@ class _BlockedUnlink:
 def state_dir(tmp_path, monkeypatch) -> Path:
     directory = tmp_path / "run"
     directory.mkdir(parents=True)
-    monkeypatch.setattr(memory_state, "STATE_DIR", directory)
-    monkeypatch.setattr(memory_state, "STATE_FILE", directory / "state.json")
-    monkeypatch.setattr(memory_state, "LOCK_FILE", directory / "state.json.lock")
-    monkeypatch.setattr(memory_state, "REPORTS_DIR", tmp_path / "logs")
+    monkeypatch.setenv("LLM_WIKI_STATE_ROOT", str(tmp_path))
     return directory
 
 
@@ -77,7 +74,7 @@ def test_a_reader_blocking_the_delete_does_not_leak_the_lock(state_dir, monkeypa
 
     memory_state.update_state(_mark)
 
-    assert (blocked.calls, memory_state.LOCK_FILE.exists()) == (4, False)
+    assert (blocked.calls, memory_state.lock_file().exists()) == (4, False)
 
 
 def test_a_second_write_still_gets_the_lock_after_a_blocked_release(
@@ -109,9 +106,9 @@ def test_a_refusal_that_is_not_a_reader_is_not_retried(state_dir, monkeypatch) -
 
     memory_state.update_state(_mark)
 
-    assert (len(calls), memory_state.LOCK_FILE.exists()) == (1, True)
+    assert (len(calls), memory_state.lock_file().exists()) == (1, True)
 
 
 def test_a_lock_already_gone_counts_as_released(state_dir) -> None:
     """Somebody else's retirement got there first, which is the outcome wanted."""
-    assert memory_state._try_unlink_lock_file() is True
+    assert memory_state.try_unlink_lock_file(memory_state.lock_file()) is True

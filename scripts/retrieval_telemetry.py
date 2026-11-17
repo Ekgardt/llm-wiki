@@ -7,17 +7,13 @@ import sqlite3
 import uuid
 from collections.abc import Sequence
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from iso_time import utc_text
-from memory_state import STATE_ROOT
-from reliable_memory import (
-    begin_immediate,
-    open_operational_db,
-    open_readonly_operational_db,
-    validate_runtime_file,
-)
+from llm_wiki import runtime_roots
+from llm_wiki.sqlite_transactions import begin_immediate
+from reliable_memory import open_operational_db, open_readonly_operational_db, validate_runtime_file
 from settings import setting_value
 
 SCHEMA_VERSION = 1
@@ -29,7 +25,12 @@ EVENT_KINDS = frozenset({
     "user_selected",
     "task_outcome",
 })
-TELEMETRY_DB = STATE_ROOT / "cache" / "evidence-graph" / "telemetry.sqlite3"
+
+
+def telemetry_db() -> Path:
+    return runtime_roots.state_root() / "cache" / "evidence-graph" / "telemetry.sqlite3"
+
+
 # Retention is the operator's setting `retention.telemetry_days` (default 90, the
 # archive's hot window); the row and delete bounds below hold per pass.
 DEFAULT_MAX_ROWS = 100_000
@@ -86,14 +87,14 @@ def _parsed_timestamp_text(value: str) -> datetime:
     if any(c in value for c in "\x00\r\n") or len(value) > 40:
         raise ValueError("timestamp is unsafe or too long")
     try:
-        return datetime.fromisoformat(value.replace("Z", "+00:00"))
+        return datetime.fromisoformat(value)
     except ValueError as exc:
         raise ValueError("timestamp must be ISO-8601") from exc
 
 
 def _parsed_timestamp(value: datetime | str | None) -> datetime:
     if value is None:
-        return datetime.now(timezone.utc)
+        return datetime.now(UTC)
     return _given_timestamp(value)
 
 
@@ -105,7 +106,7 @@ def _given_timestamp(value: object) -> datetime:
     raise TypeError("timestamp must be a datetime or string")
 
 
-def _utc_timestamp(value: datetime | str | None) -> str:
+def utc_timestamp(value: datetime | str | None) -> str:
     parsed = _parsed_timestamp(value)
     if parsed.tzinfo is None or parsed.utcoffset() is None:
         raise ValueError("timestamp must include a UTC offset")
@@ -177,7 +178,7 @@ class RetrievalEvent:
         _bounded_text("generation", self.generation)
         _bounded_text("source_tool", self.source_tool)
         _bounded_text("outcome", self.outcome, nullable=True)
-        if self.timestamp != _utc_timestamp(self.timestamp):
+        if self.timestamp != utc_timestamp(self.timestamp):
             raise ValueError("timestamp must be canonical UTC")
 
 
@@ -224,7 +225,7 @@ def make_event(
         rank=rank,
         generation=generation,
         source_tool=source_tool,
-        timestamp=_utc_timestamp(timestamp),
+        timestamp=utc_timestamp(timestamp),
         outcome=outcome,
     )
 
@@ -301,7 +302,7 @@ def _validate_export_cursor(value: object) -> str:
     return cursor
 
 
-def _open_write_database(path: Path, *, busy_ms: int) -> sqlite3.Connection:
+def open_write_database(path: Path, *, busy_ms: int) -> sqlite3.Connection:
     try:
         metadata = path.lstat()
     except FileNotFoundError:
@@ -340,7 +341,7 @@ def record_events(
     _require_recordable_batch(events, max_rows)
     if not events:
         return 0
-    database = _open_write_database(Path(db_path or TELEMETRY_DB), busy_ms=busy_ms)
+    database = open_write_database(Path(db_path or telemetry_db()), busy_ms=busy_ms)
     try:
         # Schema under its own write lock: created outside a transaction, each
         # `CREATE … IF NOT EXISTS` reads under a shared lock and then asks for
@@ -497,7 +498,7 @@ def read_events(
 ) -> list[RetrievalEvent]:
     """Read a hard-bounded newest-first event slice without creating a database."""
     _require_read_filters(candidate_id, event_kind, limit)
-    database = _readonly_database(Path(db_path or TELEMETRY_DB))
+    database = _readonly_database(Path(db_path or telemetry_db()))
     if database is None:
         return []
     try:
@@ -549,7 +550,7 @@ def list_candidate_ids(
     """List a bounded lexical candidate page after an exporter cursor."""
     cursor = _validate_export_cursor(after_candidate)
     _validate_limit("limit", limit, MAX_CANDIDATE_IDS)
-    path = Path(db_path or TELEMETRY_DB)
+    path = Path(db_path or telemetry_db())
     database = _readonly_database(path)
     if database is None:
         return []
@@ -568,7 +569,7 @@ def list_candidate_ids(
 
 def get_export_cursor(*, db_path: Path | None = None) -> str:
     """Read the durable exporter cursor; an absent database means start."""
-    database = _readonly_database(Path(db_path or TELEMETRY_DB))
+    database = _readonly_database(Path(db_path or telemetry_db()))
     if database is None:
         return ""
     try:
@@ -593,8 +594,8 @@ def _export_cursor_row(database: sqlite3.Connection) -> tuple | None:
 def set_export_cursor(value: str, *, db_path: Path | None = None) -> None:
     """Atomically persist a validated exporter cursor in telemetry metadata."""
     cursor = _validate_export_cursor(value)
-    path = Path(db_path or TELEMETRY_DB)
-    database = _open_write_database(path, busy_ms=STRICT_BUSY_MS)
+    path = Path(db_path or telemetry_db())
+    database = open_write_database(path, busy_ms=STRICT_BUSY_MS)
     try:
         _ensure_schema(database)
         with begin_immediate(database):
@@ -619,7 +620,7 @@ def read_events_after(
     _bounded_text("candidate_id", candidate_id)
     _validate_nonnegative_integer("after_sequence", after_sequence)
     _validate_limit("limit", limit, MAX_READ_EVENTS)
-    path = Path(db_path or TELEMETRY_DB)
+    path = Path(db_path or telemetry_db())
     database = _readonly_database(path)
     if database is None:
         return []
@@ -653,11 +654,11 @@ def compact(
     """
     retention_days = setting_value("retention.telemetry_days") if retention_days is None else retention_days
     _require_compact_limits(retention_days, max_rows, max_delete)
-    path = Path(db_path or TELEMETRY_DB)
+    path = Path(db_path or telemetry_db())
     if not path.exists():
         return 0
-    cutoff = _utc_timestamp(_compact_cutoff(now, retention_days))
-    database = _open_write_database(path, busy_ms=STRICT_BUSY_MS)
+    cutoff = utc_timestamp(_compact_cutoff(now, retention_days))
+    database = open_write_database(path, busy_ms=STRICT_BUSY_MS)
     try:
         _ensure_schema(database)
         with begin_immediate(database):
@@ -680,7 +681,7 @@ def _require_compact_limits(retention_days: int, max_rows: int, max_delete: int)
 
 
 def _compact_cutoff(now: datetime | None, retention_days: int) -> datetime:
-    current = now or datetime.now(timezone.utc)
+    current = now or datetime.now(UTC)
     if current.tzinfo is None or current.utcoffset() is None:
         raise ValueError("now must be timezone-aware")
     return current - timedelta(days=retention_days)

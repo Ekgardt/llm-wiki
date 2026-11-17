@@ -1,0 +1,30 @@
+"""The host stopwatch measures ingestion with an already busy writer."""
+import integration_adapter as adapter
+import pytest
+
+from tests import prompt_checkpoint_host_helpers as scenario
+from tests.test_a_prompt_checkpoint_does_not_outwait_its_host import pytestmark as scenario_mark
+
+pytestmark = pytest.mark.shipped_append_budgets
+
+
+@pytest.mark.parametrize("event", ["user_prompt", "post_tool_use"])
+def test_the_busy_writer_is_ready_before_host_ingestion(tmp_path, monkeypatch, event, request):
+    assert request.node.get_closest_marker(scenario_mark.name) is not None
+    observed = {}
+    hold = scenario.hold_writer
+    ingest = adapter.ingest_event
+
+    def held_writer(coordinator, held, release):
+        observed["held"] = held
+        return hold(coordinator, held, release)
+
+    def checked_ingest(envelope, **kwargs):
+        held = observed.get("held")
+        observed["ready_at_ingest"] = held is not None and held.is_set()
+        return ingest(envelope, **kwargs)
+
+    monkeypatch.setattr(scenario, "hold_writer", held_writer)
+    monkeypatch.setattr(adapter, "ingest_event", checked_ingest)
+    scenario.capture_keeps_its_checkpoint_pending_without_waiting_past_host(tmp_path, monkeypatch, event)
+    assert observed["ready_at_ingest"], "fixture writer must be ready before timing host ingestion"

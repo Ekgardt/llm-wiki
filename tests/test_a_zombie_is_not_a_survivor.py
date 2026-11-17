@@ -15,8 +15,8 @@ from pathlib import Path
 
 import pytest
 
+from tests.integration_injection_helpers import _ALIVE_SHELL
 from tests.slow_machine import LONG_TIMEOUT
-from tests.test_integration_injection import _ALIVE_SHELL
 
 ROOT = Path(__file__).resolve().parents[1]
 BASH = shutil.which("bash")

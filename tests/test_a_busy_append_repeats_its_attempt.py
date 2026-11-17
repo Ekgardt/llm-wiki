@@ -4,12 +4,12 @@ docs/research/2026-09-26-a-busy-append-repeats-its-attempt.md
 """
 from __future__ import annotations
 
-import sqlite3
-
 import markdown_transaction
-from markdown_transaction import MarkdownCoordinator
+from llm_wiki import markdown_append
+from llm_wiki.markdown_coordinator import MarkdownCoordinator
 
-from tests.test_append_race_lineage import _DAILY, _append, state_root, vault  # noqa: F401
+from tests.append_race_lineage_helpers import _DAILY, _append, state_root, vault  # noqa: F401  # noqa: F401
+from tests.sqlite_errors import busy_database_error
 
 
 def _locked_once(real):
@@ -18,7 +18,7 @@ def _locked_once(real):
     def once(*args, **kwargs):
         calls.append(1)
         if len(calls) == 1:
-            raise sqlite3.OperationalError("database is locked")
+            raise busy_database_error()
         return real(*args, **kwargs)
 
     return once
@@ -26,7 +26,7 @@ def _locked_once(real):
 
 def test_a_locked_attempt_is_repeated_and_the_line_lands(vault, state_root, monkeypatch) -> None:  # noqa: F811
     coordinator = MarkdownCoordinator(vault, state_root)
-    monkeypatch.setattr(markdown_transaction, "_run_append_candidate", _locked_once(markdown_transaction._run_append_candidate))
+    monkeypatch.setattr(markdown_append, "run_append_candidate", _locked_once(markdown_append.run_append_candidate))
 
     _append(coordinator, "post-tool:busy", b"line-busy\n")
 
@@ -37,4 +37,4 @@ def test_the_lineage_read_waits_out_a_busy_database(vault, state_root, monkeypat
     coordinator = MarkdownCoordinator(vault, state_root)
     monkeypatch.setattr(coordinator, "_record_for_operation_id", _locked_once(coordinator._record_for_operation_id))
 
-    assert markdown_transaction._refused_parent(coordinator, "never-written") is None
+    assert markdown_transaction.refused_parent(coordinator, "never-written") is None

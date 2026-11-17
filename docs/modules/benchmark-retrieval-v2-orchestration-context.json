@@ -1,0 +1,307 @@
+{
+  "encoding": "o200k_base",
+  "max_tokens": 100000,
+  "serialization": "exact-duplicates/v1",
+  "files": [
+    "AGENTS.md",
+    "CLAUDE.md",
+    "benchmark/__init__.py",
+    "benchmark/retrieval_v2_orchestration.py",
+    "benchmark/run_retrieval_v2.py",
+    "docs/AGENTS.md",
+    "docs/STRUCTURE.md",
+    "docs/modules/benchmark-retrieval-v2-orchestration-context.json",
+    "docs/modules/benchmark-retrieval-v2-orchestration.md",
+    "docs/modules/benchmark-run-benchmark.md",
+    "docs/modules/benchmark-run-retrieval-v2.md",
+    "docs/modules/context-bundle.md",
+    "docs/modules/context-records.md",
+    "docs/modules/context-tooling.md",
+    "docs/modules/model-choice.md",
+    "docs/modules/product-structure.md",
+    "docs/modules/project-governance.md",
+    "docs/modules/reliable-memory-tests-retrieval-v2-benchmark.md",
+    "docs/modules/test-support.md",
+    "rules/development-laws.md",
+    "scripts/__init__.py",
+    "scripts/llm_wiki/__init__.py",
+    "scripts/llm_wiki/context_bundle.py",
+    "tests/__init__.py",
+    "tests/conftest.py",
+    "tests/module_context.py",
+    "tests/module_context_paths.py",
+    "tests/module_interface.py",
+    "tests/module_interface_render.py",
+    "tests/module_qualification.py",
+    "tests/module_record_context.py",
+    "tests/module_records.py",
+    "tests/retrieval_v2_helpers.py",
+    "tests/retrieval_v2_reports_helpers.py",
+    "tests/shared_fixtures.py",
+    "tests/slow_machine.py",
+    "tests/test_retrieval_v2_orchestration.py"
+  ],
+  "ownership": {
+    "files": [
+      "benchmark/retrieval_v2_orchestration.py",
+      "docs/modules/benchmark-retrieval-v2-orchestration-context.json",
+      "docs/modules/benchmark-retrieval-v2-orchestration.md",
+      "tests/test_retrieval_v2_orchestration.py"
+    ]
+  },
+  "qualified_dependencies": [
+    {
+      "provider": "benchmark/retrieval_v2_aggregation.py",
+      "names": [
+        "aggregate_reports",
+        "checked_output_parent",
+        "payload_digest",
+        "publish_retained_and_output",
+        "retained_reports_root"
+      ],
+      "contract_sha256": "b2a167fe7be6e3bb6a884b56e020238c863498f2d96bb0ea14b2643f8f24d8fd",
+      "integration_tests": [
+        "tests/test_retrieval_v2_aggregation.py",
+        "tests/test_retrieval_v2_orchestration.py"
+      ]
+    },
+    {
+      "provider": "benchmark/retrieval_v2_cli.py",
+      "names": [
+        "main"
+      ],
+      "contract_sha256": "2ef1ce4bf4a3624c8a7fdf2d78ecdf3f6fc79a018363a9996bc566ce7d349e0e",
+      "integration_tests": [
+        "tests/test_retrieval_v2_cli.py",
+        "tests/test_retrieval_v2_facade.py"
+      ]
+    },
+    {
+      "provider": "benchmark/retrieval_v2_contract.py",
+      "names": [
+        "ADAPTER_KIND",
+        "AUTHORITATIVE_SELECTION_ADAPTER_KIND",
+        "Candidate",
+        "DEFAULT_CORPUS",
+        "DEFAULT_LEXICAL_DEADLINE_SECONDS",
+        "DEFAULT_MATRIX",
+        "DEFAULT_SCHEMA",
+        "EFFECTIVENESS_FIELDS",
+        "LEXICAL_CONFIGURATIONS",
+        "MAX_CORPUS_BYTES",
+        "MODEL_MATRIX_ADAPTER_KIND",
+        "ModelSelection",
+        "REPORT_FIELDS",
+        "ROOT",
+        "RUNNER_PATH",
+        "SELECTION_AGGREGATION_ADAPTER_KIND",
+        "ScoredCandidate",
+        "THRESHOLDS",
+        "WorkerPayload"
+      ],
+      "contract_sha256": "d26fac32b73b91b1c0c8523c4f4edb3d3fe1edb789d1d530c835d402de6136e7",
+      "integration_tests": [
+        "tests/test_retrieval_v2_adapters.py",
+        "tests/test_retrieval_v2_benchmark.py",
+        "tests/test_retrieval_v2_contract.py"
+      ]
+    },
+    {
+      "provider": "benchmark/retrieval_v2_corpus.py",
+      "names": [
+        "build_candidates",
+        "filter_candidates",
+        "load_corpus"
+      ],
+      "contract_sha256": "b4c085a45cf1840e44b05d664c565d1ba8dab2c13efd679dca21c5eb890c31f4",
+      "integration_tests": [
+        "tests/test_retrieval_v2_adapters.py",
+        "tests/test_retrieval_v2_aggregation.py",
+        "tests/test_retrieval_v2_benchmark.py"
+      ]
+    },
+    {
+      "provider": "benchmark/retrieval_v2_environment.py",
+      "names": [
+        "environment_provenance",
+        "runner_sha256",
+        "sha256_file",
+        "sha256_json",
+        "verify_locked_environment"
+      ],
+      "contract_sha256": "9a26e5575235b0a50189f3ef2f8766c6da3f097a9a513e7a15f512931551e6a8",
+      "integration_tests": [
+        "tests/test_retrieval_v2_aggregation.py",
+        "tests/test_retrieval_v2_benchmark.py",
+        "tests/test_retrieval_v2_environment.py"
+      ]
+    },
+    {
+      "provider": "benchmark/retrieval_v2_matrix.py",
+      "names": [
+        "load_model_selection",
+        "matrix_target",
+        "require_exact_keys",
+        "required_candidate_specs"
+      ],
+      "contract_sha256": "a8907e6aa692e5bd887531327bb93f46ad3f1a809472abab532082bf6b2c7a22",
+      "integration_tests": [
+        "tests/test_retrieval_v2_adapters.py",
+        "tests/test_retrieval_v2_aggregation.py",
+        "tests/test_retrieval_v2_matrix.py"
+      ]
+    },
+    {
+      "provider": "benchmark/retrieval_v2_measurements.py",
+      "names": [
+        "run_process_tree"
+      ],
+      "contract_sha256": "f428fc9b255f10cc8ace7f244140ea8817edfe8882ada5b73879a9d20b5bc4f1",
+      "integration_tests": [
+        "tests/test_retrieval_v2_measurements.py",
+        "tests/test_retrieval_v2_metrics.py",
+        "tests/test_retrieval_v2_orchestration.py"
+      ]
+    },
+    {
+      "provider": "benchmark/retrieval_v2_metrics.py",
+      "names": [
+        "aggregate",
+        "evaluation_row",
+        "expand_parents",
+        "macro_average",
+        "query_scope"
+      ],
+      "contract_sha256": "638e23cff6b76000350297276c0ec4419c46217f082f2dd34a4a83cd9824c952",
+      "integration_tests": [
+        "tests/test_retrieval_v2_benchmark.py",
+        "tests/test_retrieval_v2_corpus.py",
+        "tests/test_retrieval_v2_metrics.py"
+      ]
+    },
+    {
+      "provider": "benchmark/retrieval_v2_outputs.py",
+      "names": [
+        "canonical_report_bytes",
+        "prepared_model_cache_root",
+        "write_new_bytes"
+      ],
+      "contract_sha256": "2d8428b83318e88c2cee2ca87852a44a2945f2afbc0645263cc6a860200fbfc8",
+      "integration_tests": [
+        "tests/test_retrieval_v2_aggregation.py",
+        "tests/test_retrieval_v2_benchmark.py",
+        "tests/test_retrieval_v2_orchestration.py"
+      ]
+    },
+    {
+      "provider": "benchmark/retrieval_v2_recompute.py",
+      "names": [
+        "candidate_key",
+        "recompute_report_metrics"
+      ],
+      "contract_sha256": "182c7af5343ead2103f7d440aec0ee132751742711958b34ea181b85c8456d23",
+      "integration_tests": [
+        "tests/test_retrieval_v2_aggregation.py",
+        "tests/test_retrieval_v2_recompute.py"
+      ]
+    },
+    {
+      "provider": "benchmark/retrieval_v2_run.py",
+      "names": [
+        "run_benchmark"
+      ],
+      "contract_sha256": "961437f930d854ac142cd3f3f4846b8bfd6fcc4c3c08e0417ab8b23196932db4",
+      "integration_tests": [
+        "tests/test_retrieval_v2_benchmark.py",
+        "tests/test_retrieval_v2_cli.py",
+        "tests/test_retrieval_v2_orchestration.py"
+      ]
+    },
+    {
+      "provider": "benchmark/retrieval_v2_selection_gates.py",
+      "names": [
+        "fields_identical",
+        "recompute_reranker_depth_metrics",
+        "select_lexical_winner"
+      ],
+      "contract_sha256": "369f9b1f2837e7169c733ee79961ee8c0db698d7975614708988d95a110703dd",
+      "integration_tests": [
+        "tests/test_retrieval_v2_aggregation.py",
+        "tests/test_retrieval_v2_orchestration.py",
+        "tests/test_retrieval_v2_selection_gates.py"
+      ]
+    },
+    {
+      "provider": "benchmark/retrieval_v2_workspace.py",
+      "names": [
+        "cleanup_run_workspace",
+        "create_run_workspace"
+      ],
+      "contract_sha256": "6efb0272a2ddaa0feeb945388ec13221f3813afa81e455a4b1e80329f3886572",
+      "integration_tests": [
+        "tests/test_retrieval_v2_orchestration.py",
+        "tests/test_retrieval_v2_workspace.py"
+      ]
+    },
+    {
+      "provider": "scripts/bounded_io.py",
+      "names": [
+        "read_stable_bytes"
+      ],
+      "contract_sha256": "e570dc41e0fd70556ec6a4e887a3da194bcc13122684e515651b13dd19d7d5c1",
+      "integration_tests": [
+        "tests/modules/breadcrumb_documents/test_contract.py",
+        "tests/test_a_file_being_written_is_a_changed_corpus_on_every_system.py",
+        "tests/test_a_journal_is_readable_by_every_reader.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/generation_catalog_store.py",
+      "names": [
+        "GenerationCatalog"
+      ],
+      "contract_sha256": "b18194ebe04bf988b4474379fcb5243516550d43b745a00eaed1453f7844c983",
+      "integration_tests": [
+        "tests/test_a_blocked_task_has_a_way_back.py",
+        "tests/test_a_build_in_flight_is_not_an_orphan.py",
+        "tests/test_a_capacity_refusal_does_not_corrupt_a_generation.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/model_choice.py",
+      "names": [
+        "using_root"
+      ],
+      "contract_sha256": "d45f2655cb61963e77617d1dfd7d617b134ad77cc770b59b335d0856e5d65019",
+      "integration_tests": [
+        "tests/test_central_model_selection.py",
+        "tests/test_compile_execution_inventory.py"
+      ]
+    },
+    {
+      "provider": "scripts/reliable_memory.py",
+      "names": [
+        "canonical_json_bytes",
+        "validate_state_root"
+      ],
+      "contract_sha256": "7bba4b535d3f0a73445fece541c540939989b41456c9a79a67f82634748be36b",
+      "integration_tests": [
+        "tests/test_a_backup_image_carries_what_git_does_not.py",
+        "tests/test_a_changed_task_setting_reaches_an_installed_machine.py",
+        "tests/test_a_committed_source_resolves_an_older_compile_plan.py"
+      ]
+    },
+    {
+      "provider": "scripts/repository_scope.py",
+      "names": [
+        "sanitized_git_environment"
+      ],
+      "contract_sha256": "fd550ae20761afad50b37fa3a71044a162485b0e4d4b3e2af9b5b22e143c2bec",
+      "integration_tests": [
+        "tests/test_a_code_generation_is_not_abandoned.py",
+        "tests/test_a_directory_link_inside_the_checkout_does_not_refuse_the_revision.py",
+        "tests/test_a_document_is_opened_in_its_own_language.py"
+      ]
+    }
+  ]
+}

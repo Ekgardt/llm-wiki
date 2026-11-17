@@ -1,6 +1,6 @@
 """A provider that died did not answer with nothing.
 
-`_call_claude` ran the CLI with `check=False` and returned `result.stdout or
+`call_claude` ran the CLI with `check=False` and returned `result.stdout or
 ""`, throwing away `returncode` and `stderr`. A crashed CLI, a CLI that
 refused the request, and a CLI that genuinely answered with nothing all
 arrived at `_outcome_of` as the same empty string, and all three were reported
@@ -35,10 +35,10 @@ def _completed(returncode: int, stdout: str, stderr: str):
 
 
 def _claude_returning(monkeypatch, returncode: int, stdout: str, stderr: str = ""):
-    """The CLI backends run through `_run_cli`, which ends the whole tree."""
+    """The CLI backends run through `run_cli`, which ends the whole tree."""
     monkeypatch.setattr(llm_client.shutil, "which", lambda name: "/usr/bin/claude")
-    monkeypatch.setattr(llm_client, "_claude_cli_flags", lambda: frozenset())
-    monkeypatch.setattr(llm_client, "_run_cli", _completed(returncode, stdout, stderr))
+    monkeypatch.setattr(llm_client, "claude_cli_flags", lambda: frozenset())
+    monkeypatch.setattr(llm_client, "run_cli", _completed(returncode, stdout, stderr))
     return llm_client.provider_candidates("claude", max_tokens=2000)[0]
 
 
@@ -48,7 +48,7 @@ def test_a_claude_call_that_exits_nonzero_raises_instead_of_answering_nothing(
     descriptor = _claude_returning(monkeypatch, 1, "", "Error: not logged in\n")
 
     with pytest.raises(llm_client.ProviderExited) as caught:
-        llm_client._call_claude(descriptor, "prompt", "system")
+        llm_client.call_claude(descriptor, "prompt", "system")
 
     assert caught.value.exit_code == 1
     assert "not logged in" in str(caught.value)
@@ -60,7 +60,7 @@ def test_a_dead_provider_is_not_reported_as_an_empty_answer(monkeypatch):
         raise llm_client.ProviderExited("fake", 2, "Error: not logged in")
 
     descriptor = llm_client.provider_candidates("fake", max_tokens=10)[0]
-    monkeypatch.setitem(llm_client._BACKENDS, "fake", _exited)
+    monkeypatch.setitem(llm_client.BACKENDS, "fake", _exited)
 
     result = llm_client.call_candidate(
         descriptor, "prompt", "system", max_tokens=10, available=True
@@ -78,7 +78,7 @@ def test_the_operator_is_told_the_exit_code_and_what_the_provider_printed(
         raise llm_client.ProviderExited("fake", 127, "claude: command not found")
 
     descriptor = llm_client.provider_candidates("fake", max_tokens=10)[0]
-    monkeypatch.setitem(llm_client._BACKENDS, "fake", _exited)
+    monkeypatch.setitem(llm_client.BACKENDS, "fake", _exited)
 
     llm_client.call_candidate(
         descriptor, "prompt", "system", max_tokens=10, available=True
@@ -95,7 +95,7 @@ def test_what_the_provider_printed_is_redacted_and_bounded(monkeypatch):
     descriptor = _claude_returning(monkeypatch, 1, "", leaked)
 
     with pytest.raises(llm_client.ProviderExited) as caught:
-        llm_client._call_claude(descriptor, "prompt", "system")
+        llm_client.call_claude(descriptor, "prompt", "system")
 
     excerpt = caught.value.stderr_excerpt
     assert "sk-abcdefghijklmnopqrstuvwxyz012345" not in excerpt
@@ -108,7 +108,7 @@ def test_a_clean_exit_with_no_output_is_still_an_empty_answer(monkeypatch):
     """The distinction is the point: silence from a healthy CLI stays silence."""
     descriptor = _claude_returning(monkeypatch, 0, "", "")
 
-    assert llm_client._call_claude(descriptor, "prompt", "system") == ""
+    assert llm_client.call_claude(descriptor, "prompt", "system") == ""
 
 
 def test_what_a_failed_cli_printed_on_stdout_is_named_not_answered(monkeypatch):
@@ -121,4 +121,4 @@ def test_what_a_failed_cli_printed_on_stdout_is_named_not_answered(monkeypatch):
     descriptor = _claude_returning(monkeypatch, 1, printed, "warning: noisy")
 
     with pytest.raises(llm_client.ProviderExited, match="issue with the selected model"):
-        llm_client._call_claude(descriptor, "prompt", "system")
+        llm_client.call_claude(descriptor, "prompt", "system")

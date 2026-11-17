@@ -29,8 +29,10 @@ from pathlib import Path, PureWindowsPath
 import pyright_profile as _profile
 import windows_workspace as _windows_workspace
 from bounded_io import IO_CHUNK_BYTES
+from llm_wiki import pyright_configuration
+from llm_wiki.formats.canonical import canonical_json_bytes
 from lsp_paths import managed_pyright_root
-from operational_ownership import process_start_identity as _process_start_identity
+from operational_ownership import process_start_identity as process_start_identity
 from pinned_download import (
     MAX_COMPRESSED_BYTES,
     MAX_DECOMPRESSED_BYTES,
@@ -41,11 +43,8 @@ from pinned_download import (
     retry_transient,
 )
 from pinned_download import open_pinned_url as _open_pinned_url
-from reliable_memory import (
-    _set_owner_only,
-    _sqlite_lock_probe,
-    canonical_json_bytes,
-)
+from process_liveness import recorded_process_state
+from reliable_memory import initialize_probe_directory, set_owner_only, sqlite_lock_probe
 
 # `_open_pinned_url` is the shared opener -- no proxy table, no redirect
 # handler -- imported under this module's own private name because that is the
@@ -105,7 +104,7 @@ _NETWORK_FILESYSTEMS = frozenset(
     }
 )
 
-_LOCK_NAME = ".install-pyright-lock"
+LOCK_NAME = ".install-pyright-lock"
 _SCRATCH_PREFIX = ".install-pyright-"
 _WINDOWS_RESERVED = frozenset(
     {
@@ -165,7 +164,7 @@ class PyrightInstallError(RuntimeError):
 
 
 @dataclass(slots=True)
-class _Handle:
+class Handle:
     value: int
     directory: bool
     closed: bool = False
@@ -180,9 +179,9 @@ class _Handle:
             os.close(self.value)
 
 
-def _close_handles_preserving_error(
+def close_handles_preserving_error(
     primary_error: BaseException,
-    *handles: _Handle | None,
+    *handles: Handle | None,
 ) -> None:
     cleanup_errors = _closed_in_order(handles)
     if not cleanup_errors:
@@ -190,7 +189,7 @@ def _close_handles_preserving_error(
     raise primary_error from _chained_cause(primary_error, cleanup_errors)
 
 
-def _closed_in_order(handles: tuple[_Handle | None, ...]) -> list[BaseException]:
+def _closed_in_order(handles: tuple[Handle | None, ...]) -> list[BaseException]:
     """Close each distinct handle once, keeping whatever refuses to close."""
     cleanup_errors: list[BaseException] = []
     seen: set[int] = set()
@@ -201,7 +200,7 @@ def _closed_in_order(handles: tuple[_Handle | None, ...]) -> list[BaseException]
     return cleanup_errors
 
 
-def _already_closed(handle: _Handle | None, seen: set[int]) -> bool:
+def _already_closed(handle: Handle | None, seen: set[int]) -> bool:
     if handle is None:
         return True
     if id(handle) in seen:
@@ -210,7 +209,7 @@ def _already_closed(handle: _Handle | None, seen: set[int]) -> bool:
     return False
 
 
-def _collect_close_error(handle: _Handle, errors: list[BaseException]) -> None:
+def _collect_close_error(handle: Handle, errors: list[BaseException]) -> None:
     try:
         handle.close()
     except BaseException as cleanup_error:
@@ -229,10 +228,10 @@ def _chained_cause(
 
 
 @dataclass(slots=True)
-class _OwnedFile:
-    parent: _Handle
+class OwnedFile:
+    parent: Handle
     name: str
-    handle: _Handle
+    handle: Handle
     identity: tuple[object, ...]
     closed: bool = False
 
@@ -248,9 +247,9 @@ class _OwnedFile:
 
 @dataclass(slots=True)
 class _OwnedLock:
-    parent: _Handle
+    parent: Handle
     name: str
-    handle: _Handle
+    handle: Handle
     identity: tuple[object, ...]
     nonce: str
     closed: bool = False
@@ -273,12 +272,12 @@ class _ExistingEntry:
     identity: tuple[object, ...] | None = None
 
 
-class _Stage:
-    def __init__(self, parent: _Handle, name: str, root: _Handle) -> None:
+class Stage:
+    def __init__(self, parent: Handle, name: str, root: Handle) -> None:
         self.parent = parent
         self.name = name
         self.root = root
-        self.root_identity = _identity(root)
+        self.root_identity = path_identity(root)
         self.directories: dict[tuple[str, ...], tuple[object, ...]] = {
             (): self.root_identity
         }
@@ -289,9 +288,9 @@ class _Stage:
         parts: tuple[str, ...],
         *,
         writable_leaf: bool = False,
-    ) -> tuple[_Handle, list[_Handle]]:
+    ) -> tuple[Handle, list[Handle]]:
         current = self.root
-        opened: list[_Handle] = []
+        opened: list[Handle] = []
         current_parts: tuple[str, ...] = ()
         try:
             for index, part in enumerate(parts):
@@ -311,12 +310,12 @@ class _Stage:
 
     def _open_known_stage_child(
         self,
-        current: _Handle,
+        current: Handle,
         part: str,
         current_parts: tuple[str, ...],
         *,
         writable: bool,
-    ) -> _Handle:
+    ) -> Handle:
         """A stage directory this installer created, still the one it created."""
         expected = self.directories.get(current_parts)
         if expected is None:
@@ -324,7 +323,7 @@ class _Stage:
                 "pyright_stage_unsafe", "stage directory was not installer-created"
             )
         child = _open_child_directory(current, part, writable=writable)
-        if _identity(child) != expected:
+        if path_identity(child) != expected:
             child.close()
             raise PyrightInstallError(
                 "pyright_stage_unsafe", "stage directory identity changed"
@@ -333,7 +332,7 @@ class _Stage:
 
     def ensure_directory(self, parts: tuple[str, ...], deadline: float) -> None:
         current = self.root
-        opened: list[_Handle] = []
+        opened: list[Handle] = []
         current_parts: tuple[str, ...] = ()
         try:
             for part in parts:
@@ -346,14 +345,14 @@ class _Stage:
                 handle.close()
 
     def _stage_child(
-        self, current: _Handle, part: str, current_parts: tuple[str, ...]
-    ) -> _Handle:
+        self, current: Handle, part: str, current_parts: tuple[str, ...]
+    ) -> Handle:
         """The stage directory for this part: created once, identified ever after."""
         expected = self.directories.get(current_parts)
         if expected is None:
             return self._create_stage_child(current, part, current_parts)
         child = _open_child_directory(current, part)
-        if _identity(child) != expected:
+        if path_identity(child) != expected:
             child.close()
             raise PyrightInstallError(
                 "pyright_stage_unsafe", "stage directory identity changed"
@@ -361,17 +360,17 @@ class _Stage:
         return child
 
     def _create_stage_child(
-        self, current: _Handle, part: str, current_parts: tuple[str, ...]
-    ) -> _Handle:
+        self, current: Handle, part: str, current_parts: tuple[str, ...]
+    ) -> Handle:
         if _entry_kind(current, part) is not None:
             raise PyrightInstallError(
                 "pyright_stage_unsafe", "unexpected stage entry appeared"
             )
         child = _create_child_directory(current, part)
-        self.directories[current_parts] = _identity(child)
+        self.directories[current_parts] = path_identity(child)
         return child
 
-    def create_file(self, parts: tuple[str, ...], deadline: float) -> _Handle:
+    def create_file(self, parts: tuple[str, ...], deadline: float) -> Handle:
         if not parts:
             raise PyrightInstallError("pyright_stage_unsafe")
         self.ensure_directory(parts[:-1], deadline)
@@ -382,7 +381,7 @@ class _Stage:
                 raise PyrightInstallError(
                     "pyright_stage_unsafe", "stage file name was not create-only"
                 )
-            return _create_child_file(parent, parts[-1])
+            return create_child_file(parent, parts[-1])
         finally:
             for handle in reversed(opened):
                 handle.close()
@@ -390,7 +389,7 @@ class _Stage:
     def write_bytes(self, parts: tuple[str, ...], content: bytes, deadline: float) -> None:
         handle = self.create_file(parts, deadline)
         try:
-            _write_handle(handle, content, deadline)
+            write_handle(handle, content, deadline)
             _check_deadline(deadline)
             _checked_fsync_file(handle)
         finally:
@@ -400,14 +399,13 @@ class _Stage:
         for parts in sorted(self.directories, key=lambda value: (-len(value), value)):
             _check_deadline(deadline)
             if not parts:
-                _checked_fsync_directory(self.root)
+                checked_fsync_directory(self.root)
                 continue
             directory, opened = self._open_directory(parts, writable_leaf=True)
             try:
-                _checked_fsync_directory(directory)
+                checked_fsync_directory(directory)
             finally:
-                for handle in reversed(opened):
-                    handle.close()
+                _close_in_reverse(opened)
 
     def cleanup(self) -> None:
         if self.published:
@@ -424,7 +422,7 @@ class _Stage:
         if not self._owns_staging_name():
             self.published = True
             return
-        _clear_directory(self.root)
+        clear_directory(self.root)
         self._remove_staging_directory()
 
     def _remove_staging_directory(self) -> None:
@@ -453,7 +451,7 @@ class _Stage:
                 _named_known_identity(self.parent, self.name, directory=True)
                 == self.root_identity
             )
-        volume = _identity(self.parent)[0]
+        volume = path_identity(self.parent)[0]
         for entry in _windows_workspace.list_directory(
             self.parent.value,
             max_entries=MAX_RUNTIME_PARENT_ENTRIES,
@@ -503,14 +501,14 @@ class _BoundedDecompressedReader(io.RawIOBase):
 
 
 class _HandleReader(io.RawIOBase):
-    def __init__(self, handle: _Handle) -> None:
+    def __init__(self, handle: Handle) -> None:
         self._handle = handle
 
     def readable(self) -> bool:
         return True
 
     def readinto(self, buffer: bytearray | memoryview) -> int:
-        content = _read_handle(self._handle, len(buffer))
+        content = read_handle(self._handle, len(buffer))
         buffer[: len(content)] = content
         return len(content)
 
@@ -653,7 +651,7 @@ def _nearest_existing_path(path: Path, deadline: float) -> Path:
     raise OSError("no existing filesystem ancestor was available")
 
 
-def _darwin_filesystem_details(path: Path, deadline: float) -> tuple[str, str, int]:
+def darwin_filesystem_details(path: Path, deadline: float) -> tuple[str, str, int]:
     target = _nearest_existing_path(path, deadline)
     function = _darwin_statfs()
     information = _DarwinStatfs()
@@ -691,7 +689,7 @@ def _filesystem_type_is_network(filesystem: str) -> bool:
     return normalized in _NETWORK_FILESYSTEMS or normalized.endswith(".sshfs")
 
 
-def _require_local_filesystem(path: Path, deadline: float) -> None:
+def require_local_filesystem(path: Path, deadline: float) -> None:
     _check_deadline(deadline)
     if os.fspath(path).startswith(("\\\\", "//")):
         raise PermissionError("UNC paths are not local filesystems")
@@ -704,7 +702,7 @@ def _require_local_filesystem(path: Path, deadline: float) -> None:
 def _filesystem_locality(path: Path, deadline: float) -> tuple[str, str, bool]:
     """The filesystem type, its source, and whether the platform calls it local."""
     if sys.platform == "darwin":
-        filesystem, source, flags = _darwin_filesystem_details(path, deadline)
+        filesystem, source, flags = darwin_filesystem_details(path, deadline)
         return filesystem, source, bool(flags & _DARWIN_MNT_LOCAL)
     return _other_platform_locality(path, deadline)
 
@@ -766,19 +764,21 @@ def _validate_installer_state_root(path: Path, deadline: float) -> None:
     _check_deadline(deadline)
     if any(part.casefold() in _CLOUD_PATH_COMPONENTS for part in path.parts):
         raise PermissionError("state root is cloud-synchronized")
-    _require_local_filesystem(path, deadline)
+    require_local_filesystem(path, deadline)
     _check_deadline(deadline)
     path.mkdir(parents=True, exist_ok=True)
     _check_deadline(deadline)
-    _set_owner_only(path, 0o700)
+    set_owner_only(path, 0o700)
     _check_deadline(deadline)
-    lock_supported = _sqlite_lock_probe(path, deadline=deadline)
+    initialize_probe_directory(path)
+    _check_deadline(deadline)
+    lock_supported = sqlite_lock_probe(path, deadline=deadline)
     _check_deadline(deadline)
     if lock_supported is not True:
         raise PermissionError("state root failed the SQLite locking probe")
 
 
-def _prepare_state_root(state_root: Path, deadline: float) -> None:
+def prepare_state_root(state_root: Path, deadline: float) -> None:
     _check_deadline(deadline)
     _require_absolute_local(state_root, "state_root")
     try:
@@ -790,7 +790,7 @@ def _prepare_state_root(state_root: Path, deadline: float) -> None:
             state_root / "cache/code-tools/pyright",
             deadline,
         )
-        _require_local_filesystem(
+        require_local_filesystem(
             state_root / "cache/code-tools/pyright",
             deadline,
         )
@@ -828,9 +828,9 @@ def _has_dir_fd_support() -> bool:
     return os.open in os.supports_dir_fd and os.mkdir in os.supports_dir_fd
 
 
-def _open_absolute_directory(path: Path, *, writable: bool = False) -> _Handle:
+def open_absolute_directory(path: Path, *, writable: bool = False) -> Handle:
     if os.name == "nt":
-        return _Handle(_windows_directory_opener(writable)(path), True)
+        return Handle(_windows_directory_opener(writable)(path), True)
     return _open_posix_directory_chain(path)
 
 
@@ -840,7 +840,7 @@ def _windows_directory_opener(writable: bool) -> object:
     return _windows_workspace.open_directory_path
 
 
-def _open_posix_directory_chain(path: Path) -> _Handle:
+def _open_posix_directory_chain(path: Path) -> Handle:
     """Descend one component at a time so no step can follow a link."""
     flags = _posix_directory_flags()
     absolute = path.absolute()
@@ -852,14 +852,14 @@ def _open_posix_directory_chain(path: Path) -> _Handle:
             current = child
         if current is None:
             raise OSError("directory ownership was lost")
-        return _Handle(current, True)
+        return Handle(current, True)
     except BaseException:
         if current is not None:
             os.close(current)
         raise
 
 
-def _identity(handle: _Handle) -> tuple[object, ...]:
+def path_identity(handle: Handle) -> tuple[object, ...]:
     if handle.closed:
         raise OSError("handle is closed")
     if os.name == "nt":
@@ -869,7 +869,7 @@ def _identity(handle: _Handle) -> tuple[object, ...]:
     return _posix_identity(handle)
 
 
-def _posix_identity(handle: _Handle) -> tuple[object, ...]:
+def _posix_identity(handle: Handle) -> tuple[object, ...]:
     info = os.fstat(handle.value)
     expected = stat.S_ISDIR(info.st_mode) if handle.directory else stat.S_ISREG(info.st_mode)
     if not expected:
@@ -877,13 +877,13 @@ def _posix_identity(handle: _Handle) -> tuple[object, ...]:
     return (info.st_dev, info.st_ino, stat.S_IFMT(info.st_mode))
 
 
-def _entry_kind(parent: _Handle, name: str) -> str | None:
+def _entry_kind(parent: Handle, name: str) -> str | None:
     if os.name == "nt":
         return _windows_entry_kind(parent, name)
     return _posix_entry_kind(parent, name)
 
 
-def _windows_entry_kind(parent: _Handle, name: str) -> str | None:
+def _windows_entry_kind(parent: Handle, name: str) -> str | None:
     for entry in _windows_workspace.list_directory(
         parent.value, max_entries=MAX_RUNTIME_PARENT_ENTRIES
     ):
@@ -902,7 +902,7 @@ def _matching_entry_kind(entry: object, name: str) -> str | None:
     return None
 
 
-def _posix_entry_kind(parent: _Handle, name: str) -> str | None:
+def _posix_entry_kind(parent: Handle, name: str) -> str | None:
     try:
         info = os.stat(name, dir_fd=parent.value, follow_symlinks=False)
     except FileNotFoundError:
@@ -918,22 +918,22 @@ def _stat_kind(mode: int) -> str:
 
 
 def _open_child_directory(
-    parent: _Handle,
+    parent: Handle,
     name: str,
     *,
     writable: bool = False,
-) -> _Handle:
+) -> Handle:
     if _entry_kind(parent, name) != "directory":
         raise PermissionError("expected a regular directory")
     if os.name == "nt":
         return _open_windows_child_directory(parent, name, writable)
-    return _Handle(os.open(name, _posix_directory_flags(), dir_fd=parent.value), True)
+    return Handle(os.open(name, _posix_directory_flags(), dir_fd=parent.value), True)
 
 
-def _open_windows_child_directory(parent: _Handle, name: str, writable: bool) -> _Handle:
+def _open_windows_child_directory(parent: Handle, name: str, writable: bool) -> Handle:
     if writable:
-        return _Handle(
-            _windows_workspace._relative_handle(
+        return Handle(
+            _windows_workspace.relative_handle(
                 parent.value,
                 name,
                 directory=True,
@@ -942,21 +942,21 @@ def _open_windows_child_directory(parent: _Handle, name: str, writable: bool) ->
             ),
             True,
         )
-    return _Handle(_windows_workspace.open_directory(parent.value, name), True)
+    return Handle(_windows_workspace.open_directory(parent.value, name), True)
 
 
-def _create_child_directory(parent: _Handle, name: str) -> _Handle:
+def _create_child_directory(parent: Handle, name: str) -> Handle:
     if os.name == "nt":
-        return _Handle(
+        return Handle(
             _windows_workspace.create_writable_directory(parent.value, name), True
         )
     os.mkdir(name, 0o700, dir_fd=parent.value)
-    return _Handle(os.open(name, _posix_directory_flags(), dir_fd=parent.value), True)
+    return Handle(os.open(name, _posix_directory_flags(), dir_fd=parent.value), True)
 
 
-def _create_child_file(parent: _Handle, name: str) -> _Handle:
+def create_child_file(parent: Handle, name: str) -> Handle:
     if os.name == "nt":
-        return _Handle(_windows_workspace.create_file(parent.value, name), False)
+        return Handle(_windows_workspace.create_file(parent.value, name), False)
     flags = (
         os.O_RDWR
         | os.O_CREAT
@@ -965,36 +965,36 @@ def _create_child_file(parent: _Handle, name: str) -> _Handle:
         | getattr(os, "O_CLOEXEC", 0)
         | getattr(os, "O_BINARY", 0)
     )
-    return _Handle(os.open(name, flags, 0o600, dir_fd=parent.value), False)
+    return Handle(os.open(name, flags, 0o600, dir_fd=parent.value), False)
 
 
-def _open_child_file(parent: _Handle, name: str) -> _Handle:
+def _open_child_file(parent: Handle, name: str) -> Handle:
     if _entry_kind(parent, name) != "file":
         raise PermissionError("expected a regular file")
     if os.name == "nt":
-        return _Handle(_windows_workspace.open_file(parent.value, name), False)
+        return Handle(_windows_workspace.open_file(parent.value, name), False)
     flags = (
         os.O_RDONLY
         | os.O_NOFOLLOW
         | getattr(os, "O_CLOEXEC", 0)
         | getattr(os, "O_BINARY", 0)
     )
-    return _Handle(os.open(name, flags, dir_fd=parent.value), False)
+    return Handle(os.open(name, flags, dir_fd=parent.value), False)
 
 
-def _named_identity(parent: _Handle, name: str, *, directory: bool) -> tuple[object, ...]:
+def _named_identity(parent: Handle, name: str, *, directory: bool) -> tuple[object, ...]:
     handle = (
         _open_child_directory(parent, name)
         if directory
         else _open_child_file(parent, name)
     )
     try:
-        return _identity(handle)
+        return path_identity(handle)
     finally:
         handle.close()
 
 
-def _open_known_child(parent: _Handle, name: str, *, directory: bool) -> _Handle:
+def open_known_child(parent: Handle, name: str, *, directory: bool) -> Handle:
     if os.name != "nt":
         return (
             _open_child_directory(parent, name)
@@ -1006,19 +1006,19 @@ def _open_known_child(parent: _Handle, name: str, *, directory: bool) -> _Handle
         if directory
         else _windows_workspace.open_file
     )
-    return _Handle(function(parent.value, name), directory)
+    return Handle(function(parent.value, name), directory)
 
 
 def _open_expected_child(
-    parent: _Handle,
+    parent: Handle,
     name: str,
     *,
     directory: bool,
     expected_identity: tuple[object, ...],
-) -> _Handle:
-    handle = _open_known_child(parent, name, directory=directory)
+) -> Handle:
+    handle = open_known_child(parent, name, directory=directory)
     try:
-        if _identity(handle) != expected_identity:
+        if path_identity(handle) != expected_identity:
             raise PermissionError("filesystem object changed identity")
         return handle
     except BaseException:
@@ -1027,25 +1027,25 @@ def _open_expected_child(
 
 
 def _named_known_identity(
-    parent: _Handle,
+    parent: Handle,
     name: str,
     *,
     directory: bool,
 ) -> tuple[object, ...]:
-    handle = _open_known_child(parent, name, directory=directory)
+    handle = open_known_child(parent, name, directory=directory)
     try:
-        return _identity(handle)
+        return path_identity(handle)
     finally:
         handle.close()
 
 
-def _file_size(handle: _Handle) -> int:
+def file_size(handle: Handle) -> int:
     if os.name == "nt":
         return _windows_workspace.file_size(handle.value)
     return os.fstat(handle.value).st_size
 
 
-def _read_handle(handle: _Handle, size: int) -> bytes:
+def read_handle(handle: Handle, size: int) -> bytes:
     if size <= 0:
         return b""
     if os.name == "nt":
@@ -1056,14 +1056,14 @@ def _read_handle(handle: _Handle, size: int) -> bytes:
     return os.read(handle.value, size)
 
 
-def _seek_start(handle: _Handle) -> None:
+def seek_start(handle: Handle) -> None:
     if os.name == "nt":
         _windows_workspace.seek_start(handle.value)
     else:
         os.lseek(handle.value, 0, os.SEEK_SET)
 
 
-def _write_chunk(handle: _Handle, chunk: bytes) -> int:
+def _write_chunk(handle: Handle, chunk: bytes) -> int:
     if os.name == "nt":
         _windows_workspace.write_all(
             handle.value, chunk, chunk_bytes=COPY_CHUNK_BYTES
@@ -1075,7 +1075,7 @@ def _write_chunk(handle: _Handle, chunk: bytes) -> int:
     return written
 
 
-def _write_handle(handle: _Handle, content: bytes, deadline: float) -> None:
+def write_handle(handle: Handle, content: bytes, deadline: float) -> None:
     offset = 0
     while offset < len(content):
         _check_deadline(deadline)
@@ -1083,14 +1083,14 @@ def _write_handle(handle: _Handle, content: bytes, deadline: float) -> None:
         offset += _write_chunk(handle, chunk)
 
 
-def _fsync_file(handle: _Handle) -> None:
+def fsync_file(handle: Handle) -> None:
     if os.name == "nt":
         _windows_workspace.flush_file(handle.value)
     else:
         os.fsync(handle.value)
 
 
-def _fsync_directory(handle: _Handle) -> None:
+def fsync_directory(handle: Handle) -> None:
     if os.name == "nt":
         if not _windows_workspace.flush_directory(handle.value):
             raise OSError("directory flush failed")
@@ -1098,18 +1098,18 @@ def _fsync_directory(handle: _Handle) -> None:
         os.fsync(handle.value)
 
 
-def _checked_fsync_file(handle: _Handle) -> None:
+def _checked_fsync_file(handle: Handle) -> None:
     try:
-        _fsync_file(handle)
+        fsync_file(handle)
     except TimeoutError:
         raise
     except OSError as exc:
         raise PyrightInstallError("pyright_install_fsync_failed") from exc
 
 
-def _checked_fsync_directory(handle: _Handle) -> None:
+def checked_fsync_directory(handle: Handle) -> None:
     try:
-        _fsync_directory(handle)
+        fsync_directory(handle)
     except TimeoutError:
         raise
     except OSError as exc:
@@ -1117,7 +1117,7 @@ def _checked_fsync_directory(handle: _Handle) -> None:
 
 
 def _remove_owned_file(
-    parent: _Handle,
+    parent: Handle,
     name: str,
     expected_identity: tuple[object, ...],
 ) -> None:
@@ -1130,7 +1130,7 @@ def _remove_owned_file(
 
 
 def _delete_if_identity_matches(
-    parent: _Handle, name: str, expected_identity: tuple[object, ...]
+    parent: Handle, name: str, expected_identity: tuple[object, ...]
 ) -> None:
     """Delete the file only while the name still points at the same object."""
     if os.name == "nt":
@@ -1138,44 +1138,44 @@ def _delete_if_identity_matches(
         return
     handle = _open_child_file(parent, name)
     try:
-        if _identity(handle) == expected_identity:
+        if path_identity(handle) == expected_identity:
             os.unlink(name, dir_fd=parent.value)
     finally:
         handle.close()
 
 
 def _delete_windows_named_file(
-    parent: _Handle, name: str, expected_identity: tuple[object, ...]
+    parent: Handle, name: str, expected_identity: tuple[object, ...]
 ) -> None:
-    handle = _Handle(
+    handle = Handle(
         _windows_workspace.open_deletable_file(parent.value, name), False
     )
     try:
-        if _identity(handle) == expected_identity:
+        if path_identity(handle) == expected_identity:
             _windows_workspace.delete_handle(handle.value)
     finally:
         handle.close()
 
 
-def _clear_directory(directory: _Handle) -> None:
+def clear_directory(directory: Handle) -> None:
     if os.name == "nt":
         _clear_windows_directory(directory)
         return
     _clear_posix_directory(directory)
 
 
-def _clear_windows_directory(directory: _Handle) -> None:
+def _clear_windows_directory(directory: Handle) -> None:
     for entry in _windows_workspace.list_directory(
         directory.value, max_entries=MAX_MEMBERS + 4
     ):
         _delete_windows_entry(directory, entry)
 
 
-def _delete_windows_entry(directory: _Handle, entry: object) -> None:
+def _delete_windows_entry(directory: Handle, entry: object) -> None:
     if entry.kind == "directory":
         _delete_windows_subtree(directory, entry.name)
         return
-    child = _Handle(
+    child = Handle(
         _windows_workspace.open_deletable_file(directory.value, entry.name), False
     )
     try:
@@ -1184,61 +1184,71 @@ def _delete_windows_entry(directory: _Handle, entry: object) -> None:
         child.close()
 
 
-def _delete_windows_subtree(directory: _Handle, name: str) -> None:
-    child = _Handle(
+def _delete_windows_subtree(directory: Handle, name: str) -> None:
+    child = Handle(
         _windows_workspace.open_deletable_directory(directory.value, name), True
     )
     try:
-        _clear_directory(child)
+        clear_directory(child)
         _windows_workspace.delete_handle(child.value)
     finally:
         child.close()
 
 
-def _clear_posix_directory(directory: _Handle) -> None:
+def _clear_posix_directory(directory: Handle) -> None:
     with os.scandir(directory.value) as entries:
         names = tuple(entry.name for entry in entries)
     for name in names:
         _remove_posix_entry(directory, name)
 
 
-def _remove_posix_entry(directory: _Handle, name: str) -> None:
+def _remove_posix_entry(directory: Handle, name: str) -> None:
     """A real directory is emptied then removed; anything else is unlinked."""
     info = os.stat(name, dir_fd=directory.value, follow_symlinks=False)
     if not stat.S_ISDIR(info.st_mode) or stat.S_ISLNK(info.st_mode):
         os.unlink(name, dir_fd=directory.value)
         return
-    child = _Handle(
+    child = Handle(
         os.open(name, _posix_directory_flags(), dir_fd=directory.value), True
     )
     try:
-        _clear_directory(child)
+        clear_directory(child)
     finally:
         child.close()
     os.rmdir(name, dir_fd=directory.value)
 
 
-def _ensure_runtime_parent(state_root: Path, deadline: float) -> _Handle:
-    current = _open_absolute_directory(state_root, writable=True)
-    pending: _Handle | None = None
+def _close_in_reverse(handles: list[Handle]) -> None:
+    for handle in reversed(handles):
+        handle.close()
+
+
+def _flush_created_parent(current: Handle, created: bool, deadline: float) -> None:
+    if not created:
+        return
+    _check_deadline(deadline)
+    checked_fsync_directory(current)
+
+
+def ensure_runtime_parent(state_root: Path, deadline: float) -> Handle:
+    current = open_absolute_directory(state_root, writable=True)
+    pending: Handle | None = None
     try:
         for component in ("cache", "code-tools", "pyright"):
             pending, created = _runtime_child(current, component, deadline)
-            if created:
-                _check_deadline(deadline)
-                _checked_fsync_directory(current)
+            _flush_created_parent(current, created, deadline)
             current.close()
             current = pending
             pending = None
         return current
     except BaseException as primary_error:
-        _close_handles_preserving_error(primary_error, pending, current)
+        close_handles_preserving_error(primary_error, pending, current)
         raise
 
 
 def _runtime_child(
-    current: _Handle, component: str, deadline: float
-) -> tuple[_Handle, bool]:
+    current: Handle, component: str, deadline: float
+) -> tuple[Handle, bool]:
     """The child directory and whether this call is the one that created it.
 
     The handle is returned before the parent is flushed, so a flush failure
@@ -1255,57 +1265,60 @@ def _runtime_child(
 
 
 def _created_runtime_child(
-    current: _Handle, component: str
-) -> tuple[_Handle, bool]:
+    current: Handle, component: str
+) -> tuple[Handle, bool]:
     try:
         return _create_child_directory(current, component), True
     except FileExistsError:
         return _adopted_runtime_child(current, component), False
 
 
-def _adopted_runtime_child(current: _Handle, component: str) -> _Handle:
+def _adopted_runtime_child(current: Handle, component: str) -> Handle:
     """Lost the creation race: adopt the directory, refuse anything else."""
     if _entry_kind(current, component) != "directory":
         raise PermissionError("runtime hierarchy creation lost to an unsafe entry")
     return _open_child_directory(current, component, writable=True)
 
 
-def _new_owned_file(parent: _Handle, purpose: str) -> _OwnedFile:
+def new_owned_file(parent: Handle, purpose: str) -> OwnedFile:
     for _attempt in range(32):
         name = f"{_SCRATCH_PREFIX}{purpose}-{secrets.token_hex(16)}"
         try:
-            handle = _create_child_file(parent, name)
+            handle = create_child_file(parent, name)
         except FileExistsError:
             continue
-        return _OwnedFile(parent, name, handle, _identity(handle))
+        return OwnedFile(parent, name, handle, path_identity(handle))
     raise PyrightInstallError("pyright_scratch_exhausted")
 
 
-def _new_stage(parent: _Handle) -> _Stage:
+def new_stage(parent: Handle) -> Stage:
     for _attempt in range(32):
         name = f"{_SCRATCH_PREFIX}stage-{secrets.token_hex(16)}"
         try:
-            if os.name == "nt":
-                root = _Handle(
-                    _windows_workspace._relative_handle(
-                        parent.value,
-                        name,
-                        directory=True,
-                        create=True,
-                        deletable=True,
-                        writable=True,
-                    ),
-                    True,
-                )
-            else:
-                root = _create_child_directory(parent, name)
+            root = _create_stage_root(parent, name)
         except FileExistsError:
             continue
-        return _Stage(parent, name, root)
+        return Stage(parent, name, root)
     raise PyrightInstallError("pyright_scratch_exhausted")
 
 
-def _lock_handle_nonblocking(handle: _Handle) -> bool:
+def _create_stage_root(parent: Handle, name: str) -> Handle:
+    if os.name != "nt":
+        return _create_child_directory(parent, name)
+    return Handle(
+        _windows_workspace.relative_handle(
+            parent.value,
+            name,
+            directory=True,
+            create=True,
+            deletable=True,
+            writable=True,
+        ),
+        True,
+    )
+
+
+def lock_handle_nonblocking(handle: Handle) -> bool:
     if os.name == "nt":
         return True
     import fcntl
@@ -1319,11 +1332,11 @@ def _lock_handle_nonblocking(handle: _Handle) -> bool:
         raise
 
 
-def _open_lock_for_reclaim(parent: _Handle) -> _Handle | None:
+def _open_lock_for_reclaim(parent: Handle) -> Handle | None:
     try:
         if os.name == "nt":
-            handle = _Handle(
-                _windows_workspace.open_deletable_file(parent.value, _LOCK_NAME),
+            handle = Handle(
+                _windows_workspace.open_deletable_file(parent.value, LOCK_NAME),
                 False,
             )
         else:
@@ -1333,11 +1346,11 @@ def _open_lock_for_reclaim(parent: _Handle) -> _Handle | None:
                 | getattr(os, "O_CLOEXEC", 0)
                 | getattr(os, "O_BINARY", 0)
             )
-            handle = _Handle(os.open(_LOCK_NAME, flags, dir_fd=parent.value), False)
+            handle = Handle(os.open(LOCK_NAME, flags, dir_fd=parent.value), False)
     except (FileNotFoundError, OSError, RuntimeError):
         return None
     try:
-        if not _lock_handle_nonblocking(handle):
+        if not lock_handle_nonblocking(handle):
             handle.close()
             return None
         return handle
@@ -1346,22 +1359,22 @@ def _open_lock_for_reclaim(parent: _Handle) -> _Handle | None:
         raise
 
 
-def _read_lock_bytes(handle: _Handle) -> bytes | None:
-    size = _file_size(handle)
+def _read_lock_bytes(handle: Handle) -> bytes | None:
+    size = file_size(handle)
     if size < 0 or size > MAX_LOCK_BYTES:
         return None
-    _seek_start(handle)
+    seek_start(handle)
     content = _read_exactly(handle, size)
-    if content is None or _file_size(handle) != size:
+    if content is None or file_size(handle) != size:
         return None
     return bytes(content)
 
 
-def _read_exactly(handle: _Handle, size: int) -> bytearray | None:
+def _read_exactly(handle: Handle, size: int) -> bytearray | None:
     """Exactly this many bytes, or None when the file ended early."""
     content = bytearray()
     while len(content) < size:
-        chunk = _read_handle(handle, size - len(content))
+        chunk = read_handle(handle, size - len(content))
         if not chunk:
             return None
         content.extend(chunk)
@@ -1373,7 +1386,7 @@ _LOCK_RECORD_KEYS = frozenset(
 )
 
 
-def _read_lock_record(handle: _Handle) -> tuple[bytes | None, dict[str, object] | None]:
+def _read_lock_record(handle: Handle) -> tuple[bytes | None, dict[str, object] | None]:
     raw = _read_lock_bytes(handle)
     if raw is None:
         return None, None
@@ -1423,7 +1436,7 @@ def _is_process_start(value: object) -> bool:
     return len(value.encode("utf-8", errors="strict")) <= 256
 
 
-def _lock_modified_time_ns(handle: _Handle) -> int:
+def _lock_modified_time_ns(handle: Handle) -> int:
     if os.name == "nt":
         return _windows_workspace.file_modified_time_ns(handle.value)
     return os.fstat(handle.value).st_mtime_ns
@@ -1448,10 +1461,10 @@ def _is_windows_lock_contention(exc: OSError) -> bool:
     return exc.errno in _WINDOWS_LOCK_CONTENTION_ERRORS
 
 
-def _created_lock_file(parent: _Handle) -> _Handle | None:
+def created_lock_file(parent: Handle) -> Handle | None:
     """The newly created lock file, or None when this call lost the race."""
     try:
-        return _create_child_file(parent, _LOCK_NAME)
+        return create_child_file(parent, LOCK_NAME)
     except FileExistsError:
         return None
     except OSError as exc:
@@ -1460,46 +1473,46 @@ def _created_lock_file(parent: _Handle) -> _Handle | None:
         return None
 
 
-def _create_owned_lock(parent: _Handle, deadline: float) -> _OwnedLock | None:
-    handle = _created_lock_file(parent)
+def create_owned_lock(parent: Handle, deadline: float) -> _OwnedLock | None:
+    handle = created_lock_file(parent)
     if handle is None:
         return None
-    identity = _identity(handle)
+    identity = path_identity(handle)
     nonce = secrets.token_hex(16)
-    owned = _OwnedLock(parent, _LOCK_NAME, handle, identity, nonce)
+    owned = _OwnedLock(parent, LOCK_NAME, handle, identity, nonce)
     try:
         return _claim_owned_lock(owned, parent, handle, nonce, deadline)
     except BaseException:
         try:
             owned.close()
         finally:
-            _remove_owned_file(parent, _LOCK_NAME, identity)
+            _remove_owned_file(parent, LOCK_NAME, identity)
         raise
 
 
 def _claim_owned_lock(
     owned: _OwnedLock,
-    parent: _Handle,
-    handle: _Handle,
+    parent: Handle,
+    handle: Handle,
     nonce: str,
     deadline: float,
 ) -> _OwnedLock | None:
-    if not _lock_handle_nonblocking(handle):
+    if not lock_handle_nonblocking(handle):
         # Another owner holds a lock on the file this call had just created,
         # so the lock is theirs. Close ours and report the loss: the caller
         # waits and retries until its deadline. Treating it as a failure
         # deleted a lock this process does not own and aborted the install.
         owned.close()
         return None
-    _write_handle(handle, _lock_metadata_bytes(nonce), deadline)
+    write_handle(handle, _lock_metadata_bytes(nonce), deadline)
     _check_deadline(deadline)
     _checked_fsync_file(handle)
-    _checked_fsync_directory(parent)
+    checked_fsync_directory(parent)
     return owned
 
 
 def _lock_metadata_bytes(nonce: str) -> bytes:
-    process_start = _process_start_identity(os.getpid())
+    process_start = process_start_identity(os.getpid())
     if process_start is None:
         raise OSError("current process identity was unavailable")
     return canonical_json_bytes(
@@ -1522,16 +1535,16 @@ def _release_owned_lock(lock: _OwnedLock) -> None:
     finally:
         _close_release_handle(lock, handle)
     if removed:
-        _checked_fsync_directory(lock.parent)
+        checked_fsync_directory(lock.parent)
 
 
-def _lock_handle_for_release(lock: _OwnedLock) -> _Handle | None:
+def _lock_handle_for_release(lock: _OwnedLock) -> Handle | None:
     if lock.closed:
         return _open_lock_for_reclaim(lock.parent)
     return lock.handle
 
 
-def _remove_held_lock(lock: _OwnedLock, handle: _Handle) -> bool:
+def _remove_held_lock(lock: _OwnedLock, handle: Handle) -> bool:
     """True when this call removed a lock it still owned."""
     if not _still_our_lock(lock, handle):
         return False
@@ -1548,8 +1561,8 @@ def _unlink_owned_posix_lock(lock: _OwnedLock) -> bool:
     return True
 
 
-def _still_our_lock(lock: _OwnedLock, handle: _Handle) -> bool:
-    if _identity(handle) != lock.identity:
+def _still_our_lock(lock: _OwnedLock, handle: Handle) -> bool:
+    if path_identity(handle) != lock.identity:
         return False
     _raw, metadata = _read_lock_record(handle)
     if metadata is None:
@@ -1557,33 +1570,33 @@ def _still_our_lock(lock: _OwnedLock, handle: _Handle) -> bool:
     return metadata.get("nonce") == lock.nonce
 
 
-def _close_release_handle(lock: _OwnedLock, handle: _Handle) -> None:
+def _close_release_handle(lock: _OwnedLock, handle: Handle) -> None:
     if handle is lock.handle:
         lock.close()
         return
     handle.close()
 
 
-def _try_reclaim_lock(parent: _Handle, deadline: float) -> _OwnedLock | None:
+def _try_reclaim_lock(parent: Handle, deadline: float) -> _OwnedLock | None:
     stale = _open_lock_for_reclaim(parent)
     if stale is None:
         return None
-    quarantine: _OwnedFile | None = None
+    quarantine: OwnedFile | None = None
     try:
         quarantine = _quarantined_stale_lock(parent, stale, deadline)
         if quarantine is None:
             return None
-        _checked_fsync_directory(parent)
-        return _create_owned_lock(parent, deadline)
+        checked_fsync_directory(parent)
+        return create_owned_lock(parent, deadline)
     finally:
         _close_reclaim_handles(quarantine, stale)
 
 
 def _quarantined_stale_lock(
-    parent: _Handle, stale: _Handle, deadline: float
-) -> _OwnedFile | None:
+    parent: Handle, stale: Handle, deadline: float
+) -> OwnedFile | None:
     """Move an abandoned lock aside, or None when it is not ours to move."""
-    stale_identity = _identity(stale)
+    stale_identity = path_identity(stale)
     initial_raw, metadata = _read_lock_record(stale)
     if not _lock_looks_abandoned(stale, metadata):
         return None
@@ -1594,15 +1607,15 @@ def _quarantined_stale_lock(
 
 
 def _moved_stale_lock(
-    parent: _Handle, stale: _Handle, stale_identity: tuple[object, ...]
-) -> _OwnedFile | None:
+    parent: Handle, stale: Handle, stale_identity: tuple[object, ...]
+) -> OwnedFile | None:
     quarantine_name = f"{_SCRATCH_PREFIX}stale-lock-{secrets.token_hex(16)}"
     if not _quarantine_stale_lock(parent, stale, stale_identity, quarantine_name):
         return None
-    return _OwnedFile(parent, quarantine_name, stale, stale_identity)
+    return OwnedFile(parent, quarantine_name, stale, stale_identity)
 
 
-def _close_reclaim_handles(quarantine: _OwnedFile | None, stale: _Handle) -> None:
+def _close_reclaim_handles(quarantine: OwnedFile | None, stale: Handle) -> None:
     if quarantine is not None:
         quarantine.cleanup()
         return
@@ -1610,26 +1623,24 @@ def _close_reclaim_handles(quarantine: _OwnedFile | None, stale: _Handle) -> Non
 
 
 def _lock_looks_abandoned(
-    stale: _Handle, metadata: dict[str, object] | None
+    stale: Handle, metadata: dict[str, object] | None
 ) -> bool:
     """Abandoned means the writer is gone, or it never finished writing."""
     if metadata is None:
         age = max(0, time.time_ns() - _lock_modified_time_ns(stale)) / 1_000_000_000
         return age >= LOCK_INITIALIZATION_GRACE_SECONDS
-    return not _lock_owner_is_alive(metadata)
+    return not lock_owner_is_alive(metadata)
 
 
-def _lock_owner_is_alive(metadata: dict[str, object]) -> bool:
+def lock_owner_is_alive(metadata: dict[str, object]) -> bool:
     """An unreadable process identity counts as alive: never reclaim on doubt."""
-    try:
-        observed_start = _process_start_identity(metadata["pid"])
-    except OSError:
-        return True
-    return observed_start == metadata["process_start"]
+    return recorded_process_state(
+        metadata["pid"], metadata["process_start"], probe=process_start_identity
+    ) != "dead"
 
 
 def _lock_unchanged(
-    stale: _Handle,
+    stale: Handle,
     stale_identity: tuple[object, ...],
     initial_raw: bytes | None,
     metadata: dict[str, object] | None,
@@ -1637,12 +1648,12 @@ def _lock_unchanged(
     current_raw, current_metadata = _read_lock_record(stale)
     if current_raw != initial_raw or current_metadata != metadata:
         return False
-    return _identity(stale) == stale_identity
+    return path_identity(stale) == stale_identity
 
 
 def _quarantine_stale_lock(
-    parent: _Handle,
-    stale: _Handle,
+    parent: Handle,
+    stale: Handle,
     stale_identity: tuple[object, ...],
     quarantine_name: str,
 ) -> bool:
@@ -1653,12 +1664,12 @@ def _quarantine_stale_lock(
 
 
 def _rename_stale_posix_lock(
-    parent: _Handle, stale_identity: tuple[object, ...], quarantine_name: str
+    parent: Handle, stale_identity: tuple[object, ...], quarantine_name: str
 ) -> bool:
-    if _named_identity(parent, _LOCK_NAME, directory=False) != stale_identity:
+    if _named_identity(parent, LOCK_NAME, directory=False) != stale_identity:
         return False
     os.rename(
-        _LOCK_NAME,
+        LOCK_NAME,
         quarantine_name,
         src_dir_fd=parent.value,
         dst_dir_fd=parent.value,
@@ -1668,18 +1679,18 @@ def _rename_stale_posix_lock(
     return True
 
 
-def _try_create_lock(parent: _Handle, deadline: float) -> _OwnedLock | None:
-    owned = _create_owned_lock(parent, deadline)
+def try_create_lock(parent: Handle, deadline: float) -> _OwnedLock | None:
+    owned = create_owned_lock(parent, deadline)
     if owned is not None:
         return owned
     return _lock_after_collision(parent, deadline)
 
 
-def _lock_after_collision(parent: _Handle, deadline: float) -> _OwnedLock | None:
+def _lock_after_collision(parent: Handle, deadline: float) -> _OwnedLock | None:
     """Someone held the name: create it if it has gone, reclaim it if abandoned."""
-    kind = _entry_kind(parent, _LOCK_NAME)
+    kind = _entry_kind(parent, LOCK_NAME)
     if kind is None:
-        return _create_owned_lock(parent, deadline)
+        return create_owned_lock(parent, deadline)
     if kind != "file":
         raise PyrightInstallError("pyright_install_lock_unsafe")
     return _try_reclaim_lock(parent, deadline)
@@ -1780,8 +1791,8 @@ def _validate_package_json(raw: bytes) -> None:
 
 
 def _open_bounded_source(
-    parent: _Handle, name: str, expected_identity: tuple[object, ...] | None
-) -> _Handle:
+    parent: Handle, name: str, expected_identity: tuple[object, ...] | None
+) -> Handle:
     if expected_identity is None:
         return _open_child_file(parent, name)
     return _open_expected_child(
@@ -1799,25 +1810,25 @@ def _require_expected_size(
 
 
 def _require_stable_source(
-    handle: _Handle, size: int, identity: tuple[object, ...]
+    handle: Handle, size: int, identity: tuple[object, ...]
 ) -> None:
-    if _file_size(handle) != size or _identity(handle) != identity:
+    if file_size(handle) != size or path_identity(handle) != identity:
         raise PyrightInstallError("pyright_existing_install_invalid")
 
 
 def _read_within_bounds(
-    handle: _Handle,
+    handle: Handle,
     maximum: int,
     deadline: float,
     expected_size: int | None,
     identity: tuple[object, ...],
 ) -> bytearray:
-    size = _file_size(handle)
+    size = file_size(handle)
     _require_expected_size(size, expected_size, maximum)
     content = bytearray()
     while True:
         _check_deadline(deadline)
-        chunk = _read_handle(
+        chunk = read_handle(
             handle, min(COPY_CHUNK_BYTES, maximum + 1 - len(content))
         )
         if not chunk:
@@ -1830,7 +1841,7 @@ def _read_within_bounds(
 
 
 def _named_bounded_identity(
-    parent: _Handle, name: str, expected_identity: tuple[object, ...] | None
+    parent: Handle, name: str, expected_identity: tuple[object, ...] | None
 ) -> tuple[object, ...]:
     if expected_identity is None:
         return _named_identity(parent, name, directory=False)
@@ -1838,7 +1849,7 @@ def _named_bounded_identity(
 
 
 def _read_bounded_file(
-    parent: _Handle,
+    parent: Handle,
     name: str,
     maximum: int,
     deadline: float,
@@ -1848,7 +1859,7 @@ def _read_bounded_file(
 ) -> bytes:
     _check_deadline(deadline)
     handle = _open_bounded_source(parent, name, expected_identity)
-    identity = _identity(handle)
+    identity = path_identity(handle)
     try:
         content = _read_within_bounds(
             handle, maximum, deadline, expected_size, identity
@@ -1860,14 +1871,14 @@ def _read_bounded_file(
     return bytes(content)
 
 
-def _existing_directory_entries(directory: _Handle) -> tuple[_ExistingEntry, ...]:
+def existing_directory_entries(directory: Handle) -> tuple[_ExistingEntry, ...]:
     if os.name == "nt":
         return _windows_existing_entries(directory)
     return _posix_existing_entries(directory)
 
 
-def _windows_existing_entries(directory: _Handle) -> tuple[_ExistingEntry, ...]:
-    volume = _identity(directory)[0]
+def _windows_existing_entries(directory: Handle) -> tuple[_ExistingEntry, ...]:
+    volume = path_identity(directory)[0]
     return tuple(
         _windows_existing_entry(entry, volume)
         for entry in _windows_workspace.list_directory(
@@ -1894,7 +1905,7 @@ def _require_usable_windows_entry(entry: object) -> None:
         raise PyrightInstallError("pyright_existing_install_invalid")
 
 
-def _posix_existing_entries(directory: _Handle) -> tuple[_ExistingEntry, ...]:
+def _posix_existing_entries(directory: Handle) -> tuple[_ExistingEntry, ...]:
     with os.scandir(directory.value) as entries:
         values = [_posix_existing_entry(entry) for entry in entries]
     return tuple(sorted(values, key=lambda item: item.name))
@@ -2036,14 +2047,14 @@ def _record_interesting_file(
         snapshots[relative] = entry
 
 
-def _child_directory_identity(directory: _Handle, name: str) -> tuple[object, ...]:
+def _child_directory_identity(directory: Handle, name: str) -> tuple[object, ...]:
     if os.name == "nt":
         return _named_known_identity(directory, name, directory=True)
     return _named_identity(directory, name, directory=True)
 
 
 def _validate_existing_tree(
-    root: _Handle,
+    root: Handle,
     deadline: float,
 ) -> dict[str, _ExistingEntry]:
     walk = _ExistingTreeWalk(deadline)
@@ -2061,16 +2072,16 @@ class _ExistingTreeWalk:
         self.folded_paths: dict[str, str] = {}
         self.snapshots: dict[str, _ExistingEntry] = {}
 
-    def visit(self, directory: _Handle, parts: tuple[str, ...]) -> None:
+    def visit(self, directory: Handle, parts: tuple[str, ...]) -> None:
         _check_deadline(self.deadline)
-        entries = _existing_directory_entries(directory)
+        entries = existing_directory_entries(directory)
         _require_expected_root_entries(parts, entries)
         for entry in entries:
             _check_deadline(self.deadline)
             self.visit_entry(directory, parts, entry)
 
     def visit_entry(
-        self, directory: _Handle, parts: tuple[str, ...], entry: _ExistingEntry
+        self, directory: Handle, parts: tuple[str, ...], entry: _ExistingEntry
     ) -> None:
         self._count_entry()
         child_parts = (*parts, entry.name)
@@ -2096,7 +2107,7 @@ class _ExistingTreeWalk:
         _record_interesting_file(self.snapshots, relative, entry)
 
     def visit_directory(
-        self, directory: _Handle, entry: _ExistingEntry, child_parts: tuple[str, ...]
+        self, directory: Handle, entry: _ExistingEntry, child_parts: tuple[str, ...]
     ) -> None:
         if entry.identity is None:
             raise PyrightInstallError("pyright_existing_install_invalid")
@@ -2106,7 +2117,7 @@ class _ExistingTreeWalk:
             directory=True,
             expected_identity=entry.identity,
         )
-        identity = _identity(child)
+        identity = path_identity(child)
         try:
             self.visit(child, child_parts)
         finally:
@@ -2115,7 +2126,7 @@ class _ExistingTreeWalk:
             raise PyrightInstallError("pyright_existing_install_invalid")
 
 
-def _existing_entry_kind(parent: _Handle) -> str | None:
+def _existing_entry_kind(parent: Handle) -> str | None:
     try:
         return _entry_kind(parent, _profile.PYRIGHT_VERSION)
     except TimeoutError:
@@ -2146,7 +2157,7 @@ def _validated_manifest_fields(manifest: dict[str, object]) -> dict[str, object]
 
 
 def _validated_manifest(
-    installation: _Handle, manifest_entry: _ExistingEntry, deadline: float
+    installation: Handle, manifest_entry: _ExistingEntry, deadline: float
 ) -> tuple[bytes, dict[str, object]]:
     manifest_raw = _read_bounded_file(
         installation,
@@ -2163,7 +2174,7 @@ def _validated_manifest(
 
 
 def _read_package_files(
-    package: _Handle,
+    package: Handle,
     package_json_entry: _ExistingEntry,
     server_entry: _ExistingEntry,
     deadline: float,
@@ -2213,7 +2224,7 @@ def _executed_tree_snapshots(
 
 
 def _executed_tree_digest_under(
-    dist: _Handle,
+    dist: Handle,
     snapshots: dict[str, _ExistingEntry],
     server_sha256: str,
     deadline: float,
@@ -2234,7 +2245,7 @@ def _executed_tree_digest_under(
 
 
 def _measured_existing_executed_tree(
-    package: _Handle,
+    package: Handle,
     snapshots: dict[str, _ExistingEntry],
     server_sha256: str,
     deadline: float,
@@ -2259,7 +2270,7 @@ def _measured_existing_executed_tree(
 
 
 def _require_recorded_executed_tree(
-    package: _Handle,
+    package: Handle,
     snapshots: dict[str, _ExistingEntry],
     server_sha256: str,
     validated: dict[str, object],
@@ -2274,7 +2285,7 @@ def _require_recorded_executed_tree(
 
 
 def _verified_server_digest(
-    installation: _Handle,
+    installation: Handle,
     entries: tuple[_ExistingEntry, ...],
     snapshots: dict[str, _ExistingEntry],
     validated: dict[str, object],
@@ -2298,7 +2309,7 @@ def _verified_server_digest(
 
 
 def _install_from_snapshots(
-    installation: _Handle, root: Path, deadline: float
+    installation: Handle, root: Path, deadline: float
 ) -> InstalledPyright:
     snapshots = _validate_existing_tree(installation, deadline)
     entries = _required_snapshot_entries(snapshots)
@@ -2309,15 +2320,15 @@ def _install_from_snapshots(
     return InstalledPyright(
         root=root,
         version=_profile.PYRIGHT_VERSION,
-        package_sha256=_profile.PYRIGHT_PACKAGE_SHA256,
-        package_integrity=_profile.PYRIGHT_PACKAGE_INTEGRITY,
+        package_sha256=pyright_configuration.PYRIGHT_PACKAGE_SHA256,
+        package_integrity=pyright_configuration.PYRIGHT_PACKAGE_INTEGRITY,
         server_sha256=server_sha256,
         manifest_sha256=hashlib.sha256(manifest_raw).hexdigest(),
     )
 
 
 def _require_installation_still_named(
-    parent: _Handle, identity: tuple[object, ...]
+    parent: Handle, identity: tuple[object, ...]
 ) -> None:
     if (
         _named_known_identity(parent, _profile.PYRIGHT_VERSION, directory=True)
@@ -2327,12 +2338,12 @@ def _require_installation_still_named(
 
 
 def _validated_existing_install(
-    parent: _Handle, root: Path, deadline: float
+    parent: Handle, root: Path, deadline: float
 ) -> InstalledPyright:
-    installation = _open_known_child(
+    installation = open_known_child(
         parent, _profile.PYRIGHT_VERSION, directory=True
     )
-    installation_identity = _identity(installation)
+    installation_identity = path_identity(installation)
     try:
         result = _install_from_snapshots(installation, root, deadline)
         _require_installation_still_named(parent, installation_identity)
@@ -2342,7 +2353,7 @@ def _validated_existing_install(
 
 
 def _existing_install_or_invalid(
-    parent: _Handle, root: Path, deadline: float
+    parent: Handle, root: Path, deadline: float
 ) -> InstalledPyright:
     """Every way this can go wrong reads as one code: the install is invalid."""
     try:
@@ -2358,7 +2369,7 @@ def _existing_install_or_invalid(
 
 
 def _existing_result(
-    parent: _Handle,
+    parent: Handle,
     root: Path,
     deadline: float,
 ) -> InstalledPyright | None:
@@ -2374,7 +2385,7 @@ def _existing_result(
     return None
 
 
-def _existing_install_directory(parent: _Handle) -> bool:
+def _existing_install_directory(parent: Handle) -> bool:
     """Whether an install directory is present; any other entry there is invalid."""
     kind = _existing_entry_kind(parent)
     if kind is None:
@@ -2394,7 +2405,7 @@ def _predates_tree_digest(error: BaseException) -> bool:
     return False
 
 
-def _retire_pre_era_install(parent: _Handle, root: Path) -> None:
+def _retire_pre_era_install(parent: Handle, root: Path) -> None:
     """Remove a pre-era install so the pinned release installs fresh.
 
     The installer is the documented repair for `pyright_manifest_predates_tree_digest`
@@ -2411,12 +2422,12 @@ def _new_hashes():
     return hashlib.sha256(), hashlib.sha512()
 
 
-def _hash_handle(source: _Handle, deadline: float) -> tuple[str, bytes]:
+def _hash_handle(source: Handle, deadline: float) -> tuple[str, bytes]:
     sha256, sha512 = _new_hashes()
     total = 0
     while True:
         _check_deadline(deadline)
-        chunk = _read_handle(source, COPY_CHUNK_BYTES)
+        chunk = read_handle(source, COPY_CHUNK_BYTES)
         if not chunk:
             break
         total += len(chunk)
@@ -2427,22 +2438,22 @@ def _hash_handle(source: _Handle, deadline: float) -> tuple[str, bytes]:
     return sha256.hexdigest(), sha512.digest()
 
 
-def _copy_to_owned_file(
-    source: _Handle,
-    destination: _OwnedFile,
+def copy_to_owned_file(
+    source: Handle,
+    destination: OwnedFile,
     deadline: float,
 ) -> tuple[str, bytes]:
     sha256, sha512 = _new_hashes()
     total = 0
     while True:
         _check_deadline(deadline)
-        chunk = _read_handle(source, COPY_CHUNK_BYTES)
+        chunk = read_handle(source, COPY_CHUNK_BYTES)
         if not chunk:
             break
         total += len(chunk)
         if total > MAX_COMPRESSED_BYTES:
             raise PyrightInstallError("pyright_archive_compressed_limit")
-        _write_handle(destination.handle, chunk, deadline)
+        write_handle(destination.handle, chunk, deadline)
         sha256.update(chunk)
         sha512.update(chunk)
     _check_deadline(deadline)
@@ -2461,10 +2472,10 @@ def _posix_source_identity(info: os.stat_result) -> tuple[int, int, int, int, in
     )
 
 
-def _artifact_state(handle: _Handle) -> tuple[object, ...]:
+def _artifact_state(handle: Handle) -> tuple[object, ...]:
     if os.name == "posix":
         return _posix_source_identity(os.fstat(handle.value))
-    return (*_identity(handle), _file_size(handle))
+    return (*path_identity(handle), file_size(handle))
 
 
 def _require_plain_artifact(artifact: Path) -> os.stat_result:
@@ -2482,18 +2493,18 @@ def _artifact_posix_identity(before: os.stat_result) -> object | None:
     return _posix_source_identity(before)
 
 
-def _open_artifact_source(artifact: Path, parent: _Handle) -> _Handle:
+def _open_artifact_source(artifact: Path, parent: Handle) -> Handle:
     if os.name == "nt":
-        return _Handle(
+        return Handle(
             _windows_workspace.open_exclusive_readonly_source_file(artifact), False
         )
     return _open_child_file(parent, artifact.name)
 
 
 def _require_unchanged_source(
-    source: _Handle, before: os.stat_result, before_posix_identity: object | None
+    source: Handle, before: os.stat_result, before_posix_identity: object | None
 ) -> None:
-    if _file_size(source) != before.st_size:
+    if file_size(source) != before.st_size:
         raise PermissionError("artifact changed before open")
     if before_posix_identity is not None and _posix_source_identity(os.fstat(source.value)) != before_posix_identity:
         raise PermissionError("artifact changed before open")
@@ -2521,7 +2532,7 @@ def _artifact_is_stable(
 
 def _require_artifact_unchanged_after(
     artifact: Path,
-    parent: _Handle,
+    parent: Handle,
     before: os.stat_result,
     before_posix_identity: object | None,
     source_identity: tuple[object, ...],
@@ -2535,18 +2546,18 @@ def _require_artifact_unchanged_after(
 
 def _copy_stable_artifact(
     artifact: Path,
-    parent: _Handle,
-    destination: _OwnedFile,
+    parent: Handle,
+    destination: OwnedFile,
     deadline: float,
     before: os.stat_result,
     before_posix_identity: object | None,
 ) -> tuple[str, bytes]:
     source = _open_artifact_source(artifact, parent)
-    source_identity = _identity(source)
+    source_identity = path_identity(source)
     try:
         _require_unchanged_source(source, before, before_posix_identity)
-        result = _copy_to_owned_file(source, destination, deadline)
-        if _identity(source) != source_identity:
+        result = copy_to_owned_file(source, destination, deadline)
+        if path_identity(source) != source_identity:
             raise PermissionError("artifact changed during copy")
     finally:
         source.close()
@@ -2557,13 +2568,13 @@ def _copy_stable_artifact(
 
 
 def _copy_verified_artifact(
-    artifact: Path, destination: _OwnedFile, deadline: float
+    artifact: Path, destination: OwnedFile, deadline: float
 ) -> tuple[str, bytes]:
     _validate_existing_directory_chain(artifact.parent, deadline)
-    _require_local_filesystem(artifact, deadline)
+    require_local_filesystem(artifact, deadline)
     before = _require_plain_artifact(artifact)
     before_posix_identity = _artifact_posix_identity(before)
-    parent = _open_absolute_directory(artifact.parent)
+    parent = open_absolute_directory(artifact.parent)
     try:
         return _copy_stable_artifact(
             artifact, parent, destination, deadline, before, before_posix_identity
@@ -2572,9 +2583,9 @@ def _copy_verified_artifact(
         parent.close()
 
 
-def _copy_local_artifact(
+def copy_local_artifact(
     artifact: Path,
-    destination: _OwnedFile,
+    destination: OwnedFile,
     deadline: float,
 ) -> tuple[str, bytes]:
     _check_deadline(deadline)
@@ -2694,7 +2705,7 @@ def _response_reader(response: object) -> object:
 
 def _next_download_chunk(response: object, read1: object, deadline: float) -> bytes:
     # A reset mid-stream stays an OSError here, so the retry around the whole
-    # download can tell it from a refusal; `_download_artifact` names it after the
+    # download can tell it from a refusal; `download_artifact` names it after the
     # last attempt (audit 2026-09-27 C-10).
     _set_response_read_timeout(response, deadline)
     chunk = read1(COPY_CHUNK_BYTES)
@@ -2705,7 +2716,7 @@ def _next_download_chunk(response: object, read1: object, deadline: float) -> by
 
 def _stream_download(
     response: object,
-    destination: _OwnedFile,
+    destination: OwnedFile,
     deadline: float,
     content_length: int | None,
     sha256: object,
@@ -2722,14 +2733,14 @@ def _stream_download(
         total += len(chunk)
         if total > MAX_COMPRESSED_BYTES:
             raise PyrightInstallError("pyright_archive_compressed_limit")
-        _write_handle(destination.handle, chunk, deadline)
+        write_handle(destination.handle, chunk, deadline)
         sha256.update(chunk)
         sha512.update(chunk)
     return total
 
 
 def _downloaded_bytes(
-    response_context: object, destination: _OwnedFile, deadline: float
+    response_context: object, destination: OwnedFile, deadline: float
 ) -> tuple[str, bytes]:
     with response_context as response:
         _require_pinned_response(response)
@@ -2745,18 +2756,18 @@ def _downloaded_bytes(
     return sha256.hexdigest(), sha512.digest()
 
 
-def _download_attempt(destination: _OwnedFile, deadline: float) -> tuple[str, bytes]:
+def _download_attempt(destination: OwnedFile, deadline: float) -> tuple[str, bytes]:
     """One whole download from the start of the file: a retry overwrites what a reset left.
 
     The pinned artifact is the same bytes every time, so a complete attempt writes at
     least as far as any partial one did, and the digests check what was kept.
     """
-    _seek_start(destination.handle)
+    seek_start(destination.handle)
     return _downloaded_bytes(_opened_download(deadline), destination, deadline)
 
 
-def _download_artifact(
-    destination: _OwnedFile,
+def download_artifact(
+    destination: OwnedFile,
     deadline: float,
 ) -> tuple[str, bytes]:
     """The pinned package, tried again after a transient network error.
@@ -2776,15 +2787,15 @@ def _download_artifact(
         raise PyrightInstallError("pyright_download_failed") from exc
 
 
-def _verify_artifact_digests(package_sha256: str, package_sha512: bytes) -> None:
-    expected_integrity = _profile.PYRIGHT_PACKAGE_INTEGRITY
+def verify_artifact_digests(package_sha256: str, package_sha512: bytes) -> None:
+    expected_integrity = pyright_configuration.PYRIGHT_PACKAGE_INTEGRITY
     try:
         algorithm, encoded = expected_integrity.split("-", 1)
         expected_sha512 = base64.b64decode(encoded, validate=True)
     except (ValueError, TypeError) as exc:
         raise PyrightInstallError("pyright_package_integrity_mismatch") from exc
     sha256_matches = hmac.compare_digest(
-        package_sha256, _profile.PYRIGHT_PACKAGE_SHA256
+        package_sha256, pyright_configuration.PYRIGHT_PACKAGE_SHA256
     )
     sha512_matches = algorithm == "sha512" and hmac.compare_digest(
         package_sha512, expected_sha512
@@ -2971,7 +2982,7 @@ def _member_chunk(source: io.BufferedReader, remaining: int) -> bytes:
 
 def _stream_member(
     source: io.BufferedReader,
-    destination: _Handle,
+    destination: Handle,
     size: int,
     deadline: float,
     digest: object,
@@ -2981,7 +2992,7 @@ def _stream_member(
     while remaining:
         _check_deadline(deadline)
         chunk = _member_chunk(source, remaining)
-        _write_handle(destination, chunk, deadline)
+        write_handle(destination, chunk, deadline)
         digest.update(chunk)
         if captured is not None:
             captured.extend(chunk)
@@ -2997,7 +3008,7 @@ def _captured_bytes(captured: bytearray | None) -> bytes | None:
 
 
 def _copy_member_data(
-    stage: _Stage,
+    stage: Stage,
     parts: tuple[str, ...],
     source: io.BufferedReader,
     size: int,
@@ -3018,7 +3029,7 @@ def _copy_member_data(
 
 
 def _require_artifact_state(
-    artifact: _OwnedFile, accepted_state: tuple[object, ...]
+    artifact: OwnedFile, accepted_state: tuple[object, ...]
 ) -> None:
     if _artifact_state(artifact.handle) != accepted_state:
         raise PyrightInstallError("pyright_artifact_changed")
@@ -3085,7 +3096,7 @@ def _member_findings(
 
 
 def _extract_file_member(
-    stage: _Stage,
+    stage: Stage,
     archive: tarfile.TarFile,
     member: tarfile.TarInfo,
     parts: tuple[str, ...],
@@ -3108,7 +3119,7 @@ def _extract_file_member(
 
 
 def _extract_one_member(
-    stage: _Stage,
+    stage: Stage,
     archive: tarfile.TarFile,
     member: tarfile.TarInfo,
     names: _ArchiveNames,
@@ -3150,7 +3161,7 @@ def _require_no_trailing_bytes(bounded: io.BufferedReader, deadline: float) -> N
 
 
 def _read_archive_members(
-    stage: _Stage, bounded: io.BufferedReader, deadline: float
+    stage: Stage, bounded: io.BufferedReader, deadline: float
 ) -> tuple[bytes | None, str | None, _ArchiveNames]:
     names = _ArchiveNames()
     state = {"members": 0, "aggregate": 0, "offset": 0, "metadata": 0}
@@ -3171,9 +3182,9 @@ def _read_archive_members(
 
 
 def _extract_members(
-    stage: _Stage, artifact: _OwnedFile, deadline: float
+    stage: Stage, artifact: OwnedFile, deadline: float
 ) -> tuple[bytes | None, str | None, _ArchiveNames]:
-    _seek_start(artifact.handle)
+    seek_start(artifact.handle)
     raw = io.BufferedReader(
         _HandleReader(artifact.handle), buffer_size=COPY_CHUNK_BYTES
     )
@@ -3219,14 +3230,14 @@ def _digests_match(
 
 
 def _require_artifact_digests(
-    artifact: _OwnedFile,
+    artifact: OwnedFile,
     deadline: float,
     accepted_state: tuple[object, ...],
     accepted_sha256: str,
     accepted_sha512: bytes,
 ) -> None:
     """The bytes that were extracted must still be the bytes that were accepted."""
-    _seek_start(artifact.handle)
+    seek_start(artifact.handle)
     final_sha256, final_sha512 = _hash_handle(artifact.handle, deadline)
     if not _digests_match(
         final_sha256, final_sha512, accepted_sha256, accepted_sha512
@@ -3236,15 +3247,15 @@ def _require_artifact_digests(
 
 
 def _extract_archive(
-    parent: _Handle,
-    artifact: _OwnedFile,
+    parent: Handle,
+    artifact: OwnedFile,
     deadline: float,
     accepted_state: tuple[object, ...],
     accepted_sha256: str,
     accepted_sha512: bytes,
-) -> tuple[_Stage, bytes, str, str]:
+) -> tuple[Stage, bytes, str, str]:
     _check_deadline(deadline)
-    stage = _new_stage(parent)
+    stage = new_stage(parent)
     try:
         _require_artifact_state(artifact, accepted_state)
         package_json, server_sha256, names = _extract_members(
@@ -3296,7 +3307,7 @@ def _noreplace_rename() -> tuple[object, int]:
     raise PyrightInstallError("pyright_publish_unsupported")
 
 
-def _posix_publish_noreplace(stage: _Stage, parent: _Handle, name: str) -> int:
+def _posix_publish_noreplace(stage: Stage, parent: Handle, name: str) -> int:
     old_name = os.fsencode(stage.name)
     new_name = os.fsencode(name)
     function, flag = _noreplace_rename()
@@ -3309,7 +3320,7 @@ def _publish_error(error: int) -> OSError:
     return OSError(error, "could not publish Pyright installation")
 
 
-def _atomic_publish_noreplace(stage: _Stage, parent: _Handle, name: str) -> None:
+def atomic_publish_noreplace(stage: Stage, parent: Handle, name: str) -> None:
     if os.name == "nt":
         _windows_workspace.publish_file(stage.root.value, parent.value, name)
         stage.published = True
@@ -3321,15 +3332,15 @@ def _atomic_publish_noreplace(stage: _Stage, parent: _Handle, name: str) -> None
 
 
 def _fetched_artifact(
-    artifact: Path | None, temporary: _OwnedFile, deadline: float
+    artifact: Path | None, temporary: OwnedFile, deadline: float
 ) -> tuple[str, bytes]:
     if artifact is None:
-        return _download_artifact(temporary, deadline)
-    return _copy_local_artifact(artifact, temporary, deadline)
+        return download_artifact(temporary, deadline)
+    return copy_local_artifact(artifact, temporary, deadline)
 
 
 def _staged_manifest(
-    stage: _Stage, server_sha256: str, executed_tree_sha256: str, deadline: float
+    stage: Stage, server_sha256: str, executed_tree_sha256: str, deadline: float
 ) -> bytes:
     manifest = _profile.build_pyright_install_manifest(
         server_sha256=server_sha256, executed_tree_sha256=executed_tree_sha256
@@ -3341,7 +3352,7 @@ def _staged_manifest(
 
 
 def _published_by_another(
-    parent: _Handle, root: Path, deadline: float
+    parent: Handle, root: Path, deadline: float
 ) -> InstalledPyright:
     existing = _existing_result(parent, root, deadline)
     if existing is None:
@@ -3350,11 +3361,11 @@ def _published_by_another(
 
 
 def _publish_stage(
-    stage: _Stage, parent: _Handle, root: Path, deadline: float
+    stage: Stage, parent: Handle, root: Path, deadline: float
 ) -> InstalledPyright | None:
     """The install someone else published first, or None when this one won."""
     try:
-        _atomic_publish_noreplace(stage, parent, _profile.PYRIGHT_VERSION)
+        atomic_publish_noreplace(stage, parent, _profile.PYRIGHT_VERSION)
     except FileExistsError:
         return _published_by_another(parent, root, deadline)
     except (PyrightInstallError, TimeoutError):
@@ -3363,7 +3374,7 @@ def _publish_stage(
         raise PyrightInstallError("pyright_publish_failed") from exc
     stage.published = True
     _check_deadline(deadline)
-    _checked_fsync_directory(parent)
+    checked_fsync_directory(parent)
     return None
 
 
@@ -3373,14 +3384,14 @@ def _installed_result(
     return InstalledPyright(
         root=root,
         version=_profile.PYRIGHT_VERSION,
-        package_sha256=_profile.PYRIGHT_PACKAGE_SHA256,
-        package_integrity=_profile.PYRIGHT_PACKAGE_INTEGRITY,
+        package_sha256=pyright_configuration.PYRIGHT_PACKAGE_SHA256,
+        package_integrity=pyright_configuration.PYRIGHT_PACKAGE_INTEGRITY,
         server_sha256=server_sha256,
         manifest_sha256=hashlib.sha256(manifest_bytes).hexdigest(),
     )
 
 
-def _sweep_abandoned_scratch(parent: _Handle) -> None:
+def _sweep_abandoned_scratch(parent: Handle) -> None:
     """Remove scratch no installer can still own; the lock is held here.
 
     `.install-pyright-*` is removed on a handled failure and left behind by a
@@ -3389,12 +3400,12 @@ def _sweep_abandoned_scratch(parent: _Handle) -> None:
     Pyright, so whatever remains is abandoned. Research:
     `docs/research/2026-09-17-inst-the-second-installer-gets-the-first-ones-guarantees.md`.
     """
-    for entry in _existing_directory_entries(parent):
+    for entry in existing_directory_entries(parent):
         _remove_abandoned_scratch(parent, entry)
 
 
-def _remove_abandoned_scratch(parent: _Handle, entry: _ExistingEntry) -> None:
-    if entry.name == _LOCK_NAME or not entry.name.startswith(_SCRATCH_PREFIX):
+def _remove_abandoned_scratch(parent: Handle, entry: _ExistingEntry) -> None:
+    if entry.name == LOCK_NAME or not entry.name.startswith(_SCRATCH_PREFIX):
         return
     if os.name == "nt":
         _delete_windows_entry(parent, entry)
@@ -3403,21 +3414,21 @@ def _remove_abandoned_scratch(parent: _Handle, entry: _ExistingEntry) -> None:
 
 
 def _install_under_lock(
-    parent: _Handle,
+    parent: Handle,
     root: Path,
     artifact: Path | None,
     deadline: float,
 ) -> InstalledPyright:
     _check_deadline(deadline)
     _sweep_abandoned_scratch(parent)
-    temporary = _new_owned_file(parent, "download")
-    stage: _Stage | None = None
+    temporary = new_owned_file(parent, "download")
+    stage: Stage | None = None
     try:
         package_sha256, package_sha512 = _fetched_artifact(
             artifact, temporary, deadline
         )
         accepted_state = _artifact_state(temporary.handle)
-        _verify_artifact_digests(package_sha256, package_sha512)
+        verify_artifact_digests(package_sha256, package_sha512)
         _check_deadline(deadline)
         stage, package_json, server_sha256, executed_tree_sha256 = _extract_archive(
             parent,
@@ -3449,9 +3460,9 @@ def _require_install_arguments(state_root: object, artifact: object) -> None:
         raise TypeError("artifact must be a Path or None")
 
 
-def _opened_runtime_parent(state_root: Path, deadline: float) -> _Handle:
+def _opened_runtime_parent(state_root: Path, deadline: float) -> Handle:
     try:
-        return _ensure_runtime_parent(state_root, deadline)
+        return ensure_runtime_parent(state_root, deadline)
     except TimeoutError:
         raise
     except PyrightInstallError:
@@ -3460,18 +3471,18 @@ def _opened_runtime_parent(state_root: Path, deadline: float) -> _Handle:
         raise PyrightInstallError("pyright_state_root_unsafe") from exc
 
 
-def _awaited_lock(parent: _Handle, deadline: float) -> _OwnedLock:
+def _awaited_lock(parent: Handle, deadline: float) -> _OwnedLock:
     """Wait for the install lock, polling until the caller's deadline expires."""
     while True:
         _check_deadline(deadline)
-        lock = _try_create_lock(parent, deadline)
+        lock = try_create_lock(parent, deadline)
         if lock is not None:
             return lock
         time.sleep(min(LOCK_POLL_SECONDS, max(0.0, deadline - time.monotonic())))
 
 
 def _install_holding_lock(
-    parent: _Handle, root: Path, artifact: Path | None, deadline: float
+    parent: Handle, root: Path, artifact: Path | None, deadline: float
 ) -> InstalledPyright:
     """Someone may have published while this call waited for the lock."""
     existing = _existing_result(parent, root, deadline)
@@ -3486,7 +3497,7 @@ def _release_lock(lock: _OwnedLock | None) -> None:
 
 
 def _install_after_waiting(
-    parent: _Handle, root: Path, artifact: Path | None, deadline: float
+    parent: Handle, root: Path, artifact: Path | None, deadline: float
 ) -> InstalledPyright:
     lock: _OwnedLock | None = None
     try:
@@ -3501,7 +3512,7 @@ def _install_after_waiting(
 
 
 def _install_with_parent(
-    parent: _Handle, root: Path, artifact: Path | None, deadline: float
+    parent: Handle, root: Path, artifact: Path | None, deadline: float
 ) -> InstalledPyright:
     try:
         existing = _existing_result(parent, root, deadline)
@@ -3524,7 +3535,7 @@ def install_pyright(
     _require_install_arguments(state_root, artifact)
     effective_deadline = _validated_deadline(deadline)
     _check_deadline(effective_deadline)
-    _prepare_state_root(state_root, effective_deadline)
+    prepare_state_root(state_root, effective_deadline)
     root = managed_pyright_root(state_root)
     parent = _opened_runtime_parent(state_root, effective_deadline)
     try:
@@ -3556,7 +3567,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 MAX_CAUSE_DEPTH = 5
 
 
-def _print_cause_chain(error: BaseException) -> None:
+def print_cause_chain(error: BaseException) -> None:
     """Print what actually failed, underneath the stable machine-readable code.
 
     `main` printed only `str(exc)`, so the pyright CI jobs on all three
@@ -3589,7 +3600,7 @@ def main(argv: list[str] | None = None) -> int:
         result = install_pyright(**options)
     except (OSError, PyrightInstallError, TimeoutError, ValueError) as exc:
         print(str(exc), file=sys.stderr)
-        _print_cause_chain(exc)
+        print_cause_chain(exc)
         return 1
     print(
         canonical_json_bytes(

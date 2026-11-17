@@ -10,7 +10,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 
 from build_tiers import (  # noqa: E402
-    _deterministic_l1,
+    deterministic_l1,
     get_l0,
     get_l2,
     get_tier,
@@ -53,10 +53,9 @@ class TestL0:
     """Test L0 (one-sentence summary) extraction."""
 
     def test_l0_from_summary_line(self, tmp_path, monkeypatch):
-        import build_tiers
 
-        notes = tmp_path / "notes"
-        notes.mkdir()
+        notes = tmp_path / "knowledge" / "notes"
+        notes.mkdir(parents=True)
         page = notes / "test.md"
         page.write_text(
             "---\ntype: concept\n---\n\n"
@@ -65,27 +64,25 @@ class TestL0:
             "Body text.\n",
             encoding="utf-8",
         )
-        monkeypatch.setattr(build_tiers, "KNOWLEDGE_DIR", notes)
+        monkeypatch.setenv("LLM_WIKI_ROOT", str(tmp_path))
 
         result = get_l0("test")
         assert "This is a test about auth." in result
 
     def test_l0_fallback_to_first_sentence(self, tmp_path, monkeypatch):
-        import build_tiers
 
-        notes = tmp_path / "notes"
-        notes.mkdir()
+        notes = tmp_path / "knowledge" / "notes"
+        notes.mkdir(parents=True)
         page = notes / "bare.md"
         page.write_text("# Bare Page\n\nFirst sentence here. Second sentence.\n", encoding="utf-8")
-        monkeypatch.setattr(build_tiers, "KNOWLEDGE_DIR", notes)
+        monkeypatch.setenv("LLM_WIKI_ROOT", str(tmp_path))
 
         result = get_l0("bare")
         assert "First sentence" in result
 
     def test_l0_nonexistent_page(self, tmp_path, monkeypatch):
-        import build_tiers
 
-        monkeypatch.setattr(build_tiers, "KNOWLEDGE_DIR", tmp_path / "notes")
+        monkeypatch.setenv("LLM_WIKI_ROOT", str(tmp_path))
         result = get_l0("nonexistent")
         assert result == ""
 
@@ -94,21 +91,18 @@ class TestL2:
     """Test L2 (full page content)."""
 
     def test_l2_reads_full_content(self, tmp_path, monkeypatch):
-        import build_tiers
 
-        notes = tmp_path / "notes"
-        notes.mkdir()
+        notes = tmp_path / "knowledge" / "notes"
+        notes.mkdir(parents=True)
         page = notes / "full.md"
         page.write_text("# Full Page\n\nAll content here.\n", encoding="utf-8")
-        monkeypatch.setattr(build_tiers, "KNOWLEDGE_DIR", notes)
+        monkeypatch.setenv("LLM_WIKI_ROOT", str(tmp_path))
 
         result = get_l2("full")
         assert "All content here." in result
 
     def test_l2_nonexistent(self, tmp_path, monkeypatch):
-        import build_tiers
 
-        monkeypatch.setattr(build_tiers, "KNOWLEDGE_DIR", tmp_path / "notes")
         assert get_l2("missing") == ""
 
 
@@ -125,7 +119,7 @@ class TestDeterministicL1:
             "## Details\n\n"
             "Detailed info.\n"
         )
-        result = _deterministic_l1("test", body, "Test page.")
+        result = deterministic_l1("test", body, "Test page.")
         assert "Test page." in result
         assert "Key Points" in result or "Point A" in result
 
@@ -136,12 +130,12 @@ class TestDeterministicL1:
             "## History (pre-reflection)\n\n"
             "Old stuff that shouldn't be in L1.\n"
         )
-        result = _deterministic_l1("test", body, "Summary.")
+        result = deterministic_l1("test", body, "Summary.")
         assert "Old stuff" not in result
 
     def test_truncates_long_content(self):
         body = "# Page\n\n" + "A" * 5000 + "\n"
-        result = _deterministic_l1("test", body, "Summary.")
+        result = deterministic_l1("test", body, "Summary.")
         assert len(result) < 3000  # Should be truncated
 
 
@@ -149,42 +143,39 @@ class TestGetTier:
     """Test the tier dispatcher."""
 
     def test_auto_returns_best_available(self, tmp_path, monkeypatch):
-        import build_tiers
 
-        notes = tmp_path / "notes"
-        notes.mkdir()
+        notes = tmp_path / "knowledge" / "notes"
+        notes.mkdir(parents=True)
         page = notes / "tier.md"
         page.write_text(
             "# Tier Test\n\nOne-sentence summary: Tier test.\n\nBody.\n",
             encoding="utf-8",
         )
-        monkeypatch.setattr(build_tiers, "KNOWLEDGE_DIR", notes)
-        monkeypatch.setattr(build_tiers, "TIERS_DIR", tmp_path / "tiers")
+        monkeypatch.setenv("LLM_WIKI_ROOT", str(tmp_path))
+        monkeypatch.setenv("LLM_WIKI_STATE_ROOT", str(tmp_path))
 
         result = get_tier("tier", level="auto")
         assert result["content"] is not None
         assert "l0" in result["available"]
 
     def test_l0_level(self, tmp_path, monkeypatch):
-        import build_tiers
 
-        notes = tmp_path / "notes"
-        notes.mkdir()
+        notes = tmp_path / "knowledge" / "notes"
+        notes.mkdir(parents=True)
         page = notes / "x.md"
         page.write_text("# X\n\nOne-sentence summary: Summary X.\n\nBody.\n", encoding="utf-8")
-        monkeypatch.setattr(build_tiers, "KNOWLEDGE_DIR", notes)
+        monkeypatch.setenv("LLM_WIKI_ROOT", str(tmp_path))
 
         result = get_tier("x", level="l0")
         assert "Summary X." in result["content"]
 
     def test_l2_level(self, tmp_path, monkeypatch):
-        import build_tiers
 
-        notes = tmp_path / "notes"
-        notes.mkdir()
+        notes = tmp_path / "knowledge" / "notes"
+        notes.mkdir(parents=True)
         page = notes / "y.md"
         page.write_text("# Y\n\nFull content.\n", encoding="utf-8")
-        monkeypatch.setattr(build_tiers, "KNOWLEDGE_DIR", notes)
+        monkeypatch.setenv("LLM_WIKI_ROOT", str(tmp_path))
 
         result = get_tier("y", level="l2")
         assert "Full content." in result["content"]
@@ -197,18 +188,18 @@ class TestBuildAllTiers:
         """Build L1 for all pages using deterministic mode."""
         import build_tiers
 
-        notes = tmp_path / "notes"
-        notes.mkdir()
+        notes = tmp_path / "knowledge" / "notes"
+        notes.mkdir(parents=True)
         (notes / "a.md").write_text("# A\n\nOne-sentence summary: Page A.\n\nBody A.\n", encoding="utf-8")
         (notes / "b.md").write_text("# B\n\nOne-sentence summary: Page B.\n\nBody B.\n", encoding="utf-8")
 
-        monkeypatch.setattr(build_tiers, "KNOWLEDGE_DIR", notes)
-        monkeypatch.setattr(build_tiers, "TIERS_DIR", tmp_path / "tiers")
+        monkeypatch.setenv("LLM_WIKI_ROOT", str(tmp_path))
+        monkeypatch.setenv("LLM_WIKI_STATE_ROOT", str(tmp_path))
 
         stats = build_tiers.build_all_tiers(use_llm=False, verbose=False)
         assert stats["generated"] == 2
         # Task 15: cache files are hash-suffixed by source SHA-256 + extractor.
-        l1_files = sorted((tmp_path / "tiers").glob("*.l1.md"))
+        l1_files = sorted((tmp_path / "cache" / "tiers").glob("*.l1.md"))
         assert len(l1_files) == 2
         assert all("." in path.stem for path in l1_files)
         assert all(not path.name.endswith("a.l1.md") for path in l1_files)
@@ -217,13 +208,13 @@ class TestBuildAllTiers:
         """The name carries the page's hash, so an edit used to leave a file for ever."""
         import build_tiers
 
-        notes = tmp_path / "notes"
-        notes.mkdir()
+        notes = tmp_path / "knowledge" / "notes"
+        notes.mkdir(parents=True)
         page = notes / "a.md"
         page.write_text("# A\n\nOne-sentence summary: Page A.\n", encoding="utf-8")
-        tiers = tmp_path / "tiers"
-        monkeypatch.setattr(build_tiers, "KNOWLEDGE_DIR", notes)
-        monkeypatch.setattr(build_tiers, "TIERS_DIR", tiers)
+        tiers = tmp_path / "cache" / "tiers"
+        monkeypatch.setenv("LLM_WIKI_ROOT", str(tmp_path))
+        monkeypatch.setenv("LLM_WIKI_STATE_ROOT", str(tmp_path))
 
         build_tiers.build_all_tiers(use_llm=False, verbose=False)
         first = sorted(path.name for path in tiers.glob("*.l1.md"))
@@ -238,15 +229,15 @@ class TestBuildAllTiers:
         """Pruning by slug alone would delete the sibling's current file."""
         import build_tiers
 
-        notes = tmp_path / "notes"
+        notes = tmp_path / "knowledge" / "notes"
         for directory in ("concepts", "patterns"):
             (notes / directory).mkdir(parents=True)
             (notes / directory / "shared.md").write_text(
                 f"# Shared\n\nOne-sentence summary: {directory}.\n", encoding="utf-8"
             )
-        tiers = tmp_path / "tiers"
-        monkeypatch.setattr(build_tiers, "KNOWLEDGE_DIR", notes)
-        monkeypatch.setattr(build_tiers, "TIERS_DIR", tiers)
+        tiers = tmp_path / "cache" / "tiers"
+        monkeypatch.setenv("LLM_WIKI_ROOT", str(tmp_path))
+        monkeypatch.setenv("LLM_WIKI_STATE_ROOT", str(tmp_path))
 
         build_tiers.build_all_tiers(use_llm=False, verbose=False)
 
@@ -257,12 +248,12 @@ class TestBuildAllTiers:
     ):
         import build_tiers
 
-        notes = tmp_path / "notes"
-        notes.mkdir()
+        notes = tmp_path / "knowledge" / "notes"
+        notes.mkdir(parents=True)
         (notes / "a.md").write_text("# A\n\nBody.\n", encoding="utf-8")
-        tiers = tmp_path / "tiers"
-        monkeypatch.setattr(build_tiers, "KNOWLEDGE_DIR", notes)
-        monkeypatch.setattr(build_tiers, "TIERS_DIR", tiers)
+        tiers = tmp_path / "cache" / "tiers"
+        monkeypatch.setenv("LLM_WIKI_ROOT", str(tmp_path))
+        monkeypatch.setenv("LLM_WIKI_STATE_ROOT", str(tmp_path))
 
         assert build_tiers.build_all_tiers(verbose=False)["generated"] == 1
         with pytest.raises(ValueError, match="descriptor.*revision"):
@@ -272,14 +263,14 @@ class TestBuildAllTiers:
     def test_duplicate_stems_use_captured_relative_paths(self, tmp_path, monkeypatch):
         import build_tiers
 
-        notes = tmp_path / "notes"
+        notes = tmp_path / "knowledge" / "notes"
         (notes / "one").mkdir(parents=True)
         (notes / "two").mkdir(parents=True)
         (notes / "one/shared.md").write_text("# One\n\nFirst.\n", encoding="utf-8")
         (notes / "two/shared.md").write_text("# Two\n\nSecond.\n", encoding="utf-8")
-        tiers = tmp_path / "tiers"
-        monkeypatch.setattr(build_tiers, "KNOWLEDGE_DIR", notes)
-        monkeypatch.setattr(build_tiers, "TIERS_DIR", tiers)
+        tiers = tmp_path / "cache" / "tiers"
+        monkeypatch.setenv("LLM_WIKI_ROOT", str(tmp_path))
+        monkeypatch.setenv("LLM_WIKI_STATE_ROOT", str(tmp_path))
 
         stats = build_tiers.build_all_tiers(use_llm=False, verbose=False)
 
@@ -295,7 +286,7 @@ class TestBuildAllTiers:
     def test_legacy_tier_cache_rejects_escaping_and_windows_names(self, tmp_path, monkeypatch):
         import build_tiers
 
-        monkeypatch.setattr(build_tiers, "TIERS_DIR", tmp_path)
+        monkeypatch.setenv("LLM_WIKI_STATE_ROOT", str(tmp_path))
         for slug, logical_path in (
             ("../escape", "escape.md"),
             ("con", "con.md"),
@@ -314,7 +305,7 @@ class TestBuildAllTiers:
     ):
         import build_tiers
 
-        monkeypatch.setattr(build_tiers, "TIERS_DIR", tmp_path)
+        monkeypatch.setenv("LLM_WIKI_STATE_ROOT", str(tmp_path))
         descriptor = _model_descriptor(model="model-a")
         deterministic = build_tiers.tier_legacy_cache_path(
             "page", source_sha256="a" * 64, logical_path="page.md"

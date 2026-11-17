@@ -130,3 +130,79 @@ and every session start (`integration_adapter._run_session_start_maintenance` â†
   contract of Reliability v3.
 - Skip by elapsed time or by a minimum growth since the last compile: an unfounded
   threshold (law 9).
+
+## 2026-10-05: the open-day test uses real receipt authority
+
+The session-start regression fixture still treated `compiled_daily_hashes` as
+proof of a processed closed day. That map is now diagnostic; the existing
+context-bound receipt selector is authoritative. The original fixture therefore
+reproduced `(True, True)` instead of its required `(False, True)`. Returning trust
+to the mirror would conceal unprocessed or changed-context source material.
+
+The fixture now uses real Reliability v3 adoption and the canonical active
+Markdown coordinator. It publishes a validated empty compile plan for the
+heading-only closed day, then reads its strict committed v4 receipt and checks
+that it binds the operation that actually committed. The original `(False, True)`
+assertion remains intact. A separate adopted-vault control gives the closed day a
+matching diagnostic mirror and an empty receipt directory; it must remain pending.
+This is a controlled receipt/trigger cycle with no model call, not a semantic
+compilation qualification for real user content.
+
+Only the test fixture and this research clarification change. No production
+format, path, schema, setting, limit or authority rule changes. Actual navigation
+and source inspection covered the trigger, receipt selector, receipt reader,
+apply function and adopted coordinator before edits. The original node failed;
+the corrected five related test modules passed 62 tests in 12.67 seconds. Lizard
+and AST checks accepted all six changed/new fixture callables, including the
+nested state mutator; the combined diagnostic maximum was CCN 5, one if and
+branch/loop depth two. Ruff passed. Installation remains a separate operation.
+
+
+## 2026-10-05: repeated parsing belongs to an immutable input
+
+Actual profiling of two adjacent pending native units showed four complete parses
+of their shared 15 MB journal. Those parses accounted for about 91 percent of the
+instrumented packing time. The verification of permanent heads and parts was a
+separate operation and must remain live.
+
+A byte-based packing measurement now owns a pure parsed index for each immutable
+original byte object it encounters. Strong references preserve object identity.
+Mutable input is parsed afresh, and a new measurement starts a new cache. Every
+selected frame still validates its permanent source, linked head, physical bytes
+and coverage, including during final batch construction. No filesystem identity
+becomes an authority for cached external verification.
+
+Context selection also accumulates the exact serialized byte contribution and
+separator cost of each accepted context group. It measures the daily projection
+once. Non-additive tokenizer measurements retain their complete measurement path.
+The existing source, prompt, receipt, citation and native atomic-unit contracts
+remain unchanged. There is no new setting, schema, directory or numerical limit.
+
+The original regressions failed on repeated parsing and repeated daily measurement.
+Controls retain rejection of changed original bytes, changed permanent heads,
+forged frames and mutable cached input. The matched real two-unit experiment
+reduced full parses from four to one; the prompt hashes, measured sizes and all
+four permanent-proof checks stayed identical. Instrumented time fell from about
+0.346 s to 0.106 s; this is a two-unit result, not a whole-workload speed ratio.
+
+A subsequent read-only full qualification captured approximately 55 MB of actual
+inputs as stable immutable per-file snapshots. It completed in 78.89 s, including
+8.34 s for capture and 56.29 s for actual batch construction, with a peak RSS of
+273684 KiB. The comparison of context selection shared the exact frozen objects
+and covered all 38 selected days: chosen contexts matched. The open day changed
+between initial inventory and capture; this is not a globally quiescent snapshot
+or publication proof. Existing corpus admission was used only in the diagnostic
+process; the production compile admission was unchanged.
+
+There were 3268 planned batches, no model requests and no semantic compilation
+qualification. Previous whole-workload timings used evolving input, so they do
+not establish an exact paired speedup. Automatic same-day consolidation, context
+capacity, semantic quality and complete maintenance remain separate work.
+
+Research consulted on 2026-10-05: Python's [functools documentation](https://docs.python.org/3.10/library/functools.html)
+and [immutable bytes documentation](https://docs.python.org/3.10/library/stdtypes.html#bytes-objects),
+[SQLite snapshot and isolation guarantees](https://www.sqlite.org/isolation.html),
+and [Git's explanation of racy filesystem metadata](https://git-scm.com/docs/racy-git).
+The chosen scope reuses only pure immutable parsing. A persistent filesystem cache
+would add invalidation and lifetime concerns; external prompt caching would not
+remove this local work. Neither alternative justifies weakening source verification.

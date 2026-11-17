@@ -18,15 +18,7 @@ if str(SCRIPTS) not in sys.path:
 
 import memory_state  # noqa: E402
 
-
-@pytest.fixture
-def state_dir(tmp_path, monkeypatch) -> Path:
-    directory = tmp_path / "run"
-    monkeypatch.setattr(memory_state, "STATE_DIR", directory)
-    monkeypatch.setattr(memory_state, "STATE_FILE", directory / "state.json")
-    monkeypatch.setattr(memory_state, "LOCK_FILE", directory / "state.json.lock")
-    monkeypatch.setattr(memory_state, "REPORTS_DIR", tmp_path / "logs")
-    return directory
+from tests.a_corrupt_state_is_not_replaced_by_an_empty_one_helpers import state_dir  # noqa: E402, F401
 
 
 def _mark(key: str):
@@ -36,22 +28,22 @@ def _mark(key: str):
     return mutate
 
 
-def test_a_corrupt_file_is_recovered_from_its_previous_version(state_dir):
+def test_a_corrupt_file_is_recovered_from_its_previous_version(state_dir):  # noqa: F811
     memory_state.update_state(_mark("consolidated"))
     memory_state.update_state(_mark("compiled"))
-    memory_state.STATE_FILE.write_text("{ torn", encoding="utf-8")
+    memory_state.state_file().write_text("{ torn", encoding="utf-8")
 
     memory_state.update_state(_mark("captured"))
-    state = json.loads(memory_state.STATE_FILE.read_text(encoding="utf-8"))
+    state = json.loads(memory_state.state_file().read_text(encoding="utf-8"))
 
     assert state == {"consolidated": True, "captured": True}
 
 
-def test_with_no_readable_version_nothing_is_written(state_dir):
+def test_with_no_readable_version_nothing_is_written(state_dir):  # noqa: F811
     state_dir.mkdir(parents=True)
-    memory_state.STATE_FILE.write_text("{ torn", encoding="utf-8")
+    memory_state.state_file().write_text("{ torn", encoding="utf-8")
 
     with pytest.raises(memory_state.StateCorrupt):
         memory_state.update_state(_mark("captured"))
 
-    assert memory_state.STATE_FILE.read_text(encoding="utf-8") == "{ torn"
+    assert memory_state.state_file().read_text(encoding="utf-8") == "{ torn"

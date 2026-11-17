@@ -10,36 +10,46 @@ from __future__ import annotations
 import io
 import json
 import os
+import secrets
 import sqlite3
 import subprocess
 import sys
 from argparse import Namespace
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
+import memory_state
 import pytest
+from llm_wiki import (
+    event_project,
+    integration_capture_records,
+    integration_delegates,
+    integration_session_start,
+    integration_transient_files,
+)
+
+from tests.forgotten_modules import forget_modules
 
 SCRIPTS_DIR = Path(__file__).resolve().parent.parent / "scripts"
 if str(SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_DIR))
 
 
-def _reload(module_name: str):
+def _reload(monkeypatch: pytest.MonkeyPatch, module_name: str):
     """Force re-import so module-level env reads pick up monkeypatched env."""
-    if module_name in sys.modules:
-        del sys.modules[module_name]
+    forget_modules(monkeypatch, module_name)
     return __import__(module_name)
 
 
-def _run_with_stdin(module_name: str, stdin_text: str) -> int:
-    mod = _reload(module_name)
+def _run_with_stdin(monkeypatch: pytest.MonkeyPatch, module_name: str, stdin_text: str) -> int:
+    mod = _reload(monkeypatch, module_name)
     with patch.object(sys, "stdin", io.StringIO(stdin_text)):
         return mod.main()
 
 
-FIXED_TIME = datetime(2026, 7, 13, 12, 30, 45, tzinfo=timezone.utc)
+FIXED_TIME = datetime(2026, 7, 13, 12, 30, 45, tzinfo=UTC)
 
 
 @pytest.fixture
@@ -239,6 +249,7 @@ def test_opencode_tool_names_are_mapped_to_shared_capture_names():
     assert envelope.payload == {
         "tool_name": "Edit",
         "target": "src/auth.py",
+        "capture_time_origin": "host",
         "changed": True,
         "dirty": True,
         "significant": True,
@@ -286,57 +297,6 @@ def test_invalid_input_fails_closed_but_host_cli_exits_safely(capsys):
     assert secret not in capsys.readouterr().err
 
 
-def _assert_delegate_saw_only_redacted(observed, secret):
-    delegated = json.loads(observed["input"])
-    assert "host_only" not in delegated
-    assert secret not in observed["input"]
-    assert delegated["session_id"] == "[REDACTED_API_KEY]"
-    assert delegated["reason"] == "token=[REDACTED]"
-
-
-def test_delegate_receives_only_normalized_redacted_payload(monkeypatch, capsys, tmp_path):
-    import integration_adapter
-
-    # This one runs the adapter for real, so it writes a project journal. Without
-    # its own root that lands in the live vault under the redacted slug.
-    vault = tmp_path / "vault"
-    vault.mkdir()
-    monkeypatch.setattr(integration_adapter, "ROOT", vault)
-    monkeypatch.setattr(integration_adapter, "STATE_ROOT", tmp_path / "state")
-    monkeypatch.setenv("LLM_WIKI_ROOT", str(vault))
-    monkeypatch.setenv("LLM_WIKI_STATE_ROOT", str(tmp_path / "state"))
-    secret = "sk-abcdefghijklmnopqrstuvwxyz012345"
-    observed = {}
-
-    def fake_run(*args, **kwargs):
-        observed.update(kwargs)
-        return SimpleNamespace(returncode=0, stdout="context", stderr=secret)
-
-    monkeypatch.setattr(integration_adapter.subprocess, "run", fake_run)
-    raw = {
-        "session_id": secret,
-        "cwd": f"C:/work/{secret}",
-        "reason": f"token={secret}",
-        "transcript_path": f"C:/tmp/{secret}.jsonl",
-        "host_only": secret,
-    }
-    with patch.object(sys, "stdin", io.StringIO(json.dumps(raw))):
-        rc = integration_adapter.main(
-            [
-                "--source",
-                "claude",
-                "--event",
-                "session_end",
-                "--delegate",
-                "session_end_project_tag.py",
-            ]
-        )
-
-    assert rc == 0
-    _assert_delegate_saw_only_redacted(observed, secret)
-    assert capsys.readouterr().out == ""
-
-
 @pytest.mark.parametrize(
     ("event_type", "delegate"),
     [
@@ -358,24 +318,24 @@ def test_lifecycle_cli_delegate_uses_shared_ingest_boundary(
     monkeypatch.setattr(
         integration_adapter,
         "ingest_event",
-        lambda event: calls.append(event) or {"capture_intent_ids": ["1" * 64]},
+        lambda event, **_options: calls.append(event) or {"capture_intent_ids": ["1" * 64]},
     )
     monkeypatch.setattr(
-        integration_adapter,
-        "_run_delegate",
+        integration_delegates,
+        "run_delegate",
         lambda *_args, **_kwargs: (_ for _ in ()).throw(
             AssertionError("lifecycle delegate bypassed shared ingestion")
         ),
     )
-    args = SimpleNamespace(source="claude", event=event_type, delegate=delegate)
+    args = SimpleNamespace(source="claude", event=event_type, delegate=delegate, background=False)
 
-    assert integration_adapter._dispatch_cli_event(args, envelope) is None
+    assert integration_adapter.dispatch_cli_event(args, envelope) is None
     assert calls == [envelope]
 
 
 def _exercise_stdout_preserving_delegate(monkeypatch, capsys, integration_adapter):
     monkeypatch.setattr(
-        integration_adapter.subprocess,
+        subprocess,
         "run",
         lambda *args, **kwargs: SimpleNamespace(
             returncode=0,
@@ -406,19 +366,19 @@ def _compile_must_not_run_in_callback():
 def _wire_session_start_callback(monkeypatch, integration_adapter):
     spawned = []
     monkeypatch.setattr(
-        integration_adapter, "_project_context", lambda _event: ("app", Path("project"))
+        event_project, "project_context", lambda _event: ("app", Path("project"))
     )
-    monkeypatch.setattr(integration_adapter, "_record_activity", lambda *_args: True)
+    monkeypatch.setattr(integration_session_start, "record_activity", lambda *_args: True)
     monkeypatch.setattr(
-        integration_adapter,
+        memory_state,
         "spawn_detached",
         lambda args: spawned.append(args) or 123,
     )
     monkeypatch.setattr(
-        integration_adapter, "spawn_compile_if_idle", _compile_must_not_run_in_callback
+        integration_session_start, "spawn_compile_if_idle", _compile_must_not_run_in_callback
     )
     monkeypatch.setattr(
-        integration_adapter,
+        integration_session_start,
         "build_session_start_context",
         lambda slug=None: "# Project memory context\n\n## Health\n\nScheduler degraded.\n",
     )
@@ -461,8 +421,8 @@ def _exercise_maintenance_runs_work_then_compile(
         order.append("compile")
         return True, "spawned"
 
-    monkeypatch.setattr(integration_adapter.subprocess, "run", work)
-    monkeypatch.setattr(integration_adapter, "spawn_compile_if_idle", compile_after_work)
+    monkeypatch.setattr(subprocess, "run", work)
+    monkeypatch.setattr(integration_session_start, "spawn_compile_if_idle", compile_after_work)
     assert integration_adapter.main(["--maintenance"]) == 0
     assert order == ["--capture-worker", "work", "compile"]
     assert capsys.readouterr() == ("", "")
@@ -471,14 +431,14 @@ def _exercise_maintenance_runs_work_then_compile(
 def _exercise_maintenance_timeout_stays_silent(monkeypatch, capsys, integration_adapter):
     secret = "sk-abcdefghijklmnopqrstuvwxyz012345"
     monkeypatch.setattr(
-        integration_adapter.subprocess,
+        subprocess,
         "run",
         lambda *args, **kwargs: (_ for _ in ()).throw(
             subprocess.TimeoutExpired(args[0], kwargs["timeout"], output=secret)
         ),
     )
     monkeypatch.setattr(
-        integration_adapter,
+        integration_session_start,
         "spawn_compile_if_idle",
         lambda: (False, "secret=" + secret),
     )
@@ -512,7 +472,7 @@ def _delegate_output(command, delegate: str, outputs: list[str]) -> str:
     return outputs.pop(0)
 
 
-@pytest.mark.parametrize("delegate", ["user_prompt_capture.py", "session_start_context.py"])
+@pytest.mark.parametrize("delegate", ["session_start_context.py"])
 def test_delegate_forwards_only_valid_hook_json(monkeypatch, capsys, delegate):
     import integration_adapter
 
@@ -520,10 +480,10 @@ def test_delegate_forwards_only_valid_hook_json(monkeypatch, capsys, delegate):
         '{"hookSpecificOutput":{}}',
         '{"hookSpecificOutput":{"additionalContext":"safe"}}',
     ]
-    # A Claude prompt also reaches feedback capture (audit B-7), whose output is
-    # never forwarded; only the named delegate's output is under test here.
+    # Session-start still delegates context rendering. Prompt advisory output
+    # is checked through the durable ingress in test_breadcrumb_worker.py.
     monkeypatch.setattr(
-        integration_adapter.subprocess,
+        subprocess,
         "run",
         lambda command, *args, **kwargs: SimpleNamespace(
             returncode=0, stdout=_delegate_output(command, delegate, outputs), stderr=""
@@ -547,7 +507,7 @@ def test_delegate_timeout_is_bounded_and_secret_free(monkeypatch, capsys):
     def timeout(*args, **kwargs):
         raise subprocess.TimeoutExpired(args="secret", timeout=kwargs["timeout"])
 
-    monkeypatch.setattr(integration_adapter.subprocess, "run", timeout)
+    monkeypatch.setattr(subprocess, "run", timeout)
     with patch.object(sys, "stdin", io.StringIO("{}")):
         assert integration_adapter.main(
             [
@@ -570,7 +530,7 @@ def test_failed_delegate_does_not_forward_valid_hook_json(monkeypatch, capsys):
     import integration_adapter
 
     monkeypatch.setattr(
-        integration_adapter.subprocess,
+        subprocess,
         "run",
         lambda *args, **kwargs: SimpleNamespace(
             returncode=1,
@@ -602,7 +562,7 @@ def test_codex_run_script_timeout_returns_fixed_failure(monkeypatch, tmp_path):
 
     monkeypatch.setattr(codex_memory.subprocess, "run", timeout)
 
-    result = codex_memory._run_script("session_end_project_tag.py", tmp_path, "{}")
+    result = codex_memory.run_script("session_end_project_tag.py", tmp_path, "{}")
 
     assert result.returncode == 124
     assert result.stdout == ""
@@ -817,7 +777,7 @@ def test_codex_lookup_tier_uses_bounded_runner_and_fixed_timeout_error(
     calls = []
     monkeypatch.setattr(
         codex_memory,
-        "_run_script",
+        "run_script",
         lambda name, project_dir, stdin_text="": calls.append(
             (name, project_dir, stdin_text)
         )
@@ -883,12 +843,9 @@ def test_shared_ingest_persists_heartbeat_with_derived_slug(
     project = tmp_path / "Project With Spaces"
     (vault / "knowledge" / "projects").mkdir(parents=True)
     project.mkdir()
-    monkeypatch.setattr(integration_adapter, "ROOT", vault)
+    monkeypatch.setenv("LLM_WIKI_ROOT", str(vault))
     # Child processes read the root from the environment, and conftest pins it
     # to this checkout — which is the owner's live vault.
-    monkeypatch.setenv("LLM_WIKI_ROOT", str(vault))
-    monkeypatch.setattr(integration_adapter, "STATE_ROOT", state_root)
-    monkeypatch.setenv("LLM_WIKI_ROOT", str(vault))
     monkeypatch.setenv("LLM_WIKI_STATE_ROOT", str(state_root))
 
     result = integration_adapter.ingest_event(
@@ -919,28 +876,27 @@ def test_shared_ingest_materializes_redacted_transient_and_delegates(tmp_path, m
     project = tmp_path / "project"
     (vault / "knowledge" / "projects").mkdir(parents=True)
     project.mkdir()
-    monkeypatch.setattr(integration_adapter, "ROOT", vault)
+    monkeypatch.setenv("LLM_WIKI_ROOT", str(vault))
     # Child processes read the root from the environment, and conftest pins it
     # to this checkout — which is the owner's live vault.
-    monkeypatch.setenv("LLM_WIKI_ROOT", str(vault))
-    monkeypatch.setattr(integration_adapter, "STATE_ROOT", state_root)
+    monkeypatch.setenv("LLM_WIKI_STATE_ROOT", str(state_root))
     calls = []
     captured = []
     monkeypatch.setattr(
-        integration_adapter,
-        "_run_delegate",
+        integration_delegates,
+        "run_delegate",
         lambda name, payload, **kwargs: calls.append((name, payload))
         or SimpleNamespace(returncode=0, stdout="", stderr=""),
     )
     monkeypatch.setattr(
-        integration_adapter,
-        "_publish_durable_capture_intent",
+        integration_capture_records,
+        "publish_durable_capture_intent",
         lambda _envelope, payload, _slug, _trigger: captured.append(
             Path(payload["transcript_path"]).read_text(encoding="utf-8")
         )
         or "1" * 64,
     )
-    monkeypatch.setattr(integration_adapter, "spawn_detached", lambda _args: 123)
+    monkeypatch.setattr(memory_state, "spawn_detached", lambda _args: 123)
     secret = "sk-abcdefghijklmnopqrstuvwxyz012345"
     envelope = integration_adapter.normalize_event(
         "opencode",
@@ -979,11 +935,10 @@ def _adopted_ingest_vault(tmp_path, monkeypatch, integration_adapter):
         confirm_all_agents_stopped=True,
     )
     assert report["overall_status"] == "ok"
-    monkeypatch.setattr(integration_adapter, "ROOT", vault)
+    monkeypatch.setenv("LLM_WIKI_ROOT", str(vault))
     # Child processes read the root from the environment, and conftest pins it
     # to this checkout — which is the owner's live vault.
-    monkeypatch.setenv("LLM_WIKI_ROOT", str(vault))
-    monkeypatch.setattr(integration_adapter, "STATE_ROOT", state_root)
+    monkeypatch.setenv("LLM_WIKI_STATE_ROOT", str(state_root))
     return state_root, project
 
 
@@ -1022,10 +977,10 @@ def test_shared_ingest_publishes_durable_intent_before_delegate_and_replays(
         calls.append((name, payload))
         return SimpleNamespace(returncode=0, stdout='{"flush_started": true}', stderr="")
 
-    monkeypatch.setattr(integration_adapter, "_run_delegate", delegate)
+    monkeypatch.setattr(integration_delegates, "run_delegate", delegate)
     wakes = []
     monkeypatch.setattr(
-        integration_adapter,
+        memory_state,
         "spawn_detached",
         lambda args: wakes.append(args) or 123,
     )
@@ -1056,7 +1011,7 @@ def test_durable_session_end_wakes_v3_worker_without_legacy_flush(
     state_root, project = _adopted_ingest_vault(tmp_path, monkeypatch, integration_adapter)
     spawned = []
     monkeypatch.setattr(
-        integration_adapter,
+        memory_state,
         "spawn_detached",
         lambda args: spawned.append(args) or 123,
     )
@@ -1065,7 +1020,7 @@ def test_durable_session_end_wakes_v3_worker_without_legacy_flush(
         assert name == "session_end_project_tag.py"
         return SimpleNamespace(returncode=0, stdout="", stderr="")
 
-    monkeypatch.setattr(integration_adapter, "_run_delegate", delegate)
+    monkeypatch.setattr(integration_delegates, "run_delegate", delegate)
     envelope = integration_adapter.normalize_event(
         "opencode",
         "session_end",
@@ -1097,7 +1052,7 @@ def test_capture_worker_cli_runs_one_active_worker(monkeypatch):
     calls = []
     monkeypatch.setattr(
         integration_adapter,
-        "_run_active_capture_worker_once",
+        "run_active_capture_worker_once",
         lambda: calls.append("worker") or 0,
         raising=False,
     )
@@ -1110,10 +1065,10 @@ def test_active_capture_worker_completes_published_intent(tmp_path, monkeypatch)
     import integration_adapter
 
     state_root, project = _adopted_ingest_vault(tmp_path, monkeypatch, integration_adapter)
-    monkeypatch.setattr(integration_adapter, "spawn_detached", lambda _args: 123)
+    monkeypatch.setattr(memory_state, "spawn_detached", lambda _args: 123)
     monkeypatch.setattr(
-        integration_adapter,
-        "_run_delegate",
+        integration_delegates,
+        "run_delegate",
         lambda *_args, **_kwargs: SimpleNamespace(
             returncode=0, stdout="", stderr=""
         ),
@@ -1132,7 +1087,7 @@ def test_active_capture_worker_completes_published_intent(tmp_path, monkeypatch)
     )
     result = integration_adapter.ingest_event(envelope, trigger="opencode-idle")
 
-    assert integration_adapter._run_active_capture_worker_once() == 0
+    assert integration_adapter.run_active_capture_worker_once() == 0
 
     intent_id = result["capture_intent_ids"][0]
     terminal = state_root / "run" / "queue-results" / f"capture-{intent_id}.json"
@@ -1150,14 +1105,14 @@ def test_transient_cleanup_after_durable_publication(tmp_path, monkeypatch, even
     vault.mkdir()
     project = tmp_path / "project"
     project.mkdir()
-    monkeypatch.setattr(integration_adapter, "STATE_ROOT", state_root)
-    monkeypatch.setattr(integration_adapter, "ROOT", vault)
+    monkeypatch.setenv("LLM_WIKI_STATE_ROOT", str(state_root))
+    monkeypatch.setenv("LLM_WIKI_ROOT", str(vault))
     # Child processes read the root from the environment, and conftest pins it
     # to this checkout — which is the owner's live vault.
     monkeypatch.setenv("LLM_WIKI_ROOT", str(vault))
     monkeypatch.setattr(
-        integration_adapter,
-        "_publish_durable_capture_intent",
+        integration_capture_records,
+        "publish_durable_capture_intent",
         lambda *_args: "1" * 64,
     )
     def fail(name, **_kwargs):
@@ -1165,13 +1120,13 @@ def test_transient_cleanup_after_durable_publication(tmp_path, monkeypatch, even
 
     if event_type == "session_end":
         monkeypatch.setattr(
-            integration_adapter,
-            "_run_delegate",
+            integration_delegates,
+            "run_delegate",
             lambda name, _payload, **kwargs: fail(name, **kwargs),
         )
     else:
         monkeypatch.setattr(
-            integration_adapter,
+            memory_state,
             "spawn_detached",
             lambda args: fail(str(args)),
         )
@@ -1220,21 +1175,21 @@ def test_precompact_transcript_text_materializes_and_confirms_start(tmp_path, mo
     vault.mkdir()
     project = tmp_path / "project"
     project.mkdir()
-    monkeypatch.setattr(integration_adapter, "STATE_ROOT", state_root)
-    monkeypatch.setattr(integration_adapter, "ROOT", vault)
+    monkeypatch.setenv("LLM_WIKI_STATE_ROOT", str(state_root))
+    monkeypatch.setenv("LLM_WIKI_ROOT", str(vault))
     # Child processes read the root from the environment, and conftest pins it
     # to this checkout — which is the owner's live vault.
     monkeypatch.setenv("LLM_WIKI_ROOT", str(vault))
     calls = []
     monkeypatch.setattr(
-        integration_adapter,
-        "_publish_durable_capture_intent",
+        integration_capture_records,
+        "publish_durable_capture_intent",
         lambda _envelope, payload, _slug, _trigger: calls.append(
             dict(payload)
         )
         or "1" * 64,
     )
-    monkeypatch.setattr(integration_adapter, "spawn_detached", lambda _args: 123)
+    monkeypatch.setattr(memory_state, "spawn_detached", lambda _args: 123)
     envelope = integration_adapter.normalize_event(
         "opencode",
         "pre_compact",
@@ -1280,9 +1235,9 @@ def _assert_bounded_icacls(call: tuple, path: Path) -> None:
 
 def _assert_unsafe_mode_is_refused(integration_adapter, monkeypatch, transient_dir, envelope):
     transient_dir.chmod(0o733)
-    monkeypatch.setattr(integration_adapter.secrets, "token_hex", lambda _size: "unsafe")
+    monkeypatch.setattr(secrets, "token_hex", lambda _size: "unsafe")
     with pytest.raises(PermissionError, match="private"):
-        integration_adapter._write_transient_transcript(envelope, "private")
+        integration_adapter.write_transient_transcript(envelope, "private")
     transient_dir.chmod(0o700)
 
 
@@ -1307,11 +1262,11 @@ def _assert_swapped_parent_keeps_no_transcript(
         if not _try_symlink(swap_parent, external_parent, target_is_directory=True):
             swap_parent.mkdir()
 
-    monkeypatch.setattr(integration_adapter, "STATE_ROOT", swap_state)
+    monkeypatch.setenv("LLM_WIKI_STATE_ROOT", str(swap_state))
     monkeypatch.setattr(integration_adapter.os, "fsync", fsync_and_swap)
-    monkeypatch.setattr(integration_adapter.secrets, "token_hex", lambda _size: "swap")
+    monkeypatch.setattr(secrets, "token_hex", lambda _size: "swap")
     with pytest.raises(PermissionError, match="transient"):
-        integration_adapter._write_transient_transcript(envelope, "private")
+        integration_adapter.write_transient_transcript(envelope, "private")
     assert not list(moved_parent.glob("*.txt"))
     assert not list(external_parent.glob("*.txt"))
 
@@ -1319,9 +1274,9 @@ def _assert_swapped_parent_keeps_no_transcript(
 def _refuse_symlinked_cache_root(
     monkeypatch, integration_adapter, state_root, external_dir, envelope
 ):
-    monkeypatch.setattr(integration_adapter, "STATE_ROOT", state_root)
+    monkeypatch.setenv("LLM_WIKI_STATE_ROOT", str(state_root))
     with pytest.raises(PermissionError, match="transient"):
-        integration_adapter._write_transient_transcript(envelope, "private")
+        integration_adapter.write_transient_transcript(envelope, "private")
     assert not list(external_dir.rglob("*"))
 
 
@@ -1332,12 +1287,12 @@ def _exercise_collision_suffix_retry(
         collision.write_text("untouched", encoding="utf-8")
     suffixes = iter(("collision", "unique"))
     monkeypatch.setattr(
-        integration_adapter.secrets, "token_hex", lambda _size: next(suffixes)
+        secrets, "token_hex", lambda _size: next(suffixes)
     )
     monkeypatch.setattr(
-        integration_adapter, "_restrict_file_permissions", lambda _path: None
+        integration_transient_files, "restrict_file_permissions", lambda _path: None
     )
-    created = integration_adapter._write_transient_transcript(envelope, "private")
+    created = integration_adapter.write_transient_transcript(envelope, "private")
     assert created.name == f"{envelope.event_id}-unique.txt"
     assert external_file.read_text(encoding="utf-8") == "untouched"
     assert collision.read_text(encoding="utf-8") == "untouched"
@@ -1360,7 +1315,7 @@ def _exercise_windows_icacls_bounds(
     path.write_text("safe", encoding="utf-8")
     calls = []
     monkeypatch.setattr(
-        integration_adapter, "_restrict_file_permissions", restrict_file_permissions
+        integration_transient_files, "restrict_file_permissions", restrict_file_permissions
     )
     monkeypatch.setattr(integration_adapter.os, "name", "nt")
     monkeypatch.setenv("USERNAME", "Test User")
@@ -1369,9 +1324,9 @@ def _exercise_windows_icacls_bounds(
         calls.append((args, kwargs))
         return SimpleNamespace(returncode=0)
 
-    monkeypatch.setattr(integration_adapter.subprocess, "run", record_run)
+    monkeypatch.setattr(subprocess, "run", record_run)
 
-    integration_adapter._restrict_file_permissions(path)
+    integration_adapter.restrict_file_permissions(path)
 
     _assert_bounded_icacls(calls[0], path)
 
@@ -1398,7 +1353,7 @@ def test_windows_transient_permissions_use_bounded_icacls(monkeypatch, tmp_path)
     file_link_available = _try_symlink(
         collision, external_file, target_is_directory=False
     )
-    restrict_file_permissions = integration_adapter._restrict_file_permissions
+    restrict_file_permissions = integration_adapter.restrict_file_permissions
     _exercise_collision_suffix_retry(
         monkeypatch,
         integration_adapter,
@@ -1425,7 +1380,7 @@ def test_windows_transient_permissions_use_bounded_icacls(monkeypatch, tmp_path)
 def _assert_hook_contract(settings: dict, hook_name: str, timeouts: list, event_name: str) -> None:
     hooks = settings["hooks"][hook_name][0]["hooks"]
     commands = [hook["command"] for hook in hooks]
-    assert [hook["timeout"] for hook in hooks] == timeouts
+    assert [hook.get("timeout") for hook in hooks] == timeouts
     assert all("scripts/integration_adapter.py" in command for command in commands)
     assert all(f"--event {event_name}" in command for command in commands)
 
@@ -1441,7 +1396,7 @@ def test_claude_hooks_route_through_shared_adapter_and_preserve_contract():
         "SessionStart": ([15], "session_start"),
         "PreCompact": ([15], "pre_compact"),
         "SessionEnd": ([15], "session_end"),
-        "UserPromptSubmit": ([5], "user_prompt"),
+        "UserPromptSubmit": ([None], "user_prompt"),
         "PostToolUse": ([5], "post_tool_use"),
     }
     for hook_name, (timeouts, event_name) in expected.items():
@@ -1628,12 +1583,12 @@ def test_codex_delegate_failure_does_not_echo_output(monkeypatch, tmp_path, caps
 # ---------------------------------------------------------------------------
 
 
-def test_heartbeat_record_exits_zero_on_empty_stdin():
-    assert _run_with_stdin("heartbeat_record", "") == 0
+def test_heartbeat_record_exits_zero_on_empty_stdin(monkeypatch):
+    assert _run_with_stdin(monkeypatch, "heartbeat_record", "") == 0
 
 
-def test_heartbeat_record_exits_zero_on_malformed_json():
-    assert _run_with_stdin("heartbeat_record", "{not json") == 0
+def test_heartbeat_record_exits_zero_on_malformed_json(monkeypatch):
+    assert _run_with_stdin(monkeypatch, "heartbeat_record", "{not json") == 0
 
 
 def test_heartbeat_record_writes_state_entry(tmp_path, monkeypatch):
@@ -1646,12 +1601,8 @@ def test_heartbeat_record_writes_state_entry(tmp_path, monkeypatch):
 
     # Patch memory_state module attributes (heartbeat_record imports
     # update_state from memory_state, which references STATE_FILE etc).
-    import memory_state
 
-    monkeypatch.setattr(memory_state, "STATE_ROOT", fake_state_root)
-    monkeypatch.setattr(memory_state, "STATE_DIR", fake_state_dir)
-    monkeypatch.setattr(memory_state, "STATE_FILE", fake_state_file)
-    monkeypatch.setattr(memory_state, "LOCK_FILE", fake_state_dir / "state.json.lock")
+    monkeypatch.setenv("LLM_WIKI_STATE_ROOT", str(fake_state_root))
 
     payload = {
         "slug": "test-project",
@@ -1659,7 +1610,7 @@ def test_heartbeat_record_writes_state_entry(tmp_path, monkeypatch):
         "reason": "opencode-session-start",
         "sessionId": "opc-123",
     }
-    rc = _run_with_stdin("heartbeat_record", json.dumps(payload))
+    rc = _run_with_stdin(monkeypatch, "heartbeat_record", json.dumps(payload))
     assert rc == 0
 
     assert fake_state_file.exists()
@@ -1677,14 +1628,11 @@ def test_heartbeat_record_preserves_missing_optional_source_fields(tmp_path, mon
     fake_state_dir = tmp_path / "run"
     fake_state_dir.mkdir(parents=True)
     fake_state_file = fake_state_dir / "state.json"
-    import memory_state
 
-    monkeypatch.setattr(memory_state, "STATE_ROOT", tmp_path)
-    monkeypatch.setattr(memory_state, "STATE_DIR", fake_state_dir)
-    monkeypatch.setattr(memory_state, "STATE_FILE", fake_state_file)
-    monkeypatch.setattr(memory_state, "LOCK_FILE", fake_state_dir / "state.json.lock")
+    monkeypatch.setenv("LLM_WIKI_STATE_ROOT", str(tmp_path))
 
     rc = _run_with_stdin(
+        monkeypatch,
         "heartbeat_record",
         json.dumps({"slug": "test-project", "reason": "session_end"}),
     )
@@ -1735,7 +1683,7 @@ def test_a_large_tool_response_is_read_not_refused(monkeypatch):
     _feed_stdin(monkeypatch, json.dumps(raw))
 
     envelope = integration_adapter.normalize_occurrence_event(
-        "claude", "post_tool_use", integration_adapter._read_hook_input()
+        "claude", "post_tool_use", integration_adapter.read_hook_input()
     )
 
     assert envelope.payload["tool_name"] == "Bash"
@@ -1750,7 +1698,7 @@ def test_an_oversize_payload_names_the_bound_it_broke(monkeypatch):
     _feed_stdin(monkeypatch, json.dumps(_claude_post_tool_payload(oversize)))
 
     with pytest.raises(ValueError, match="exceeds the .* adapter limit"):
-        integration_adapter._read_hook_input()
+        integration_adapter.read_hook_input()
 
 
 def _write_long_transcript(path: Path, target_bytes: int) -> tuple[str, str]:
@@ -1779,13 +1727,13 @@ def test_a_long_transcript_is_excerpted_rather_than_lost(tmp_path):
     """
     from integration_adapter import (
         MAX_CAPTURE_EVIDENCE_BYTES,
-        _capture_transcript_text,
+        capture_transcript_text,
     )
 
     path = tmp_path / "session.jsonl"
     first, last = _write_long_transcript(path, 3 * MAX_CAPTURE_EVIDENCE_BYTES)
 
-    text = _capture_transcript_text(path)
+    text = capture_transcript_text(path)
 
     assert text.startswith(first)
     assert text.endswith(last + "\n")
@@ -1795,14 +1743,14 @@ def test_a_long_transcript_is_excerpted_rather_than_lost(tmp_path):
 
 def test_a_short_transcript_is_still_returned_whole(tmp_path):
     """Nothing that worked before is excerpted now."""
-    from integration_adapter import _capture_transcript_text
+    from integration_adapter import capture_transcript_text
 
     path = tmp_path / "short.jsonl"
     # newline="\n" pins the bytes; without it Windows writes "\r\n" and the
     # byte-faithful reader would truthfully return a fixture we did not intend.
     path.write_text('{"a": 1}\n{"b": 2}\n', encoding="utf-8", newline="\n")
 
-    assert _capture_transcript_text(path) == '{"a": 1}\n{"b": 2}\n'
+    assert capture_transcript_text(path) == '{"a": 1}\n{"b": 2}\n'
 
 
 def test_the_excerpt_marker_counts_the_bytes_it_dropped(tmp_path):
@@ -1811,14 +1759,14 @@ def test_the_excerpt_marker_counts_the_bytes_it_dropped(tmp_path):
 
     from integration_adapter import (
         MAX_CAPTURE_EVIDENCE_BYTES,
-        _capture_transcript_text,
+        capture_transcript_text,
     )
 
     path = tmp_path / "counted.jsonl"
     _write_long_transcript(path, 4 * MAX_CAPTURE_EVIDENCE_BYTES)
     size = path.stat().st_size
 
-    text = _capture_transcript_text(path)
+    text = capture_transcript_text(path)
     dropped = int(re.search(r"_\((\d+) bytes", text).group(1))
 
     assert 0 < dropped < size

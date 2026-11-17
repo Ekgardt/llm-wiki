@@ -1,0 +1,135 @@
+{
+  "encoding": "o200k_base",
+  "max_tokens": 100000,
+  "serialization": "exact-duplicates/v1",
+  "files": [
+    "AGENTS.md",
+    "CLAUDE.md",
+    "docs/AGENTS.md",
+    "docs/STRUCTURE.md",
+    "docs/modules/context-bundle.md",
+    "docs/modules/context-records.md",
+    "docs/modules/context-tooling.md",
+    "docs/modules/evidence-graph-tests-evidence-graph-recovery-helpers-context.json",
+    "docs/modules/evidence-graph-tests-evidence-graph-recovery-helpers.md",
+    "docs/modules/model-choice.md",
+    "docs/modules/product-structure.md",
+    "docs/modules/project-governance.md",
+    "docs/modules/test-support.md",
+    "rules/development-laws.md",
+    "scripts/__init__.py",
+    "scripts/llm_wiki/__init__.py",
+    "scripts/llm_wiki/context_bundle.py",
+    "tests/__init__.py",
+    "tests/conftest.py",
+    "tests/evidence_graph_recovery_helpers.py",
+    "tests/module_context.py",
+    "tests/module_context_paths.py",
+    "tests/module_interface.py",
+    "tests/module_interface_render.py",
+    "tests/module_qualification.py",
+    "tests/module_record_context.py",
+    "tests/module_records.py",
+    "tests/shared_fixtures.py",
+    "tests/slow_machine.py"
+  ],
+  "ownership": {
+    "files": [
+      "docs/modules/evidence-graph-tests-evidence-graph-recovery-helpers-context.json",
+      "docs/modules/evidence-graph-tests-evidence-graph-recovery-helpers.md",
+      "tests/evidence_graph_recovery_helpers.py"
+    ]
+  },
+  "qualified_dependencies": [
+    {
+      "provider": "scripts/corpus_snapshot.py",
+      "names": [
+        "COLLECTOR_VERSION",
+        "EXTRACTOR_VERSION",
+        "canonical_source_manifest"
+      ],
+      "contract_sha256": "0cc87152075558d99d4b0d2b958e1f0e14b22fad8777cbca4377e198dd0a442f",
+      "integration_tests": [
+        "tests/a_decorator_is_a_call_until_it_is_a_route_helpers.py",
+        "tests/code_kernel_helpers.py",
+        "tests/evidence_graph_recovery_helpers.py"
+      ]
+    },
+    {
+      "provider": "scripts/evidence_graph.py",
+      "names": [
+        "create_generation_database"
+      ],
+      "contract_sha256": "bfef1ce440404c513f00588bf9861184456252576a1f75d20e4dda19871a75be",
+      "integration_tests": [
+        "tests/evidence_graph_recovery_helpers.py",
+        "tests/test_a_publication_that_is_out_of_time_does_not_link.py",
+        "tests/test_a_question_is_answered_by_its_own_kind_of_generation.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/generation_catalog_store.py",
+      "names": [
+        "GenerationCatalog"
+      ],
+      "contract_sha256": "b18194ebe04bf988b4474379fcb5243516550d43b745a00eaed1453f7844c983",
+      "integration_tests": [
+        "tests/test_a_blocked_task_has_a_way_back.py",
+        "tests/test_a_build_in_flight_is_not_an_orphan.py",
+        "tests/test_a_capacity_refusal_does_not_corrupt_a_generation.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/model_choice.py",
+      "names": [
+        "using_root"
+      ],
+      "contract_sha256": "d45f2655cb61963e77617d1dfd7d617b134ad77cc770b59b335d0856e5d65019",
+      "integration_tests": [
+        "tests/test_a_flow_walk_stops_when_its_caller_has.py",
+        "tests/test_a_generation_that_cannot_be_read_says_so.py",
+        "tests/test_code_graph.py",
+        "tests/test_dead_code_and_dependencies_answer_truthfully.py",
+        "tests/test_evidence_graph_recovery.py",
+        "tests/test_evidence_reader_cache.py",
+        "tests/test_unresolved_receivers_and_named_communities.py",
+        "tests/test_whole_graph_aggregates.py"
+      ]
+    },
+    {
+      "provider": "scripts/reliable_memory.py",
+      "names": [
+        "canonical_json_bytes",
+        "validate_state_root"
+      ],
+      "contract_sha256": "7bba4b535d3f0a73445fece541c540939989b41456c9a79a67f82634748be36b",
+      "integration_tests": [
+        "tests/test_a_flow_walk_stops_when_its_caller_has.py",
+        "tests/test_a_generation_that_cannot_be_read_says_so.py",
+        "tests/test_code_graph.py",
+        "tests/test_dead_code_and_dependencies_answer_truthfully.py",
+        "tests/test_evidence_graph_recovery.py",
+        "tests/test_evidence_reader_cache.py",
+        "tests/test_unresolved_receivers_and_named_communities.py",
+        "tests/test_whole_graph_aggregates.py"
+      ]
+    },
+    {
+      "provider": "scripts/repository_scope.py",
+      "names": [
+        "sanitized_git_environment"
+      ],
+      "contract_sha256": "fd550ae20761afad50b37fa3a71044a162485b0e4d4b3e2af9b5b22e143c2bec",
+      "integration_tests": [
+        "tests/test_a_flow_walk_stops_when_its_caller_has.py",
+        "tests/test_a_generation_that_cannot_be_read_says_so.py",
+        "tests/test_code_graph.py",
+        "tests/test_dead_code_and_dependencies_answer_truthfully.py",
+        "tests/test_evidence_graph_recovery.py",
+        "tests/test_evidence_reader_cache.py",
+        "tests/test_unresolved_receivers_and_named_communities.py",
+        "tests/test_whole_graph_aggregates.py"
+      ]
+    }
+  ]
+}

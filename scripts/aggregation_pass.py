@@ -264,7 +264,7 @@ def _clustered(
     if len(mentions) < 2:
         return []
     listed = "\n".join(f"{index}: {mention}" for index, mention in enumerate(mentions))
-    indexes = _parsed_groups(cluster(_unit_line(kind) + listed), len(mentions))
+    indexes = parsed_groups(cluster(_unit_line(kind) + listed), len(mentions))
     return [_named(mentions, group) for group in indexes if len(group) > 1]
 
 
@@ -272,7 +272,7 @@ def _named(mentions: Sequence[str], group: Sequence[int]) -> list[str]:
     return [mentions[index] for index in group]
 
 
-def _parsed_groups(raw: str | None, size: int) -> list[list[int]]:
+def parsed_groups(raw: str | None, size: int) -> list[list[int]]:
     """The index groups in the reply, or none when the reply is not what was asked."""
     groups = _groups_field(_loaded(raw, "groups"))
     return [group for group in groups if _is_index_group(group, size)]

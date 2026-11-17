@@ -35,8 +35,14 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from daily_log_append import BREADCRUMB_APPEND_BUDGET_SECONDS  # noqa: E402
-from integration_adapter import BACKLOG_DRAIN_SECONDS, drain_pending_backlog  # noqa: E402
-from memory_state import ROOT, STATE_ROOT  # noqa: E402
+from llm_wiki import runtime_roots
+from llm_wiki.step_budgets import (
+    RECLAIM_STEP_SECONDS,
+)
+from project_checkpoint import (
+    BACKLOG_DRAIN_SECONDS,
+    drain_pending_backlog,
+)
 
 # An atomic write of the largest state seen here takes well under a second. An
 # hour is not a tuning parameter; it is a margin wide enough that a file this
@@ -111,7 +117,7 @@ def _reclaimed(paths: list[Path], unfinished: bool = False) -> dict[str, object]
 
 
 def sweep_orphan_temporaries(directory: Path | None = None) -> dict[str, object]:
-    root = directory if directory is not None else STATE_ROOT / "run"
+    root = directory if directory is not None else runtime_roots.state_root() / "run"
     return _reclaimed(_orphan_temporaries(root, time.time()))
 
 
@@ -150,16 +156,15 @@ def sweep_staged_knowledge_writes(
     root: Path | None = None, deadline: float = float("inf")
 ) -> dict[str, object]:
     """Staged copies a killed write left beside a Markdown target."""
-    base = root or ROOT / "knowledge"
+    base = root or runtime_roots.vault_root() / "knowledge"
     if not base.is_dir():
         return _reclaimed([])
     return _reclaimed(*_staged_knowledge_writes(base, time.time(), deadline))
 
 
 # The nightly kills this step after `RECLAIM_STEP_SECONDS`; the image prune stops
-# on its own a margin before that, so the kill never lands inside a prune and the
-# steps after it still run. What it did not reach is pruned the next night.
-RECLAIM_STEP_SECONDS = 180
+# on its own this margin before that, so the kill never lands inside a prune and
+# the steps after it still run. What it did not reach is pruned the next night.
 RECLAIM_MARGIN_SECONDS = 30
 
 
@@ -183,7 +188,7 @@ def prune_settled_transactions(deadline: float = float("inf")) -> dict[str, obje
     from markdown_transaction import active_or_legacy_coordinator
 
     try:
-        coordinator = active_or_legacy_coordinator(ROOT, STATE_ROOT)
+        coordinator = active_or_legacy_coordinator(runtime_roots.vault_root(), runtime_roots.state_root())
         return {"pruned": int(coordinator.prune(deadline=deadline)), "failed": 0}
     except TimeoutError:
         return {"pruned": 0, "failed": 0, "unfinished": True}
@@ -208,7 +213,7 @@ def prune_transaction_history(deadline: float = float("inf")) -> dict[str, int]:
     from markdown_transaction import active_or_legacy_coordinator
 
     try:
-        coordinator = active_or_legacy_coordinator(ROOT, STATE_ROOT)
+        coordinator = active_or_legacy_coordinator(runtime_roots.vault_root(), runtime_roots.state_root())
         pruned = coordinator.prune_history(deadline=deadline, slice_seconds=HISTORY_SLICE_SECONDS)
         return {**pruned, "failed": 0}
     except Exception as error:  # noqa: BLE001
@@ -221,7 +226,7 @@ def remove_empty_intent_shards(directory: Path | None = None) -> int:
     Intents move from `pending/` to `ready/` and on; both leave empty shards,
     and only `pending/` was swept (136 empty under `ready/` on 2026-09-25, C-13).
     """
-    intents = STATE_ROOT / "run" / "capture-intents"
+    intents = runtime_roots.state_root() / "run" / "capture-intents"
     roots = [directory] if directory is not None else [intents / "pending", intents / "ready"]
     return sum(_empty_shards_removed(root) for root in roots)
 
@@ -289,7 +294,7 @@ def reclaim(budget_seconds: float) -> dict[str, object]:
     }
 
 
-def _report(result: dict[str, object]) -> str:
+def report(result: dict[str, object]) -> str:
     backlog = result["backlog"]
     temporaries = result["temporaries"]
     drained = sum(int(count) for count in backlog["drained"].values())
@@ -297,25 +302,25 @@ def _report(result: dict[str, object]) -> str:
     snapshot = result["snapshot"]
     return (
         f"snapshot {snapshot['status']} ({snapshot['commit']}); "
-        f"pruned {transactions['pruned']} settled transaction(s){_unfinished_note(transactions)}; "
+        f"pruned {transactions['pruned']} settled transaction(s){unfinished_note(transactions)}; "
         f"dropped {result['history']['transactions']} transaction row(s) and "
         f"{result['history']['attempts']} attempt row(s) past the history window"
-        f"{_unfinished_note(result['history'])}; "
+        f"{unfinished_note(result['history'])}; "
         f"drained {drained} checkpoint(s); "
         f"{len(backlog['remaining'])} project(s) still queued; "
         f"{len(backlog['failed'])} project(s) failed; "
         f"removed {temporaries['removed']} orphaned temporary file(s), "
         f"{temporaries['bytes']} byte(s), {result['staged_writes']['removed']} staged "
-        f"knowledge write(s){_unfinished_note(result['staged_writes'])}, and {result['empty_shards']} empty intent shard(s)"
+        f"knowledge write(s){unfinished_note(result['staged_writes'])}, and {result['empty_shards']} empty intent shard(s)"
         f"{_failure_note(result)}"
     )
 
 
-def _unfinished_note(transactions: dict) -> str:
+def unfinished_note(transactions: dict) -> str:
     return " (stopped at its deadline; the next night continues)" if transactions.get("unfinished") else ""
 
 
-def _failures(result: dict[str, object]) -> list[str]:
+def failures(result: dict[str, object]) -> list[str]:
     """What this pass could not do; the report printed counts and hid these (audit 2026-09-26 B-23)."""
     keys = ("transactions", "history", "temporaries", "staged_writes")
     failed = [f"{key}: {result[key].get('reason', 'failed')}" for key in keys if result[key].get("failed")]
@@ -335,7 +340,7 @@ def _backlog_failure(backlog: dict) -> list[str]:
 
 
 def _failure_note(result: dict[str, object]) -> str:
-    failed = _failures(result)
+    failed = failures(result)
     derived = result["co_activation"].get("co_activation_error")
     notes = [*failed, *([f"co-activation: {derived}"] if derived else [])]
     return f"; FAILED: {'; '.join(notes)}" if notes else ""
@@ -351,10 +356,10 @@ def main() -> int:
     )
     args = parser.parse_args()
     result = reclaim(args.budget_seconds)
-    print(_report(result))
+    print(report(result))
     # A derived table that failed is named and costs nothing else; a real
     # maintenance failure fails the step, so the night records it.
-    return 1 if _failures(result) else 0
+    return 1 if failures(result) else 0
 
 
 if __name__ == "__main__":

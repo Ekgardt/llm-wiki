@@ -27,10 +27,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 
 import blackboard  # noqa: E402
 
-from tests.test_reliability_v3_adoption import (  # noqa: E402
-    _vault,
-    build_adopted_reliability_v3,
-)
+from tests.reliability_v3_adoption_helpers import _vault, build_adopted_reliability_v3
 
 
 @pytest.fixture()
@@ -39,7 +36,6 @@ def vault(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     build_adopted_reliability_v3(root, state_root)
     projects = root / "knowledge/projects"
     (projects / "demo/.blackboard").mkdir(parents=True)
-    monkeypatch.setattr(blackboard, "PROJECTS_DIR", projects)
     monkeypatch.setenv("LLM_WIKI_ROOT", str(root))
     monkeypatch.setenv("LLM_WIKI_STATE_ROOT", str(state_root))
     return root
@@ -47,14 +43,14 @@ def vault(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 
 def _fail_the_announcement(monkeypatch: pytest.MonkeyPatch):
     """Let everything through except the record that announces the claim."""
-    real_append = blackboard._append_jsonl
+    real_append = blackboard.append_jsonl
 
     def failing_append(path, record, operation_id):
         if operation_id.startswith("blackboard-active:"):
             raise TimeoutError("Markdown writer gate deadline expired")
         return real_append(path, record, operation_id)
 
-    monkeypatch.setattr(blackboard, "_append_jsonl", failing_append)
+    monkeypatch.setattr(blackboard, "append_jsonl", failing_append)
     return real_append
 
 
@@ -68,7 +64,7 @@ def test_a_release_that_loses_the_first_attempts_still_happens(
     vault: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """The release competes with whatever stopped the announcement."""
-    real_delete = blackboard._delete_exact_claim
+    real_delete = blackboard.delete_exact_claim
     attempts: list[int] = []
 
     def flaky_delete(coordinator, claim):
@@ -77,8 +73,8 @@ def test_a_release_that_loses_the_first_attempts_still_happens(
             raise RuntimeError("database is locked")
         return real_delete(coordinator, claim)
 
-    monkeypatch.setattr(blackboard, "_delete_exact_claim", flaky_delete)
-    monkeypatch.setattr(blackboard, "_RELEASE_RETRY_SECONDS", 0.0)
+    monkeypatch.setattr(blackboard, "delete_exact_claim", flaky_delete)
+    monkeypatch.setattr(blackboard, "RELEASE_RETRY_SECONDS", 0.0)
     real_append = _fail_the_announcement(monkeypatch)
 
     with pytest.raises(TimeoutError):
@@ -88,8 +84,8 @@ def test_a_release_that_loses_the_first_attempts_still_happens(
 
     # The release landed, so the resource is free and the caller's retry —
     # the whole point of releasing — now succeeds.
-    monkeypatch.setattr(blackboard, "_append_jsonl", real_append)
-    monkeypatch.setattr(blackboard, "_delete_exact_claim", real_delete)
+    monkeypatch.setattr(blackboard, "append_jsonl", real_append)
+    monkeypatch.setattr(blackboard, "delete_exact_claim", real_delete)
 
     assert _claim().resources == ("shared/resource",)
 
@@ -104,14 +100,14 @@ def test_the_attempts_are_bounded(
         attempts.append(1)
         raise RuntimeError("database is locked")
 
-    monkeypatch.setattr(blackboard, "_delete_exact_claim", always_failing_delete)
-    monkeypatch.setattr(blackboard, "_RELEASE_RETRY_SECONDS", 0.0)
+    monkeypatch.setattr(blackboard, "delete_exact_claim", always_failing_delete)
+    monkeypatch.setattr(blackboard, "RELEASE_RETRY_SECONDS", 0.0)
     _fail_the_announcement(monkeypatch)
 
     with pytest.raises(TimeoutError):
         _claim()
 
-    assert len(attempts) == blackboard._RELEASE_ATTEMPTS
+    assert len(attempts) == blackboard.RELEASE_ATTEMPTS
 
 
 def test_the_callers_own_failure_is_what_reaches_it(
@@ -120,12 +116,12 @@ def test_the_callers_own_failure_is_what_reaches_it(
     """The release failure must not replace the announcement failure."""
     monkeypatch.setattr(
         blackboard,
-        "_delete_exact_claim",
+        "delete_exact_claim",
         lambda _coordinator, _claim: (_ for _ in ()).throw(
             RuntimeError("release exploded")
         ),
     )
-    monkeypatch.setattr(blackboard, "_RELEASE_RETRY_SECONDS", 0.0)
+    monkeypatch.setattr(blackboard, "RELEASE_RETRY_SECONDS", 0.0)
     _fail_the_announcement(monkeypatch)
 
     with pytest.raises(TimeoutError, match="writer gate deadline expired"):
@@ -141,12 +137,12 @@ def _fail_the_presence_read(monkeypatch: pytest.MonkeyPatch):
     few milliseconds later.
     """
 
-    real_read = blackboard._read_jsonl
+    real_read = blackboard.read_jsonl
 
     def failing_read(_path):
         raise RuntimeError("gate ownership was lost")
 
-    monkeypatch.setattr(blackboard, "_read_jsonl", failing_read)
+    monkeypatch.setattr(blackboard, "read_jsonl", failing_read)
     return real_read
 
 
@@ -155,14 +151,14 @@ def test_an_unreadable_stream_does_not_skip_the_release(
 ) -> None:
     """An unreadable task stream is not evidence that the record landed."""
     attempts: list[int] = []
-    real_delete = blackboard._delete_exact_claim
+    real_delete = blackboard.delete_exact_claim
 
     def counted_delete(coordinator, claim):
         attempts.append(1)
         return real_delete(coordinator, claim)
 
-    monkeypatch.setattr(blackboard, "_delete_exact_claim", counted_delete)
-    monkeypatch.setattr(blackboard, "_RELEASE_RETRY_SECONDS", 0.0)
+    monkeypatch.setattr(blackboard, "delete_exact_claim", counted_delete)
+    monkeypatch.setattr(blackboard, "RELEASE_RETRY_SECONDS", 0.0)
     real_append = _fail_the_announcement(monkeypatch)
     real_read = _fail_the_presence_read(monkeypatch)
 
@@ -172,8 +168,8 @@ def test_an_unreadable_stream_does_not_skip_the_release(
     assert attempts, "the release never ran, so the rows stand for the lease"
 
     # The whole point of releasing: the caller's retry no longer meets itself.
-    monkeypatch.setattr(blackboard, "_append_jsonl", real_append)
-    monkeypatch.setattr(blackboard, "_read_jsonl", real_read)
+    monkeypatch.setattr(blackboard, "append_jsonl", real_append)
+    monkeypatch.setattr(blackboard, "read_jsonl", real_read)
     assert _claim().resources == ("shared/resource",)
 
 
@@ -181,7 +177,7 @@ def test_a_failing_presence_read_does_not_replace_the_callers_failure(
     vault: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """The recovery's own trouble must not be reported as the cause."""
-    monkeypatch.setattr(blackboard, "_RELEASE_RETRY_SECONDS", 0.0)
+    monkeypatch.setattr(blackboard, "RELEASE_RETRY_SECONDS", 0.0)
     _fail_the_announcement(monkeypatch)
     _fail_the_presence_read(monkeypatch)
 
@@ -194,7 +190,7 @@ def test_a_readable_stream_is_read_again_before_the_release(
 ) -> None:
     """A stream that becomes readable settles the claim without releasing it."""
     reads: list[int] = []
-    real_read = blackboard._read_jsonl
+    real_read = blackboard.read_jsonl
 
     def slow_to_recover_read(path):
         reads.append(1)
@@ -207,15 +203,15 @@ def test_a_readable_stream_is_read_again_before_the_release(
         if operation_id.startswith("blackboard-active:"):
             raise TimeoutError("Markdown writer gate deadline expired")
 
-    real_append = blackboard._append_jsonl
-    monkeypatch.setattr(blackboard, "_append_jsonl", landed_append)
-    monkeypatch.setattr(blackboard, "_read_jsonl", slow_to_recover_read)
+    real_append = blackboard.append_jsonl
+    monkeypatch.setattr(blackboard, "append_jsonl", landed_append)
+    monkeypatch.setattr(blackboard, "read_jsonl", slow_to_recover_read)
     monkeypatch.setattr(
         blackboard,
-        "_delete_exact_claim",
+        "delete_exact_claim",
         lambda _coordinator, _claim: pytest.fail("a landed claim was released"),
     )
-    monkeypatch.setattr(blackboard, "_RELEASE_RETRY_SECONDS", 0.0)
+    monkeypatch.setattr(blackboard, "RELEASE_RETRY_SECONDS", 0.0)
 
     # The record is on disk, so the claim stands and the caller is told so.
     assert _claim().resources == ("shared/resource",)
@@ -230,12 +226,12 @@ def test_a_recovery_that_settles_nothing_says_so(
     """Rows left behind must be named, because the next conflict is their child."""
     monkeypatch.setattr(
         blackboard,
-        "_delete_exact_claim",
+        "delete_exact_claim",
         lambda _coordinator, _claim: (_ for _ in ()).throw(
             RuntimeError("database is locked")
         ),
     )
-    monkeypatch.setattr(blackboard, "_RELEASE_RETRY_SECONDS", 0.0)
+    monkeypatch.setattr(blackboard, "RELEASE_RETRY_SECONDS", 0.0)
     _fail_the_announcement(monkeypatch)
     _fail_the_presence_read(monkeypatch)
 
@@ -244,7 +240,7 @@ def test_a_recovery_that_settles_nothing_says_so(
 
     reported = capsys.readouterr().err
     assert "shared/resource" in reported
-    assert f"{blackboard._RELEASE_ATTEMPTS} release attempts" in reported
+    assert f"{blackboard.RELEASE_ATTEMPTS} release attempts" in reported
 
 
 def test_a_conflict_names_the_claim_that_holds_the_resource(
@@ -276,10 +272,10 @@ def test_a_slow_stream_is_asked_once_not_once_per_attempt(
         time.sleep(0.05)
         raise RuntimeError("gate ownership was lost")
 
-    real_read = blackboard._read_jsonl
-    monkeypatch.setattr(blackboard, "_read_jsonl", slow_failing_read)
-    monkeypatch.setattr(blackboard, "_SETTLE_READ_SECONDS", 0.01)
-    monkeypatch.setattr(blackboard, "_RELEASE_RETRY_SECONDS", 0.0)
+    real_read = blackboard.read_jsonl
+    monkeypatch.setattr(blackboard, "read_jsonl", slow_failing_read)
+    monkeypatch.setattr(blackboard, "SETTLE_READ_SECONDS", 0.01)
+    monkeypatch.setattr(blackboard, "RELEASE_RETRY_SECONDS", 0.0)
     real_append = _fail_the_announcement(monkeypatch)
 
     with pytest.raises(TimeoutError):
@@ -287,6 +283,6 @@ def test_a_slow_stream_is_asked_once_not_once_per_attempt(
 
     assert len(reads) == 1
 
-    monkeypatch.setattr(blackboard, "_append_jsonl", real_append)
-    monkeypatch.setattr(blackboard, "_read_jsonl", real_read)
+    monkeypatch.setattr(blackboard, "append_jsonl", real_append)
+    monkeypatch.setattr(blackboard, "read_jsonl", real_read)
     assert _claim().resources == ("shared/resource",)

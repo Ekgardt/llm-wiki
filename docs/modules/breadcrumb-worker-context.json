@@ -1,0 +1,208 @@
+{
+  "encoding": "o200k_base",
+  "max_tokens": 100000,
+  "serialization": "exact-duplicates/v1",
+  "files": [
+    "AGENTS.md",
+    "CLAUDE.md",
+    "docs/AGENTS.md",
+    "docs/STRUCTURE.md",
+    "docs/modules/breadcrumb-worker-context.json",
+    "docs/modules/breadcrumb-worker.md",
+    "docs/modules/context-bundle.md",
+    "docs/modules/context-records.md",
+    "docs/modules/context-tooling.md",
+    "docs/modules/formats.md",
+    "docs/modules/model-choice.md",
+    "docs/modules/product-structure.md",
+    "docs/modules/project-governance.md",
+    "docs/modules/test-support.md",
+    "rules/development-laws.md",
+    "scripts/__init__.py",
+    "scripts/breadcrumb_worker.py",
+    "scripts/llm_wiki/__init__.py",
+    "scripts/llm_wiki/context_bundle.py",
+    "scripts/llm_wiki/formats/__init__.py",
+    "tests/__init__.py",
+    "tests/conftest.py",
+    "tests/module_context.py",
+    "tests/module_context_paths.py",
+    "tests/module_interface.py",
+    "tests/module_interface_render.py",
+    "tests/module_qualification.py",
+    "tests/module_record_context.py",
+    "tests/module_records.py",
+    "tests/shared_fixtures.py",
+    "tests/slow_machine.py"
+  ],
+  "ownership": {
+    "files": [
+      "docs/modules/breadcrumb-worker-context.json",
+      "docs/modules/breadcrumb-worker.md",
+      "scripts/breadcrumb_worker.py"
+    ]
+  },
+  "qualified_dependencies": [
+    {
+      "provider": "scripts/breadcrumb_bundle.py",
+      "names": [
+        "load_bound_bundle"
+      ],
+      "contract_sha256": "5a742cf930cbf4927d5eb7301bd9a37ee708da5ef5d799b0ef60af1d957358cf",
+      "integration_tests": [
+        "tests/test_breadcrumb_adoption.py",
+        "tests/test_capture_bundle_validation_has_one_parsing_scope.py",
+        "tests/test_the_prompt_worker_updates_the_project.py"
+      ]
+    },
+    {
+      "provider": "scripts/breadcrumb_decision.py",
+      "names": [
+        "decision_bytes"
+      ],
+      "contract_sha256": "80c6a265dca188f522e429c6d933aa49e949a1f4b6390c01d70ff7a6cefc43bd",
+      "integration_tests": [
+        "tests/breadcrumb_terminal_proof_helpers.py",
+        "tests/compile_keeps_complete_tool_lines_helpers.py",
+        "tests/native_user_frames_keep_their_physical_evidence_helpers.py"
+      ]
+    },
+    {
+      "provider": "scripts/breadcrumb_evidence.py",
+      "names": [
+        "publish_source"
+      ],
+      "contract_sha256": "ac2a60faaf18ca175a3f86a4caaa076a3b030bc2bf4eeb531d65d8dc18213f34",
+      "integration_tests": [
+        "tests/breadcrumb_terminal_proof_helpers.py",
+        "tests/breadcrumb_worker_helpers.py",
+        "tests/native_user_frames_keep_their_physical_evidence_helpers.py"
+      ]
+    },
+    {
+      "provider": "scripts/breadcrumb_storage.py",
+      "names": [
+        "protocol"
+      ],
+      "contract_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "integration_tests": [
+        "tests/test_breadcrumb_adoption.py",
+        "tests/test_capture_diagnostics.py",
+        "tests/test_capture_renewal_boundaries.py"
+      ]
+    },
+    {
+      "provider": "scripts/breadcrumb_terminal.py",
+      "names": [
+        "operation_id_matches",
+        "require_journal_transaction"
+      ],
+      "contract_sha256": "08c527dc8f1c2b8e9b66bd73db51160a3ba51a92f067effa2ece35f35bfc5f74",
+      "integration_tests": [
+        "tests/test_a_blocked_task_has_a_way_back.py",
+        "tests/test_a_claude_prompt_takes_the_ingest_path.py",
+        "tests/test_a_committed_source_resolves_an_older_compile_plan.py"
+      ]
+    },
+    {
+      "provider": "scripts/capture_intent_records.py",
+      "names": [
+        "capture_intent_reference",
+        "capture_markdown_disposition",
+        "commit_capture_markdown",
+        "ensure_capture_results_directory",
+        "held_by_this_task",
+        "publish_capture_terminal"
+      ],
+      "contract_sha256": "80b4ddcd8e3021282c23f621455f42744c99abae46dd92357087d376ae0f8e12",
+      "integration_tests": [
+        "tests/breadcrumb_terminal_proof_helpers.py",
+        "tests/test_breadcrumb_archived_journal.py",
+        "tests/test_breadcrumb_redrive.py"
+      ]
+    },
+    {
+      "provider": "scripts/event_envelope.py",
+      "names": [
+        "SCHEMA_VERSION",
+        "build_event_envelope"
+      ],
+      "contract_sha256": "0c3e01f84bdd54804fd4b90af89e60cabbee869f686decab4691ed81563c0870",
+      "integration_tests": [
+        "tests/test_capture_publication_with_busy_writer.py",
+        "tests/test_every_stored_instant_has_one_width.py",
+        "tests/test_generic_breadcrumb_is_not_a_native_event.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/formats/canonical.py",
+      "names": [
+        "sha256_bytes"
+      ],
+      "contract_sha256": "7d34a853c5a6f1be8b00805b2e865ac2a5ca5a6fe3ca141de97ebda61d2a85cf",
+      "integration_tests": [
+        "tests/modules/formats/test_primitives.py",
+        "tests/modules/formats/test_queue_payload.py",
+        "tests/modules/pyright_configuration/test_configuration.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/generation_catalog_store.py",
+      "names": [
+        "GenerationCatalog"
+      ],
+      "contract_sha256": "b18194ebe04bf988b4474379fcb5243516550d43b745a00eaed1453f7844c983",
+      "integration_tests": [
+        "tests/test_a_blocked_task_has_a_way_back.py",
+        "tests/test_a_build_in_flight_is_not_an_orphan.py",
+        "tests/test_a_capacity_refusal_does_not_corrupt_a_generation.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/model_choice.py",
+      "names": [
+        "using_root"
+      ],
+      "contract_sha256": "d45f2655cb61963e77617d1dfd7d617b134ad77cc770b59b335d0856e5d65019",
+      "integration_tests": [
+        "tests/test_compile_execution_inventory.py"
+      ]
+    },
+    {
+      "provider": "scripts/project_checkpoint.py",
+      "names": [
+        "observe_project_checkpoint"
+      ],
+      "contract_sha256": "d6deab115bc8737ec318ab202a93375b6dc4cebb4d019da49f46557bfa481e26",
+      "integration_tests": [
+        "tests/adopted_capture_vault.py",
+        "tests/breadcrumb_worker_helpers.py",
+        "tests/test_a_backlog_drains_in_windows.py"
+      ]
+    },
+    {
+      "provider": "scripts/reliable_memory.py",
+      "names": [
+        "validate_state_root"
+      ],
+      "contract_sha256": "8680515cd873056a7c8a36e0057d91f2f83f23c48841263697676ff91f7ff964",
+      "integration_tests": [
+        "tests/a_publication_that_stopped_half_way_is_finished_helpers.py",
+        "tests/capture_intent_adoption_helpers.py",
+        "tests/capture_terminal_helpers.py"
+      ]
+    },
+    {
+      "provider": "scripts/repository_scope.py",
+      "names": [
+        "sanitized_git_environment"
+      ],
+      "contract_sha256": "fd550ae20761afad50b37fa3a71044a162485b0e4d4b3e2af9b5b22e143c2bec",
+      "integration_tests": [
+        "tests/test_a_code_generation_is_not_abandoned.py",
+        "tests/test_a_directory_link_inside_the_checkout_does_not_refuse_the_revision.py",
+        "tests/test_a_document_is_opened_in_its_own_language.py"
+      ]
+    }
+  ]
+}

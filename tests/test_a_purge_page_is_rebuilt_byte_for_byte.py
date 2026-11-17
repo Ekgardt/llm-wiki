@@ -4,7 +4,7 @@ Both resumable lineage operations write the page file before the database rows
 that record it, which is what lets a retry recognise its own work — provided the
 retry produces the same bytes. Both cut the page by `time.monotonic()`, so the
 number of links depended on how busy the machine was: a rollback left page N on
-disk, the retry built a different page N, and `_write_durable_file` answered
+disk, the retry built a different page N, and `write_durable_file` answered
 `durable_file_conflict` — `orphan_corrupt_purge_page_conflict` on the purge side,
 a blocked state with no resolver.
 
@@ -23,8 +23,10 @@ SCRIPTS_DIR = Path(__file__).resolve().parent.parent / "scripts"
 if str(SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_DIR))
 
-import memory_queue  # noqa: E402
-from memory_queue import MemoryQueue  # noqa: E402
+import queue_core  # noqa: E402
+from queue_core import (  # noqa: E402
+    MemoryQueue,
+)
 
 _OPERATION = {"page_count": 2, "rolling_root": "0" * 64}
 
@@ -54,8 +56,8 @@ def test_the_same_candidates_build_the_same_page_on_any_machine(
     tmp_path: Path, slow_clock: None
 ) -> None:
     candidate = tmp_path / "run" / "queue-v3.candidate.sqlite3"
-    memory_queue.initialize_queue_v3_candidate(candidate, source_v2=None)
-    queue = MemoryQueue._from_v3_candidate(candidate, state_root=tmp_path)
+    queue_core.initialize_queue_v3_candidate(candidate, source_v2=None)
+    queue = MemoryQueue.from_v3_candidate(candidate, state_root=tmp_path)
     candidates = _candidates(8)
 
     first = queue._bounded_lineage_links(candidates, _OPERATION, "op-1")

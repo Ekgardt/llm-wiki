@@ -31,15 +31,19 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from memory_state import ROOT, STATE_ROOT  # noqa: E402
+from datetime import UTC
+
+from llm_wiki import runtime_roots
 from project_journal import (  # noqa: E402
     ProjectJournalRebuildRequired,
     ProjectLeaseBusy,
     ProjectStore,
-    _timestamp,
+)
+from project_journal import (
+    timestamp as timestamp,
 )
 
-# Every checkpoint written since the rename is named by `_batch_occurrence_id`.
+# Every checkpoint written since the rename is named by `batch_occurrence_id`.
 # Anything else on an unsettled row predates it and can never be re-requested.
 BATCH_NAME_PREFIX = "batch:"
 
@@ -61,13 +65,13 @@ def _age_seconds(created_at: object, now: float) -> float:
     from datetime import datetime
 
     try:
-        started = datetime.fromisoformat(str(created_at).replace("Z", "+00:00"))
+        started = datetime.fromisoformat(str(created_at))
     except (TypeError, ValueError):
         return float("inf")
     return now - started.timestamp()
 
 
-def _is_orphaned(row: object, now: float, live_tokens: frozenset[str]) -> bool:
+def is_orphaned(row: object, now: float, live_tokens: frozenset[str]) -> bool:
     """Nobody is coming back for this row.
 
     A reserved row has no transaction, so the age of its transaction is the
@@ -86,11 +90,11 @@ def _is_orphaned(row: object, now: float, live_tokens: frozenset[str]) -> bool:
 
 def live_lease_tokens(database) -> frozenset[str]:
     """The lease tokens a project writer still holds, by the coordinator's clock."""
-    from datetime import datetime, timezone
+    from datetime import datetime
 
     from iso_time import utc_text
 
-    now = utc_text(datetime.now(timezone.utc))
+    now = utc_text(datetime.now(UTC))
     rows = database.execute(
         "SELECT lease_token FROM project_leases WHERE expires_at > ?", (now,)
     ).fetchall()
@@ -99,9 +103,9 @@ def live_lease_tokens(database) -> frozenset[str]:
 
 def orphaned_rows(store: ProjectStore) -> list[tuple[str, int, str, str]]:
     """Unsettled sequences no request is going to settle on its own."""
-    from datetime import datetime, timezone
+    from datetime import datetime
 
-    now = datetime.now(timezone.utc).timestamp()
+    now = datetime.now(UTC).timestamp()
     with store.coordinator._connect() as database:  # noqa: SLF001
         rows = database.execute(
             "SELECT c.project, c.sequence, c.state, c.occurrence_id, "
@@ -114,7 +118,7 @@ def orphaned_rows(store: ProjectStore) -> list[tuple[str, int, str, str]]:
     return [
         (row["project"], row["sequence"], row["state"], row["occurrence_id"])
         for row in rows
-        if _is_orphaned(row, now, live)
+        if is_orphaned(row, now, live)
     ]
 
 
@@ -123,7 +127,7 @@ def _lease_precondition(project: str, lease) -> dict[str, object]:
         "project": project,
         "lease_token": lease.token,
         "fencing_epoch": lease.epoch,
-        "expires_at": _timestamp(lease.expires_at),
+        "expires_at": timestamp(lease.expires_at),
     }
 
 
@@ -156,7 +160,7 @@ def _failed(error: BaseException) -> str:
     return f"{FAILED}{type(error).__name__}: {error}"
 
 
-def _rebuilt(store: ProjectStore, behind: ProjectJournalRebuildRequired) -> str:
+def rebuilt(store: ProjectStore, behind: ProjectJournalRebuildRequired) -> str:
     """Rebuild a journal that fell behind its committed checkpoints, then settle.
 
     The journal is a projection of the committed checkpoints (issue #20), and
@@ -182,7 +186,7 @@ def _outcome(store: ProjectStore, project: str, sequence: int) -> str:
 
 def _rebuild_outcome(store: ProjectStore, behind: ProjectJournalRebuildRequired) -> str:
     try:
-        return _rebuilt(store, behind)
+        return rebuilt(store, behind)
     except Exception as error:  # noqa: BLE001
         return _failed(error)
 
@@ -202,8 +206,8 @@ def any_failed(lines: list[str]) -> bool:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--vault", default=str(ROOT))
-    parser.add_argument("--state-root", default=str(STATE_ROOT))
+    parser.add_argument("--vault", default=str(runtime_roots.vault_root()))
+    parser.add_argument("--state-root", default=str(runtime_roots.state_root()))
     parser.add_argument(
         "--list-only",
         action="store_true",

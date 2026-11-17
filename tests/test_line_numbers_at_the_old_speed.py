@@ -21,9 +21,9 @@ SOURCE = "class A:\n    def f(self):\n        return g(1)\n\n\ndef g(x):\n    re
 
 
 def _spans(content: bytes) -> list[tuple[int, int, int, int]]:
-    offsets = code_extractor._line_offsets(content)
+    offsets = code_extractor.line_offsets(content)
     nodes = [node for node in ast.walk(ast.parse(content)) if hasattr(node, "lineno")]
-    return [code_extractor._span(node, offsets, content) for node in nodes]
+    return [code_extractor.node_span(node, offsets, content) for node in nodes]
 
 
 @pytest.mark.parametrize("ending", [b"\n", b"\r\n", b"\r"])
@@ -40,8 +40,8 @@ def test_lines_are_the_writers_count_of_line_feeds(ending):
 
 def test_one_file_is_scanned_for_line_feeds_once():
     content = (SOURCE * 200).encode()
-    code_extractor._newline_positions.cache_clear()
+    code_extractor.newline_positions.cache_clear()
 
     _spans(content)
 
-    assert code_extractor._newline_positions.cache_info().misses == 1
+    assert code_extractor.newline_positions.cache_info().misses == 1

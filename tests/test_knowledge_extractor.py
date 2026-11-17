@@ -10,27 +10,11 @@ from pathlib import Path
 
 import pytest
 
+from tests.knowledge_extractor_helpers import _source
+
 SCRIPTS = Path(__file__).resolve().parent.parent / "scripts"
 if str(SCRIPTS) not in sys.path:
     sys.path.insert(0, str(SCRIPTS))
-
-
-def _source(path: str, content: bytes, *, kind: str = "concept"):
-    from corpus_snapshot import CapturedSource, SourceMetadata, SourceRecord
-
-    return CapturedSource(
-        SourceRecord(
-            f"source:{path}",
-            path,
-            hashlib.sha256(content).hexdigest(),
-            len(content),
-            "text/markdown",
-            "markdown",
-            None,
-        ),
-        SourceMetadata(kind),
-        content,
-    )
 
 
 def _edges(result) -> set[tuple[str, str, str]]:
@@ -184,7 +168,7 @@ def test_results_are_deterministic_independent_of_input_order():
 
 
 def test_claim_ledger_emits_claim_evidence_nodes_and_evidenced_by_edge():
-    from claims import _semantic_payload
+    from claims import semantic_payload
     from knowledge_extractor import extract_knowledge
     from reliable_memory import canonical_json_bytes
 
@@ -196,7 +180,7 @@ def test_claim_ledger_emits_claim_evidence_nodes_and_evidenced_by_edge():
         "qualifiers": [],
         "validity": {"from": None, "to": None},
     }
-    fingerprint = hashlib.sha256(canonical_json_bytes(_semantic_payload(semantic))).hexdigest()
+    fingerprint = hashlib.sha256(canonical_json_bytes(semantic_payload(semantic))).hexdigest()
     claim = {
         "schema_version": "claim/v1",
         "id": "claim-1",
@@ -247,14 +231,14 @@ def test_adversarial_5000_links_stop_at_record_limit(monkeypatch):
         f"[[missing-{index}]]".encode() for index in range(5000)
     )
     calls = 0
-    evidence = knowledge_extractor._evidence
+    evidence = knowledge_extractor.evidence
 
     def counted_evidence(*args, **kwargs):
         nonlocal calls
         calls += 1
         return evidence(*args, **kwargs)
 
-    monkeypatch.setattr(knowledge_extractor, "_evidence", counted_evidence)
+    monkeypatch.setattr(knowledge_extractor, "evidence", counted_evidence)
     with pytest.raises(ValueError, match="record ceiling"):
         knowledge_extractor.extract_knowledge(
             (_source("knowledge/notes/adversarial.md", content),),

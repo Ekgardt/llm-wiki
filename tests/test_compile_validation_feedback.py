@@ -1,0 +1,116 @@
+"""A retry must know which answer failed and why; refusal is not completion."""
+import json
+from unittest.mock import Mock
+
+import compile_pipeline
+import pytest
+from compile_cache import CompileCache
+from llm_client import LLMResult
+from llm_wiki import compile_pipeline_base, compile_pipeline_prompts
+
+from tests.compile_critic_drop_cannot_complete_source_work_helpers import QUOTE, _inputs, _proposed
+from tests.compile_paths import point_compile_path
+from tests.the_compile_decides_what_the_snapshot_already_knows_helpers import (
+    _provider,
+    _source_review,
+)
+from tests.the_compile_decides_what_the_snapshot_already_knows_helpers import vault as vault
+
+
+def _invalid_draft(kind):
+    operation = _proposed()
+    if kind == 'json':
+        return '{"operations": ['
+    operation[kind] = {'related': [42], 'category': 'unlisted'}[kind]
+    return json.dumps({'operations': [operation]})
+
+
+@pytest.mark.parametrize('kind', ['json', 'related', 'category'])
+def test_retry_receives_failed_answer_reason_and_complete_sources(vault, kind):
+    root, state = vault
+    attempt = compile_pipeline_prompts.CompileAttempt(_inputs(root), CompileCache(state), None, None)
+    provider = _provider()
+    invalid = _invalid_draft(kind)
+    valid = json.dumps({'operations': [_proposed()]})
+    review = json.dumps({'reviews': [dict(slug='cedar-merge-order', verdict='pass', reason='Supported.')]})
+    attempt._call = Mock(side_effect=[LLMResult(provider, text, True, None, 'native')
+                                     for text in (invalid, valid, review, _source_review())])
+    resolved = attempt._drafted_with_retries(provider, attempt._action(provider))
+    assert resolved is not None
+    retry_prompt = attempt._call.call_args_list[1].args[1]
+    assert json.dumps(invalid, ensure_ascii=False) in retry_prompt
+    assert 'validation_error' in retry_prompt
+    assert {'json': '0 JSON values of the expected shape',
+            'related': 'related[0]: expected string',
+            'category': 'category: value is not in enum'}[kind] in retry_prompt
+    assert QUOTE in retry_prompt
+    assert attempt._call.call_args_list[1].args[2] == compile_pipeline_base.DRAFT_SYSTEM
+    assert len(resolved.plan['operations']) == 1
+
+
+def test_invalid_draft_cannot_be_replaced_by_unreviewed_empty_completion(vault):
+    root, state = vault
+    attempt = compile_pipeline_prompts.CompileAttempt(_inputs(root), CompileCache(state), None, None)
+    provider = _provider()
+    actions = attempt._action(provider)
+    assert attempt._planned(provider, actions, _invalid_draft('related')) is None
+    attempt._call = Mock(return_value=LLMResult(provider, _source_review(False), True, None, 'native'))
+    assert attempt._planned(provider, actions, '{"operations": []}') is None
+    assert QUOTE in attempt._call.call_args.args[1]
+    assert not list(attempt.cache.cache_dir.glob('*.json'))
+
+
+def test_validation_feedback_does_not_replace_prior_supported_review_records(vault):
+    root, state = vault
+    attempt = compile_pipeline_prompts.CompileAttempt(_inputs(root), CompileCache(state), None, None)
+    provider = _provider()
+    prior = json.dumps({'reviews': [{'slug': 'supported', 'verdict': 'pass'}]})
+    attempt.critic_feedback = (prior,)
+    assert attempt._planned(provider, attempt._action(provider), _invalid_draft('json')) is None
+    assert len(attempt.critic_feedback) == 2
+    assert attempt.critic_feedback[0] == prior
+
+
+def test_normalization_failure_also_returns_exact_diagnostic(vault, monkeypatch):
+    root, state = vault
+    attempt = compile_pipeline_prompts.CompileAttempt(_inputs(root), CompileCache(state), None, None)
+    provider = _provider()
+    point_compile_path(monkeypatch, 'normalize_plan', Mock(side_effect=ValueError('conflicting target')))
+    assert attempt._normalized(provider, attempt._action(provider), [_proposed()], 'normalize') is None
+    record = json.loads(attempt.critic_feedback[0])
+    assert record['validation_error'] == 'ValueError: conflicting target'
+    assert json.loads(record['rejected_response']) == {'operations': [_proposed()]}
+    assert not list(attempt.cache.cache_dir.glob('*.json'))
+
+
+def test_invalid_response_is_budgeted_whole_before_another_call(vault):
+    root, state = vault
+    attempt = compile_pipeline_prompts.CompileAttempt(_inputs(root), CompileCache(state), None, None)
+    provider = _provider()
+    invalid = _invalid_draft('related')
+    assert attempt._planned(provider, attempt._action(provider), invalid) is None
+    attempt._fits = Mock(return_value=False)
+    attempt._call = Mock(side_effect=AssertionError('Over-budget repair must not call provider'))
+    assert attempt._drafted(provider, attempt._action(provider)) is None
+    assert json.dumps(invalid) in attempt._fits.call_args.args[0]
+    attempt._call.assert_not_called()
+
+
+def test_refused_draft_does_not_use_a_cached_empty_result(vault):
+    root, state = vault
+    attempt = compile_pipeline_prompts.CompileAttempt(_inputs(root), CompileCache(state), None, None)
+    provider = _provider()
+    actions = attempt._action(provider)
+    attempt.cache.get = Mock(side_effect=AssertionError('Unresolved source work must bypass cached completion'))
+    assert attempt._planned(provider, actions, _invalid_draft('related')) is None
+    assert attempt._cached(actions, provider) is None
+    attempt.cache.get.assert_not_called()
+
+
+def test_draft_cache_identity_invalidates_answers_from_blind_retries():
+    old_program = (
+        'compile-draft/v19: explicit native ID/text pairs and validated critic feedback, with lossless source choices; '
+        'with immutable original-entry context and derived-provenance claims')
+    old_hash = compile_pipeline.sha256_bytes(compile_pipeline.canonical_json_bytes({
+        'program': old_program, 'system': compile_pipeline_base.DRAFT_SYSTEM, 'schema': compile_pipeline_base.RAW_PLAN_SCHEMA}))
+    assert compile_pipeline_prompts.DRAFT_PROGRAM_HASH != old_hash

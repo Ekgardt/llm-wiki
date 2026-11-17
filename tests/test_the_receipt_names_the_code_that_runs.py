@@ -29,10 +29,12 @@ from reliable_memory import canonical_json_bytes  # noqa: E402
 from repository_scope import resolve_repository_scope  # noqa: E402
 
 from tests.code_kernel_helpers import (  # noqa: E402
-    PyrightTarEntry,
-    create_pyright_install_artifact,
     create_python_repository,
     pyright_executed_tree_sha256,
+)
+from tests.pyright_install_artifacts import (  # noqa: E402
+    PyrightTarEntry,
+    create_pyright_install_artifact,
     use_pyright_install_artifact_identity,
 )
 

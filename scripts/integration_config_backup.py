@@ -11,14 +11,9 @@ from datetime import datetime, timedelta
 from pathlib import Path
 
 from reliable_memory import fsync_directory
-from settings import setting_value
 
-# Configuration backups kept per file beside the age setting and MAX_BACKUP_BYTES; the newest is
-# always kept. Basis unknown: value predates measurement; review when an operator needs an older
-# backup.
-MAX_BACKUPS = 10
 # Backups older than the setting `retention.config_backup_days` (90 by default) go,
-# the newest always kept; the count and byte bounds hold alongside.
+# the newest always kept; the existing byte budget holds alongside.
 MAX_BACKUP_BYTES = 100 * 1024 * 1024
 _DAY_SECONDS = 86_400
 _UNSET = object()
@@ -139,7 +134,7 @@ def _backup_path(destination: Path) -> Path:
     raise FileExistsError("could not allocate integration config backup path")
 
 
-def _create_verified_backup(destination: Path, original: bytes) -> Path:
+def create_verified_backup(destination: Path, original: bytes) -> Path:
     """Binary: a copy of somebody's config keeps that config's own newlines."""
     flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0)
     backup = _backup_path(destination)
@@ -246,6 +241,9 @@ def _expired_backup(
 def _prune_expired(
     backups: list[tuple[Path, os.stat_result]], protected: Path
 ) -> None:
+    # Only real backup retention reads operator settings, after provisioning.
+    from settings import setting_value
+
     cutoff = time.time() - setting_value("retention.config_backup_days") * _DAY_SECONDS
     for item in list(backups):
         if _expired_backup(item, protected, cutoff) and len(backups) > 1:
@@ -255,7 +253,7 @@ def _prune_expired(
 
 def _over_backup_limits(backups: list[tuple[Path, os.stat_result]]) -> bool:
     total_bytes = sum(metadata.st_size for _, metadata in backups)
-    return len(backups) > MAX_BACKUPS or total_bytes > MAX_BACKUP_BYTES
+    return total_bytes > MAX_BACKUP_BYTES
 
 
 def _oldest_unprotected(
@@ -275,7 +273,7 @@ def _prune_to_limits(
         backups.remove(removable)
 
 
-def _prune_backups(destination: Path, protected: Path | None) -> None:
+def prune_backups(destination: Path, protected: Path | None) -> None:
     backups = _owned_backups(destination)
     if not backups:
         return
@@ -287,7 +285,7 @@ def _prune_backups(destination: Path, protected: Path | None) -> None:
 def _optional_backup(destination: Path, original: bytes | None) -> Path | None:
     if original is None:
         return None
-    return _create_verified_backup(destination, original)
+    return create_verified_backup(destination, original)
 
 
 def _cleanup_failed_backup(backup: Path | None) -> None:
@@ -342,7 +340,7 @@ def publish_configuration(
     _require_expected(original, expected_original, expected_original_sha256)
     _require_replacement_size(replacement, max_original_bytes)
     if original == replacement:
-        _prune_backups(destination, None)
+        prune_backups(destination, None)
         return False, None
     backup = _publish_changed_configuration(
         destination,
@@ -352,5 +350,5 @@ def publish_configuration(
         expected_original_sha256,
         max_original_bytes,
     )
-    _prune_backups(destination, backup)
+    prune_backups(destination, backup)
     return True, backup

@@ -8,7 +8,7 @@ deletion of `run/` for a month while the doctor stopped counting it after two da
 from __future__ import annotations
 
 import sqlite3
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -27,7 +27,7 @@ def _committed_days_ago(tmp_path: Path, days: int) -> tuple[MarkdownCoordinator,
         [MarkdownChange.create("knowledge/notes/new.md", b"new")], operation_id="aged"
     )
     coordinator.apply(record.id)
-    aged = datetime.now(timezone.utc) - timedelta(days=days)
+    aged = datetime.now(UTC) - timedelta(days=days)
     with sqlite3.connect(coordinator.database_path) as database:
         database.execute(
             'UPDATE "transaction" SET updated_at = ? WHERE id = ?',

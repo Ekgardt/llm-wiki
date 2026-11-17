@@ -124,7 +124,9 @@ def _scope(directory: Path | None):
 
 
 def _state_root() -> Path:
-    from repository_index import state_root_path
+    from repository_indexing import (
+        state_root_path,
+    )
 
     return state_root_path()
 

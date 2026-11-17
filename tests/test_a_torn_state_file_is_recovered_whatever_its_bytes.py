@@ -22,10 +22,7 @@ TORN = b'{"consolidated": tr\xff\xfe'
 @pytest.fixture
 def state_dir(tmp_path, monkeypatch) -> Path:
     directory = tmp_path / "run"
-    monkeypatch.setattr(memory_state, "STATE_DIR", directory)
-    monkeypatch.setattr(memory_state, "STATE_FILE", directory / "state.json")
-    monkeypatch.setattr(memory_state, "LOCK_FILE", directory / "state.json.lock")
-    monkeypatch.setattr(memory_state, "REPORTS_DIR", tmp_path / "logs")
+    monkeypatch.setenv("LLM_WIKI_STATE_ROOT", str(tmp_path))
     return directory
 
 
@@ -39,18 +36,18 @@ def _mark(key: str):
 def test_bytes_that_are_not_utf8_are_recovered_from_the_previous_version(state_dir):
     memory_state.update_state(_mark("consolidated"))
     memory_state.update_state(_mark("compiled"))
-    memory_state.STATE_FILE.write_bytes(TORN)
+    memory_state.state_file().write_bytes(TORN)
 
     memory_state.update_state(_mark("captured"))
 
-    state = json.loads(memory_state.STATE_FILE.read_text(encoding="utf-8"))
+    state = json.loads(memory_state.state_file().read_text(encoding="utf-8"))
     assert state == {"consolidated": True, "captured": True}
     assert (state_dir / "state.json.corrupt").read_bytes() == TORN
 
 
 def test_a_reader_of_bytes_that_are_not_utf8_gets_an_empty_state(state_dir):
     state_dir.mkdir(parents=True)
-    memory_state.STATE_FILE.write_bytes(TORN)
+    memory_state.state_file().write_bytes(TORN)
 
     assert memory_state.load_state() == {}
     assert (state_dir / "state.json.corrupt").read_bytes() == TORN
@@ -58,7 +55,7 @@ def test_a_reader_of_bytes_that_are_not_utf8_gets_an_empty_state(state_dir):
 
 def test_a_reader_never_gets_anything_but_an_object(state_dir):
     state_dir.mkdir(parents=True)
-    memory_state.STATE_FILE.write_text("[]", encoding="utf-8")
+    memory_state.state_file().write_text("[]", encoding="utf-8")
 
     assert memory_state.load_state() == {}
     assert (state_dir / "state.json.corrupt").read_text(encoding="utf-8") == "[]"

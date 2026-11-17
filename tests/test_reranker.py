@@ -12,18 +12,18 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 
 import reranker as reranker_module  # noqa: E402
 from reranker import (  # noqa: E402
-    _sigmoid,
     rerank,
     reranker_available,
     should_rerank,
+    sigmoid,
 )
 
 
 def _reset_bundle(monkeypatch: pytest.MonkeyPatch) -> None:
     import reranker
 
-    monkeypatch.setattr(reranker, "_reranker_bundle", None)
-    monkeypatch.setattr(reranker, "_reranker_unavailable_reason", None)
+    monkeypatch.setattr(reranker, "reranker_bundle", None)
+    monkeypatch.setattr(reranker, "reranker_failure_reason", None)
 
 
 def test_no_environment_configuration_means_the_default_reranker(
@@ -53,12 +53,12 @@ def test_the_off_switch_means_no_reranker_bundle(
     _reset_bundle(monkeypatch)
     monkeypatch.setattr(
         reranker,
-        "_have_reranker_deps",
+        "have_reranker_deps",
         lambda: pytest.fail("dependency probe ran with the reranker switched off"),
     )
 
     assert reranker.configured_reranker_identity() is None
-    assert reranker._get_reranker_bundle() is None
+    assert reranker.get_reranker_bundle() is None
 
 
 @pytest.mark.parametrize(
@@ -124,11 +124,11 @@ def test_explicit_immutable_model_load_is_local_only(
     monkeypatch.setenv("LLMWIKI_RERANKER_MODEL", "org/model")
     monkeypatch.setenv("LLMWIKI_RERANKER_REVISION", revision)
     _reset_bundle(monkeypatch)
-    monkeypatch.setattr(reranker, "_have_reranker_deps", lambda: True)
+    monkeypatch.setattr(reranker, "have_reranker_deps", lambda: True)
     calls: list[tuple] = []
     _fake_reranker_modules(monkeypatch, calls)
 
-    bundle = reranker._get_reranker_bundle()
+    bundle = reranker.get_reranker_bundle()
 
     pinned = {
         "revision": revision,
@@ -157,7 +157,7 @@ def test_missing_local_artifact_degrades_without_network(
     monkeypatch.setenv("LLMWIKI_RERANKER_MODEL", "org/missing")
     monkeypatch.setenv("LLMWIKI_RERANKER_REVISION", revision)
     _reset_bundle(monkeypatch)
-    monkeypatch.setattr(reranker, "_have_reranker_deps", lambda: True)
+    monkeypatch.setattr(reranker, "have_reranker_deps", lambda: True)
     calls: list[tuple] = []
     _fake_reranker_modules(monkeypatch, calls)
 
@@ -167,7 +167,7 @@ def test_missing_local_artifact_degrades_without_network(
 
     sys.modules["transformers"].AutoTokenizer.from_pretrained = missing
 
-    assert reranker._get_reranker_bundle() is None
+    assert reranker.get_reranker_bundle() is None
     assert len(calls) == 1
     assert calls[0][2]["local_files_only"] is True
     assert calls[0][2]["trust_remote_code"] is False
@@ -182,7 +182,7 @@ def test_a_failed_load_is_recorded_once_and_not_retried_per_question(
     monkeypatch.setenv("LLMWIKI_RERANKER_MODEL", "org/missing")
     monkeypatch.setenv("LLMWIKI_RERANKER_REVISION", "c" * 40)
     _reset_bundle(monkeypatch)
-    monkeypatch.setattr(reranker, "_have_reranker_deps", lambda: True)
+    monkeypatch.setattr(reranker, "have_reranker_deps", lambda: True)
     calls: list[tuple] = []
     _fake_reranker_modules(monkeypatch, calls)
 
@@ -192,8 +192,8 @@ def test_a_failed_load_is_recorded_once_and_not_retried_per_question(
 
     sys.modules["transformers"].AutoTokenizer.from_pretrained = missing
 
-    assert reranker._get_reranker_bundle() is None
-    assert reranker._get_reranker_bundle() is None
+    assert reranker.get_reranker_bundle() is None
+    assert reranker.get_reranker_bundle() is None
     assert len(calls) == 1
     assert reranker.reranker_unavailable_reason() == "OSError: not cached"
 
@@ -204,7 +204,7 @@ class TestGracefulDegradation:
 
     def test_rerank_returns_input_when_deps_unavailable(self):
         docs = [{"slug": "a", "score": 1.0}, {"slug": "b", "score": 0.5}]
-        with patch("reranker._get_reranker_bundle", return_value=None):
+        with patch("reranker.get_reranker_bundle", return_value=None):
             result = rerank("query", docs, limit=10)
         assert [d["slug"] for d in result] == ["a", "b"]
         assert result[0]["reranker_applied"] is False
@@ -321,7 +321,7 @@ class TestFakeCrossEncoder:
             }
             for i in range(20)
         ]
-        with patch("reranker._get_reranker_bundle", return_value=None):
+        with patch("reranker.get_reranker_bundle", return_value=None):
             result = rerank("query", docs, limit=5)
         assert len(result) == 5
 
@@ -364,14 +364,14 @@ class TestShouldRerank:
 
 class TestSigmoid:
     def test_sigmoid_zero(self):
-        assert abs(_sigmoid(0) - 0.5) < 0.001
+        assert abs(sigmoid(0) - 0.5) < 0.001
 
     def test_sigmoid_large_positive(self):
-        assert abs(_sigmoid(100) - 1.0) < 0.001
+        assert abs(sigmoid(100) - 1.0) < 0.001
 
     def test_sigmoid_large_negative(self):
-        assert _sigmoid(-100) < 0.001
+        assert sigmoid(-100) < 0.001
 
     def test_sigmoid_symmetry(self):
         for x in [0.5, 1.0, 2.0, 5.0]:
-            assert abs(_sigmoid(x) + _sigmoid(-x) - 1.0) < 0.001
+            assert abs(sigmoid(x) + sigmoid(-x) - 1.0) < 0.001

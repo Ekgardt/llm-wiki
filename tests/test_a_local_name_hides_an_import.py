@@ -7,7 +7,7 @@ from __future__ import annotations
 import pytest
 from code_extractor import extract_code
 
-from tests.test_a_decorator_is_a_call_until_it_is_a_route import _source
+from tests.a_decorator_is_a_call_until_it_is_a_route_helpers import _source
 
 LIB = b"def compute():\n    return 1\n"
 

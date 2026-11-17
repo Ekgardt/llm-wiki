@@ -5,24 +5,14 @@ from __future__ import annotations
 import json
 import os
 import sqlite3
-import subprocess
-import sys
 import time
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
 
+from tests.generation_maintenance_helpers import _empty_generation, _generation_directory, _vault
 from tests.slow_machine import LONG_TIMEOUT
-
-
-def _generation_directory(state_root: Path, result: dict) -> Path:
-    """The built generation, naming the whole result when there is none."""
-    assert result.get("generation_id"), result
-    return (
-        state_root / "cache" / "evidence-graph" / "generations" / result["generation_id"]
-    )
-
 
 # The code-extractor tests build a generation over declared code roots, the
 # way a repository generation does; the vault's own generation holds memory
@@ -33,16 +23,6 @@ CODE_ROOTS = ("scripts", "tests")
 def _code_roots(root: Path) -> tuple[str, ...]:
     """The declared roots this fixture actually created; a policy names directories."""
     return tuple(name for name in CODE_ROOTS if (root / name).is_dir())
-
-
-def _vault(tmp_path: Path) -> tuple[Path, Path]:
-    root = tmp_path / "vault"
-    state = tmp_path / "state"
-    (root / "knowledge" / "notes").mkdir(parents=True)
-    (root / "knowledge" / "projects").mkdir(parents=True)
-    (state / "cache").mkdir(parents=True)
-    (state / "run").mkdir(parents=True)
-    return root, state
 
 
 def _graph_tables(state: Path, result: dict) -> dict[str, list[tuple]]:
@@ -69,9 +49,9 @@ def _write_python_workspace(root: Path, files: dict[str, str]) -> None:
 
 def test_production_opencode_plugin_progresses_through_generation_validation(tmp_path):
     pytest.importorskip("tree_sitter_javascript")
-    import doctor
+    import generation_maintenance
     from evidence_graph import validate_generation_artifact
-    from generation_catalog import GenerationCatalog
+    from llm_wiki.generation_catalog_store import GenerationCatalog
 
     root, state = _vault(tmp_path)
     scripts = root / "scripts"
@@ -81,7 +61,7 @@ def test_production_opencode_plugin_progresses_through_generation_validation(tmp
     )
     (scripts / production_plugin.name).write_bytes(production_plugin.read_bytes())
 
-    result = doctor.run_generation_maintenance(code_roots=_code_roots(root), root=root,
+    result = generation_maintenance.run_generation_maintenance(code_roots=_code_roots(root), root=root,
         state_root=state,
         time_budget_seconds=LONG_TIMEOUT,
         max_sources=10,
@@ -105,48 +85,14 @@ def test_production_opencode_plugin_progresses_through_generation_validation(tmp
     assert all(target and "\r" not in target and "\n" not in target for target in targets)
 
 
-def _empty_generation(
-    state: Path,
-    generation_id: str,
-    *,
-    parent: str | None = None,
-    root: Path | None = None,
-    extractor_version: str | None = None,
-):
-    import doctor
-    from evidence_graph_builder import build_full_generation
-    from generation_catalog import GenerationCatalog
-    from repository_scope import resolve_repository_scope
-
-    catalog = GenerationCatalog(state)
-    if root is not None and extractor_version is None:
-        extractor_version = doctor._maintenance_extractor_identity()
-    return build_full_generation(
-        catalog,
-        sources=(),
-        source_bytes={},
-        nodes=(),
-        occurrences=(),
-        assertions=(),
-        evidence=(),
-        observations=(),
-        dependencies=(),
-        generation_id=generation_id,
-        parent_generation_id=parent,
-        expected_active=parent,
-        repository_scope=None if root is None else resolve_repository_scope(root),
-        **({"extractor_version": extractor_version} if extractor_version else {}),
-    )
-
-
 def test_generation_check_reports_graph_only_v1_as_degraded_and_repairable(tmp_path):
-    import doctor
+    from llm_wiki import doctor_generation
 
     root, state = _vault(tmp_path)
     _empty_generation(state, "gen-1", root=root)
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
 
-    healthy = doctor._generation_check(
+    healthy = doctor_generation.generation_check(
         root, state, now, deadline=time.monotonic() + LONG_TIMEOUT, max_sources=10
     )
 
@@ -175,7 +121,7 @@ def test_generation_check_reports_graph_only_v1_as_degraded_and_repairable(tmp_p
     (root / "knowledge" / "notes" / "new.md").write_text(
         "---\ntype: concept\n---\n# New\n", encoding="utf-8"
     )
-    stale = doctor._generation_check(
+    stale = doctor_generation.generation_check(
         root, state, now, deadline=time.monotonic() + LONG_TIMEOUT, max_sources=10
     )
 
@@ -185,17 +131,18 @@ def test_generation_check_reports_graph_only_v1_as_degraded_and_repairable(tmp_p
 
 
 def test_generation_check_reports_complete_v2_as_healthy(tmp_path):
-    import doctor
+    import generation_maintenance
+    from llm_wiki import doctor_generation
 
     root, state = _vault(tmp_path)
-    built = doctor.run_generation_maintenance(
+    built = generation_maintenance.run_generation_maintenance(
         root=root, state_root=state, time_budget_seconds=LONG_TIMEOUT, max_sources=10
     )
 
-    result = doctor._generation_check(
+    result = doctor_generation.generation_check(
         root,
         state,
-        datetime.now(timezone.utc),
+        datetime.now(UTC),
         deadline=time.monotonic() + LONG_TIMEOUT,
         max_sources=10,
     )
@@ -209,10 +156,11 @@ def test_generation_check_reports_complete_v2_as_healthy(tmp_path):
 
 @pytest.mark.parametrize("damage", ["missing", "corrupt"])
 def test_generation_check_reports_invalid_v2_search_index_as_error(tmp_path, damage):
-    import doctor
+    import generation_maintenance
+    from llm_wiki import doctor_generation
 
     root, state = _vault(tmp_path)
-    built = doctor.run_generation_maintenance(
+    built = generation_maintenance.run_generation_maintenance(
         root=root, state_root=state, time_budget_seconds=LONG_TIMEOUT, max_sources=10
     )
     search = _generation_directory(state, built) / "search.sqlite3"
@@ -221,10 +169,10 @@ def test_generation_check_reports_invalid_v2_search_index_as_error(tmp_path, dam
     else:
         search.write_bytes(b"corrupt")
 
-    result = doctor._generation_check(
+    result = doctor_generation.generation_check(
         root,
         state,
-        datetime.now(timezone.utc),
+        datetime.now(UTC),
         deadline=time.monotonic() + LONG_TIMEOUT,
         max_sources=10,
     )
@@ -241,19 +189,22 @@ def test_generation_check_reports_invalid_v2_search_index_as_error(tmp_path, dam
 
 @pytest.mark.parametrize("finding", ["unscoped", "mismatched_scope", "stale_extractor"])
 def test_generation_check_degrades_noncurrent_scope_or_extraction_identity(tmp_path, finding):
-    import doctor
+    import generation_maintenance
+    from llm_wiki import doctor_generation
 
     root, state = _vault(tmp_path)
-    if finding == "unscoped":
-        _empty_generation(
-            state,
-            "gen-1",
-            extractor_version=doctor._maintenance_extractor_identity(),
-        )
-    elif finding == "mismatched_scope":
-        other_root, _other_state = _vault(tmp_path / "other")
-        _empty_generation(state, "gen-1", root=other_root)
-    else:
+    def publish_stale_generation():
+        if finding == "unscoped":
+            _empty_generation(
+                state,
+                "gen-1",
+                extractor_version=generation_maintenance.maintenance_extractor_identity(),
+            )
+            return
+        if finding == "mismatched_scope":
+            other_root, _other_state = _vault(tmp_path / "other")
+            _empty_generation(state, "gen-1", root=other_root)
+            return
         _empty_generation(
             state,
             "gen-1",
@@ -261,10 +212,12 @@ def test_generation_check_degrades_noncurrent_scope_or_extraction_identity(tmp_p
             extractor_version="maintenance-extractors/stale",
         )
 
-    result = doctor._generation_check(
+    publish_stale_generation()
+
+    result = doctor_generation.generation_check(
         root,
         state,
-        datetime.now(timezone.utc),
+        datetime.now(UTC),
         deadline=time.monotonic() + LONG_TIMEOUT,
         max_sources=10,
     )
@@ -275,16 +228,16 @@ def test_generation_check_degrades_noncurrent_scope_or_extraction_identity(tmp_p
 
 
 def test_generation_check_distinguishes_not_built_from_invalid_active(tmp_path):
-    import doctor
-    from generation_catalog import GenerationCatalog
+    from llm_wiki import doctor_generation
+    from llm_wiki.generation_catalog_store import GenerationCatalog
 
     root, state = _vault(tmp_path)
     before = {path.relative_to(tmp_path).as_posix() for path in tmp_path.rglob("*")}
 
-    missing = doctor._generation_check(
+    missing = doctor_generation.generation_check(
         root,
         state,
-        datetime.now(timezone.utc),
+        datetime.now(UTC),
         deadline=time.monotonic() + LONG_TIMEOUT,
         max_sources=10,
     )
@@ -299,10 +252,10 @@ def test_generation_check_distinguishes_not_built_from_invalid_active(tmp_path):
     assert {path.relative_to(tmp_path).as_posix() for path in tmp_path.rglob("*")} == before
 
     catalog = GenerationCatalog(state)
-    empty = doctor._generation_check(
+    empty = doctor_generation.generation_check(
         root,
         state,
-        datetime.now(timezone.utc),
+        datetime.now(UTC),
         deadline=time.monotonic() + LONG_TIMEOUT,
         max_sources=10,
     )
@@ -319,10 +272,10 @@ def test_generation_check_distinguishes_not_built_from_invalid_active(tmp_path):
             ("missing-generation",),
         )
 
-    invalid = doctor._generation_check(
+    invalid = doctor_generation.generation_check(
         root,
         state,
-        datetime.now(timezone.utc),
+        datetime.now(UTC),
         deadline=time.monotonic() + LONG_TIMEOUT,
         max_sources=10,
     )
@@ -332,17 +285,17 @@ def test_generation_check_distinguishes_not_built_from_invalid_active(tmp_path):
 
 
 def _age_past_orphan_grace(*paths: Path) -> None:
-    import doctor
+    import generation_maintenance
 
-    aged = time.time() - doctor.GENERATION_ORPHAN_GRACE_SECONDS - 60
+    aged = time.time() - generation_maintenance.GENERATION_ORPHAN_GRACE_SECONDS - 60
     for path in paths:
         os.utime(path, (aged, aged))
 
 
 def test_generation_repair_recovers_valid_orphan_cleans_partial_and_falls_back(tmp_path):
-    import doctor
+    import generation_maintenance
     from evidence_graph_builder import KillPointError, build_full_generation
-    from generation_catalog import GenerationCatalog
+    from llm_wiki.generation_catalog_store import GenerationCatalog
 
     root, state = _vault(tmp_path)
     first = _empty_generation(state, "gen-1")
@@ -375,7 +328,7 @@ def test_generation_repair_recovers_valid_orphan_cleans_partial_and_falls_back(t
     (second.generation_path / "evidence.sqlite3").write_bytes(b"corrupt")
     repaired: list[dict] = []
 
-    doctor._repair_generation_catalog(
+    generation_maintenance.repair_generation_catalog(
         root,
         state,
         deadline=time.monotonic() + LONG_TIMEOUT,
@@ -398,11 +351,11 @@ def test_generation_repair_recovers_valid_orphan_cleans_partial_and_falls_back(t
 
 
 def test_generation_repair_does_not_create_an_empty_catalog(tmp_path):
-    import doctor
+    import generation_maintenance
 
     root, state = _vault(tmp_path)
 
-    doctor._repair_generation_catalog(
+    generation_maintenance.repair_generation_catalog(
         root,
         state,
         deadline=time.monotonic() + LONG_TIMEOUT,
@@ -414,12 +367,12 @@ def test_generation_repair_does_not_create_an_empty_catalog(tmp_path):
 
 
 def test_bounded_builder_builds_then_defers_when_source_limit_is_exceeded(tmp_path):
-    import doctor
+    import generation_maintenance
 
     root, state = _vault(tmp_path)
     before_knowledge = list((root / "knowledge").rglob("*"))
 
-    built = doctor.run_generation_maintenance(
+    built = generation_maintenance.run_generation_maintenance(
         root=root,
         state_root=state,
         time_budget_seconds=LONG_TIMEOUT,
@@ -430,7 +383,7 @@ def test_bounded_builder_builds_then_defers_when_source_limit_is_exceeded(tmp_pa
     assert built["partial"] is False
     assert before_knowledge == list((root / "knowledge").rglob("*"))
 
-    current = doctor.run_generation_maintenance(
+    current = generation_maintenance.run_generation_maintenance(
         root=root,
         state_root=state,
         time_budget_seconds=LONG_TIMEOUT,
@@ -444,7 +397,7 @@ def test_bounded_builder_builds_then_defers_when_source_limit_is_exceeded(tmp_pa
         (root / "knowledge" / "notes" / name).write_text(
             f"---\ntype: concept\n---\n# {name}\n", encoding="utf-8"
         )
-    deferred = doctor.run_generation_maintenance(
+    deferred = generation_maintenance.run_generation_maintenance(
         root=root,
         state_root=state,
         time_budget_seconds=LONG_TIMEOUT,
@@ -458,9 +411,10 @@ def test_bounded_builder_builds_then_defers_when_source_limit_is_exceeded(tmp_pa
 
 
 def test_maintenance_publishes_consumable_v2_search_without_legacy(tmp_path, monkeypatch):
-    import doctor
+    import generation_maintenance
+    import generation_search
     import search_memory
-    from generation_catalog import GenerationCatalog
+    from llm_wiki.generation_catalog_store import GenerationCatalog
 
     root, state = _vault(tmp_path)
     unique = "phaseoneuniqueterm"
@@ -468,13 +422,13 @@ def test_maintenance_publishes_consumable_v2_search_without_legacy(tmp_path, mon
         f"---\ntype: concept\n---\n# Searchable\n{unique}\n", encoding="utf-8"
     )
 
-    built = doctor.run_generation_maintenance(
+    built = generation_maintenance.run_generation_maintenance(
         root=root, state_root=state, time_budget_seconds=LONG_TIMEOUT, max_sources=10
     )
     active = GenerationCatalog(state).get_active()
-    monkeypatch.setattr(search_memory, "ROOT", root)
+    monkeypatch.setenv("LLM_WIKI_ROOT", str(root))
     monkeypatch.setattr(
-        search_memory,
+        generation_search,
         "markdown_hits",
         lambda *args, **kwargs: pytest.fail("legacy search must not run"),
     )
@@ -491,17 +445,17 @@ def test_maintenance_publishes_consumable_v2_search_without_legacy(tmp_path, mon
 
 
 def test_matching_hash_v2_with_missing_search_is_rebuilt(tmp_path):
-    import doctor
-    from generation_catalog import GenerationCatalog
+    import generation_maintenance
+    from llm_wiki.generation_catalog_store import GenerationCatalog
 
     root, state = _vault(tmp_path)
-    first = doctor.run_generation_maintenance(
+    first = generation_maintenance.run_generation_maintenance(
         root=root, state_root=state, time_budget_seconds=LONG_TIMEOUT, max_sources=10
     )
     first_path = _generation_directory(state, first)
     (first_path / "search.sqlite3").unlink()
 
-    rebuilt = doctor.run_generation_maintenance(
+    rebuilt = generation_maintenance.run_generation_maintenance(
         root=root, state_root=state, time_budget_seconds=LONG_TIMEOUT, max_sources=10
     )
 
@@ -515,29 +469,13 @@ def _generation_directories(path) -> set[str]:
     return {item.name for item in path.iterdir() if item.is_dir()}
 
 
-def _ok_checks(names) -> list[dict]:
-    return [
-        {"id": name, "status": "ok", "message": "ok", "details": {}} for name in names
-    ]
-
-
-_SYNC_CHECK_NAMES = (
-    "environment",
-    "runtime",
-    "filesystem",
-    "integrations",
-    "transactions",
-    "queue",
-)
-
-
 def test_fts_failure_preserves_prior_and_removes_candidate(tmp_path, monkeypatch):
-    import doctor
-    import search_memory
-    from generation_catalog import GenerationCatalog
+    import generation_maintenance
+    import generation_search
+    from llm_wiki.generation_catalog_store import GenerationCatalog
 
     root, state = _vault(tmp_path)
-    prior = doctor.run_generation_maintenance(
+    prior = generation_maintenance.run_generation_maintenance(
         root=root, state_root=state, time_budget_seconds=LONG_TIMEOUT, max_sources=10
     )
     (root / "knowledge/notes/new.md").write_text(
@@ -545,13 +483,13 @@ def test_fts_failure_preserves_prior_and_removes_candidate(tmp_path, monkeypatch
     )
     before = _generation_directories(state / "cache/evidence-graph/generations")
     monkeypatch.setattr(
-        search_memory,
+        generation_search,
         "build_generation_fts",
         lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("injected FTS failure")),
     )
 
     with pytest.raises(RuntimeError, match="injected FTS failure"):
-        doctor._build_or_refresh_generation(
+        generation_maintenance.build_or_refresh_generation(
             root,
             state,
             deadline=time.monotonic() + LONG_TIMEOUT,
@@ -566,20 +504,20 @@ def test_fts_failure_preserves_prior_and_removes_candidate(tmp_path, monkeypatch
 
 
 def test_incremental_search_contains_new_chunks_and_no_old_text(tmp_path):
-    import doctor
+    import generation_maintenance
 
     root, state = _vault(tmp_path)
     page = root / "knowledge/notes/changing.md"
     page.write_text(
         "---\ntype: concept\n---\n# Changing\noldonlyterm\n", encoding="utf-8"
     )
-    first = doctor.run_generation_maintenance(
+    first = generation_maintenance.run_generation_maintenance(
         root=root, state_root=state, time_budget_seconds=LONG_TIMEOUT, max_sources=10
     )
     page.write_text(
         "---\ntype: concept\n---\n# Changing\nnewonlyterm\n", encoding="utf-8"
     )
-    second = doctor.run_generation_maintenance(
+    second = generation_maintenance.run_generation_maintenance(
         root=root, state_root=state, time_budget_seconds=LONG_TIMEOUT, max_sources=10
     )
 
@@ -597,32 +535,32 @@ def test_incremental_search_contains_new_chunks_and_no_old_text(tmp_path):
 def test_source_drift_before_publication_preserves_prior_and_removes_candidate(
     tmp_path, monkeypatch
 ):
-    import doctor
-    import search_memory
-    from generation_catalog import GenerationCatalog
+    import generation_maintenance
+    import generation_search
+    from llm_wiki.generation_catalog_store import GenerationCatalog
 
     root, state = _vault(tmp_path)
     page = root / "knowledge/notes/drift.md"
     page.write_text("---\ntype: concept\n---\n# Drift\nfirst\n", encoding="utf-8")
-    prior = doctor.run_generation_maintenance(
+    prior = generation_maintenance.run_generation_maintenance(
         root=root, state_root=state, time_budget_seconds=LONG_TIMEOUT, max_sources=10
     )
     page.write_text("---\ntype: concept\n---\n# Drift\nsecond\n", encoding="utf-8")
     before = {path.name for path in GenerationCatalog(state).generations_path.iterdir()}
-    real_build = search_memory.build_generation_fts
+    real_build = generation_search.build_generation_fts
 
     def build_then_drift(*args, **kwargs):
         descriptor = real_build(*args, **kwargs)
         page.write_text("---\ntype: concept\n---\n# Drift\nthird!\n", encoding="utf-8")
         return descriptor
 
-    monkeypatch.setattr(search_memory, "build_generation_fts", build_then_drift)
+    monkeypatch.setattr(generation_search, "build_generation_fts", build_then_drift)
 
     # Until 2026-09-05 a page edited during the build refused the publication and
     # left the prior generation active. Measured on the live vault, that is why
     # nothing was activated from 2026-08-30 onward. The build now finishes; the
     # page that moved is dropped at query time before its text can be quoted.
-    doctor._build_or_refresh_generation(
+    generation_maintenance.build_or_refresh_generation(
         root,
         state,
         deadline=time.monotonic() + LONG_TIMEOUT,
@@ -639,18 +577,18 @@ def test_source_drift_before_publication_preserves_prior_and_removes_candidate(
 def test_cancellation_after_registration_leaves_only_an_unregistered_orphan(
     tmp_path, monkeypatch
 ):
-    import doctor
-    from generation_catalog import GenerationCatalog
+    import generation_maintenance
+    from llm_wiki.generation_catalog_store import GenerationCatalog
 
     root, state = _vault(tmp_path)
     page = root / "knowledge/notes/cancel.md"
     page.write_text("---\ntype: concept\n---\n# Cancel\nfirst\n", encoding="utf-8")
-    prior = doctor.run_generation_maintenance(
+    prior = generation_maintenance.run_generation_maintenance(
         root=root, state_root=state, time_budget_seconds=LONG_TIMEOUT, max_sources=10
     )
     page.write_text("---\ntype: concept\n---\n# Cancel\nsecond\n", encoding="utf-8")
     cancelled = False
-    real_register = GenerationCatalog._register_validated
+    real_register = GenerationCatalog.register_validated
 
     def register_then_cancel(self, *args, **kwargs):
         nonlocal cancelled
@@ -659,10 +597,10 @@ def test_cancellation_after_registration_leaves_only_an_unregistered_orphan(
         return result
 
     monkeypatch.setattr(
-        GenerationCatalog, "_register_validated", register_then_cancel
+        GenerationCatalog, "register_validated", register_then_cancel
     )
     with pytest.raises(TimeoutError, match="cancel"):
-        doctor._build_or_refresh_generation(
+        generation_maintenance.build_or_refresh_generation(
             root,
             state,
             deadline=time.monotonic() + LONG_TIMEOUT,
@@ -685,34 +623,34 @@ def test_cancellation_after_registration_leaves_only_an_unregistered_orphan(
 def test_expired_deadline_after_registration_leaves_only_an_unregistered_orphan(
     tmp_path, monkeypatch
 ):
-    import doctor
-    import generation_catalog
+
+    import generation_maintenance
     import search_memory
-    from generation_catalog import GenerationCatalog
+    from llm_wiki.generation_catalog_store import GenerationCatalog
 
     root, state = _vault(tmp_path)
     page = root / "knowledge/notes/deadline.md"
     page.write_text("---\ntype: concept\n---\n# Deadline\nfirst\n", encoding="utf-8")
-    prior = doctor.run_generation_maintenance(
+    prior = generation_maintenance.run_generation_maintenance(
         root=root, state_root=state, time_budget_seconds=LONG_TIMEOUT, max_sources=10
     )
     page.write_text("---\ntype: concept\n---\n# Deadline\nsecond\n", encoding="utf-8")
 
     deadline = time.monotonic() + 100.0
     clock = [deadline - 1.0]
-    monkeypatch.setattr(generation_catalog.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(time, "monotonic", lambda: clock[0])
     monkeypatch.setattr(search_memory.time, "monotonic", lambda: clock[0])
-    real_register = GenerationCatalog._register_validated
+    real_register = GenerationCatalog.register_validated
 
     def register_then_expire(self, *args, **kwargs):
         result = real_register(self, *args, **kwargs)
         clock[0] = deadline + 1.0
         return result
 
-    monkeypatch.setattr(GenerationCatalog, "_register_validated", register_then_expire)
+    monkeypatch.setattr(GenerationCatalog, "register_validated", register_then_expire)
 
     with pytest.raises(TimeoutError, match="deadline"):
-        doctor._build_or_refresh_generation(
+        generation_maintenance.build_or_refresh_generation(
             root,
             state,
             deadline=deadline,
@@ -735,7 +673,7 @@ def test_expired_deadline_after_registration_leaves_only_an_unregistered_orphan(
 def test_complete_v2_orphan_is_recoverable_without_activation(tmp_path):
     import corpus_snapshot
     from evidence_graph_builder import KillPointError, build_full_generation
-    from generation_catalog import GenerationCatalog
+    from llm_wiki.generation_catalog_store import GenerationCatalog
     from repository_scope import resolve_repository_scope
 
     root, state = _vault(tmp_path)
@@ -782,9 +720,9 @@ def test_complete_v2_orphan_is_recoverable_without_activation(tmp_path):
 
 def test_incomplete_v2_orphan_is_not_registered_or_activated(tmp_path):
     import corpus_snapshot
-    import doctor
+    import generation_maintenance
     from evidence_graph_builder import KillPointError, build_full_generation
-    from generation_catalog import GenerationCatalog
+    from llm_wiki.generation_catalog_store import GenerationCatalog
     from repository_scope import resolve_repository_scope
 
     root, state = _vault(tmp_path)
@@ -824,7 +762,7 @@ def test_incomplete_v2_orphan_is_not_registered_or_activated(tmp_path):
     (catalog.generations_path / "incomplete-v2/search.sqlite3").unlink()
 
     repaired = []
-    doctor._repair_generation_catalog(
+    generation_maintenance.repair_generation_catalog(
         root,
         state,
         deadline=time.monotonic() + LONG_TIMEOUT,
@@ -839,8 +777,8 @@ def test_incomplete_v2_orphan_is_not_registered_or_activated(tmp_path):
 
 
 def test_maintenance_scopes_same_basename_roots_and_repository_nodes(tmp_path):
-    import doctor
-    from generation_catalog import GenerationCatalog
+    import generation_maintenance
+    from llm_wiki.generation_catalog_store import GenerationCatalog
     from repository_scope import resolve_repository_scope
 
     first_root, state = _vault(tmp_path / "first")
@@ -849,12 +787,12 @@ def test_maintenance_scopes_same_basename_roots_and_repository_nodes(tmp_path):
         (root / "scripts").mkdir()
         (root / "scripts" / "app.py").write_text("def shared():\n    return 1\n", encoding="utf-8")
 
-    first = doctor.run_generation_maintenance(code_roots=_code_roots(first_root), root=first_root,
+    first = generation_maintenance.run_generation_maintenance(code_roots=_code_roots(first_root), root=first_root,
         state_root=state,
         time_budget_seconds=LONG_TIMEOUT,
         max_sources=10,
     )
-    second = doctor.run_generation_maintenance(code_roots=_code_roots(second_root), root=second_root,
+    second = generation_maintenance.run_generation_maintenance(code_roots=_code_roots(second_root), root=second_root,
         state_root=state,
         time_budget_seconds=LONG_TIMEOUT,
         max_sources=10,
@@ -880,8 +818,8 @@ def test_maintenance_scopes_same_basename_roots_and_repository_nodes(tmp_path):
 
 
 def test_maintenance_extracts_python_and_records_current_extractor_inputs(tmp_path):
-    import doctor
-    from generation_catalog import GenerationCatalog
+    import generation_maintenance
+    from llm_wiki.generation_catalog_store import GenerationCatalog
 
     root, state = _vault(tmp_path)
     (root / "scripts").mkdir()
@@ -889,7 +827,7 @@ def test_maintenance_extracts_python_and_records_current_extractor_inputs(tmp_pa
         "def production_worker():\n    return 42\n", encoding="utf-8"
     )
 
-    result = doctor.run_generation_maintenance(code_roots=_code_roots(root), root=root,
+    result = generation_maintenance.run_generation_maintenance(code_roots=_code_roots(root), root=root,
         state_root=state,
         time_budget_seconds=LONG_TIMEOUT,
         max_sources=10,
@@ -900,7 +838,7 @@ def test_maintenance_extracts_python_and_records_current_extractor_inputs(tmp_pa
     import corpus_snapshot
 
     assert active["extractor_version"] == corpus_snapshot.EXTRACTOR_VERSION
-    assert active["graph_extractor_version"] == doctor._maintenance_extractor_identity()
+    assert active["graph_extractor_version"] == generation_maintenance.maintenance_extractor_identity()
     database_path = (
         _generation_directory(state, result)
         / "evidence.sqlite3"
@@ -923,7 +861,7 @@ def test_maintenance_extracts_workspace_once_and_partitions_cross_file_ownership
     tmp_path, monkeypatch
 ):
     import code_extractor
-    import doctor
+    import generation_maintenance
 
     root, state = _vault(tmp_path)
     _write_python_workspace(
@@ -943,7 +881,7 @@ def test_maintenance_extracts_workspace_once_and_partitions_cross_file_ownership
 
     monkeypatch.setattr(code_extractor, "extract_code", counted_extract)
 
-    result = doctor.run_generation_maintenance(code_roots=_code_roots(root), root=root,
+    result = generation_maintenance.run_generation_maintenance(code_roots=_code_roots(root), root=root,
         state_root=state,
         time_budget_seconds=LONG_TIMEOUT,
         max_sources=10,
@@ -1008,17 +946,17 @@ def test_maintenance_extracts_workspace_once_and_partitions_cross_file_ownership
     ids=("add-resolves", "delete-unresolves", "rename-unresolves", "signature-change"),
 )
 def test_maintenance_cross_file_incremental_equals_clean_rebuild(tmp_path, initial, updated):
-    import doctor
+    import generation_maintenance
 
     root, incremental_state = _vault(tmp_path)
     _write_python_workspace(root, initial)
-    first = doctor.run_generation_maintenance(code_roots=_code_roots(root), root=root, state_root=incremental_state, time_budget_seconds=LONG_TIMEOUT, max_sources=10
+    first = generation_maintenance.run_generation_maintenance(code_roots=_code_roots(root), root=root, state_root=incremental_state, time_budget_seconds=LONG_TIMEOUT, max_sources=10
     )
     _write_python_workspace(root, updated)
-    incremental = doctor.run_generation_maintenance(code_roots=_code_roots(root), root=root, state_root=incremental_state, time_budget_seconds=LONG_TIMEOUT, max_sources=10
+    incremental = generation_maintenance.run_generation_maintenance(code_roots=_code_roots(root), root=root, state_root=incremental_state, time_budget_seconds=LONG_TIMEOUT, max_sources=10
     )
     clean_state = tmp_path / "clean-state"
-    clean = doctor.run_generation_maintenance(code_roots=_code_roots(root), root=root, state_root=clean_state, time_budget_seconds=LONG_TIMEOUT, max_sources=10
+    clean = generation_maintenance.run_generation_maintenance(code_roots=_code_roots(root), root=root, state_root=clean_state, time_budget_seconds=LONG_TIMEOUT, max_sources=10
     )
 
     assert first["status"] == "built"
@@ -1039,7 +977,7 @@ def test_maintenance_cross_file_incremental_equals_clean_rebuild(tmp_path, initi
 
 
 def test_package_init_relative_import_incremental_equals_clean_rebuild(tmp_path):
-    import doctor
+    import generation_maintenance
 
     root, incremental_state = _vault(tmp_path)
     package = root / "scripts" / "pkg"
@@ -1047,20 +985,20 @@ def test_package_init_relative_import_incremental_equals_clean_rebuild(tmp_path)
     (package / "__init__.py").write_text(
         "from .dep import helper\nhelper()\n", encoding="utf-8"
     )
-    doctor.run_generation_maintenance(code_roots=_code_roots(root), root=root,
+    generation_maintenance.run_generation_maintenance(code_roots=_code_roots(root), root=root,
         state_root=incremental_state,
         time_budget_seconds=LONG_TIMEOUT,
         max_sources=10,
     )
     (package / "dep.py").write_text("def helper():\n    return 1\n", encoding="utf-8")
 
-    incremental = doctor.run_generation_maintenance(code_roots=_code_roots(root), root=root,
+    incremental = generation_maintenance.run_generation_maintenance(code_roots=_code_roots(root), root=root,
         state_root=incremental_state,
         time_budget_seconds=LONG_TIMEOUT,
         max_sources=10,
     )
     clean_state = tmp_path / "clean-state"
-    clean = doctor.run_generation_maintenance(code_roots=_code_roots(root), root=root,
+    clean = generation_maintenance.run_generation_maintenance(code_roots=_code_roots(root), root=root,
         state_root=clean_state,
         time_budget_seconds=LONG_TIMEOUT,
         max_sources=10,
@@ -1109,7 +1047,7 @@ def _has_missing_dependency_observation(tables: dict) -> bool:
 def test_from_dot_import_dependency_invalidates_and_matches_clean_rebuild(
     tmp_path, change
 ):
-    import doctor
+    import generation_maintenance
 
     root, incremental_state = _vault(tmp_path)
     package = root / "scripts" / "pkg"
@@ -1117,7 +1055,7 @@ def test_from_dot_import_dependency_invalidates_and_matches_clean_rebuild(
     (package / "__init__.py").write_text("from . import dep\n", encoding="utf-8")
     dependency = package / "dep.py"
     dependency.write_text("VALUE = 1\n", encoding="utf-8")
-    first = doctor.run_generation_maintenance(code_roots=_code_roots(root), root=root,
+    first = generation_maintenance.run_generation_maintenance(code_roots=_code_roots(root), root=root,
         state_root=incremental_state,
         time_budget_seconds=LONG_TIMEOUT,
         max_sources=10,
@@ -1132,13 +1070,13 @@ def test_from_dot_import_dependency_invalidates_and_matches_clean_rebuild(
     ]
 
     _apply_dependency_change(change, dependency, package)
-    incremental = doctor.run_generation_maintenance(code_roots=_code_roots(root), root=root,
+    incremental = generation_maintenance.run_generation_maintenance(code_roots=_code_roots(root), root=root,
         state_root=incremental_state,
         time_budget_seconds=LONG_TIMEOUT,
         max_sources=10,
     )
     clean_state = tmp_path / "clean-state"
-    clean = doctor.run_generation_maintenance(code_roots=_code_roots(root), root=root,
+    clean = generation_maintenance.run_generation_maintenance(code_roots=_code_roots(root), root=root,
         state_root=clean_state,
         time_budget_seconds=LONG_TIMEOUT,
         max_sources=10,
@@ -1153,7 +1091,7 @@ def test_from_dot_import_dependency_invalidates_and_matches_clean_rebuild(
 
 
 def test_maintenance_ambiguous_candidates_invalidate_referencing_source(tmp_path):
-    import doctor
+    import generation_maintenance
 
     root, incremental_state = _vault(tmp_path)
     _write_python_workspace(
@@ -1167,7 +1105,7 @@ def test_maintenance_ambiguous_candidates_invalidate_referencing_source(tmp_path
     alternate = root / "tests" / "dep.py"
     alternate.write_text("def helper():\n    return 2\n", encoding="utf-8")
 
-    first = doctor.run_generation_maintenance(code_roots=_code_roots(root), root=root,
+    first = generation_maintenance.run_generation_maintenance(code_roots=_code_roots(root), root=root,
         state_root=incremental_state,
         time_budget_seconds=LONG_TIMEOUT,
         max_sources=10,
@@ -1191,13 +1129,13 @@ def test_maintenance_ambiguous_candidates_invalidate_referencing_source(tmp_path
         ).fetchall() == [("ambiguous_target",)]
 
     alternate.write_text("def other():\n    return 2\n", encoding="utf-8")
-    incremental = doctor.run_generation_maintenance(code_roots=_code_roots(root), root=root,
+    incremental = generation_maintenance.run_generation_maintenance(code_roots=_code_roots(root), root=root,
         state_root=incremental_state,
         time_budget_seconds=LONG_TIMEOUT,
         max_sources=10,
     )
     clean_state = tmp_path / "clean-state"
-    clean = doctor.run_generation_maintenance(code_roots=_code_roots(root), root=root,
+    clean = generation_maintenance.run_generation_maintenance(code_roots=_code_roots(root), root=root,
         state_root=clean_state,
         time_budget_seconds=LONG_TIMEOUT,
         max_sources=10,
@@ -1213,7 +1151,7 @@ def test_maintenance_ambiguous_candidates_invalidate_referencing_source(tmp_path
 def test_module_addition_rebuilds_unique_reference_into_ambiguity_and_matches_clean(
     tmp_path,
 ):
-    import doctor
+    import generation_maintenance
 
     root, incremental_state = _vault(tmp_path)
     _write_python_workspace(
@@ -1223,7 +1161,7 @@ def test_module_addition_rebuilds_unique_reference_into_ambiguity_and_matches_cl
             "dep.py": "def helper():\n    return 1\n",
         },
     )
-    first = doctor.run_generation_maintenance(code_roots=_code_roots(root), root=root,
+    first = generation_maintenance.run_generation_maintenance(code_roots=_code_roots(root), root=root,
         state_root=incremental_state,
         time_budget_seconds=LONG_TIMEOUT,
         max_sources=10,
@@ -1234,13 +1172,13 @@ def test_module_addition_rebuilds_unique_reference_into_ambiguity_and_matches_cl
         "def helper():\n    return 2\n", encoding="utf-8"
     )
 
-    incremental = doctor.run_generation_maintenance(code_roots=_code_roots(root), root=root,
+    incremental = generation_maintenance.run_generation_maintenance(code_roots=_code_roots(root), root=root,
         state_root=incremental_state,
         time_budget_seconds=LONG_TIMEOUT,
         max_sources=10,
     )
     clean_state = tmp_path / "clean-state"
-    clean = doctor.run_generation_maintenance(code_roots=_code_roots(root), root=root,
+    clean = generation_maintenance.run_generation_maintenance(code_roots=_code_roots(root), root=root,
         state_root=clean_state,
         time_budget_seconds=LONG_TIMEOUT,
         max_sources=10,
@@ -1262,7 +1200,7 @@ def test_module_addition_rebuilds_unique_reference_into_ambiguity_and_matches_cl
 def test_module_removal_rebuilds_ambiguous_reference_to_unique_and_matches_clean(
     tmp_path,
 ):
-    import doctor
+    import generation_maintenance
 
     root, incremental_state = _vault(tmp_path)
     _write_python_workspace(
@@ -1276,20 +1214,20 @@ def test_module_removal_rebuilds_ambiguous_reference_to_unique_and_matches_clean
     tests_root.mkdir()
     alternate = tests_root / "dep.py"
     alternate.write_text("def helper():\n    return 2\n", encoding="utf-8")
-    doctor.run_generation_maintenance(code_roots=_code_roots(root), root=root,
+    generation_maintenance.run_generation_maintenance(code_roots=_code_roots(root), root=root,
         state_root=incremental_state,
         time_budget_seconds=LONG_TIMEOUT,
         max_sources=10,
     )
     alternate.unlink()
 
-    incremental = doctor.run_generation_maintenance(code_roots=_code_roots(root), root=root,
+    incremental = generation_maintenance.run_generation_maintenance(code_roots=_code_roots(root), root=root,
         state_root=incremental_state,
         time_budget_seconds=LONG_TIMEOUT,
         max_sources=10,
     )
     clean_state = tmp_path / "clean-state"
-    clean = doctor.run_generation_maintenance(code_roots=_code_roots(root), root=root,
+    clean = generation_maintenance.run_generation_maintenance(code_roots=_code_roots(root), root=root,
         state_root=clean_state,
         time_budget_seconds=LONG_TIMEOUT,
         max_sources=10,
@@ -1304,7 +1242,7 @@ def test_module_removal_rebuilds_ambiguous_reference_to_unique_and_matches_clean
 
 
 def test_module_file_package_collision_is_ambiguous_then_resolves_incrementally(tmp_path):
-    import doctor
+    import generation_maintenance
 
     root, incremental_state = _vault(tmp_path)
     _write_python_workspace(
@@ -1320,7 +1258,7 @@ def test_module_file_package_collision_is_ambiguous_then_resolves_incrementally(
         "def helper():\n    return 'package'\n", encoding="utf-8"
     )
 
-    first = doctor.run_generation_maintenance(code_roots=_code_roots(root), root=root,
+    first = generation_maintenance.run_generation_maintenance(code_roots=_code_roots(root), root=root,
         state_root=incremental_state,
         time_budget_seconds=LONG_TIMEOUT,
         max_sources=10,
@@ -1347,13 +1285,13 @@ def test_module_file_package_collision_is_ambiguous_then_resolves_incrementally(
         ).fetchone()[0] == 0
 
     (root / "scripts/foo.py").unlink()
-    incremental = doctor.run_generation_maintenance(code_roots=_code_roots(root), root=root,
+    incremental = generation_maintenance.run_generation_maintenance(code_roots=_code_roots(root), root=root,
         state_root=incremental_state,
         time_budget_seconds=LONG_TIMEOUT,
         max_sources=10,
     )
     clean_state = tmp_path / "clean-state"
-    clean = doctor.run_generation_maintenance(code_roots=_code_roots(root), root=root,
+    clean = generation_maintenance.run_generation_maintenance(code_roots=_code_roots(root), root=root,
         state_root=clean_state,
         time_budget_seconds=LONG_TIMEOUT,
         max_sources=10,
@@ -1367,7 +1305,7 @@ def test_module_file_package_collision_is_ambiguous_then_resolves_incrementally(
 
 
 def test_duplicate_tables_are_ambiguous_and_incremental_matches_clean_rebuild(tmp_path):
-    import doctor
+    import generation_maintenance
 
     root, incremental_state = _vault(tmp_path)
     _write_python_workspace(
@@ -1383,7 +1321,7 @@ def test_duplicate_tables_are_ambiguous_and_incremental_matches_clean_rebuild(tm
         },
     )
 
-    first = doctor.run_generation_maintenance(code_roots=_code_roots(root), root=root,
+    first = generation_maintenance.run_generation_maintenance(code_roots=_code_roots(root), root=root,
         state_root=incremental_state,
         time_budget_seconds=LONG_TIMEOUT,
         max_sources=10,
@@ -1412,13 +1350,13 @@ def test_duplicate_tables_are_ambiguous_and_incremental_matches_clean_rebuild(tm
         "class Second:\n    __tablename__ = 'archived_users'\n",
         encoding="utf-8",
     )
-    incremental = doctor.run_generation_maintenance(code_roots=_code_roots(root), root=root,
+    incremental = generation_maintenance.run_generation_maintenance(code_roots=_code_roots(root), root=root,
         state_root=incremental_state,
         time_budget_seconds=LONG_TIMEOUT,
         max_sources=10,
     )
     clean_state = tmp_path / "clean-state"
-    clean = doctor.run_generation_maintenance(code_roots=_code_roots(root), root=root,
+    clean = generation_maintenance.run_generation_maintenance(code_roots=_code_roots(root), root=root,
         state_root=clean_state,
         time_budget_seconds=LONG_TIMEOUT,
         max_sources=10,
@@ -1432,7 +1370,7 @@ def test_duplicate_tables_are_ambiguous_and_incremental_matches_clean_rebuild(tm
 
 
 def test_missing_table_rechecks_when_existing_code_source_adds_definition(tmp_path):
-    import doctor
+    import generation_maintenance
 
     root, incremental_state = _vault(tmp_path)
     _write_python_workspace(
@@ -1446,7 +1384,7 @@ def test_missing_table_rechecks_when_existing_code_source_adds_definition(tmp_pa
             ),
         },
     )
-    doctor.run_generation_maintenance(code_roots=_code_roots(root), root=root,
+    generation_maintenance.run_generation_maintenance(code_roots=_code_roots(root), root=root,
         state_root=incremental_state,
         time_budget_seconds=LONG_TIMEOUT,
         max_sources=10,
@@ -1455,13 +1393,13 @@ def test_missing_table_rechecks_when_existing_code_source_adds_definition(tmp_pa
         "class User:\n    __tablename__ = 'users'\n", encoding="utf-8"
     )
 
-    incremental = doctor.run_generation_maintenance(code_roots=_code_roots(root), root=root,
+    incremental = generation_maintenance.run_generation_maintenance(code_roots=_code_roots(root), root=root,
         state_root=incremental_state,
         time_budget_seconds=LONG_TIMEOUT,
         max_sources=10,
     )
     clean_state = tmp_path / "clean-state"
-    clean = doctor.run_generation_maintenance(code_roots=_code_roots(root), root=root,
+    clean = generation_maintenance.run_generation_maintenance(code_roots=_code_roots(root), root=root,
         state_root=clean_state,
         time_budget_seconds=LONG_TIMEOUT,
         max_sources=10,
@@ -1477,7 +1415,7 @@ def test_missing_table_rechecks_when_existing_code_source_adds_definition(tmp_pa
 def test_missing_python_symbol_rechecks_all_code_sources_on_module_addition(
     tmp_path,
 ):
-    import doctor
+    import generation_maintenance
 
     root, incremental_state = _vault(tmp_path)
     _write_python_workspace(
@@ -1487,7 +1425,7 @@ def test_missing_python_symbol_rechecks_all_code_sources_on_module_addition(
             "ordinary.py": "def stable():\n    return 1\n",
         },
     )
-    doctor.run_generation_maintenance(code_roots=_code_roots(root), root=root,
+    generation_maintenance.run_generation_maintenance(code_roots=_code_roots(root), root=root,
         state_root=incremental_state,
         time_budget_seconds=LONG_TIMEOUT,
         max_sources=10,
@@ -1496,13 +1434,13 @@ def test_missing_python_symbol_rechecks_all_code_sources_on_module_addition(
         "def helper():\n    return 1\n", encoding="utf-8"
     )
 
-    incremental = doctor.run_generation_maintenance(code_roots=_code_roots(root), root=root,
+    incremental = generation_maintenance.run_generation_maintenance(code_roots=_code_roots(root), root=root,
         state_root=incremental_state,
         time_budget_seconds=LONG_TIMEOUT,
         max_sources=10,
     )
     clean_state = tmp_path / "clean-state"
-    clean = doctor.run_generation_maintenance(code_roots=_code_roots(root), root=root,
+    clean = generation_maintenance.run_generation_maintenance(code_roots=_code_roots(root), root=root,
         state_root=clean_state,
         time_budget_seconds=LONG_TIMEOUT,
         max_sources=10,
@@ -1521,9 +1459,9 @@ def test_missing_python_symbol_rechecks_all_code_sources_on_module_addition(
 def test_shared_structural_nodes_survive_owner_removal_and_match_clean_rebuild(
     tmp_path, change
 ):
-    import doctor
     import evidence_graph
-    from generation_catalog import GenerationCatalog
+    import generation_maintenance
+    from llm_wiki.generation_catalog_store import GenerationCatalog
 
     root, incremental_state = _vault(tmp_path)
     shared = root / "scripts" / "shared"
@@ -1531,7 +1469,7 @@ def test_shared_structural_nodes_survive_owner_removal_and_match_clean_rebuild(
     first_file = shared / "a.py"
     first_file.write_text("def first():\n    return 1\n", encoding="utf-8")
     (shared / "b.py").write_text("def second():\n    return 2\n", encoding="utf-8")
-    first = doctor.run_generation_maintenance(code_roots=_code_roots(root), root=root,
+    first = generation_maintenance.run_generation_maintenance(code_roots=_code_roots(root), root=root,
         state_root=incremental_state,
         time_budget_seconds=LONG_TIMEOUT,
         max_sources=10,
@@ -1546,13 +1484,13 @@ def test_shared_structural_nodes_survive_owner_removal_and_match_clean_rebuild(
         first_file.rename(shared / "z.py")
     else:
         first_file.unlink()
-    incremental = doctor.run_generation_maintenance(code_roots=_code_roots(root), root=root,
+    incremental = generation_maintenance.run_generation_maintenance(code_roots=_code_roots(root), root=root,
         state_root=incremental_state,
         time_budget_seconds=LONG_TIMEOUT,
         max_sources=10,
     )
     clean_state = tmp_path / "clean-state"
-    clean = doctor.run_generation_maintenance(code_roots=_code_roots(root), root=root,
+    clean = generation_maintenance.run_generation_maintenance(code_roots=_code_roots(root), root=root,
         state_root=clean_state,
         time_budget_seconds=LONG_TIMEOUT,
         max_sources=10,
@@ -1641,7 +1579,7 @@ def _assert_partition_of(partition, index: int) -> None:
 def test_workspace_partition_indexes_each_record_collection_once():
     from types import SimpleNamespace
 
-    import doctor
+    import generation_maintenance
 
     class CountingRecords:
         def __init__(self, records):
@@ -1670,7 +1608,7 @@ def test_workspace_partition_indexes_each_record_collection_once():
         observation_source_dependencies={},
     )
 
-    partitions = doctor._partition_code_extraction(result, sources)
+    partitions = generation_maintenance.partition_code_extraction(result, sources)
 
     assert all(records.iterations == 1 for records in collections.values())
     assert tuple(partitions) == source_ids
@@ -1681,20 +1619,20 @@ def test_workspace_partition_indexes_each_record_collection_once():
 def test_workspace_partition_receives_generation_deadline_and_cancellation(
     tmp_path, monkeypatch
 ):
-    import doctor
+    import generation_maintenance
 
     root, state = _vault(tmp_path)
     _write_python_workspace(root, {"app.py": "def app():\n    return 1\n"})
     captured = {}
-    real_partition = doctor._partition_code_extraction
+    real_partition = generation_maintenance.partition_code_extraction
 
     def capture_partition(result, sources, **kwargs):
         captured.update(kwargs)
         return real_partition(result, sources, **kwargs)
 
-    monkeypatch.setattr(doctor, "_partition_code_extraction", capture_partition)
+    monkeypatch.setattr(generation_maintenance, "partition_code_extraction", capture_partition)
 
-    built = doctor.run_generation_maintenance(code_roots=_code_roots(root), root=root,
+    built = generation_maintenance.run_generation_maintenance(code_roots=_code_roots(root), root=root,
         state_root=state,
         time_budget_seconds=LONG_TIMEOUT,
         max_sources=10,
@@ -1708,7 +1646,7 @@ def test_workspace_partition_receives_generation_deadline_and_cancellation(
 def test_workspace_partition_checks_cancellation_inside_record_loops():
     from types import SimpleNamespace
 
-    import doctor
+    import generation_maintenance
 
     source = SimpleNamespace(record=SimpleNamespace(logical_id="source:app"))
     result = SimpleNamespace(
@@ -1728,7 +1666,7 @@ def test_workspace_partition_checks_cancellation_inside_record_loops():
         return checks >= 4
 
     with pytest.raises(TimeoutError, match="partition cancelled"):
-        doctor._partition_code_extraction(result, (source,), cancelled=cancelled)
+        generation_maintenance.partition_code_extraction(result, (source,), cancelled=cancelled)
 
     assert checks == 4
 
@@ -1737,7 +1675,7 @@ def test_maintenance_language_membership_change_forces_workspace_reresolution(
     tmp_path, monkeypatch
 ):
     import corpus_snapshot
-    import doctor
+    import generation_maintenance
 
     root, state = _vault(tmp_path)
     _write_python_workspace(
@@ -1747,7 +1685,7 @@ def test_maintenance_language_membership_change_forces_workspace_reresolution(
             "ordinary.py": "def ordinary():\n    return 2\n",
         },
     )
-    first = doctor.run_generation_maintenance(code_roots=_code_roots(root), root=root, state_root=state, time_budget_seconds=LONG_TIMEOUT, max_sources=10
+    first = generation_maintenance.run_generation_maintenance(code_roots=_code_roots(root), root=root, state_root=state, time_budget_seconds=LONG_TIMEOUT, max_sources=10
     )
     real_collect = corpus_snapshot.collect_corpus
 
@@ -1758,7 +1696,7 @@ def test_maintenance_language_membership_change_forces_workspace_reresolution(
         return snapshot
 
     monkeypatch.setattr(corpus_snapshot, "collect_corpus", reclassified)
-    second = doctor.run_generation_maintenance(code_roots=_code_roots(root), root=root, state_root=state, time_budget_seconds=LONG_TIMEOUT, max_sources=10
+    second = generation_maintenance.run_generation_maintenance(code_roots=_code_roots(root), root=root, state_root=state, time_budget_seconds=LONG_TIMEOUT, max_sources=10
     )
 
     assert first["status"] == "built"
@@ -1768,21 +1706,23 @@ def test_maintenance_language_membership_change_forces_workspace_reresolution(
 
 
 def test_maintenance_rebuilds_when_code_extractor_version_changes(tmp_path, monkeypatch):
-    import code_extractor
-    import doctor
+    import generation_maintenance
+    from llm_wiki import extractor_versions
 
     root, state = _vault(tmp_path)
     (root / "scripts").mkdir()
     (root / "scripts" / "app.py").write_text("def app():\n    return 1\n", encoding="utf-8")
-    first = doctor.run_generation_maintenance(
+    first = generation_maintenance.run_generation_maintenance(
         root=root,
         state_root=state,
         time_budget_seconds=LONG_TIMEOUT,
         max_sources=10,
     )
-    monkeypatch.setattr(code_extractor, "EXTRACTOR_VERSION", "code-extractor/freshness-test")
+    monkeypatch.setattr(
+        extractor_versions, "CODE_EXTRACTOR_VERSION", "code-extractor/freshness-test"
+    )
 
-    second = doctor.run_generation_maintenance(
+    second = generation_maintenance.run_generation_maintenance(
         root=root,
         state_root=state,
         time_budget_seconds=LONG_TIMEOUT,
@@ -1796,12 +1736,12 @@ def test_maintenance_rebuilds_when_code_extractor_version_changes(tmp_path, monk
 
 def test_maintenance_rebuilds_when_classifier_identity_changes(tmp_path, monkeypatch):
     import code_languages
-    import doctor
+    import generation_maintenance
 
     root, state = _vault(tmp_path)
     (root / "scripts").mkdir()
     (root / "scripts" / "app.py").write_text("def app():\n    return 1\n", encoding="utf-8")
-    first = doctor.run_generation_maintenance(
+    first = generation_maintenance.run_generation_maintenance(
         root=root,
         state_root=state,
         time_budget_seconds=LONG_TIMEOUT,
@@ -1813,7 +1753,7 @@ def test_maintenance_rebuilds_when_classifier_identity_changes(tmp_path, monkeyp
         "code-language-classifier/freshness-test+sha256:" + "0" * 64,
     )
 
-    second = doctor.run_generation_maintenance(
+    second = generation_maintenance.run_generation_maintenance(
         root=root,
         state_root=state,
         time_budget_seconds=LONG_TIMEOUT,
@@ -1826,7 +1766,7 @@ def test_maintenance_rebuilds_when_classifier_identity_changes(tmp_path, monkeyp
 
 
 def test_maintenance_passes_budget_to_scope_resolution_and_defers(tmp_path, monkeypatch):
-    import doctor
+    import generation_maintenance
     import repository_scope
 
     root, state = _vault(tmp_path)
@@ -1838,7 +1778,7 @@ def test_maintenance_passes_budget_to_scope_resolution_and_defers(tmp_path, monk
 
     monkeypatch.setattr(repository_scope, "resolve_repository_scope", exhausted)
 
-    result = doctor.run_generation_maintenance(
+    result = generation_maintenance.run_generation_maintenance(
         root=root,
         state_root=state,
         time_budget_seconds=LONG_TIMEOUT,
@@ -1856,12 +1796,12 @@ def test_workspace_extraction_deadline_defers_without_replacing_prior_generation
     tmp_path, monkeypatch
 ):
     import code_extractor
-    import doctor
-    from generation_catalog import GenerationCatalog
+    import generation_maintenance
+    from llm_wiki.generation_catalog_store import GenerationCatalog
 
     root, state = _vault(tmp_path)
     _write_python_workspace(root, {"app.py": "def app():\n    return 1\n"})
-    first = doctor.run_generation_maintenance(code_roots=_code_roots(root), root=root,
+    first = generation_maintenance.run_generation_maintenance(code_roots=_code_roots(root), root=root,
         state_root=state,
         time_budget_seconds=LONG_TIMEOUT,
         max_sources=10,
@@ -1880,7 +1820,7 @@ def test_workspace_extraction_deadline_defers_without_replacing_prior_generation
 
     monkeypatch.setattr(code_extractor, "extract_code", expired)
 
-    second = doctor.run_generation_maintenance(code_roots=_code_roots(root), root=root,
+    second = generation_maintenance.run_generation_maintenance(code_roots=_code_roots(root), root=root,
         state_root=state,
         time_budget_seconds=LONG_TIMEOUT,
         max_sources=10,
@@ -1904,165 +1844,6 @@ def test_generation_catalog_remains_rollback_journal_full_sync(tmp_path):
         assert database.execute("PRAGMA synchronous").fetchone()[0] == 2
 
 
-def test_nightly_uses_shared_generation_builder_not_process_local_graphs(monkeypatch):
-    import scheduled_nightly
-
-    calls = []
-    monkeypatch.setattr(
-        scheduled_nightly,
-        "run_generation_maintenance",
-        lambda **kwargs: (
-            calls.append(kwargs) or {"status": "built", "generation_id": "gen-1", "partial": False}
-        ),
-    )
-
-    result = scheduled_nightly._refresh_generation(lambda message: calls.append(message))
-
-    assert result == 0
-    assert any(isinstance(item, dict) and item["max_sources"] > 0 for item in calls)
-    source = Path(scheduled_nightly.__file__).read_text(encoding="utf-8")
-    assert "rebuild_graph_cache" not in source
-    assert "index_directory(ROOT" not in source
-
-
-def test_edited_wikilink_is_visible_after_nightly_in_fresh_processes(
-    tmp_path, monkeypatch
-):
-    import scheduled_nightly
-
-    root, state = _vault(tmp_path)
-    notes = root / "knowledge" / "notes"
-    source = notes / "source.md"
-    source.write_text(
-        "---\ntype: concept\n---\n# Source\n[[target-a]]\n",
-        encoding="utf-8",
-    )
-    for target in ("a", "b"):
-        (notes / f"target-{target}.md").write_text(
-            f"---\ntype: concept\n---\n# Target {target.upper()}\n",
-            encoding="utf-8",
-        )
-
-    monkeypatch.setattr(scheduled_nightly, "ROOT", root)
-    monkeypatch.setattr(scheduled_nightly, "STATE_ROOT", state)
-    logs = []
-
-    def fresh_neighbors() -> list[str]:
-        environment = os.environ.copy()
-        environment.update(
-            {
-                "LLM_WIKI_ROOT": str(root),
-                "LLM_WIKI_STATE_ROOT": str(state),
-                "PYTHONPATH": str(Path(__file__).resolve().parent.parent / "scripts"),
-            }
-        )
-        completed = subprocess.run(
-            [
-                sys.executable,
-                "-c",
-                (
-                    "import json, graph_neighbors; "
-                    "graph_neighbors._build_link_graph = lambda *args, **kwargs: "
-                    "(_ for _ in ()).throw(AssertionError('live source fallback')); "
-                    "print(json.dumps(graph_neighbors.get_neighbors("
-                    "'knowledge/notes/source.md')))"
-                ),
-            ],
-            cwd=root,
-            env=environment,
-            capture_output=True,
-            text=True,
-            check=True,
-            timeout=30,
-        )
-        return json.loads(completed.stdout)
-
-    assert scheduled_nightly._refresh_generation(logs.append) == 0
-    assert fresh_neighbors() == ["knowledge/notes/target-a.md"]
-
-    source.write_text(
-        "---\ntype: concept\n---\n# Source\n[[target-b]]\n",
-        encoding="utf-8",
-    )
-
-    assert scheduled_nightly._refresh_generation(logs.append) == 0
-    assert fresh_neighbors() == ["knowledge/notes/target-b.md"]
-
-
-def _recording_kwargs(calls, value):
-    """A stub that remembers the call it was made with."""
-
-    def stub(**kwargs):
-        calls.append(kwargs)
-        return value
-
-    return stub
-
-
-def _recording_name(calls, name, value):
-    """A stub that remembers only that it ran, in order."""
-
-    def stub(**kwargs):
-        calls.append(name)
-        return value
-
-    return stub
-
-
-def _action_of(result: dict, action_id: str) -> dict:
-    return next(item for item in result["actions"] if item["id"] == action_id)
-
-
-def _stub_sync_report(monkeypatch, sync_memory, report, dependency) -> None:
-    monkeypatch.setattr(sync_memory.doctor, "run_doctor", lambda **kwargs: report)
-    monkeypatch.setattr(sync_memory, "_dependency_action", lambda **kwargs: dependency)
-
-
-def test_sync_check_reports_stale_generation_and_apply_uses_shared_builder(tmp_path, monkeypatch):
-    import sync_memory
-
-    calls = []
-    generation = {
-        "id": "generation",
-        "status": "degraded",
-        "message": "Generation is stale.",
-        "details": {"freshness": "stale", "repairable": True},
-    }
-    index = {
-        "id": "index",
-        "status": "ok",
-        "message": "Index is fresh.",
-        "details": {"freshness": "fresh", "repairable": False},
-    }
-    report = {
-        "overall_status": "degraded",
-        "repaired": [],
-        "checks": _ok_checks(_SYNC_CHECK_NAMES) + [generation, index],
-    }
-    dependency = {"id": "dependencies", "status": "ok", "message": "ok", "details": {}}
-    refreshed = {
-        "id": "indexes",
-        "status": "changed",
-        "message": "Generation refreshed.",
-        "details": {"generation": "gen-2", "partial": False},
-    }
-    _stub_sync_report(monkeypatch, sync_memory, report, dependency)
-    monkeypatch.setattr(
-        sync_memory, "_run_generation_builder", _recording_kwargs(calls, refreshed)
-    )
-
-    checked = sync_memory.run_sync(root=tmp_path, state_root=tmp_path, home=tmp_path, apply=False)
-    applied = sync_memory.run_sync(root=tmp_path, state_root=tmp_path, home=tmp_path, apply=True)
-
-    checked_index = _action_of(checked, "indexes")
-    applied_index = _action_of(applied, "indexes")
-    assert checked_index["status"] == "skipped"
-    assert checked_index["details"]["checks"]["generation"] == "degraded"
-    assert applied_index["status"] == "changed"
-    assert calls, "apply must reach the shared generation builder"
-    assert calls[0]["max_sources"] > 0
-
-
 def test_a_vault_with_generations_but_none_active_is_degraded(tmp_path):
     """Built and then deactivated is an outage; never built is just young.
 
@@ -2070,8 +1851,8 @@ def test_a_vault_with_generations_but_none_active_is_degraded(tmp_path):
     catalog cleared the active pointer, search returned zero rows — and the report
     still said `ok, legacy retrieval remains available`.
     """
-    import doctor
-    from generation_catalog import GenerationCatalog
+    from llm_wiki import doctor_generation
+    from llm_wiki.generation_catalog_store import GenerationCatalog
 
     root, state = _vault(tmp_path)
     catalog = GenerationCatalog(state)
@@ -2083,10 +1864,10 @@ def test_a_vault_with_generations_but_none_active_is_degraded(tmp_path):
             ("generation-1111111111111111-22222222", b"{}", "a" * 64, "2026-08-24T00:00:00Z"),
         )
 
-    report = doctor._generation_check(
+    report = doctor_generation.generation_check(
         root,
         state,
-        datetime.now(timezone.utc),
+        datetime.now(UTC),
         deadline=time.monotonic() + LONG_TIMEOUT,
         max_sources=10,
     )
@@ -2126,8 +1907,8 @@ def _git_scope(tmp_path: Path, name: str, commit: str):
 
 def test_a_build_that_spans_a_commit_still_publishes(tmp_path, monkeypatch):
     """This vault commits itself; a four-minute build must survive that."""
+    import generation_search
     import repository_scope
-    import search_memory
 
     expected = _git_scope(tmp_path, "repository", "a" * 40)
     moved = _git_scope(tmp_path, "repository", "b" * 40)
@@ -2135,14 +1916,14 @@ def test_a_build_that_spans_a_commit_still_publishes(tmp_path, monkeypatch):
         repository_scope, "resolve_repository_scope", lambda *a, **k: moved
     )
 
-    search_memory._require_matching_repository(
+    generation_search.require_matching_repository(
         tmp_path, expected, deadline=None, cancelled=None
     )
 
 
 def test_publishing_into_another_checkout_is_still_refused(tmp_path, monkeypatch):
+    import generation_search
     import repository_scope
-    import search_memory
 
     expected = _git_scope(tmp_path, "repository", "a" * 40)
     elsewhere = _git_scope(tmp_path, "elsewhere", "a" * 40)
@@ -2151,7 +1932,7 @@ def test_publishing_into_another_checkout_is_still_refused(tmp_path, monkeypatch
     )
 
     with pytest.raises(ValueError, match="repository scope"):
-        search_memory._require_matching_repository(
+        generation_search.require_matching_repository(
             tmp_path, expected, deadline=None, cancelled=None
         )
 
@@ -2160,8 +1941,8 @@ def test_the_vault_generation_holds_memory_not_the_checkouts_code(tmp_path):
     """Issue #29.2: 92 % of an installed vault's chunks were this product's own
     tests and docs, because the checkout is the vault. The generation now
     collects `knowledge/` only; code is indexed per repository."""
-    import doctor
-    from generation_catalog import GenerationCatalog
+    import generation_maintenance
+    from llm_wiki.generation_catalog_store import GenerationCatalog
 
     root, state = _vault(tmp_path)
     (root / "knowledge/notes/mine.md").write_text(
@@ -2172,7 +1953,7 @@ def test_the_vault_generation_holds_memory_not_the_checkouts_code(tmp_path):
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text("checkout content\n", encoding="utf-8")
 
-    built = doctor.run_generation_maintenance(
+    built = generation_maintenance.run_generation_maintenance(
         root=root, state_root=state, time_budget_seconds=LONG_TIMEOUT, max_sources=10
     )
     manifest = json.loads(
@@ -2190,12 +1971,12 @@ def test_the_vault_generation_holds_memory_not_the_checkouts_code(tmp_path):
 def test_a_build_names_the_seconds_each_phase_cost(tmp_path):
     """Built or deferred, the outcome says where the time went, so a runner that
     passes its budget can be read instead of guessed at."""
-    import doctor
     import evidence_graph_builder
+    import generation_maintenance
 
     root, state = _vault(tmp_path)
     (root / "knowledge" / "notes" / "a.md").write_text("# A\n\nfact\n", encoding="utf-8")
-    built = doctor.run_generation_maintenance(
+    built = generation_maintenance.run_generation_maintenance(
         root=root, state_root=state, time_budget_seconds=LONG_TIMEOUT, max_sources=10
     )
     assert built["status"] == "built", built
@@ -2210,7 +1991,7 @@ def test_a_build_names_the_seconds_each_phase_cost(tmp_path):
     original = evidence_graph_builder.build_incremental_generation
     evidence_graph_builder.build_incremental_generation = out_of_time
     try:
-        deferred = doctor.run_generation_maintenance(
+        deferred = generation_maintenance.run_generation_maintenance(
             root=root, state_root=state, time_budget_seconds=LONG_TIMEOUT, max_sources=10
         )
     finally:
