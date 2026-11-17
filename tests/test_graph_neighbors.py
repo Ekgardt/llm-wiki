@@ -108,7 +108,6 @@ def test_rebuild_graph_cache_returns_edges(fake_graph):
 
 
 def test_build_link_graph_extracts_wikilinks(fake_graph, notes):
-    """build_link_graph finds [[wikilinks]] in markdown files."""
     (notes / "page_a.md").write_text(
         "# Page A\n\nSee [[Page B]] and [[Page C]].", encoding="utf-8"
     )
@@ -168,19 +167,21 @@ def test_boost_ties_are_ordered_by_path(fake_graph):
 
 
 def test_source_scan_fallback_honors_expired_deadline(fake_graph):
-    with patch.object(fake_graph, "_read_active_link_graph", return_value=None):
-        with pytest.raises(TimeoutError, match="deadline"):
-            fake_graph.get_link_graph(
-                catalog=object(), deadline=time.monotonic() - 1
-            )
+    with (
+        patch.object(fake_graph, "_read_active_link_graph", return_value=None),
+        pytest.raises(TimeoutError, match="deadline"),
+    ):
+        fake_graph.get_link_graph(catalog=object(), deadline=time.monotonic() - 1)
 
 
 @pytest.mark.parametrize("cached", [None, {}, {"seed.md": ["neighbor.md"]}])
 def test_expired_deadline_does_not_enter_graph_reader(fake_graph, cached):
     fake_graph.link_graph_cache = cached
-    with patch.object(fake_graph, "_read_active_link_graph") as read:
-        with pytest.raises(TimeoutError, match="deadline"):
-            fake_graph.get_link_graph(deadline=time.monotonic() - 1)
+    with (
+        patch.object(fake_graph, "_read_active_link_graph") as read,
+        pytest.raises(TimeoutError, match="deadline"),
+    ):
+        fake_graph.get_link_graph(deadline=time.monotonic() - 1)
     read.assert_not_called()
 
 

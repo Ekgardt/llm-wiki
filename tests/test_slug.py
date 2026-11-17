@@ -20,7 +20,6 @@ from session_start_project_state import (
     slug_owns_dir,
 )
 
-# ---------- _base_slug ----------
 
 def test_base_slug_lowercase():
     p = Path("/tmp/My-Project")
@@ -51,8 +50,6 @@ def test_base_slug_fallback_for_dotdot():
     assert base_slug(P()) == "root"  # type: ignore[arg-type]
 
 
-# ---------- git_remote_slug ----------
-
 def test_git_remote_slug_parses_ssh(tmp_path: Path):
     (tmp_path / ".git").mkdir()
     (tmp_path / ".git" / "config").write_text(
@@ -81,8 +78,6 @@ def test_git_remote_slug_none_when_no_origin(tmp_path: Path):
     assert git_remote_slug(tmp_path) is None
 
 
-# ---------- path_hash_suffix ----------
-
 def test_path_hash_deterministic(tmp_path: Path):
     assert path_hash_suffix(tmp_path) == path_hash_suffix(tmp_path)
 
@@ -90,8 +85,6 @@ def test_path_hash_deterministic(tmp_path: Path):
 def test_path_hash_length():
     assert len(path_hash_suffix(Path("/any"))) == 6
 
-
-# ---------- slug_owns_dir (strict ownership, Round 5 #3) ----------
 
 def test_slug_owns_empty_dir(tmp_path: Path):
     """Unused slug → free to take."""
@@ -142,8 +135,6 @@ def test_slug_owns_strict_rejects_missing_source(tmp_path: Path):
     )
     assert slug_owns_dir("ambiguous", tmp_path / "someproj", projects) is False
 
-
-# ---------- _compute_slug end-to-end ----------
 
 def test_compute_slug_unique(tmp_path: Path):
     """Clean slug — base strategy wins."""
