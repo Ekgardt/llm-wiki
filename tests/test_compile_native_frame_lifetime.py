@@ -67,7 +67,7 @@ def test_initial_capture_still_verifies_permanent_source(tmp_path, monkeypatch, 
 
 
 def test_source_backed_native_frames_survive_archive_roundtrip(tmp_path, monkeypatch):
-    inputs, _ = _native_inputs(tmp_path, monkeypatch, 'Unicode й, quotes " and slash \\.\n' * 1000)
+    inputs, _ = _native_inputs(tmp_path, monkeypatch, 'Unicode \u0439, quotes " and slash \\.\n' * 1000)
     expected = tuple(inputs.dailies[0].native_frames)
     with _reader(inputs.dailies) as reader:
         restored = reader.planning_inputs().dailies

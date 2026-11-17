@@ -1151,8 +1151,8 @@ def test_the_claude_call_does_not_inherit_the_operator_persona(monkeypatch):
 
     Measured on this machine: `claude -p` loads the user's settings, including
     the output style, and treats a `<system>` block in the prompt as text. The
-    compile's draft came back three times as a chat reply — "От вас ничего не
-    нужно" — instead of the JSON plan the schema asked for.
+    compile's draft came back three times as a chat reply — "Nothing is
+    required from you" (in Russian) — instead of the JSON plan the schema asked for.
     """
     monkeypatch.setattr(
         llm_client, "claude_cli_flags", lambda: frozenset({"--system-prompt", "--setting-sources"})

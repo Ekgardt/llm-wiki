@@ -352,7 +352,7 @@ def _replace_open_target(source, target):
     source.replace(target)
 
 
-@pytest.mark.parametrize('name', ['target.json', 'проверка-𐐀.json'])
+@pytest.mark.parametrize('name', ['target.json', '\u043f\u0440\u043e\u0432\u0435\u0440\u043a\u0430-𐐀.json'])
 def test_native_rename_name_stops_before_unrelated_memory(tmp_path, name):
     path = tmp_path / name
     buffer = _rename_information(path)
@@ -364,7 +364,7 @@ def test_native_rename_name_stops_before_unrelated_memory(tmp_path, name):
     assert record.length == len(str(path.resolve()).encode('utf-16-le'))
 
 
-@pytest.mark.parametrize('name', ['target.json', 'проверка-𐐀.json'])
+@pytest.mark.parametrize('name', ['target.json', '\u043f\u0440\u043e\u0432\u0435\u0440\u043a\u0430-𐐀.json'])
 def test_native_rename_buffer_keeps_full_utf16_path_and_only_posix_replace_flags(tmp_path, name):
     path = tmp_path / name
     buffer = _rename_information(path)
@@ -406,7 +406,7 @@ def test_native_fixture_writer_closes_source_handle_when_rename_refuses(tmp_path
 
 
 @pytest.mark.skipif(os.name != 'nt', reason='Actual Windows open-target rename semantics')
-@pytest.mark.parametrize('name', ['target.json', 'проверка-𐐀.json'])
+@pytest.mark.parametrize('name', ['target.json', '\u043f\u0440\u043e\u0432\u0435\u0440\u043a\u0430-𐐀.json'])
 def test_native_posix_replacement_reaches_held_identity_while_movefileex_refuses(tmp_path, name):
     path, source = tmp_path / name, tmp_path / 'replacement.json'
     path.write_bytes(b'original')

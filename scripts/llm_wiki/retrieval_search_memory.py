@@ -273,7 +273,7 @@ def resolved_query_encoder(
     so a caller that enters here directly — the grounded answer does — left it
     None and the generation reader refused the dense leg as
     `generation_vectors_unavailable`. Measured on this vault: the grounded
-    answer to "как устроен повтор после карантина" was built from six lexical
+    answer to "how is the retry after quarantine built" (asked in Russian) was built from six lexical
     rows, four of them the same status document, and reported insufficient
     evidence for a page the vault holds.
     """

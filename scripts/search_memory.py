@@ -405,7 +405,7 @@ def main() -> int:
     p.add_argument("--project", default=None, help="Boost results from this project slug")
     p.add_argument("--since", default=None, help="Only results since YYYY-MM-DD")
     p.add_argument("--as-of", dest="as_of", default=None, help="Only results valid on YYYY-MM-DD")
-    # On by default: measured on this vault, "почему systemd таймер, а не cron"
+    # On by default: measured on this vault, "why a systemd timer and not cron" (asked in Russian)
     # returns nothing without it and four results with it. The dense leg costs
     # about three seconds once the model is warm, and it fails soft — no model or
     # no vectors in the active generation simply means the lexical answer.

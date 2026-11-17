@@ -35,7 +35,7 @@ def test_codex_draft_planning_counts_the_complete_local_stdin(monkeypatch):
 
 def test_final_fit_rejects_the_old_unframed_budget(monkeypatch):
     monkeypatch.setenv('MEMORY_LLM_PROVIDER', 'codex')
-    prompt, system, schema = 'Полный e\u0301 факт', 'system', {'type': 'object'}
+    prompt, system, schema = '\u041f\u043e\u043b\u043d\u044b\u0439 e\u0301 \u0444\u0430\u043a\u0442', 'system', {'type': 'object'}
     old = f'{system}\n{compile_pipeline.canonical_json_bytes(schema).decode()}\n{prompt}'
     budget = ContextBudget(None, len(old.encode()) + 2, 1, 1)
     assert len(_codex_text(prompt, system, schema).encode()) > budget.available_input_tokens

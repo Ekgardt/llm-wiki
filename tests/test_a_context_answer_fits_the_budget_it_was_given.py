@@ -74,7 +74,7 @@ def test_every_answer_counts_tokens_one_way(vault: Path) -> None:
 
 
 def test_the_estimate_counts_bytes_so_cyrillic_is_not_undercounted() -> None:
-    assert (answer_budget.estimate_text_tokens("abcd"), answer_budget.estimate_text_tokens("привет")) == (2, 6)
+    assert (answer_budget.estimate_text_tokens("abcd"), answer_budget.estimate_text_tokens("\u043f\u0440\u0438\u0432\u0435\u0442")) == (2, 6)
 
 
 def test_a_budget_the_item_list_cannot_fit_is_refused_not_exceeded(vault: Path, monkeypatch) -> None:

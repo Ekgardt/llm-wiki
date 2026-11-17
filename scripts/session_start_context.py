@@ -192,8 +192,8 @@ def _spawn_nightly_catchup(today: str) -> None:
 # has been misdecoded as cp1252 and re-encoded.
 MOJIBAKE_MARKERS = (
     "Ð", "Ñ", "Â", "Ã",
-    "вЂ", "РЎ", "Рѕ", "Р°", "Рµ", "Р¶", "РЅ", "С‚", "СЂ", "С€", "С‹", "Рё", "Р»",
-    "в†", "РїРѕ", "РЅРµ", "РЅР°",
+    "\u0432\u0402", "\u0420\u040e", "\u0420\u0455", "\u0420°", "\u0420µ", "\u0420¶", "\u0420\u0405", "\u0421‚", "\u0421\u0402", "\u0421€", "\u0421‹", "\u0420\u0451", "\u0420»",
+    "\u0432†", "\u0420\u0457\u0420\u0455", "\u0420\u0405\u0420µ", "\u0420\u0405\u0420°",
 )
 
 # Lines that are pure hook noise and carry no information. Stripped

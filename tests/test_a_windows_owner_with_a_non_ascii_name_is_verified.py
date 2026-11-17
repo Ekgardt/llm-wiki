@@ -30,7 +30,7 @@ def test_an_owner_named_in_cyrillic_is_verified(tmp_path, monkeypatch):
 def test_a_second_entry_is_still_refused_under_that_code_page(tmp_path, monkeypatch):
     path = tmp_path / "artifact"
     path.write_bytes(b"artifact")
-    listing = f"artifact {OWNER}:(F)\n         PC\\Гость:(R)\n"
+    listing = f"artifact {OWNER}:(F)\n         PC\\\u0413\u043e\u0441\u0442\u044c:(R)\n"
     _icacls_writing(monkeypatch, listing, "cp866")
 
     with pytest.raises(PermissionError, match="owner-only ACL"):

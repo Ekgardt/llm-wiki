@@ -192,7 +192,7 @@ def test_an_unreadable_mode_falls_back_to_the_measured_default(monkeypatch) -> N
     assert attach_answer_cost(other, elapsed_seconds=0.02, budget_seconds=10.0) is False
 
 
-@pytest.mark.parametrize("body", ["x" * 80_000, "Привет 世界 🧭" * 8_000])
+@pytest.mark.parametrize("body", ["x" * 80_000, "\u041f\u0440\u0438\u0432\u0435\u0442 世界 🧭" * 8_000])
 def test_repeated_attachment_measures_the_same_answer(body):
     envelope = {"components": {}, "data": {"body": body}}
     expected = estimate_tokens(envelope)
@@ -205,7 +205,7 @@ def test_repeated_attachment_measures_the_same_answer(body):
 
 
 def test_measurement_omits_only_the_reserved_location_without_mutation():
-    telemetry = {"old": "старое" * 100}
+    telemetry = {"old": "\u0441\u0442\u0430\u0440\u043e\u0435" * 100}
     nested = {COST_KEY: "nested answer fact" * 100}
     data = {"body": "世界 🧭", COST_KEY: telemetry, "nested": nested}
     envelope = {"components": {}, COST_KEY: "top level fact" * 100, "data": data}

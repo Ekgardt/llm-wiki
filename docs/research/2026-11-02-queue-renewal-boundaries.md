@@ -1,177 +1,177 @@
-# Следующий этап: параметры надёжности и продление аренды
+# The next stage: reliability parameters and lease renewal
 
-2026-11-02. На базе add477d3. Пользователь явно согласовал оба шага ответом
-«Да, реализовать оба шага». Решение и STRUCTURE записаны до production-изменений.
+2026-11-02. Based on add477d3. The user explicitly approved both steps with the answer
+"Yes, implement both steps". The decision and STRUCTURE were recorded before the production changes.
 
-## Два последовательных переноса
+## Two sequential moves
 
-1. `scripts/llm_wiki/reliability_defaults.py` становится владельцем существующего
-   frozen dataclass ReliableMemoryDefaults (21 поле) и единственного DEFAULTS.
-   Значения, типы, порядок полей, frozen-поведение и constructor сохраняются.
-   reliable_memory переэкспортирует те же объекты; исторический
-   `ReliableMemoryDefaults.__module__ = 'reliable_memory'` сохраняет pickle ABI.
-   Изолированный import/construct не требует reliable_memory, но pickle вправе
-   загрузить старый фасад. Перед переносом фиксируются доверенные старые образцы.
-   Двенадцать найденных прямых production from-import потребителей переводятся
-   на владельца в том же lexical scope; совместимые имена остаются в прежнем API.
-2. `scripts/llm_wiki/queue_heartbeat.py` получает существующие _SourceFenceHeartbeat,
-   _LeaseHeartbeat, _join_heartbeat_or_refuse и HEARTBEAT_STOP_FLOOR_SECONDS.
-   Зависимости: stdlib, новый reliability_defaults, queue_contracts и существующий
-   lease_renewal. MemoryQueue annotation заменяется узкими typing.Protocol:
-   для lease нужны heartbeat и _heartbeat_wait; для source fence —
-   heartbeat_source_fence и _heartbeat_wait. Это описания существующего интерфейса,
-   не wrappers, runtime checks, subclasses или callbacks registry.
+1. `scripts/llm_wiki/reliability_defaults.py` becomes the owner of the existing
+   frozen dataclass ReliableMemoryDefaults (21 fields) and of the single DEFAULTS.
+   Values, types, field order, frozen behaviour and the constructor are kept.
+   reliable_memory re-exports the same objects; the historical
+   `ReliableMemoryDefaults.__module__ = 'reliable_memory'` keeps the pickle ABI.
+   An isolated import/construct does not need reliable_memory, but pickle may
+   load the old facade. Trusted old samples are pinned before the move.
+   The twelve direct production from-import consumers found are switched
+   to the owner in the same lexical scope; compatible names stay in the old API.
+2. `scripts/llm_wiki/queue_heartbeat.py` receives the existing _SourceFenceHeartbeat,
+   _LeaseHeartbeat, _join_heartbeat_or_refuse and HEARTBEAT_STOP_FLOOR_SECONDS.
+   Dependencies: stdlib, the new reliability_defaults, queue_contracts and the existing
+   lease_renewal. The MemoryQueue annotation is replaced by narrow typing.Protocol types:
+   a lease needs heartbeat and _heartbeat_wait; a source fence needs
+   heartbeat_source_fence and _heartbeat_wait. These describe the existing interface;
+   they are not wrappers, runtime checks, subclasses or a callbacks registry.
 
-У каждого модуля собственные tests/modules/reliability_defaults/ и
-tests/modules/queue_heartbeat/, guide и manifest в docs/modules/ с соответствующим
-именем через дефис. Полный пакет каждого должен быть ≤100000 o200k_base токенов.
-Оба переноса квалифицируются последовательно; провал первого не скрывается
-выполнением второго. Согласование этого плана разрешает оба указанных шага.
+Each module has its own tests/modules/reliability_defaults/ and
+tests/modules/queue_heartbeat/, and a guide and manifest in docs/modules/ under the matching
+hyphenated name. The full package of each must be ≤100000 o200k_base tokens.
+Both moves are qualified sequentially; a failure of the first is not hidden by
+carrying out the second. Approval of this plan permits both named steps.
 
-## Почему такая последовательность
+## Why this order
 
-Исходник reliable_memory — 14069 токенов. Сам defaults dataclass —232 токена
-без decorators/комментариев/тестов. Heartbeat определения —1066 токенов без
-константы/обвязки. Эти числа не являются полными пакетами. Простой перенос
-heartbeat с импортом DEFAULTS из reliable_memory оставляет зависимость от
-общего durability/IO модуля и его зависимостей ради небольшого набора значений.
-Выделение уже существующего immutable контракта устраняет эту причину без
-копирования чисел или создания второго набора настроек.
+The reliable_memory source is 14069 tokens. The defaults dataclass itself is 232 tokens
+without decorators/comments/tests. The heartbeat definitions are 1066 tokens without
+the constant/glue. These numbers are not full packages. A plain move of
+heartbeat that imports DEFAULTS from reliable_memory leaves a dependency on the
+shared durability/IO module and its dependencies for the sake of a small set of values.
+Extracting the already existing immutable contract removes this cause without
+copying numbers or creating a second set of settings.
 
-Найдены прямые потребители DEFAULTS: archive_sessions, flush_memory, archive_daily,
+Direct consumers of DEFAULTS found: archive_sessions, flush_memory, archive_daily,
 repair_exhausted_queue_tasks, installed_memory_repair, operational_ownership,
 integration_adapter, scheduled_weekly, compile_progress_migration,
-markdown_transaction, memory_queue, private_vault_backup. AST инвентаризация
-дополняется поиском qualified/aliased usages перед переносом; отсутствие
-from-import само по себе не доказывает отсутствие потребителя.
-Также найден qualified доступ reliable_memory.DEFAULTS в doctor.py; он входит
-в миграцию потребителей, остальные операции doctor остаются у прежних владельцев.
+markdown_transaction, memory_queue, private_vault_backup. The AST inventory
+is supplemented by a search for qualified/aliased usages before the move; the absence
+of a from-import does not by itself prove the absence of a consumer.
+A qualified access reliable_memory.DEFAULTS was also found in doctor.py; it is part
+of the consumer migration, and the other doctor operations stay with their previous owners.
 
-Очередь сохраняет транзакции, проверки fencing, renew SQL и _heartbeat_wait.
-Новый heartbeat лишь владеет существующими потоками, stop Event, lock и ошибкой.
-Прежние имена memory_queue остаются прямыми aliases при подтверждённых вызовах.
-Проверки, меняющие внутренний stop floor, патчат нового владельца; перенаправление
-globals не добавляется. Проверяется identity классов для текущих monkeypatch
-потребителей compile controller.
+The queue keeps transactions, fencing checks, the renew SQL and _heartbeat_wait.
+The new heartbeat only owns the existing threads, stop Event, lock and error.
+The old memory_queue names stay direct aliases where calls are confirmed.
+Checks that change the internal stop floor patch the new owner; no redirection of
+globals is added. Class identity is checked for the current monkeypatch
+consumers of the compile controller.
 
-## Сохранение поведения
+## Preserving behaviour
 
-Не менять значения DEFAULTS, default arguments, held_since, renewal schedule,
-attempt_seconds, типы/коды ошибок, блокировки, thread names и daemon flags.
-Сохранить join с последующим is_alive и отказ heartbeat_stop_timeout. Busy SQLite
-не объявлять потерей lease раньше существующего срока. Успех heartbeat не даёт
-права обходить fencing при завершении задания. Stop failure продолжает блокировать
-обычный путь завершения; source refresh хранит и передаёт исходную причину ошибки.
-Запуск нового daemon, изменение runtime, schema, env, CLI и installation не входят.
+Do not change the DEFAULTS values, default arguments, held_since, renewal schedule,
+attempt_seconds, error types/codes, locks, thread names or daemon flags.
+Keep join followed by is_alive, and the heartbeat_stop_timeout refusal. Do not declare busy SQLite
+a lease loss earlier than the existing deadline. Heartbeat success does not grant the
+right to bypass fencing when a task completes. A stop failure keeps blocking
+the normal completion path; source refresh stores and passes on the original cause of the error.
+Starting a new daemon and changing the runtime, schema, env, CLI or installation are out of scope.
 
-Делать копии параметров в heartbeat, извлекать методы по числу строк или вводить
-универсальную службу lease не предлагается. Оставить весь импорт reliable_memory
-можно технически, но это сохраняет связанность, которую пользователь попросил
-устранить. Менять scheduling на asyncio или заменять алгоритм сторонней системой
-не требуется для этой локальной модульной границы.
+Making copies of parameters in heartbeat, extracting methods by line count or introducing
+a universal lease service is not proposed. Keeping the whole reliable_memory import
+is technically possible, but it keeps the coupling the user asked to
+remove. Moving scheduling to asyncio or replacing the algorithm with a third-party system
+is not needed for this local module boundary.
 
-## Исследование и его пределы
+## Research and its limits
 
-Проверены 2026-11-02 три независимых первичных источника:
+Three independent primary sources were checked on 2026-11-02:
 
 - [Python threading](https://docs.python.org/3.10/library/threading.html):
-  join возвращает None и требует is_alive для определения timeout; Event позволяет
-  сигнализировать остановку. Поэтому существующий отказ и синхронизация сохраняются.
-  Daemon threads могут быть оборваны при shutdown: перенос не устраняет это
-  существующее ограничение и не обещает graceful cleanup при убийстве процесса.
-- [SQLite busy timeout](https://www.sqlite.org/c3ref/busy_timeout.html): busy handler
-  может ждать блокировку до своего бюджета. Это объясняет необходимость учитывать
-  время попытки при renewal и bounded join, не даёт основания менять значения.
+  join returns None and needs is_alive to detect a timeout; Event allows
+  signalling a stop. So the existing refusal and synchronization are kept.
+  Daemon threads may be cut off at shutdown: the move does not remove this
+  existing limitation and does not promise graceful cleanup when the process is killed.
+- [SQLite busy timeout](https://www.sqlite.org/c3ref/busy_timeout.html): a busy handler
+  may wait for a lock up to its budget. This explains the need to account for
+  attempt time in renewal and a bounded join; it gives no reason to change the values.
 - [AWS: leader election and leases](https://aws.amazon.com/builders-library/leader-election-in-distributed-systems/):
-  локальная длительность и проверка права выполнять действие существенны для
-  lease safety. Это первичный опыт 2019 года, не новая библиотека и не рекомендация
-  внедрить распределённый сервис в локальную SQLite-систему.
+  local duration and checking the right to perform an action are essential for
+  lease safety. This is primary experience from 2019, not a new library and not a recommendation
+  to bring a distributed service into a local SQLite system.
 
-Дополнительно проверен [Python pickle](https://docs.python.org/3.10/library/pickle.html):
-импортируемое имя класса является частью восстановления объектов. Поэтому
-сохраняется legacy module name при единственном владельце определения.
-Python 3.10 upstream unsupported, но действующий project floor сохраняется и
-проверяется; перенос не заявляет продление поддержки Python upstream.
+[Python pickle](https://docs.python.org/3.10/library/pickle.html) was checked in addition:
+the importable class name is part of restoring objects. So
+the legacy module name is kept with a single owner of the definition.
+Python 3.10 is unsupported upstream, but the current project floor is kept and
+checked; the move does not claim an extension of upstream Python support.
 
-Встроенный индекс add477d3 актуален. Граф видит вызовы общего join из обоих stop,
-renew_until_stopped из обоих _run и из других компонентов. Class-only queries
-не показали dependency edges; это не доказательство изоляции. Исходники,
-аннотации, импорты и реальные tests дополняют неполный статический граф.
+The built-in index at add477d3 is current. The graph sees calls of the shared join from both stops,
+and of renew_until_stopped from both _run methods and from other components. Class-only queries
+showed no dependency edges; that is not proof of isolation. Sources,
+annotations, imports and real tests supplement the incomplete static graph.
 
-## Проверки до и после
+## Checks before and after
 
-Исходный набор reliable_memory, queue heartbeat stop, lease renewal и остановка
-дочернего процесса при lease loss: **97 passed, 3 skipped**, 6,47 с на Linux.
-Это baseline, не квалификация ещё не выполненного переноса.
+The original set of reliable_memory, queue heartbeat stop, lease renewal and stopping
+the child process on lease loss: **97 passed, 3 skipped**, 6.47 s on Linux.
+This is a baseline, not a qualification of the move not yet carried out.
 
-После согласования: private decision и STRUCTURE до кода; старые AST и pickle
-samples; красные boundary checks; миграция без дублирования; одинаковые значения,
-identity и старые pickle bytes; isolated imports; реальные heartbeat threads и
+After approval: private decision and STRUCTURE before the code; old AST and pickle
+samples; red boundary checks; migration without duplication; identical values,
+identity and old pickle bytes; isolated imports; real heartbeat threads and
 stop timeout, source refresh/error; busy/expiry cases; queue/compile lock handoff,
-lease-loss/cancellation, ownership и affected defaults consumers. Python3.10,
-Ruff, реальная CCN/branch-shape проверка, CI discovery/weights и оба полных
-token budgets обязательны. Обновить индекс и удалить заменённые тела, сохраняя
-только документированные compatibility names. Живой vault не заменять всей
-незавершённой candidate веткой. Native платформы и полный suite не заявлять без
-их фактического выполнения.
+lease-loss/cancellation, ownership and affected defaults consumers. Python3.10,
+Ruff, a real CCN/branch-shape check, CI discovery/weights and both full
+token budgets are mandatory. Update the index and delete the replaced bodies, keeping
+only the documented compatibility names. Do not replace the live vault with the whole
+unfinished candidate branch. Do not claim native platforms or the full suite without
+actually running them.
 
 Evidence: logs/queue-renewal-proposal-inventory.json; logs/queue-heartbeat-graph.json;
 logs/queue-renewal-callers.json; logs/queue-renewal-baseline.txt;
 scripts/reliable_memory.py; scripts/memory_queue.py; tests/test_queue_heartbeat_stop.py.
 
-## Первый шаг: defaults
+## First step: defaults
 
-ReliableMemoryDefaults и DEFAULTS выделены без изменения AST класса или значений.
-Тела 13 потребителей совпали после исключения imports и замены qualified DEFAULTS
-в doctor на прямой импорт владельца. Остальная реализация reliable_memory также
-совпала после исключения перенесённых узлов/imports. Constructor/frozen semantics,
-все поля и исторические protocol-4 bytes класса/default/custom instances сохранены.
-Boundary guard сначала обнаружил прежние зависимости, затем прошёл; own import
-и создание экземпляра в свежем interpreter не загружают durability/queue/state.
+ReliableMemoryDefaults and DEFAULTS were extracted without changing the class AST or the values.
+The bodies of 13 consumers matched after excluding imports and replacing the qualified DEFAULTS
+in doctor with a direct import from the owner. The rest of the reliable_memory implementation also
+matched after excluding the moved nodes/imports. Constructor/frozen semantics,
+all fields and the historical protocol-4 bytes of the class/default/custom instances are kept.
+The boundary guard first detected the old dependencies, then passed; the module's own import
+and instance creation in a fresh interpreter do not load durability/queue/state.
 
-Own packet:18passed, первоначальный размер70023tokens/23files. Python3.10 own+
-reliable_memory:77passed/3skipped. Расширенный набор:646passed/8skipped,84,48с.
-Окончательный размер
-зафиксированы в logs/reliability-defaults-related.txt/.xml и финальном budget log.
-Он включает queue, transaction/recovery, ownership, archives, scheduled weekly,
-progress migration, backup, capture hooks, heartbeat, complexity, structure и CI.
-Три пропуска на3.10 относятся к платформенным случаям. Источники измерений:
+Own packet:18passed, initial size70023tokens/23files. Python3.10 own+
+reliable_memory:77passed/3skipped. Extended set:646passed/8skipped,84.48s.
+The final size
+is recorded in logs/reliability-defaults-related.txt/.xml and the final budget log.
+It includes queue, transaction/recovery, ownership, archives, scheduled weekly,
+progress migration, backup, capture hooks, heartbeat, complexity, structure and CI.
+The three skips on3.10 concern platform-specific cases. Measurement sources:
 logs/reliability-defaults-preservation.json; logs/reliability-defaults-own.txt;
 logs/reliability-defaults-python310.txt; logs/reliability-defaults-boundary-red.txt;
 logs/reliability-defaults-boundary-green.txt.
 
-Второй шаг heartbeat на момент этой записи ещё не реализован. Живая установка
-не менялась; public CI, native Windows/macOS и полный suite не заявлены.
+The second step, heartbeat, was not yet implemented at the time of this entry. The live installation
+was not changed; public CI, native Windows/macOS and the full suite are not claimed.
 
-## Второй шаг: heartbeat
+## Second step: heartbeat
 
-Оба класса и bounded join теперь принадлежат queue_heartbeat. AST перенесённых
-тел совпал с bee6aac3 после нормализации двух queue-аннотаций; остальная очередь
-совпала после исключения imports и перенесённых узлов. Старые имена классов
-являются прямыми aliases. Stop floor патчится у нового владельца; прежний тест
-перенесён в собственный пакет. Boundary check сначала падал на прежнем владельце.
+Both classes and the bounded join now belong to queue_heartbeat. The AST of the moved
+bodies matched bee6aac3 after normalizing two queue annotations; the rest of the queue
+matched after excluding imports and the moved nodes. The old class names
+are direct aliases. The stop floor is patched at the new owner; the old test
+was moved into the module's own package. The boundary check first failed on the previous owner.
 
-13 собственных проверок прошли, включая настоящий stop timeout, fresh-interpreter
-запуск обоих потоков с запретом imports runtime, точные аргументы scheduler,
-публикацию нового record и сохранение исходной причины потери source fence.
-Python3.10:136passed, включая busy/expiry, потерю child и compile controller.
-Первый запуск в старом окружении не собрался из-за отсутствия tiktoken; успешный
-запуск использовал isolated environment с locked dev dependencies проекта.
+13 own checks passed, including a real stop timeout, a fresh-interpreter
+start of both threads with runtime imports forbidden, the exact scheduler arguments,
+publication of the new record and keeping the original cause of a source fence loss.
+Python3.10:136passed, including busy/expiry, child loss and the compile controller.
+The first run in the old environment did not build because tiktoken was missing; the successful
+run used an isolated environment with the project's locked dev dependencies.
 
 Evidence: logs/queue-heartbeat-preservation.json;
 logs/queue-heartbeat-boundary-red.txt; logs/queue-heartbeat-own.txt;
 logs/queue-heartbeat-python310.txt; logs/queue-heartbeat-related.txt/.xml;
-logs/queue-renewal-final-budget.txt. Статический граф актуализирован на bee6aac3,
-но остаётся неполным; callers join подтверждены и сверены по исходникам.
-Пакет включает исходники зависимостей, shared renewal tests и их документацию;
-размер считается o200k_base, без вычитания обязательного контекста.
+logs/queue-renewal-final-budget.txt. The static graph was refreshed at bee6aac3,
+but remains incomplete; the join callers were confirmed and cross-checked against the sources.
+The package includes the dependency sources, shared renewal tests and their documentation;
+the size is counted in o200k_base, without subtracting the mandatory context.
 
-Расширенный набор дал387passed и один отказ глобального CCN guard: новая
-проверка imports объединила две независимые проверки и превысила CCN5. Она
-разделена; production код не менялся. Повторная квалификация own+global shape/CCN
-записана в logs/queue-heartbeat-final.txt/.xml. Это не полный regression suite.
+The extended set gave387passed and one failure of the global CCN guard: the new
+imports check combined two independent checks and exceeded CCN5. It
+was split; the production code did not change. The repeated qualification of own+global shape/CCN
+is recorded in logs/queue-heartbeat-final.txt/.xml. This is not the full regression suite.
 
-Повторная проверка:25passed (14 own и 11 global complexity/shape),34,78с.
-CI weights/discovery:8passed. Ruff и git diff --check прошли. Все десять
-объявленных пакетов укладываются в100000; исходник очереди остаётся129165токенов.
-Оба согласованных переноса завершены в candidate; установленный vault не менялся.
+Repeated check:25passed (14 own and 11 global complexity/shape),34.78s.
+CI weights/discovery:8passed. Ruff and git diff --check passed. All ten
+declared packages fit within100000; the queue source remains129165tokens.
+Both approved moves are complete in the candidate; the installed vault was not changed.

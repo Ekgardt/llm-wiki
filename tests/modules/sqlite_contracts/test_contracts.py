@@ -50,7 +50,7 @@ def test_callback_is_not_part_of_value_equality_or_repr():
         first.sql = 'DROP TABLE tasks'
 
 
-@pytest.mark.parametrize('name,expected', [('simple', '"simple"'), ('a"b', '"a""b"'), ('', '""'), ('таблица', '"таблица"'), ('x;DROP TABLE y', '"x;DROP TABLE y"')])
+@pytest.mark.parametrize('name,expected', [('simple', '"simple"'), ('a"b', '"a""b"'), ('', '""'), ('\u0442\u0430\u0431\u043b\u0438\u0446\u0430', '"\u0442\u0430\u0431\u043b\u0438\u0446\u0430"'), ('x;DROP TABLE y', '"x;DROP TABLE y"')])
 def test_identifier_quoting_is_exact(name, expected):
     assert quote_sqlite_identifier(name) == expected
 

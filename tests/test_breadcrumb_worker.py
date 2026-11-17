@@ -140,7 +140,7 @@ def test_direct_hooks_use_the_same_durable_ingress(ingress, kind):  # noqa: F811
     import user_prompt_capture
 
     queue, _coordinator_value = ingress
-    hook = {"session_id": "direct", "cwd": "/fixture", "prompt": "да",
+    hook = {"session_id": "direct", "cwd": "/fixture", "prompt": "\u0434\u0430",
             "tool_name": "Bash", "tool_input": {"command": "pwd"}}
     calls = {"user_prompt": partial(user_prompt_capture.record_prompt, hook, hook["prompt"]),
              "post_tool_use": partial(post_tool_capture.capture_tool, hook)}

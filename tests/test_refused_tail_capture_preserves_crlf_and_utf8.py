@@ -8,7 +8,7 @@ from tests.a_codex_turn_is_not_a_session_helpers import codex as codex
 from tests.adopted_capture_vault import host_transcript, intent_records
 from tests.historical_test_protocols_keep_their_exact_utf8_bytes_helpers import _windows_text_write
 
-TEXT = "Полный разговор остаётся сохранённым.\nThe complete conversation remains durable.\n"
+TEXT = "\u041f\u043e\u043b\u043d\u044b\u0439 \u0440\u0430\u0437\u0433\u043e\u0432\u043e\u0440 \u043e\u0441\u0442\u0430\u0451\u0442\u0441\u044f \u0441\u043e\u0445\u0440\u0430\u043d\u0451\u043d\u043d\u044b\u043c.\nThe complete conversation remains durable.\n"
 
 
 def _utf8_transcript(state_root, name, ignored):

@@ -4,17 +4,17 @@ from llm_wiki import queue_validation as check
 from llm_wiki.queue_contracts import ResultConflictError
 
 
-@pytest.mark.parametrize('kind', ['', None, 'я' * 33])
+@pytest.mark.parametrize('kind', ['', None, '\u044f' * 33])
 def test_adopted_task_kind_is_bounded_in_utf8(kind):
     with pytest.raises(ValueError, match='kind'):
         check.require_enqueue_arguments(kind, 1, 0, None)
 
 
 def test_legacy_and_adopted_kind_bounds_are_intentionally_distinct():
-    check.require_enqueue_arguments('я' * 32, 1, 0, None)
-    check.require_legacy_enqueue_arguments('я' * 100, 1, 0, None)
+    check.require_enqueue_arguments('\u044f' * 32, 1, 0, None)
+    check.require_legacy_enqueue_arguments('\u044f' * 100, 1, 0, None)
     with pytest.raises(ValueError, match='kind'):
-        check.require_enqueue_arguments('я' * 100, 1, 0, None)
+        check.require_enqueue_arguments('\u044f' * 100, 1, 0, None)
 
 
 @pytest.mark.parametrize('version,priority', [(True, 0), (0, 0), (2147483648, 0), (1, True), (1, 101), (1, -101)])
@@ -24,9 +24,9 @@ def test_integer_ranges_reject_booleans_and_out_of_range_values(version, priorit
 
 
 def test_dedupe_bound_is_utf8_bytes():
-    check.require_enqueue_arguments('query', 1, 0, 'я' * 256)
+    check.require_enqueue_arguments('query', 1, 0, '\u044f' * 256)
     with pytest.raises(ValueError, match='dedupe_key'):
-        check.require_enqueue_arguments('query', 1, 0, 'я' * 257)
+        check.require_enqueue_arguments('query', 1, 0, '\u044f' * 257)
 
 
 @pytest.mark.parametrize('lease,heartbeat', [(True, 1), (2, True), (0, 1), (2, 2), (2, 3)])

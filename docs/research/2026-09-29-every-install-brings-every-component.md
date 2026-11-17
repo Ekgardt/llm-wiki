@@ -4,8 +4,8 @@ Date: 2026-09-29. Status: implemented in the same change.
 
 ## The owner's requirement
 
-"должно всё входить + Pyright, все остальные языковые пакеты пользователем ставятся
-отдельно под необходимый ему язык" (2026-09-29). An install brings every Python
+"everything must be included + Pyright; all the other language packages are installed
+by the user separately for the language they need" (2026-09-29, translated from Russian). An install brings every Python
 component of the product; of the four managed language servers only Pyright comes
 with it, and TypeScript, Go and Rust stay one explicit command each
 (`scripts/install_language_server.py --profile <name>`), because each is large and

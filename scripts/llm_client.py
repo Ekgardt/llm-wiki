@@ -2486,7 +2486,7 @@ def claude_command(claude_bin: str, model: str | None, system_prompt: str) -> li
     `claude -p` loads the user's settings, including the output style, and
     treats a `<system>` block in the prompt as ordinary text. Measured on this
     machine: the compile's draft came back as a chat reply in the operator's
-    configured voice — "От вас ничего не нужно" — instead of the JSON plan the
+    configured voice — "Nothing is required from you" (in Russian) — instead of the JSON plan the
     schema asked for, three times in a row. `--system-prompt` replaces the
     assistant persona with ours; `--setting-sources` with nothing after it loads
     no settings files at all. A memory call carries private vault text and uses no

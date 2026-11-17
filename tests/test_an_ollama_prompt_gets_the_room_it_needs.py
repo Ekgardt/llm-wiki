@@ -19,7 +19,7 @@ import pytest
 # exercises the same arithmetic, this one keeps the window sums readable.
 MAX_TOKENS = 500
 # ~20 KB of Cyrillic: far past Ollama's default 4 096-token window.
-LONG_PROMPT = "контекст " * 1200
+LONG_PROMPT = "\u043a\u043e\u043d\u0442\u0435\u043a\u0441\u0442 " * 1200
 
 
 class _StubOllama(BaseHTTPRequestHandler):

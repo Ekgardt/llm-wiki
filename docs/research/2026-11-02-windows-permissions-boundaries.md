@@ -1,160 +1,160 @@
-# Windows permissions: убрать зависимость базового IO от очереди и транзакций
+# Windows permissions: remove the dependency of basic IO on the queue and transactions
 
-Дата исследования: 2026-11-02. Статус: оба последовательных шага явно согласованы пользователем.
-Исходная версия: dd3ad044. Это следующая граница общего плана декомпозиции.
+Research date: 2026-11-02. Status: both sequential steps were explicitly approved by the user.
+Original version: dd3ad044. This is the next boundary of the overall decomposition plan.
 
-## Подтверждённая причина связанности
+## The confirmed cause of the coupling
 
-reliable_memory._harden_runtime_owner_only импортирует queue._harden_owner_only,
-который на Windows импортирует transaction._harden_windows_acl.
-reliable_memory._require_windows_owner_only импортирует queue._is_owner_only,
-а проверка Windows в очереди снова импортирует transaction helpers.
-Ещё один strict Windows verifier reliable_memory импортирует transaction напрямую.
-Таким образом базовый runtime IO зависит от исполнителей, которые сами его используют.
-Это подтверждённая структура зависимостей, не утверждение о неизбежном import crash.
+reliable_memory._harden_runtime_owner_only imports queue._harden_owner_only,
+which on Windows imports transaction._harden_windows_acl.
+reliable_memory._require_windows_owner_only imports queue._is_owner_only,
+and the Windows check in the queue imports transaction helpers again.
+One more strict Windows verifier in reliable_memory imports transaction directly.
+So the basic runtime IO depends on executors that themselves use it.
+This is a confirmed dependency structure, not a claim of an inevitable import crash.
 
-ACL-код использует _windows_kernel32 для console code page. Тот же loader нужен
-операциям над файловыми handles, а его прототипы ссылаются на ctypes structures.
-Простой перенос ACL с обратным импортом transaction не устранит исходную связь.
+The ACL code uses _windows_kernel32 for the console code page. The same loader is needed
+by operations on file handles, and its prototypes refer to ctypes structures.
+A plain move of the ACL code with a reverse import of transaction would not remove the original coupling.
 
-## Два последовательных переноса
+## Two sequential moves
 
-1. scripts/llm_wiki/windows_native.py получает из markdown_transaction
+1. scripts/llm_wiki/windows_native.py receives from markdown_transaction
    _WindowsFileInformation, _WindowsDispositionInformation,
-   _WINDOWS_KERNEL32_PROTOTYPES и _windows_kernel32 вместе с текущим lru_cache.
-   Зависимости только ctypes/wintypes и functools. Импорт не загружает kernel32:
-   WinDLL вызывается лениво, как сейчас. Старые имена в transaction — identity aliases.
-   Операции открытия, проверки, удаления и закрытия handles остаются у transaction.
-2. scripts/llm_wiki/windows_acl.py получает 18 ACL-функций transaction от
-   _windows_acl_identity до _acl_lines_naming и четыре функции очереди:
+   _WINDOWS_KERNEL32_PROTOTYPES and _windows_kernel32 together with its current lru_cache.
+   Dependencies are only ctypes/wintypes and functools. The import does not load kernel32:
+   WinDLL is called lazily, as now. The old names in transaction are identity aliases.
+   Operations that open, check, delete and close handles stay with transaction.
+2. scripts/llm_wiki/windows_acl.py receives 18 transaction ACL functions from
+   _windows_acl_identity to _acl_lines_naming and four queue functions:
    _windows_acl_lines, _acl_owner_lines, _acl_is_owner_only, _is_owner_only_windows.
-   Новый модуль использует только stdlib и windows_native. Обратные local imports
-   transaction в перенесённых функциях удаляются, они вызывают своего владельца.
-   reliable_memory обращается к новому owner напрямую во всех трёх Windows путях;
-   queue и transaction сохраняют их разные POSIX/Windows dispatch semantics.
+   The new module uses only stdlib and windows_native. The reverse local imports of
+   transaction in the moved functions are removed; they call their owner.
+   reliable_memory calls the new owner directly in all three Windows paths;
+   queue and transaction keep their different POSIX/Windows dispatch semantics.
 
-Точный список определений: logs/windows-permissions-inventory.json.
-Все подтверждённые production imports этих helper names переводятся на владельца
-с сохранением прежнего lazy/eager scope; compatibility aliases остаются там, где
-есть действующие потребители. Подмены внутренних вызовов тестами переносятся к
-новому владельцу; test patch внешнего dispatch в очереди остаётся действительным.
-Не добавлять forwarding registry, динамическую подмену globals или дубли loader.
-Старые определения удалить после AST/behavior сравнения.
+The exact list of definitions: logs/windows-permissions-inventory.json.
+All confirmed production imports of these helper names are switched to the owner
+while keeping the old lazy/eager scope; compatibility aliases stay where
+there are active consumers. Test substitutions of internal calls move to
+the new owner; the test patch of the external dispatch in the queue stays valid.
+Do not add a forwarding registry, dynamic substitution of globals or duplicate loaders.
+Delete the old definitions after the AST/behaviour comparison.
 
-У каждого модуля собственные tests/modules/windows_native либо windows_acl,
-guide и context manifest в docs/modules/windows-native* либо windows-acl*.
-Полный пакет каждого ≤100000 o200k_base токенов; числа пока не измерены,
-поскольку новые модули и их собственные тесты ещё не созданы.
+Each module has its own tests/modules/windows_native or windows_acl,
+a guide and a context manifest in docs/modules/windows-native* or windows-acl*.
+The full package of each is ≤100000 o200k_base tokens; the numbers are not measured yet,
+since the new modules and their own tests have not been created yet.
 
-## Что сохраняется и почему
+## What is kept and why
 
-Пять kernel32 prototypes, размеры handles, use_last_error=True, ctypes structures
-и единственный cache остаются прежними. Сохраняются имя пользователя/domain,
-порядок codec fallbacks и работа с не-ASCII именами, icacls arguments, timeout 5 с,
-все тексты ошибок и fail-closed результаты. Новые лимиты не вводятся.
+The five kernel32 prototypes, handle sizes, use_last_error=True, the ctypes structures
+and the single cache stay the same. Kept: the user name/domain,
+the order of codec fallbacks and handling of non-ASCII names, the icacls arguments, the 5 s timeout,
+all error texts and the fail-closed results. No new limits are introduced.
 
-Strict verifier требует единственную явную ACE без inherited marker. Boolean
-queue checker имеет отличающийся существующий контракт. Не объединять эти
-предикаты и не усиливать/ослаблять их молча. POSIX chmod, unsupported-filesystem
-warning, path/symlink/handle checks, transaction fences, runtime roots и schema
-остаются прежними. Не менять ACL живых файлов ради демонстрации переноса.
+The strict verifier requires a single explicit ACE without an inherited marker. The boolean
+queue checker has a different existing contract. Do not merge these
+predicates and do not silently strengthen/weaken them. POSIX chmod, the unsupported-filesystem
+warning, path/symlink/handle checks, transaction fences, runtime roots and the schema
+stay the same. Do not change the ACLs of live files to demonstrate the move.
 
-Альтернативы: оставить обратные imports — сохраняет проблему; скопировать loader —
-два владельца ABI/cache; новый framework/pywin32 — лишняя зависимость и риск
-изменения поведения. Объединить весь transactional Windows IO с ACL означало бы
-переносить операции публикации ради permission-check. Выбраны два существующих
-слоя: общий ленивый binding и проверка/применение ACL над ним.
+Alternatives: keeping the reverse imports keeps the problem; copying the loader gives
+two owners of the ABI/cache; a new framework/pywin32 is an unnecessary dependency and a risk
+of behaviour change. Merging all transactional Windows IO with the ACL code would mean
+moving publication operations for the sake of a permission check. The choice is two existing
+layers: a shared lazy binding, and the ACL check/application on top of it.
 
-## Первичные источники, проверенные 2026-11-02
+## Primary sources checked 2026-11-02
 
 - [Microsoft icacls](https://learn.microsoft.com/en-us/windows-server/administration/windows-commands/icacls):
-  grant:r заменяет explicit permissions, inheritance removal имеет отдельную
-  семантику; /verify не доказывает сам по себе owner-only. Поэтому команды и
-  последующая собственная проверка сохраняются, а inherited/explicit не смешиваются.
-- [Python ctypes](https://docs.python.org/3.10/library/ctypes.html): типы аргументов,
-  результата и Windows error handling существенны для native calls. Сохраняются
-  restype/argtypes/use_last_error и lazy loading, без platform-dependent imports
-  исполняемых runtime модулей. Python 3.10 upstream unsupported, project floor не меняется.
+  grant:r replaces explicit permissions, inheritance removal has separate
+  semantics; /verify does not by itself prove owner-only. So the commands and
+  the subsequent own check are kept, and inherited/explicit are not mixed.
+- [Python ctypes](https://docs.python.org/3.10/library/ctypes.html): the argument types,
+  result types and Windows error handling are essential for native calls. Kept:
+  restype/argtypes/use_last_error and lazy loading, without platform-dependent imports
+  of executable runtime modules. Python 3.10 is unsupported upstream; the project floor does not change.
 - [OWASP insecure temporary file](https://community.owasp.org/vulnerabilities/Insecure_Temporary_File):
-  временные имена и разрешения не устраняют гонку создания; secure create/open
-  нужны отдельно. Поэтому ACL extraction не подменяет существующие filesystem
-  containment/atomic-create проверки и не заявляется новым OS sandbox.
+  temporary names and permissions do not remove the creation race; secure create/open
+  is needed separately. So the ACL extraction does not replace the existing filesystem
+  containment/atomic-create checks and is not declared a new OS sandbox.
 
-Дополнительно [Python os.chmod](https://docs.python.org/3.10/library/os.html#os.chmod):
-платформенные ограничения различаются; POSIX mode bits не считаются заменой Windows ACL.
-Источники обосновывают сохранение контрактов, не доказывают отсутствие всех
-существующих ACL-дефектов. Native Windows validation отдельно от Linux mocks.
+In addition, [Python os.chmod](https://docs.python.org/3.10/library/os.html#os.chmod):
+platform limitations differ; POSIX mode bits are not considered a replacement for Windows ACLs.
+The sources justify keeping the contracts; they do not prove the absence of all
+existing ACL defects. Native Windows validation is separate from Linux mocks.
 
-## Исследование и квалификация
+## Research and qualification
 
-Встроенный индекс dd3ad044 актуален, changes:stale=false. Граф выявил loader callers:
-console codec и пять групп handle operations; hardener callers — оба dispatch и
-существующие tests; boolean Windows reader — queue dispatch и Cyrillic-owner tests.
-Граф неполный; AST и source search дополняют локальные imports/monkeypatch.
+The built-in index dd3ad044 is current, changes:stale=false. The graph revealed the loader callers:
+the console codec and five groups of handle operations; the hardener callers: both dispatches and
+existing tests; the boolean Windows reader: the queue dispatch and Cyrillic-owner tests.
+The graph is incomplete; AST and source search supplement the local imports/monkeypatches.
 Evidence: logs/windows-permissions-graph.json.
 
-Baseline: transaction, reliable memory, non-ASCII owner и native handle-width tests
-на Linux — 154 passed, 8 skipped, 3,15 с. Evidence: logs/windows-permissions-baseline.txt.
-Пропуски не объявляются native Windows qualification.
+Baseline: transaction, reliable memory, non-ASCII owner and native handle-width tests
+on Linux: 154 passed, 8 skipped, 3.15 s. Evidence: logs/windows-permissions-baseline.txt.
+The skips are not declared a native Windows qualification.
 
-После явного согласия: private decision и STRUCTURE до кода; каждый шаг отдельно
-с AST comparisons (imports нормализуются), red/green boundary guard, isolated import,
-identity/cache tests, faithful mocked subprocess outcomes и существующими native tests.
-Проверить Unicode owner, extra ACE, malformed/failed command, inherited-vs-explicit,
-unsupported codec, full-width handles и last-error preservation. Миграции consumers
-проверяются вместе с queue, transaction/recovery, reliable_memory и compile_cache.
-Каждый этап: Python 3.10, global CCN/shape, Ruff, CI discovery/weights, полный token
-budget; commit/push и актуализация индекса. Native Windows не заявлять без запуска.
-Live rollout, перестройка operational state, изменение security policy и новый
-WinAPI surface не входят в согласуемые переносы.
+After explicit approval: private decision and STRUCTURE before the code; each step separately
+with AST comparisons (imports are normalized), a red/green boundary guard, an isolated import,
+identity/cache tests, faithful mocked subprocess outcomes and the existing native tests.
+Check a Unicode owner, an extra ACE, a malformed/failed command, inherited-vs-explicit,
+an unsupported codec, full-width handles and last-error preservation. Consumer migrations
+are checked together with the queue, transaction/recovery, reliable_memory and compile_cache.
+Each stage: Python 3.10, global CCN/shape, Ruff, CI discovery/weights, the full token
+budget; commit/push and refreshing the index. Do not claim native Windows without running it.
+A live rollout, rebuilding operational state, changing the security policy and a new
+WinAPI surface are not part of the moves being approved.
 
-Дополнительный baseline readers: 5 passed, 0,32с;
+Additional readers baseline: 5 passed, 0.32s;
 logs/windows-permissions-reader-baseline.txt.
 
 
-## Первый шаг: native binding
+## First step: native binding
 
-До кода записаны private decision и STRUCTURE. Весь блок двух structures,
-prototypes и lazy loader перенесён побайтно из dd3ad044; остальной transaction AST
-совпал после исключения imports. Boundary guard сначала упал на старом владельце.
-Aliases сохраняют identity типов, prototypes и единственного cache.
+The private decision and STRUCTURE were recorded before the code. The whole block of the two structures,
+the prototypes and the lazy loader was moved byte for byte from dd3ad044; the rest of the transaction AST
+matched after excluding imports. The boundary guard first failed on the old owner.
+The aliases keep the identity of the types, the prototypes and the single cache.
 Own+handle integration:12passed; Python3.10 own+handles+Unicode/readers:19passed.
-Первоначальный пакет:69845 o200k_base токенов/23 файла. Native Windows не запускалась.
+Initial package:69845 o200k_base tokens/23 files. Native Windows was not run.
 Evidence: logs/windows-native-preservation.json; logs/windows-native-boundary-red.txt;
 logs/windows-native-own.txt; logs/windows-native-python310.txt;
 logs/windows-native-related.txt/.xml; logs/windows-native-final-budget.txt.
-Второй шаг ACL на момент этой записи ещё не реализован.
+The second step, ACL, was not yet implemented at the time of this entry.
 
-Native binding expanded:325passed,8skipped,58,85с; включает transaction/recovery,
-reliable memory, Unicode readers, global CCN/shape, structure и CI policy.
-Ruff и diff checks чисты. Пропуски — не доказательство native платформы.
+Native binding expanded:325passed,8skipped,58.85s; it includes transaction/recovery,
+reliable memory, Unicode readers, global CCN/shape, structure and CI policy.
+Ruff and diff checks are clean. Skips are not proof of the native platform.
 
-## Второй шаг: ACL owner
+## Second step: ACL owner
 
-22 функции перенесены из transaction/queue; их AST совпадает после удаления
-обратных imports. Остальные тела transaction, queue, archive, compile_cache,
-evidence_resolver и LSP совпали без imports. В reliable_memory сравнение
-дополнительно нормализует ровно два согласованных перенаправления Windows-only
-вызовов: hardening и boolean verification; strict verifier меняет только import.
+22 functions were moved from transaction/queue; their AST matches after removing
+the reverse imports. The other bodies of transaction, queue, archive, compile_cache,
+evidence_resolver and LSP matched without imports. In reliable_memory the comparison
+additionally normalizes exactly two approved redirections of Windows-only
+calls: hardening and boolean verification; the strict verifier changes only its import.
 
-Boundary guard сначала поймал прежние определения и обратные imports базового IO.
-После переноса owner зависит только от stdlib/windows_native, runtime IO не
-импортирует queue/transaction. Старые function aliases проверены по identity;
-подмены внутренних ACL вызовов перенесены к owner, внешние dispatch не менялись.
-Самостоятельный non-ASCII test остаётся на прежнем пути (его fixture используется
-integration tests), импортирует owner и входит в полный пакет ACL.
+The boundary guard first caught the old definitions and the reverse imports of basic IO.
+After the move the owner depends only on stdlib/windows_native, and runtime IO does not
+import queue/transaction. The old function aliases were checked for identity;
+substitutions of internal ACL calls moved to the owner, and the external dispatches did not change.
+The standalone non-ASCII test stays at its old path (its fixture is used by
+integration tests), imports the owner and is part of the full ACL package.
 
-Первый selected набор:48passed/1skipped. Expanded:637passed/11skipped,69,75с,
-включая transaction/recovery, queue/migration, reliable memory, archives, cache,
-evidence resolver, global CCN/shape, structure и CI. Python3.10 selected:
-119passed/4skipped,2,28с. Добавленные direct runtime bridge tests отдельно:
-19passed/1skipped; их CCN/shape проверены отдельно после добавления.
-LSP ACL/owner selection:1passed/2skipped/254deselected; это не весь LSP suite.
-Windows native validation не проводилась. Skip не является успехом платформы.
+First selected set:48passed/1skipped. Expanded:637passed/11skipped,69.75s,
+including transaction/recovery, queue/migration, reliable memory, archives, cache,
+evidence resolver, global CCN/shape, structure and CI. Python3.10 selected:
+119passed/4skipped,2.28s. The added direct runtime bridge tests separately:
+19passed/1skipped; their CCN/shape were checked separately after they were added.
+LSP ACL/owner selection:1passed/2skipped/254deselected; this is not the whole LSP suite.
+Windows native validation was not carried out. A skip is not a platform success.
 
 Evidence: logs/windows-acl-preservation.json; logs/windows-acl-boundary-red.txt;
 logs/windows-acl-own.txt; logs/windows-acl-related.txt/.xml;
 logs/windows-acl-python310.txt; logs/windows-acl-runtime-bridge.txt/.xml;
 logs/windows-acl-lsp.txt; logs/windows-acl-final-budget.txt.
-Ни live ACL, ни runtime layout/schema, ни POSIX policy не изменялись.
-Полный regression suite, public CI и live rollout не заявлены.
+Neither live ACLs, nor the runtime layout/schema, nor the POSIX policy were changed.
+The full regression suite, public CI and a live rollout are not claimed.

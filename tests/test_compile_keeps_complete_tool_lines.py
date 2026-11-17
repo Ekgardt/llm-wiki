@@ -60,7 +60,7 @@ def test_forged_tool_companion_is_not_authorized_by_line_grouping():
 
 
 def test_plain_unknown_json_keeps_existing_partition_contract():
-    raw = b"# 2026-10-02\n\n## 12:34:56\n    {\"unknown\":\"" + ("я" * 12000).encode() + b'\"}\n'
+    raw = b"# 2026-10-02\n\n## 12:34:56\n    {\"unknown\":\"" + ("\u044f" * 12000).encode() + b'\"}\n'
     parts = compile_pipeline_sources.daily_parts("knowledge/daily/2026-10-02.md", raw)
     assert len(compile_pipeline_sources.native_part_units(parts)) == len(parts)
 

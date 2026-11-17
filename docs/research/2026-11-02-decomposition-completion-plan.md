@@ -1,153 +1,153 @@
-# Завершение декомпозиции LLM Wiki
+# Completing the LLM Wiki decomposition
 
-Дата: 2026-11-02. Статус: согласовано пользователем; самостоятельное уточнение внутренних границ разрешено.
-База: bccb6a9c248f0abe5ded75144887d2f01ffc1a81, отдельная рабочая ветка.
+Date: 2026-11-02. Status: approved by the user; independent refinement of internal boundaries is allowed.
+Base: bccb6a9c248f0abe5ded75144887d2f01ffc1a81, a separate working branch.
 
-## Цель и проверяемое завершение
+## Goal and checkable completion
 
-Один продукт и установка. Каждый модуль имеет одну ответственность, явный
-контракт и единственного владельца состояния. Полный пакет сопровождения
-(исходники, собственные тесты, данные, документация, обязательные инструкции,
-необходимые контракты зависимостей) не превышает 100000 o200k_base токенов.
-Межмодульные сценарии и исторические материалы также учитываются; перенос тестов
-в «общую» папку не освобождает их от бюджета. Готовность отдельных пакетов не
-означает завершение проекта.
+One product and installation. Each module has one responsibility, an explicit
+contract and a single owner of state. The full maintenance package
+(sources, own tests, data, documentation, mandatory instructions,
+the necessary dependency contracts) does not exceed 100000 o200k_base tokens.
+Cross-module scenarios and historical materials are counted as well; moving tests
+into a "shared" folder does not free them from the budget. Readiness of individual packages does not
+mean completion of the project.
 
-Для завершения необходимы:
-- Полный реестр владения, проверяемый против git ls-files: нет потерянных файлов.
-- Измерение каждого пакета, включая инструкции и разделители при сериализации.
-- Однонаправленные проверяемые импорты; каждый перенос проверен по потребителям,
-  динамическим вызовам, CLI, subprocess и ресурсам, а не только по AST.
-- Сохранены поведение, форматы, атомарность, права доступа и публичные команды.
-- Нет дублированных реализаций. Для необходимых совместимых alias указаны
-  потребители и проверяемое условие удаления.
-- Связанные тесты и полный регрессионный прогон проходят; платформенные пропуски
-  явно перечислены и не выдаются за подтверждённую Windows/macOS квалификацию.
-- Проверены CCN <=5 и ограничения формы; индекс актуален.
-- Токеновая эффективность задачи оценивается отдельно от размера исходников.
-  Без парных измерений не заявляется экономия вызовов модели.
+Completion requires:
+- A full ownership registry checked against git ls-files: no lost files.
+- A measurement of each package, including instructions and serialization separators.
+- One-way checkable imports; each move is checked against consumers,
+  dynamic calls, CLI, subprocess and resources, not only by AST.
+- Behaviour, formats, atomicity, access permissions and public commands are kept.
+- No duplicated implementations. For necessary compatibility aliases, the
+  consumers and a checkable removal condition are stated.
+- Related tests and the full regression run pass; platform skips
+  are listed explicitly and are not presented as confirmed Windows/macOS qualification.
+- CCN <=5 and the form limits are checked; the index is current.
+- The token efficiency of a task is assessed separately from the size of the sources.
+  Without paired measurements, no savings in model calls are claimed.
 
-## Свежая инвентаризация
+## Fresh inventory
 
-2842 отслеживаемых файла, 8090066 токенов. scripts: 1929206; tests: 2391344;
-docs: 1874357; benchmark: 1430515. Это сумма текста файлов, без сообщений чата.
-14 существующих манифестов включают объединённо 154 файла; это покрытие контекста,
-а не доказанное уникальное владение. 2688 файлов ещё вне этих манифестов.
+2842 tracked files, 8090066 tokens. scripts: 1929206; tests: 2391344;
+docs: 1874357; benchmark: 1430515. This is the sum of file text, without chat messages.
+14 existing manifests include 154 files combined; this is context coverage,
+not proven unique ownership. 2688 files are still outside these manifests.
 
-Особые крупные артефакты: uv.lock 334209, benchmark/contradiction-v1.json 209197,
-docs/DEVELOPER-AUDIT-STATUS-2026-08-18.md 144744 токена. Их нельзя скрыть как
-«не код». Lockfile остаётся единым входом установщика; для сопровождения нужны
-проверяемые представления записей с полным покрытием и обратной сборкой.
-Если пользователь требует, чтобы каждый физический файл также был <=100000,
-единый lockfile требует отдельного решения: это более сильное условие, чем
-лимит модуля. Нельзя объявлять его выполненным за счёт выборочного чтения.
+Special large artifacts: uv.lock 334209, benchmark/contradiction-v1.json 209197,
+docs/DEVELOPER-AUDIT-STATUS-2026-08-18.md 144744 tokens. They must not be hidden as
+"not code". The lockfile stays the single input of the installer; maintenance needs
+checkable views of records with full coverage and reverse assembly.
+If the user requires that each physical file also be <=100000,
+the single lockfile needs a separate decision: this is a stronger condition than
+the module limit. It must not be declared met by selective reading.
 
-Доказательства: logs/decomposition-completion-inventory.json и
-logs/decomposition-completion-graph.json в установленном vault. Встроенный MCP
-обзор сообщил занятых работников; отдельный процесс code_graph.get_architecture
-прочитал индекс. Граф неполон и дополняется исходниками. Индекс исходников
-соответствует bccb6a9c; docs и установщики проверяются отдельно.
+Evidence: logs/decomposition-completion-inventory.json and
+logs/decomposition-completion-graph.json in the installed vault. The built-in MCP
+overview reported busy workers; a separate code_graph.get_architecture process
+read the index. The graph is incomplete and is supplemented by the sources. The source index
+matches bccb6a9c; docs and installers are checked separately.
 
-## Предлагаемый общий архитектурный мандат
+## Proposed overall architectural mandate
 
-Согласовать следующие семейства ответственностей и последовательный перенос
-в scripts/llm_wiki/<responsibility>.py либо пакет того же имени, когда несколько
-внутренних файлов действительно нужны. Существующий самостоятельный файл можно
-квалифицировать на месте без перемещения. Тесты — tests/modules/<responsibility>/,
-описание и манифест — docs/modules/. Старые публичные CLI остаются входами.
-Не вводить обязательную многоэтажную структуру area/module/api.
+Approve the following families of responsibilities and a step-by-step move
+into scripts/llm_wiki/<responsibility>.py or a package of the same name when several
+internal files are really needed. An existing standalone file can
+be qualified in place without moving. Tests go to tests/modules/<responsibility>/,
+the description and manifest to docs/modules/. The old public CLIs stay entry points.
+Do not introduce a mandatory multi-level area/module/api structure.
 
-Порядок определяется зависимостями, а не количеством файлов:
+The order is defined by dependencies, not by the number of files:
 
-1. Основа: конфигурация, безопасное файловое IO, SQLite-контракты, admission и
-   владение. Убрать зависимости основы от исполнителей без второго реестра.
-2. Очередь: проверки схемы; идентичность источников; планирование миграции;
-   хранение и переходы; результаты; управление оператором; исполнитель.
-   SQL-транзакция и lease settlement сохраняют единого владельца.
-3. Markdown-транзакции: образы файлов и манифесты; prepare/CAS/publication;
-   восстановление, undo и retention. Не создавать конкурирующих координаторов.
-4. Capture и breadcrumbs: ingress, неизменяемое evidence, adoption, terminal
-   records. Очередь не подменяет доказательство сохранённого Markdown.
-5. Компиляция: источники, планирование, валидация, публикация, журнал прогресса,
-   восстановление вызовов. Существующий незавершённый compile-progress не
-   объявлять завершённым одной перестановкой кода.
-6. Знания: страницы, claims, архивы, project journal и blackboard, learning.
-7. Модели: выбор и вызов провайдера, DLP policy/gateway. Один fail-closed барьер.
-8. Поколения и поиск: corpus, catalog, graph, vectors, retrieval, evidence
-   resolution, answers, context, telemetry. Единственный active pointer.
-9. Код: parsing, graph/impact, repository index/revision/retention, navigation.
-10. LSP: protocol/security, запуск/containment/cleanup, документы, lifecycle,
-    profiles. Сохраняются deadlines, process ownership и платформенные правила.
-11. Интерфейсы: MCP tools/transport/supervisor и lifecycle adapters.
-12. Установка и обслуживание: install transactions/configuration/release,
+1. Foundation: configuration, safe file IO, SQLite contracts, admission and
+   ownership. Remove the foundation's dependencies on executors without a second registry.
+2. Queue: schema checks; source identity; migration planning;
+   storage and transitions; results; operator control; executor.
+   The SQL transaction and lease settlement keep a single owner.
+3. Markdown transactions: file images and manifests; prepare/CAS/publication;
+   recovery, undo and retention. Do not create competing coordinators.
+4. Capture and breadcrumbs: ingress, immutable evidence, adoption, terminal
+   records. The queue does not substitute for proof of saved Markdown.
+5. Compilation: sources, planning, validation, publication, progress journal,
+   call recovery. Do not declare the existing unfinished compile-progress
+   finished by a mere rearrangement of code.
+6. Knowledge: pages, claims, archives, project journal and blackboard, learning.
+7. Models: provider selection and calls, DLP policy/gateway. One fail-closed barrier.
+8. Generations and search: corpus, catalog, graph, vectors, retrieval, evidence
+   resolution, answers, context, telemetry. A single active pointer.
+9. Code: parsing, graph/impact, repository index/revision/retention, navigation.
+10. LSP: protocol/security, launch/containment/cleanup, documents, lifecycle,
+    profiles. Deadlines, process ownership and platform rules are kept.
+11. Interfaces: MCP tools/transport/supervisor and lifecycle adapters.
+12. Installation and maintenance: install transactions/configuration/release,
     language/model installation, health readers, maintenance, backup/repair.
-    Nightly обращается к maintenance, а не заимствует реализацию из doctor.
-13. Отдельные сценарные пакеты: capture→terminal, compile→publication/recovery,
+    Nightly calls maintenance instead of borrowing the implementation from doctor.
+13. Separate scenario packages: capture→terminal, compile→publication/recovery,
     queue→ownership, transaction→recovery, backup→restore, install→upgrade,
     retrieval→answer, code→navigation, LSP containment, nightly, MCP lifecycle.
-14. Измерения и история: тематические benchmark и документы, fixtures и отчёты.
-    Большие данные разбиваются по существующим записям с проверкой сохранности;
-    архивные утверждения не переписываются под новый код.
+14. Measurements and history: topical benchmarks and documents, fixtures and reports.
+    Large data are split at existing records with a check of preservation;
+    archived claims are not rewritten for the new code.
 
-Это не фиксированное количество будущих модулей. Для каждой ответственности
-перед кодом фиксируются точные символы, потребители, необходимый контекст,
-baseline и тест нарушения границы. Если пакет превышает бюджет, делится по
-самостоятельной обязанности, а не по строкам или размеру произвольного среза.
-Предлагается разрешить такие уточнения внутри перечисленных семейств без
-повторной подписи на каждый файл. Отклонение от данных рамок требует согласования.
-Разрешение получено 2026-11-02: «Да, согласовать весь план и самостоятельное уточнение границ».
+This is not a fixed number of future modules. For each responsibility,
+before code, the exact symbols, consumers, needed context,
+baseline and boundary violation test are recorded. If a package exceeds the budget, it is split by
+a standalone duty, not by lines or the size of an arbitrary slice.
+It is proposed to allow such refinements within the listed families without
+a new sign-off for each file. Deviation from these bounds needs approval.
+Permission was received on 2026-11-02: "Yes, approve the whole plan and the independent refinement of boundaries".
 
-## Что не входит в мандат
+## What the mandate does not include
 
-Нет установки в живой vault, изменения runtime-root, БД, форматов, публичного
-поведения, модели безопасности, поддержки Python, зависимостей или релиза.
-Нельзя удалять private knowledge или run/, ослаблять тесты и лимиты, вводить
-daemon, сервисы, второй продукт или универсальный DI/event framework.
-Обнаруженный дефект сначала воспроизводится и исправляется отдельным шагом.
+No installation into the live vault, no change of the runtime root, databases, formats, public
+behaviour, security model, Python support, dependencies or release.
+Deleting private knowledge or run/, weakening tests and limits, introducing a
+daemon, services, a second product or a universal DI/event framework are forbidden.
+A discovered defect is first reproduced and fixed in a separate step.
 
-## Исследование и альтернативы
+## Research and alternatives
 
-Повторно проверены 2026-11-02 три независимых первичных источника:
-- https://martinfowler.com/bliki/BoundedContext.html — границы по модели и
-  ответственности; не обосновывает заранее заданное число файлов.
-- https://import-linter.readthedocs.io/en/stable/contract_types/ — проверяемые
-  forbidden/protected/layers/independence/acyclic contracts. Инструмент не
-  устанавливается этим планом; imports не доказывают runtime-изоляцию.
-- https://peps.python.org/pep-0544/ — узкие структурные Protocol, когда нужны
-  альтернативные исполнители. Не заменяют runtime-валидацию и не нужны везде.
+Three independent primary sources were rechecked on 2026-11-02:
+- https://martinfowler.com/bliki/BoundedContext.html — boundaries by model and
+  responsibility; it does not justify a predefined number of files.
+- https://import-linter.readthedocs.io/en/stable/contract_types/ — checkable
+  forbidden/protected/layers/independence/acyclic contracts. The tool is not
+  installed by this plan; imports do not prove runtime isolation.
+- https://peps.python.org/pep-0544/ — narrow structural Protocols when
+  alternative executors are needed. They do not replace runtime validation and are not needed everywhere.
 
-Выбор: последовательная декомпозиция внутри одной поставки. Альтернативы:
-только выбор контекста оставляет обратные зависимости; механическое дробление
-оставляет связанность; отдельные distributions/сервисы добавляют версии и отказы
-без подтверждённой потребности. Сжатие данных допустимо только с доказательством
-сохранности; минификация и удаление необходимого контекста отвергнуты.
-Сохраняется контракт Python >=3.10; новые технологии и версии не добавляются.
+Choice: step-by-step decomposition inside one distribution. Alternatives:
+context selection alone leaves reverse dependencies; mechanical splitting
+leaves coupling; separate distributions/services add versions and failures
+without a confirmed need. Data compression is acceptable only with proof of
+preservation; minification and deleting needed context are rejected.
+The Python >=3.10 contract is kept; no new technologies or versions are added.
 
-## Уточнение проверки полноты пакета
+## Refining the package completeness check
 
-После SQLite-контрактов обнаружено: все 16 манифестов пропускали автоматически
-загружаемые tests/conftest.py (3024 токена) и tests/code_kernel_helpers.py
-(4487). Это общий пропуск измерения, не уменьшение кода. Воспроизведение:
-logs/module-pytest-bootstrap-underestimate.json. Даже с ними все 16 предварительно
-укладываются в лимит; прежние числа занижены. Требуется проверка обязательного
-bootstrap из фактического pytest_plugins и родителей тестов, а не ручной список.
+After the SQLite contracts it was found that all 16 manifests missed the automatically
+loaded tests/conftest.py (3024 tokens) and tests/code_kernel_helpers.py
+(4487). This is a shared measurement gap, not a code reduction. Reproduction:
+logs/module-pytest-bootstrap-underestimate.json. Even with them, all 16 preliminarily
+fit within the limit; the earlier numbers were too low. A check of the mandatory
+bootstrap from the actual pytest_plugins and test parents is required, not a manual list.
 
-Единый test-only измеритель tests/module_context.py заменит повторённый код
-16 счётчиков: разворачивает объявленные файлы, добавляет проверяемый обязательный
-bootstrap и собственный код в требования к манифесту, считает реальное
-сериализованное содержимое с именами и границами файлов. Нельзя молча добавлять
-отсутствующее и выдавать старый манифест полным: отсутствие — явный отказ.
-Лимит, encoding и файлы не урезаются. Общий conftest и его guards остаются
-включёнными; изоляция product imports отдельно проверяется в subprocess.
-Pytest-plugin импортирует интеграционные библиотеки, но собственные fixtures
-этого плагина не вызываются чистыми module tests; их полные транзитивные исходники
-не становятся собственностью каждого модуля. Граф контрактов/вызовов по-прежнему
-проверяется отдельно. Этот измеритель не доказывает, что все связанные тесты
-всего репозитория уже распределены по владельцам.
+A single test-only meter, tests/module_context.py, will replace the repeated code
+of 16 counters: it expands the declared files, adds the checkable mandatory
+bootstrap and its own code to the manifest requirements, counts the real
+serialized content with file names and boundaries. Silently adding
+what is missing and presenting the old manifest as complete is forbidden: absence is an explicit refusal.
+The limit, the encoding and the files are not cut. The shared conftest and its guards stay
+included; isolation of product imports is checked separately in a subprocess.
+The pytest plugin imports integration libraries, but the plugin's own fixtures
+are not called by pure module tests; their full transitive sources
+do not become the property of each module. The contract/call graph is still
+checked separately. This meter does not prove that all related tests
+of the whole repository are already distributed among owners.
 
-Первичные источники проверены 2026-11-02: pytest writing_plugins (автозагрузка
-conftest и pytest_plugins), OpenAI tiktoken README (реальное кодирование токенов),
-Python pathlib (явное перечисление файлов). Новых зависимостей не вводится.
+Primary sources checked on 2026-11-02: pytest writing_plugins (autoloading
+of conftest and pytest_plugins), OpenAI tiktoken README (real token encoding),
+Python pathlib (explicit file enumeration). No new dependencies are introduced.
 
 ## Status update 2026-11-09: the decomposition is not complete
 

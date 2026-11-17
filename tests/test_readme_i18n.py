@@ -129,9 +129,9 @@ _PARITY_MARKERS = {
     ),
     "README.ru.md": (
         "12 task-shaped",
-        "полный регрессионный набор",
+        "\u043f\u043e\u043b\u043d\u044b\u0439 \u0440\u0435\u0433\u0440\u0435\u0441\u0441\u0438\u043e\u043d\u043d\u044b\u0439 \u043d\u0430\u0431\u043e\u0440",
         "retrieval-v2.json",
-        "Obsidian как опциональный viewer",
+        "Obsidian \u043a\u0430\u043a \u043e\u043f\u0446\u0438\u043e\u043d\u0430\u043b\u044c\u043d\u044b\u0439 viewer",
     ),
     "README.zh-CN.md": (
         "12 个 task-shaped",
@@ -206,7 +206,7 @@ def test_readmes_mark_precommit_as_opt_in() -> None:
     )
     markers = {
         "README.md": "Opt-in; the installer does not activate these hooks",
-        "README.ru.md": "Опционально; установщик не активирует эти хуки",
+        "README.ru.md": "\u041e\u043f\u0446\u0438\u043e\u043d\u0430\u043b\u044c\u043d\u043e; \u0443\u0441\u0442\u0430\u043d\u043e\u0432\u0449\u0438\u043a \u043d\u0435 \u0430\u043a\u0442\u0438\u0432\u0438\u0440\u0443\u0435\u0442 \u044d\u0442\u0438 \u0445\u0443\u043a\u0438",
         "README.zh-CN.md": "可选；安装程序不会启用这些钩子",
     }
     for path, text in _readmes():
@@ -222,9 +222,9 @@ def test_readmes_describe_the_retired_hosts_and_viewer_integration() -> None:
             "Viewer only",
         ),
         "README.ru.md": (
-            "Cursor и Antigravity сняты с поддержки 2026-08-26",
-            "`uninstall` по-прежнему забирает хуки",
-            "Только viewer",
+            "Cursor \u0438 Antigravity \u0441\u043d\u044f\u0442\u044b \u0441 \u043f\u043e\u0434\u0434\u0435\u0440\u0436\u043a\u0438 2026-08-26",
+            "`uninstall` \u043f\u043e-\u043f\u0440\u0435\u0436\u043d\u0435\u043c\u0443 \u0437\u0430\u0431\u0438\u0440\u0430\u0435\u0442 \u0445\u0443\u043a\u0438",
+            "\u0422\u043e\u043b\u044c\u043a\u043e viewer",
         ),
         "README.zh-CN.md": (
             "Cursor 与 Antigravity 已于 2026-08-26 退出支持",
@@ -467,7 +467,7 @@ def test_user_guide_describes_search_signals_conditionally() -> None:
 def test_all_readmes_share_python_navigation_operator_contract():
     translated_trust_markers = {
         "README.md": ("trusted local repositories", "not an OS sandbox"),
-        "README.ru.md": ("доверенных локальных репозиториях", "не является OS sandbox"),
+        "README.ru.md": ("\u0434\u043e\u0432\u0435\u0440\u0435\u043d\u043d\u044b\u0445 \u043b\u043e\u043a\u0430\u043b\u044c\u043d\u044b\u0445 \u0440\u0435\u043f\u043e\u0437\u0438\u0442\u043e\u0440\u0438\u044f\u0445", "\u043d\u0435 \u044f\u0432\u043b\u044f\u0435\u0442\u0441\u044f OS sandbox"),
         "README.zh-CN.md": ("受信任的本地仓库", "不是 OS sandbox"),
     }
     shared = (

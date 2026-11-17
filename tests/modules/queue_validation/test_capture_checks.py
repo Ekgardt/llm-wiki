@@ -72,7 +72,7 @@ def test_unknown_terminal_disposition_has_no_invented_fields(kind):
     assert check.capture_terminal_disposition_fields(kind) is None
 
 
-@pytest.mark.parametrize('path', [None, True, 'я' * 2049])
+@pytest.mark.parametrize('path', [None, True, '\u044f' * 2049])
 def test_capture_identity_requires_bounded_text(path):
     with pytest.raises(ValueError, match='intent_path'):
         check.require_capture_identity(INTENT, DIGEST, path)
@@ -134,11 +134,11 @@ def test_seal_consumer_kinds_remain_closed(kind):
 
 
 def test_identifiers_and_reasons_are_bounded_by_utf8_bytes():
-    check.require_task_identifier('я' * 128)
-    check.check_quarantine_names('я' * 128, 'я' * 2048)
-    check.check_resolution_reason('я' * 2048)
-    check.check_consumer_id('я' * 2048)
+    check.require_task_identifier('\u044f' * 128)
+    check.check_quarantine_names('\u044f' * 128, '\u044f' * 2048)
+    check.check_resolution_reason('\u044f' * 2048)
+    check.check_consumer_id('\u044f' * 2048)
     with pytest.raises(ValueError, match='task ID'):
-        check.require_task_identifier('я' * 129)
+        check.require_task_identifier('\u044f' * 129)
     with pytest.raises(ValueError, match='consumer ID'):
-        check.check_consumer_id('я' * 2049)
+        check.check_consumer_id('\u044f' * 2049)

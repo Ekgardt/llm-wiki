@@ -1,16 +1,16 @@
-# Следующий срез очереди: типы и ошибки публичного контракта
+# The next queue slice: types and errors of the public contract
 
-2026-11-02. Согласовано пользователем командой «Продолжай без остановки» после предложения этого среза. Реализация и проверки описаны ниже.
-Основа — fec3fbaf, актуальный встроенный индекс и AST исходников.
+2026-11-02. The user approved it with the command "Continue without stopping" after this slice was proposed. The implementation and checks are described below.
+Basis: fec3fbaf, the current built-in index and the AST of the sources.
 
-## Конкретное изменение
+## The concrete change
 
-Добавить `scripts/llm_wiki/queue_contracts.py`: один владелец уже существующих
-типов задач, результатов и ошибок. Собственные проверки находятся в
-`tests/modules/queue_contracts/`, описание и полный манифест контекста — в
-`docs/modules/queue-contracts.md` и `queue-contracts-context.json`.
+Add `scripts/llm_wiki/queue_contracts.py`: one owner of the already existing
+task, result and error types. Its own checks live in
+`tests/modules/queue_contracts/`; the description and the full context manifest live in
+`docs/modules/queue-contracts.md` and `queue-contracts-context.json`.
 
-Переносятся ровно 20 определений из memory_queue:
+Exactly 20 definitions move out of memory_queue:
 
 - LeaseFenceError, ResultConflictError, QueueOperationError,
   CompileCompletionError, MigrationBusy;
@@ -19,133 +19,133 @@
   CorruptPurgeProgress, SourceFence, WorkerSummary, PurgeReceipt,
   DeadCaptureRedrive, RestoreReceipt, LeaseProcessor.
 
-Их тела занимают 1 025 o200k_base токенов без decorators/imports. Зависимости —
-стандартная библиотека. Поля, defaults, наследование, frozen-свойства, методы и
-сигнатуры сохраняются. Прежние публичные имена memory_queue ссылаются на те же
-объекты; wrappers и вторая реализация не добавляются. Текущие потребители
-переводятся на владельца типов напрямую. QueueRetryPolicy с DEFAULTS и TaskFence
-с OwnerLease остаются у своих текущих владельцев: их зависимости не прячутся
-за копиями значений или подменой аннотаций.
+Their bodies take 1 025 o200k_base tokens without decorators/imports. Their dependencies are
+the standard library. Fields, defaults, inheritance, frozen properties, methods and
+signatures are kept. The old public names in memory_queue refer to the same
+objects; no wrappers and no second implementation are added. Current consumers
+switch to the type owner directly. QueueRetryPolicy with DEFAULTS and TaskFence
+with OwnerLease stay with their current owners: their dependencies are not hidden
+behind copies of values or substituted annotations.
 
-## Зачем до более крупного разделения
+## Why before a larger split
 
-memory_queue занимает 135 934 токена без тестов. Крупнейшие классы — adopted
-reader/store (51 120 токенов) и legacy MemoryQueue (13 470). Механическое деление
-их методов по длине оставит общие зависимости и риск циклов. Общие типы нужны
-будущим хранилищу, worker и CLI, но должны быть доступны без их загрузки.
+memory_queue takes 135 934 tokens without tests. The largest classes are the adopted
+reader/store (51 120 tokens) and the legacy MemoryQueue (13 470). Splitting
+their methods mechanically by length would leave shared dependencies and a risk of cycles. The shared types are needed
+by the future store, worker and CLI, but must be available without loading them.
 
-Сегодня compile_controller импортирует QueueFailure, а markdown_transaction —
-CaptureTaskBinding через исполнитель очереди. Ещё четыре потребителя смешивают
-импорты типов и операций. Это наблюдаемая причина выделения контракта, а не
-обещание значительной экономии файлов от переноса 20 небольших определений.
-Работу хранилища, leases, SQL, миграций, subprocess и runtime этот шаг не меняет.
+Today compile_controller imports QueueFailure, and markdown_transaction imports
+CaptureTaskBinding, through the queue executor. Four more consumers mix
+imports of types and operations. This is the observed reason to extract the contract, not
+a promise of significant file savings from moving 20 small definitions.
+This step does not change the work of the store, leases, SQL, migrations, subprocess or runtime.
 
-## Совместимость и проверка
+## Compatibility and verification
 
-1. Записать согласование в knowledge/notes и обновить docs/STRUCTURE до кода.
-2. Зафиксировать доверенные pickle-образцы исходных типов и ошибок; сохранить
-   поддержку прежнего module/name через реэкспорты. Проверить старые образцы,
-   новые round-trip и реальный spawn-переход. Unpickle внешних данных не добавляется.
-3. Сверить AST всех определений и идентичность объектов по двум импортным путям.
-4. До переноса воспроизвести зависимость типа от executor; после запретить её
-   автоматической проверкой. Свежий процесс загружает только контракт и stdlib.
-5. Сохранить интеграционные сценарии очереди, завершения компиляции, capture,
-   восстановления и процессов. Общая проверка сложности обязательна.
-6. Измерить целиком код, тесты, данные, инструкции, необходимые контракты и docs;
-   принять пакет только при ≤100 000 токенов. Число исходника не выдаётся за
-   размер всего пакета. Межмодульные сценарии учитываются отдельно.
+1. Record the approval in knowledge/notes and update docs/STRUCTURE before the code.
+2. Pin trusted pickle samples of the original types and errors; keep
+   support for the old module/name through re-exports. Check the old samples,
+   new round-trips and a real spawn transition. No unpickling of external data is added.
+3. Compare the AST of all definitions and the identity of objects across two import paths.
+4. Before the move, reproduce the type's dependency on the executor; after it, forbid it
+   with an automatic check. A fresh process loads only the contract and stdlib.
+5. Keep the integration scenarios of the queue, compile completion, capture,
+   recovery and processes. The shared complexity check is mandatory.
+6. Measure the code, tests, data, instructions, required contracts and docs as a whole;
+   accept the package only at ≤100 000 tokens. The source's count is not passed off as the
+   size of the whole package. Cross-module scenarios are counted separately.
 
-Сами QueueTask и QueueLease не получают новых проверок полей: это перенос
-существующего контракта, не изменение допуска данных. Никаких новых лимитов,
-Protocol, DI-контейнера, сервиса, runtime-каталога или БД. Установка всей
-незавершённой ветки в живой vault не входит в этот срез.
+QueueTask and QueueLease themselves get no new field checks: this is a move of
+the existing contract, not a change in data admission. No new limits,
+Protocol, DI container, service, runtime directory or DB. Installing the whole
+unfinished branch into the live vault is not part of this slice.
 
-## Стабильное имя сериализации
+## Stable serialization name
 
-При переносе сохранить `__module__ = "memory_queue"` у этих публичных типов:
-это их существующее имя сериализации, а новый файл — владелец реализации.
-Не вводить custom Unpickler, таблицу миграции или второй класс. Старый фасад
-связывает то же имя с тем же объектом. Такой явно документированный публичный
-путь требуется, пока поддерживаются существующие pickle-имена и смешанный
-момент обновления исходников у уже запущенного родителя и нового дочернего процесса.
+During the move, keep `__module__ = "memory_queue"` on these public types:
+it is their existing serialization name, and the new file owns the implementation.
+Do not introduce a custom Unpickler, a migration table or a second class. The old facade
+binds the same name to the same object. Such an explicitly documented public
+path is required as long as the existing pickle names are supported, and for the mixed
+moment of a source update between an already running parent and a new child process.
 
-Компромисс: сам import и создание объектов из queue_contracts не загружают
-очередь, но pickle может разрешать публичное имя через memory_queue. Полную
-независимость сериализации от этого фасада на данном этапе не обещаем. В дальнейшем
-фасад должен стать тонким при разделении исполнителя; менять имя сериализации
-ради красивого графа небезопасно. Сохранение metadata не дублирует реализацию.
+Trade-off: importing queue_contracts and creating objects from it do not load the
+queue, but pickle may resolve the public name through memory_queue. Full
+independence of serialization from this facade is not promised at this stage. Later
+the facade should become thin when the executor is split; changing the serialization name
+for the sake of a pretty graph is unsafe. Keeping the metadata does not duplicate the implementation.
 
-Все 20 исходных типов и пять характерных значений зафиксированы в доверенных
-локальных baseline-образцах protocol 4; исходные round-trip прошли. Будущая
-проверка должна дополнительно подтвердить сохранение публичного module/name,
-байтов исходных образцов и реальную передачу результата через spawn. Нельзя
-ограничиться проверкой, что старый pickle читается новым кодом: обратное направление
-и старый родитель также важны. Артефакты: logs/queue-contracts-pickle-baseline.json,
+All 20 original types and five characteristic values are pinned in trusted
+local baseline samples of protocol 4; the original round-trips passed. A future
+check must additionally confirm that the public module/name is kept, along with the
+bytes of the original samples and real transfer of a result through spawn. It is not enough
+to check only that an old pickle is read by new code: the reverse direction
+and an old parent matter too. Artifacts: logs/queue-contracts-pickle-baseline.json,
 logs/queue-contracts-baseline-classes.pickle, logs/queue-contracts-baseline-values.pickle.
 
-## Альтернативы и источники
+## Alternatives and sources
 
-Оставить типы у executor — сохраняет обратную зависимость. Поместить их в formats —
-смешивает канонические wire bytes с оперативными Python-объектами. Перенести сразу
-worker/store — создаёт более широкий риск до определения общей границы. Выбран
-минимальный самостоятельный контракт, необходимый дальнейшему разделению.
+Leaving the types with the executor keeps the reverse dependency. Putting them in formats
+mixes canonical wire bytes with operational Python objects. Moving
+worker/store at once creates a wider risk before the shared boundary is defined. The chosen option is the
+minimal self-contained contract that the further split needs.
 
-Первичные источники проверены 2026-11-02:
-[Bounded Context](https://martinfowler.com/bliki/BoundedContext.html) — согласованная
-модель и явные отношения; [Import Linter](https://import-linter.readthedocs.io/en/stable/contract_types/)
-— защита направлений импортов;
-[Python pickle](https://docs.python.org/3.10/library/pickle.html) — зависимость
-десериализации от доступного module/name и ограничения доверия. API проверяется
-на поддерживаемой проектом Python 3.10; её upstream EOL не скрывается и не меняет
-версию проекта автоматически. Новые зависимости не устанавливаются.
+Primary sources checked 2026-11-02:
+[Bounded Context](https://martinfowler.com/bliki/BoundedContext.html): a consistent
+model and explicit relationships; [Import Linter](https://import-linter.readthedocs.io/en/stable/contract_types/):
+protection of import directions;
+[Python pickle](https://docs.python.org/3.10/library/pickle.html): the dependency of
+deserialization on an available module/name, and trust limitations. The API is checked
+on Python 3.10, which the project supports; its upstream EOL is not hidden and does not change
+the project version automatically. No new dependencies are installed.
 
 Evidence: `logs/queue-contracts-definitions.json`, `logs/queue-contracts-consumers.json`,
 `logs/queue-contracts-graph.json`, scripts/memory_queue.py.
 
-## Реализация и доказательства
+## Implementation and evidence
 
-Согласование записано в private decision `queue-contracts-decision-20261102`;
-STRUCTURE обновлён до переноса. Все 20 AST классов совпадают с fec3fbaf. После
-исключения импортов и перенесённых классов AST оставшейся очереди также совпадает.
-Шесть потребителей переведены напрямую; операции и ленивые места импорта сохранены.
+The approval is recorded in the private decision `queue-contracts-decision-20261102`;
+STRUCTURE was updated before the move. All 20 class ASTs match fec3fbaf. After
+excluding imports and the moved classes, the AST of the remaining queue also matches.
+Six consumers were switched directly; operations and lazy import sites were kept.
 
-До исправления новый guard воспроизвёл все шесть зависимостей от executor.
-После исправления guard проверяет также aliased, local и star imports. Собственный
-пакет проходит 49 проверок на Python 3.12 и 3.10. Первый запуск на 3.10 обнаружил
-особенность теста: stdlib copy пробует необязательный Jython import. Запрещённый
-import теперь получает обычный ModuleNotFoundError: модуль не загружается,
-частных разрешений и сторонних зависимостей нет.
+Before the fix, the new guard reproduced all six dependencies on the executor.
+After the fix, the guard also checks aliased, local and star imports. The module's own
+package passes 49 checks on Python 3.12 and 3.10. The first run on 3.10 found
+a quirk of the test: stdlib copy tries an optional Jython import. The forbidden
+import now gets an ordinary ModuleNotFoundError: the module is not loaded, and there are
+no private permissions or third-party dependencies.
 
-Все 20 классов и пять значений дают прежние pickle bytes protocol 4. Реальный
-spawn переносит значения туда и обратно. Отдельно неизменённый executor fec3fbaf,
-распакованный из Git во временный каталог, прочитал и воспроизвёл те же bytes.
-Это свидетельство сохранения wire-контракта; обновление живых процессов на
-установленной системе в этом срезе не выполнялось. На Python 3.10 дополнительно
-прошли 175 тестов очереди и CLI.
+All 20 classes and five values give the same pickle bytes of protocol 4 as before. A real
+spawn carries the values there and back. Separately, the unchanged executor fec3fbaf,
+unpacked from Git into a temporary directory, read and reproduced the same bytes.
+This is evidence that the wire contract is kept; updating live processes on
+the installed system was not done in this slice. On Python 3.10, 175 queue and CLI tests
+also passed.
 
-Контекст включает исходник, собственные тесты и fixture, инструкции, структуру,
-проектные решения и манифест. Интеграционные тесты явно отделены и не выдаются за
-пакет независимого модуля. Временная копия исходного executor нужна только для
-проверки совместимости и не входит в продукт. Старая реализация классов удалена;
-публичные aliases оставлены ради действующего pickle-контракта.
+The context includes the source, its own tests and fixture, instructions, structure,
+design decisions and the manifest. Integration tests are explicitly separated and are not passed off as
+the package of an independent module. The temporary copy of the original executor is needed only for
+the compatibility check and is not part of the product. The old class implementation was removed;
+the public aliases are kept for the sake of the active pickle contract.
 
-Артефакты локальной проверки: `logs/queue-contracts-boundary-red.txt`,
+Local verification artifacts: `logs/queue-contracts-boundary-red.txt`,
 `logs/queue-contracts-ast.txt`, `logs/queue-contracts-own.txt`,
 `logs/queue-contracts-python310-own.txt`,
 `logs/queue-contracts-python310-integration.txt`,
 `logs/queue-contracts-old-executor.txt`, `logs/queue-contracts-complexity.txt`.
-Это локальные свидетельства; remote CI и установка не заявляются.
+These are local evidence; remote CI and installation are not claimed.
 
-Расширенный локальный прогон: **1 264 passed, 7 skipped**, 291,73 с,
-Python 3.12.3. Он включает очередь, migration/races, capture bindings,
+Extended local run: **1 264 passed, 7 skipped**, 291.73 s,
+Python 3.12.3. It includes the queue, migration/races, capture bindings,
 compile completion, archive, Markdown transactions/recovery, MCP, formats,
-структуру и общий контроль сложности. Список:
-`logs/queue-contracts-qualified-selection.txt`; результат и JUnit:
-`logs/queue-contracts-qualified.txt` / `.xml`. Это связанный набор, не полная
-регрессия проекта. Дополнительная финальная проверка CI discovery, сложности
-и трёх бюджетов: 73 passed. Ruff для scripts/tests прошёл.
+structure and the shared complexity control. The list:
+`logs/queue-contracts-qualified-selection.txt`; the result and JUnit:
+`logs/queue-contracts-qualified.txt` / `.xml`. This is a related set, not the full
+project regression. An additional final check of CI discovery, complexity
+and the three budgets: 73 passed. Ruff for scripts/tests passed.
 
-Источник memory_queue после переноса занимает 135 129 o200k_base токенов:
-его дальнейшее разделение остаётся необходимым. Этот срез устраняет зависимость
-потребителей типов от исполнителя; он не выдаётся за окончательное сжатие всей
-системы или доказательство экономии LLM-запросов. Общая ветка не установлена.
+The memory_queue source takes 135 129 o200k_base tokens after the move:
+its further split remains necessary. This slice removes the dependency of
+type consumers on the executor; it is not passed off as the final compression of the whole
+system or as proof of savings in LLM requests. The shared branch is not installed.

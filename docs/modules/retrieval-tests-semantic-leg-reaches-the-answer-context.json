@@ -238,7 +238,7 @@
         "retrieve_via_search_memory",
         "run_optional_bounded"
       ],
-      "contract_sha256": "c872aa2fcf899dd4c8d762cc5b5a6e4c7fc09cf3a582df8630eed435807b0be4",
+      "contract_sha256": "b71788ad21e6d24fe7bfb734817784e6583b4c31c9f1dbb272bb648e18be7f84",
       "integration_tests": [
         "tests/test_a_blocked_task_has_a_way_back.py",
         "tests/test_a_committed_source_resolves_an_older_compile_plan.py",
@@ -261,7 +261,7 @@
       "names": [
         "owning_checkout"
       ],
-      "contract_sha256": "81358eecfb587a11eab044b6cff8528680c7c4d0dc09ef9ec397cee60642298c",
+      "contract_sha256": "857d39868a8723c53e5c49b15182e3cb4e46b0fda35a235e38c42ef935d081b4",
       "integration_tests": [
         "tests/test_semantic_leg_reaches_the_answer.py"
       ]

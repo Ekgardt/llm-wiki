@@ -28,15 +28,15 @@ assert notification['method']=='notifications/initialized' and 'id' not in notif
 request=read()
 assert request['id']==2
 results={
- 'answered':{'result':{'content':[{'type':'text','text':'Привет'},{'type':'image','data':'ignored'},{'type':'text','text':'second'}]}},
+ 'answered':{'result':{'content':[{'type':'text','text':'\u041f\u0440\u0438\u0432\u0435\u0442'},{'type':'image','data':'ignored'},{'type':'text','text':'second'}]}},
  'tool_error':{'result':{'isError':True,'content':[{'type':'text','text':'refused'}]}},
  'rpc_error':{'error':{'code':-32000,'message':'failed'}},
- 'list':{'result':{'tools':[{'name':'echo','description':'локальный инструмент'}]}},
+ 'list':{'result':{'tools':[{'name':'echo','description':'\u043b\u043e\u043a\u0430\u043b\u044c\u043d\u044b\u0439 \u0438\u043d\u0441\u0442\u0440\u0443\u043c\u0435\u043d\u0442'}]}},
 }
 expected={'list':'tools/list'}.get(mode,'tools/call')
 assert request['method']==expected
 if expected=='tools/call':
-    assert request['params']['arguments']=={'value':'Привет'}
+    assert request['params']['arguments']=={'value':'\u041f\u0440\u0438\u0432\u0435\u0442'}
 send({'jsonrpc':'2.0','id':2,**results[mode]})
 assert sys.stdin.read()==''
 '''
@@ -44,7 +44,7 @@ assert sys.stdin.read()==''
 
 def _cli(mode):
     command = [sys.executable, '-u', '-c', SERVER, mode]
-    options = ['--tool', 'echo', '--arguments', '{"value":"Привет"}']
+    options = ['--tool', 'echo', '--arguments', '{"value":"\u041f\u0440\u0438\u0432\u0435\u0442"}']
     if mode == 'list':
         options = ['--list']
     return subprocess.run(
@@ -55,7 +55,7 @@ def _cli(mode):
 
 
 @pytest.mark.parametrize('mode,status,text', [
-    ('answered', 'answered', 'Привет\nsecond'),
+    ('answered', 'answered', '\u041f\u0440\u0438\u0432\u0435\u0442\nsecond'),
     ('tool_error', 'tool_error', 'refused'),
     ('rpc_error', 'error', "error: {'code': -32000, 'message': 'failed'}"),
 ])
@@ -67,19 +67,19 @@ def test_real_finite_server_handshake_call_and_output(mode, status, text):
 
 
 def test_real_finite_server_lists_tools():
-    assert _cli('list').stdout.strip() == 'echo: локальный инструмент'
+    assert _cli('list').stdout.strip() == 'echo: \u043b\u043e\u043a\u0430\u043b\u044c\u043d\u044b\u0439 \u0438\u043d\u0441\u0442\u0440\u0443\u043c\u0435\u043d\u0442'
 
 
 def test_unicode_call_survives_a_non_utf8_stdio_default(monkeypatch):
     monkeypatch.setenv('PYTHONIOENCODING', 'cp1252')
     outcome = json.loads(_cli('answered').stdout)
     assert outcome['status'] == 'answered'
-    assert outcome['text'] == 'Привет\nsecond'
+    assert outcome['text'] == '\u041f\u0440\u0438\u0432\u0435\u0442\nsecond'
 
 
 def test_unicode_listing_survives_a_non_utf8_stdio_default(monkeypatch):
     monkeypatch.setenv('PYTHONIOENCODING', 'cp1252')
-    assert _cli('list').stdout.strip() == 'echo: локальный инструмент'
+    assert _cli('list').stdout.strip() == 'echo: \u043b\u043e\u043a\u0430\u043b\u044c\u043d\u044b\u0439 \u0438\u043d\u0441\u0442\u0440\u0443\u043c\u0435\u043d\u0442'
 
 
 def test_request_and_notification_are_independent_json_lines():

@@ -5,7 +5,7 @@ import subprocess
 
 from llm_wiki import windows_acl
 
-OWNER = "PC\\Оператор"
+OWNER = "PC\\\u041e\u043f\u0435\u0440\u0430\u0442\u043e\u0440"
 
 
 def _icacls_writing(monkeypatch, listing: str, code_page: str) -> None:

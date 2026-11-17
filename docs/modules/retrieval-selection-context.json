@@ -84,7 +84,7 @@
       "names": [
         "QUERY_STOPWORDS"
       ],
-      "contract_sha256": "f61ac1137ee731bdc577f5b406ab5fd0bb086107217f574c1a715747cb82f1e3",
+      "contract_sha256": "f3de6b503cf8a4fce22b487c3255ef5325675e4774bfa12148896e72d4ef7572",
       "integration_tests": [
         "tests/test_a_fallback_names_its_cause.py",
         "tests/test_a_hit_is_named_by_its_page.py",

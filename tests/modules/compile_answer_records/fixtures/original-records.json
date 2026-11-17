@@ -18,10 +18,10 @@
   },
   "cases": [
     {
-      "encoded": "{\"dispatch\":{\"model_call\":{\"checkpoint_digest\":\"cd9db608668d811273baff9bf466e0ae2d3303b7956dfca34adb7e8c03ab1d7d\",\"checkpoint_sequence\":1,\"phase\":\"dispatch\",\"request_digest\":\"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\",\"schema\":\"compile-model-call/v1\"},\"sequence\":2,\"source_digest\":\"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\",\"stage\":\"snapshot_ready\",\"work_id\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"},\"schema\":\"compile-model-answer/v1\",\"text\":\"ответ é 全\",\"usage\":{\"cache_read_tokens\":null,\"cache_write_tokens\":null,\"cost_kind\":\"unknown\",\"duration_ms\":null,\"estimated_cost\":null,\"input_tokens\":null,\"output_tokens\":null}}",
+      "encoded": "{\"dispatch\":{\"model_call\":{\"checkpoint_digest\":\"cd9db608668d811273baff9bf466e0ae2d3303b7956dfca34adb7e8c03ab1d7d\",\"checkpoint_sequence\":1,\"phase\":\"dispatch\",\"request_digest\":\"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\",\"schema\":\"compile-model-call/v1\"},\"sequence\":2,\"source_digest\":\"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\",\"stage\":\"snapshot_ready\",\"work_id\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"},\"schema\":\"compile-model-answer/v1\",\"text\":\"\u043e\u0442\u0432\u0435\u0442 é 全\",\"usage\":{\"cache_read_tokens\":null,\"cache_write_tokens\":null,\"cost_kind\":\"unknown\",\"duration_ms\":null,\"estimated_cost\":null,\"input_tokens\":null,\"output_tokens\":null}}",
       "kind": "BackendResponse",
       "input": {
-        "text": "ответ é 全",
+        "text": "\u043e\u0442\u0432\u0435\u0442 é 全",
         "usage": {
           "input_tokens": null,
           "output_tokens": null,
@@ -33,7 +33,7 @@
         }
       },
       "expected": {
-        "text": "ответ é 全",
+        "text": "\u043e\u0442\u0432\u0435\u0442 é 全",
         "usage": {
           "input_tokens": null,
           "output_tokens": null,
@@ -365,37 +365,37 @@
     },
     {
       "case": "wrong-work",
-      "encoded": "{\"dispatch\":{\"model_call\":{\"checkpoint_digest\":\"cd9db608668d811273baff9bf466e0ae2d3303b7956dfca34adb7e8c03ab1d7d\",\"checkpoint_sequence\":1,\"phase\":\"dispatch\",\"request_digest\":\"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\",\"schema\":\"compile-model-call/v1\"},\"sequence\":2,\"source_digest\":\"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\",\"stage\":\"snapshot_ready\",\"work_id\":\"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff\"},\"schema\":\"compile-model-answer/v1\",\"text\":\"ответ é 全\",\"usage\":{\"cache_read_tokens\":null,\"cache_write_tokens\":null,\"cost_kind\":\"unknown\",\"duration_ms\":null,\"estimated_cost\":null,\"input_tokens\":null,\"output_tokens\":null}}",
+      "encoded": "{\"dispatch\":{\"model_call\":{\"checkpoint_digest\":\"cd9db608668d811273baff9bf466e0ae2d3303b7956dfca34adb7e8c03ab1d7d\",\"checkpoint_sequence\":1,\"phase\":\"dispatch\",\"request_digest\":\"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\",\"schema\":\"compile-model-call/v1\"},\"sequence\":2,\"source_digest\":\"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\",\"stage\":\"snapshot_ready\",\"work_id\":\"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff\"},\"schema\":\"compile-model-answer/v1\",\"text\":\"\u043e\u0442\u0432\u0435\u0442 é 全\",\"usage\":{\"cache_read_tokens\":null,\"cache_write_tokens\":null,\"cost_kind\":\"unknown\",\"duration_ms\":null,\"estimated_cost\":null,\"input_tokens\":null,\"output_tokens\":null}}",
       "error_type": "ProgressCorrupt",
       "message": "saved model answer is invalid or belongs to another call"
     },
     {
       "case": "wrong-request",
-      "encoded": "{\"dispatch\":{\"model_call\":{\"checkpoint_digest\":\"cd9db608668d811273baff9bf466e0ae2d3303b7956dfca34adb7e8c03ab1d7d\",\"checkpoint_sequence\":1,\"phase\":\"dispatch\",\"request_digest\":\"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff\",\"schema\":\"compile-model-call/v1\"},\"sequence\":2,\"source_digest\":\"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\",\"stage\":\"snapshot_ready\",\"work_id\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"},\"schema\":\"compile-model-answer/v1\",\"text\":\"ответ é 全\",\"usage\":{\"cache_read_tokens\":null,\"cache_write_tokens\":null,\"cost_kind\":\"unknown\",\"duration_ms\":null,\"estimated_cost\":null,\"input_tokens\":null,\"output_tokens\":null}}",
+      "encoded": "{\"dispatch\":{\"model_call\":{\"checkpoint_digest\":\"cd9db608668d811273baff9bf466e0ae2d3303b7956dfca34adb7e8c03ab1d7d\",\"checkpoint_sequence\":1,\"phase\":\"dispatch\",\"request_digest\":\"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff\",\"schema\":\"compile-model-call/v1\"},\"sequence\":2,\"source_digest\":\"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\",\"stage\":\"snapshot_ready\",\"work_id\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"},\"schema\":\"compile-model-answer/v1\",\"text\":\"\u043e\u0442\u0432\u0435\u0442 é 全\",\"usage\":{\"cache_read_tokens\":null,\"cache_write_tokens\":null,\"cost_kind\":\"unknown\",\"duration_ms\":null,\"estimated_cost\":null,\"input_tokens\":null,\"output_tokens\":null}}",
       "error_type": "ProgressCorrupt",
       "message": "saved model answer is invalid or belongs to another call"
     },
     {
       "case": "extra-field",
-      "encoded": "{\"dispatch\":{\"model_call\":{\"checkpoint_digest\":\"cd9db608668d811273baff9bf466e0ae2d3303b7956dfca34adb7e8c03ab1d7d\",\"checkpoint_sequence\":1,\"phase\":\"dispatch\",\"request_digest\":\"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\",\"schema\":\"compile-model-call/v1\"},\"sequence\":2,\"source_digest\":\"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\",\"stage\":\"snapshot_ready\",\"work_id\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"},\"extra\":true,\"schema\":\"compile-model-answer/v1\",\"text\":\"ответ é 全\",\"usage\":{\"cache_read_tokens\":null,\"cache_write_tokens\":null,\"cost_kind\":\"unknown\",\"duration_ms\":null,\"estimated_cost\":null,\"input_tokens\":null,\"output_tokens\":null}}",
+      "encoded": "{\"dispatch\":{\"model_call\":{\"checkpoint_digest\":\"cd9db608668d811273baff9bf466e0ae2d3303b7956dfca34adb7e8c03ab1d7d\",\"checkpoint_sequence\":1,\"phase\":\"dispatch\",\"request_digest\":\"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\",\"schema\":\"compile-model-call/v1\"},\"sequence\":2,\"source_digest\":\"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\",\"stage\":\"snapshot_ready\",\"work_id\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"},\"extra\":true,\"schema\":\"compile-model-answer/v1\",\"text\":\"\u043e\u0442\u0432\u0435\u0442 é 全\",\"usage\":{\"cache_read_tokens\":null,\"cache_write_tokens\":null,\"cost_kind\":\"unknown\",\"duration_ms\":null,\"estimated_cost\":null,\"input_tokens\":null,\"output_tokens\":null}}",
       "error_type": "ProgressCorrupt",
       "message": "saved model answer is invalid or belongs to another call"
     },
     {
       "case": "negative-usage",
-      "encoded": "{\"dispatch\":{\"model_call\":{\"checkpoint_digest\":\"cd9db608668d811273baff9bf466e0ae2d3303b7956dfca34adb7e8c03ab1d7d\",\"checkpoint_sequence\":1,\"phase\":\"dispatch\",\"request_digest\":\"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\",\"schema\":\"compile-model-call/v1\"},\"sequence\":2,\"source_digest\":\"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\",\"stage\":\"snapshot_ready\",\"work_id\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"},\"schema\":\"compile-model-answer/v1\",\"text\":\"ответ é 全\",\"usage\":{\"cache_read_tokens\":null,\"cache_write_tokens\":null,\"cost_kind\":\"unknown\",\"duration_ms\":null,\"estimated_cost\":null,\"input_tokens\":-1,\"output_tokens\":null}}",
+      "encoded": "{\"dispatch\":{\"model_call\":{\"checkpoint_digest\":\"cd9db608668d811273baff9bf466e0ae2d3303b7956dfca34adb7e8c03ab1d7d\",\"checkpoint_sequence\":1,\"phase\":\"dispatch\",\"request_digest\":\"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\",\"schema\":\"compile-model-call/v1\"},\"sequence\":2,\"source_digest\":\"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\",\"stage\":\"snapshot_ready\",\"work_id\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"},\"schema\":\"compile-model-answer/v1\",\"text\":\"\u043e\u0442\u0432\u0435\u0442 é 全\",\"usage\":{\"cache_read_tokens\":null,\"cache_write_tokens\":null,\"cost_kind\":\"unknown\",\"duration_ms\":null,\"estimated_cost\":null,\"input_tokens\":-1,\"output_tokens\":null}}",
       "error_type": "ProgressCorrupt",
       "message": "saved model answer is invalid or belongs to another call"
     },
     {
       "case": "boolean-usage",
-      "encoded": "{\"dispatch\":{\"model_call\":{\"checkpoint_digest\":\"cd9db608668d811273baff9bf466e0ae2d3303b7956dfca34adb7e8c03ab1d7d\",\"checkpoint_sequence\":1,\"phase\":\"dispatch\",\"request_digest\":\"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\",\"schema\":\"compile-model-call/v1\"},\"sequence\":2,\"source_digest\":\"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\",\"stage\":\"snapshot_ready\",\"work_id\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"},\"schema\":\"compile-model-answer/v1\",\"text\":\"ответ é 全\",\"usage\":{\"cache_read_tokens\":null,\"cache_write_tokens\":null,\"cost_kind\":\"unknown\",\"duration_ms\":null,\"estimated_cost\":null,\"input_tokens\":true,\"output_tokens\":null}}",
+      "encoded": "{\"dispatch\":{\"model_call\":{\"checkpoint_digest\":\"cd9db608668d811273baff9bf466e0ae2d3303b7956dfca34adb7e8c03ab1d7d\",\"checkpoint_sequence\":1,\"phase\":\"dispatch\",\"request_digest\":\"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\",\"schema\":\"compile-model-call/v1\"},\"sequence\":2,\"source_digest\":\"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\",\"stage\":\"snapshot_ready\",\"work_id\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"},\"schema\":\"compile-model-answer/v1\",\"text\":\"\u043e\u0442\u0432\u0435\u0442 é 全\",\"usage\":{\"cache_read_tokens\":null,\"cache_write_tokens\":null,\"cost_kind\":\"unknown\",\"duration_ms\":null,\"estimated_cost\":null,\"input_tokens\":true,\"output_tokens\":null}}",
       "error_type": "ProgressCorrupt",
       "message": "saved model answer is invalid or belongs to another call"
     },
     {
       "case": "wrong-schema",
-      "encoded": "{\"dispatch\":{\"model_call\":{\"checkpoint_digest\":\"cd9db608668d811273baff9bf466e0ae2d3303b7956dfca34adb7e8c03ab1d7d\",\"checkpoint_sequence\":1,\"phase\":\"dispatch\",\"request_digest\":\"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\",\"schema\":\"compile-model-call/v1\"},\"sequence\":2,\"source_digest\":\"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\",\"stage\":\"snapshot_ready\",\"work_id\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"},\"schema\":\"other/v1\",\"text\":\"ответ é 全\",\"usage\":{\"cache_read_tokens\":null,\"cache_write_tokens\":null,\"cost_kind\":\"unknown\",\"duration_ms\":null,\"estimated_cost\":null,\"input_tokens\":null,\"output_tokens\":null}}",
+      "encoded": "{\"dispatch\":{\"model_call\":{\"checkpoint_digest\":\"cd9db608668d811273baff9bf466e0ae2d3303b7956dfca34adb7e8c03ab1d7d\",\"checkpoint_sequence\":1,\"phase\":\"dispatch\",\"request_digest\":\"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\",\"schema\":\"compile-model-call/v1\"},\"sequence\":2,\"source_digest\":\"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\",\"stage\":\"snapshot_ready\",\"work_id\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"},\"schema\":\"other/v1\",\"text\":\"\u043e\u0442\u0432\u0435\u0442 é 全\",\"usage\":{\"cache_read_tokens\":null,\"cache_write_tokens\":null,\"cost_kind\":\"unknown\",\"duration_ms\":null,\"estimated_cost\":null,\"input_tokens\":null,\"output_tokens\":null}}",
       "error_type": "ProgressCorrupt",
       "message": "saved model answer is invalid or belongs to another call"
     },

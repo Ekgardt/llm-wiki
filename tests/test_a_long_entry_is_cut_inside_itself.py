@@ -38,7 +38,7 @@ def test_a_day_whose_entries_fit_is_cut_between_entries_as_before() -> None:
 
 
 def test_a_line_without_breaks_is_cut_on_a_character_boundary() -> None:
-    content = _entry(1, "ж".encode() * 30_000)
+    content = _entry(1, "\u0436".encode() * 30_000)
     for piece in _pieces(content):
         piece.decode("utf-8")
 

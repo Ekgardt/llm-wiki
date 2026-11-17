@@ -1,26 +1,26 @@
 # Queue heartbeat
 
-Владелец: `scripts/llm_wiki/queue_heartbeat.py`. Два существующих класса владеют
-потоком, сигналом остановки и ошибкой продления. Source fence дополнительно
-защищает текущее значение блокировкой. Узкие Protocol описывают необходимые
-методы очереди; SQL, fencing и реализация ожидания остаются у очереди.
+Owner: `scripts/llm_wiki/queue_heartbeat.py`. Two existing classes own the
+thread, the stop signal and the renewal error. Source fence additionally
+protects the current value with a lock. Narrow Protocols describe the queue
+methods that are needed; SQL, fencing and the wait implementation stay with the queue.
 
-Зависимости: стандартная библиотека, queue_contracts, reliability_defaults и
-lease_renewal. Импорт исполнителя, storage или durability запрещён. Старые
-queue_core.LeaseHeartbeat и SourceFenceHeartbeat — те же объекты классов,
-поэтому существующие подмены stop сохраняют действие. Stop floor принадлежит
-новому модулю; тесты меняют его там. Это внутренний параметр, не настройка.
+Dependencies: the standard library, queue_contracts, reliability_defaults and
+lease_renewal. Importing the executor, storage or durability is forbidden. The old
+queue_core.LeaseHeartbeat and SourceFenceHeartbeat are the same class objects,
+so existing stop substitutions keep their effect. The stop floor belongs to
+the new module; tests change it there. It is an internal parameter, not a setting.
 
-Значения, время начала владения, интервалы, budget busy timeout, названия daemon
-threads, lock, порядок публикации ошибки и bounded join сохранены. После join
-проверяется is_alive; живой поток вызывает heartbeat_stop_timeout. Убийство
-процесса по-прежнему не гарантирует graceful cleanup daemon thread.
+Values, ownership start time, intervals, the busy-timeout budget, daemon
+thread names, the lock, the error publication order and the bounded join are preserved. After join
+is_alive is checked; a live thread raises heartbeat_stop_timeout. Killing
+the process still does not guarantee graceful cleanup of the daemon thread.
 
-Полный пакет указан в queue-heartbeat-context.json: исходники зависимостей,
-контракты, документация и все собственные тесты. Предел — 100000 o200k_base
-токенов. Тесты запускаются отдельно: `pytest tests/modules/queue_heartbeat -q`.
-Интеграция дополнительно проверяется тестами очереди, compile controller,
-busy database, потери аренды и прекращения дочернего выполнения.
+The complete packet is listed in queue-heartbeat-context.json: dependency sources,
+contracts, documentation and all own tests. The limit is 100000 o200k_base
+tokens. Tests run separately: `pytest tests/modules/queue_heartbeat -q`.
+Integration is additionally checked by the tests of the queue, the compile controller,
+busy database, lease loss and termination of child execution.
 
 Evidence: docs/research/2026-11-02-queue-renewal-boundaries.md.
 

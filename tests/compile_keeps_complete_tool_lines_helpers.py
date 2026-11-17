@@ -7,7 +7,7 @@ from reliable_memory import canonical_json_bytes
 
 def _tool_parts():
     record = {"event_type": "post_tool_use", "payload": {
-        "tool_name": "exec_command", "target": "я" * 12000}}
+        "tool_name": "exec_command", "target": "\u044f" * 12000}}
     raw = canonical_json_bytes(record)
     anchor = {"occurred_at": "2026-10-02T12:34:56+00:00", "intent_id": "physical-tool-control"}
     head = "knowledge/raw/sessions/2026-10-02/physical-tool-control.breadcrumb.md"

@@ -96,7 +96,7 @@ def test_partition_memo_parses_original_once_but_final_validation_is_fresh(monke
 def test_native_frame_and_its_verified_neighbor_share_actual_byte_measure(tmp_path, monkeypatch):
     from tests.native_compile_uses_whole_container_helpers import _native_inputs
 
-    inputs, _ = _native_inputs(tmp_path, monkeypatch, "Мой велосипед синий. " * 600)
+    inputs, _ = _native_inputs(tmp_path, monkeypatch, "\u041c\u043e\u0439 \u0432\u0435\u043b\u043e\u0441\u0438\u043f\u0435\u0434 \u0441\u0438\u043d\u0438\u0439. " * 600)
     assert len(inputs.dailies) > 1
     budget = SimpleNamespace(available_input_tokens=1_000_000)
     opaque = compile_pipeline_batches.group_dailies(inputs, budget, lambda paths: len(paths))
@@ -105,7 +105,7 @@ def test_native_frame_and_its_verified_neighbor_share_actual_byte_measure(tmp_pa
     assert len(actual) == 1
     selected = compile_pipeline_sources.subset_compile_inputs(inputs, actual[0])
     assert selected.sources[0].content == inputs.dailies[0].original_content
-    assert "Мой велосипед синий." in selected.sources[0].prompt_content.decode()
+    assert "\u041c\u043e\u0439 \u0432\u0435\u043b\u043e\u0441\u0438\u043f\u0435\u0434 \u0441\u0438\u043d\u0438\u0439." in selected.sources[0].prompt_content.decode()
 
 
 def test_measure_bound_to_different_inputs_cannot_authorize_join():
@@ -119,7 +119,7 @@ def test_measure_bound_to_different_inputs_cannot_authorize_join():
 def test_missing_native_cover_is_refused(tmp_path, monkeypatch):
     from tests.native_compile_uses_whole_container_helpers import _native_inputs
 
-    inputs, _ = _native_inputs(tmp_path, monkeypatch, "Полная строка. " * 3000)
+    inputs, _ = _native_inputs(tmp_path, monkeypatch, "\u041f\u043e\u043b\u043d\u0430\u044f \u0441\u0442\u0440\u043e\u043a\u0430. " * 3000)
     assert len(inputs.dailies) > 2
     with pytest.raises(ValueError, match="all covering source parts"):
         compile_pipeline_sources.deduplicated_sources(inputs.dailies[:2])
@@ -161,7 +161,7 @@ def test_source_bound_tokenizer_preserves_explicit_adapter_and_full_bytes():
 
 
 def test_join_preserves_unicode_physical_bytes_without_normalization():
-    original = b"# 2026-09-01\n\n## 10:00\n" + ("- e\u0301 и машина.\n" * 2000).encode()
+    original = b"# 2026-09-01\n\n## 10:00\n" + ("- e\u0301 \u0438 \u043c\u0430\u0448\u0438\u043d\u0430.\n" * 2000).encode()
     parts = compile_pipeline_sources.daily_parts("knowledge/daily/2026-09-01.md", original)
     joined = compile_pipeline_sources.deduplicated_sources(parts)
     assert joined[0].content == original
@@ -180,7 +180,7 @@ def test_equal_part_digests_remain_distinct_v4_physical_contexts():
 def test_removed_native_cache_cannot_hide_missing_physical_companion(tmp_path, monkeypatch):
     from tests.native_compile_uses_whole_container_helpers import _native_inputs
 
-    inputs, _ = _native_inputs(tmp_path, monkeypatch, "Полная строка. " * 3000)
+    inputs, _ = _native_inputs(tmp_path, monkeypatch, "\u041f\u043e\u043b\u043d\u0430\u044f \u0441\u0442\u0440\u043e\u043a\u0430. " * 3000)
     selected = [replace(part, native_frames=()) for part in inputs.dailies[:2]]
     with pytest.raises(ValueError, match="covering source parts"):
         compile_pipeline_sources.deduplicated_sources(selected)
@@ -357,7 +357,7 @@ def test_capture_partition_context_rejects_shadowed_input_tuple(tmp_path, monkey
 
 def test_captured_ranges_still_reject_missing_native_companion(tmp_path, monkeypatch):
     from tests.native_compile_uses_whole_container_helpers import _native_inputs
-    inputs, _ = _native_inputs(tmp_path, monkeypatch, "Полная строка. " * 3000)
+    inputs, _ = _native_inputs(tmp_path, monkeypatch, "\u041f\u043e\u043b\u043d\u0430\u044f \u0441\u0442\u0440\u043e\u043a\u0430. " * 3000)
     measure = compile_pipeline_prompts.ByteBatchMeasure(inputs)
     selected = [replace(part, native_frames=()) for part in inputs.dailies[:2]]
     with pytest.raises(ValueError, match="covering source parts"):

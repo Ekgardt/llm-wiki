@@ -277,11 +277,11 @@ def test_should_rerank_refuses_only_for_a_named_reason(monkeypatch):
 @pytest.mark.parametrize(
     ("query", "intent", "profile"),
     [
-        ("Что зависит от search_memory?", "graph_relation", "GRAPH"),
-        ("Покажи карту репозитория scripts", "repo_map", "REPO_MAP"),
-        ("Влияние изменения search_memory.py", "impact", "IMPACT"),
-        ("Синтез архитектуры across all projects", "global_synthesis", "GLOBAL"),
-        ("решения с 2025-01-01", "temporal", "TEMPORAL"),
+        ("\u0427\u0442\u043e \u0437\u0430\u0432\u0438\u0441\u0438\u0442 \u043e\u0442 search_memory?", "graph_relation", "GRAPH"),
+        ("\u041f\u043e\u043a\u0430\u0436\u0438 \u043a\u0430\u0440\u0442\u0443 \u0440\u0435\u043f\u043e\u0437\u0438\u0442\u043e\u0440\u0438\u044f scripts", "repo_map", "REPO_MAP"),
+        ("\u0412\u043b\u0438\u044f\u043d\u0438\u0435 \u0438\u0437\u043c\u0435\u043d\u0435\u043d\u0438\u044f search_memory.py", "impact", "IMPACT"),
+        ("\u0421\u0438\u043d\u0442\u0435\u0437 \u0430\u0440\u0445\u0438\u0442\u0435\u043a\u0442\u0443\u0440\u044b across all projects", "global_synthesis", "GLOBAL"),
+        ("\u0440\u0435\u0448\u0435\u043d\u0438\u044f \u0441 2025-01-01", "temporal", "TEMPORAL"),
         ("什么依赖 search_memory", "graph_relation", "GRAPH"),
         ("显示仓库地图 scripts", "repo_map", "REPO_MAP"),
         ("更改 search_memory.py 的影响", "impact", "IMPACT"),

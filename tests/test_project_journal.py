@@ -293,11 +293,11 @@ def test_cyrillic_computed_slug_supports_new_and_existing_project_state(
 ):
     from session_start_project_state import compute_slug
 
-    project_dir = tmp_path / "Тесты"
+    project_dir = tmp_path / "\u0422\u0435\u0441\u0442\u044b"
     project_dir.mkdir()
     projects = vault / "knowledge/projects"
     slug = compute_slug(project_dir, projects)
-    assert slug == "тесты"
+    assert slug == "\u0442\u0435\u0441\u0442\u044b"
     if existing_state:
         target = projects / slug
         target.mkdir()
@@ -936,7 +936,7 @@ def _assert_identity_is_bounded(occurrence_id, idempotency_key, stable_hash) -> 
 def test_bootstrap_identity_hashes_256_character_unicode_slug():
     from project_journal import bootstrap_event_identity
 
-    slug = "я" * 256
+    slug = "\u044f" * 256
     occurrence_id, idempotency_key, stable_hash = bootstrap_event_identity(
         slug, "meaningful legacy content"
     )

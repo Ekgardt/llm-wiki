@@ -49,8 +49,8 @@ def test_restored_position_checks_do_not_decode_native_payloads(monkeypatch):
 
 
 @pytest.mark.parametrize("value", [
-    [], [1, 12.5, True, None, "quotes \\\" and й", {"x": [",", "]"]}],
-    ["\\" * 32768 + '"', {"long": "й" * 65536}],
+    [], [1, 12.5, True, None, "quotes \\\" and \u0439", {"x": [",", "]"]}],
+    ["\\" * 32768 + '"', {"long": "\u0439" * 65536}],
 ])
 def test_array_view_preserves_canonical_values_and_slices(tmp_path, value):
     raw = controller.snapshot_json(value)
@@ -80,7 +80,7 @@ def test_invalid_or_noncanonical_array_is_rejected_at_admission(tmp_path, raw):
 
 @pytest.mark.parametrize("chunk_size", [1, 2, 3, 5, 8, 13])
 def test_escaping_and_nesting_cross_every_small_transfer_boundary(chunk_size):
-    values = ['\\",[]{}й', "\\\\", {"nested": [1, "comma, quote\"", []]}, False, None]
+    values = ['\\",[]{}\u0439', "\\\\", {"nested": [1, "comma, quote\"", []]}, False, None]
     raw = controller.snapshot_json(values)
     with io.BytesIO(raw) as stream:
         source = VerifiedByteRange(stream, len(raw), hashlib.sha256(raw).hexdigest(),

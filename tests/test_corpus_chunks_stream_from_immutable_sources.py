@@ -24,7 +24,7 @@ def test_real_100001_chunks_keep_both_bounded_sources(tmp_path):
 
 
 def test_captured_bytes_survive_source_deletion_and_keep_citations(tmp_path):
-    snapshot = _notes(tmp_path, ("# Тема\nТочный cafe\u0301.\n## Вторая\nХвост.\n".encode(),))
+    snapshot = _notes(tmp_path, ("# \u0422\u0435\u043c\u0430\n\u0422\u043e\u0447\u043d\u044b\u0439 cafe\u0301.\n## \u0412\u0442\u043e\u0440\u0430\u044f\n\u0425\u0432\u043e\u0441\u0442.\n".encode(),))
     expected = tuple(snapshot.chunks)
     (tmp_path / expected[0].source_path).unlink()
     assert snapshot.chunks == expected

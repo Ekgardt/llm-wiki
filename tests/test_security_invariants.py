@@ -133,7 +133,7 @@ def test_archive_guard_does_not_split_the_whole_source_for_every_assignment(tmp_
     "é = 'pré'; target = daily_root / 'archive'\nos.rename(before, target)\n",
     "target = (\n    daily_root / 'archive'\n)\nos.replace(before, target)\n",
     "target: str = 'daily\\farchive'\nos.rename(before, target)\n",
-    "target = '''daily\farchive\nсохранённая строка'''\nos.rename(before, target)\n",
+    "target = '''daily\farchive\n\u0441\u043e\u0445\u0440\u0430\u043d\u0451\u043d\u043d\u0430\u044f \u0441\u0442\u0440\u043e\u043a\u0430'''\nos.rename(before, target)\n",
     "target = 'daily\\narchive'\nos.rename(before, target)\n",
 ])
 def test_archive_source_spans_match_python_with_unicode_and_physical_endings(source, ending):

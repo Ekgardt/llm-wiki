@@ -39,7 +39,7 @@ def test_matched_complete_packing_layout_bindings_and_wire(tmp_path, monkeypatch
     from tests.compile_binds_the_protected_source_view_helpers import _legacy_packet
     from tests.compile_reuses_raw_row_positions_within_one_layout_helpers import _context_pages
 
-    inputs = _legacy_packet(tmp_path, monkeypatch, [f'Факт {index} is settled.' for index in range(750)])
+    inputs = _legacy_packet(tmp_path, monkeypatch, [f'\u0424\u0430\u043a\u0442 {index} is settled.' for index in range(750)])
     parts = tuple(compile_pipeline_sources.daily_parts(inputs.dailies[0].logical_path, inputs.dailies[0].content))
     inputs = replace(inputs, dailies=parts, sources=(*inputs.sources, *_context_pages()))
     current = redactor.redact_patterns

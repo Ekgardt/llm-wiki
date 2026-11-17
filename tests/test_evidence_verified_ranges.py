@@ -63,7 +63,7 @@ def test_verified_source_cannot_authorize_a_different_reference(tmp_path, fields
 def test_large_block_hash_and_utf8_validation_do_not_materialize_the_block(tmp_path, monkeypatch):
     from bounded_io import VerifiedByteRange
 
-    raw = b'## [12:34:56] event\nFact\n' + ('я\n' * IO_CHUNK_BYTES).encode()
+    raw = b'## [12:34:56] event\nFact\n' + ('\u044f\n' * IO_CHUNK_BYTES).encode()
     expected = evidence.EvidenceResolver(tmp_path).resolve_bytes(_packet(raw), raw, source_path=tmp_path)
     read = VerifiedByteRange.__getitem__
 
@@ -83,7 +83,7 @@ def test_unicode_and_line_indexes_cross_physical_transfer_boundaries(tmp_path, m
     from llm_wiki import compile_controller_reader
 
     monkeypatch.setattr(compile_controller_reader, 'IO_CHUNK_BYTES', transfer)
-    raw = '## [12:34:56] event\nя😀\r\nFact\n## [12:34:56] second\nё\n'.encode()
+    raw = '## [12:34:56] event\n\u044f😀\r\nFact\n## [12:34:56] second\n\u0451\n'.encode()
     resolver = evidence.EvidenceResolver(tmp_path)
     expected = resolver.resolve_bytes(_packet(raw), raw, source_path=tmp_path)
     with _original(raw) as content:
@@ -94,11 +94,11 @@ def test_unicode_and_line_indexes_cross_physical_transfer_boundaries(tmp_path, m
 
 
 def test_utf8_citation_boundary_is_checked_even_with_cached_range_proof(tmp_path):
-    raw = '## [12:34:56] event\nFact я\n'.encode()
+    raw = '## [12:34:56] event\nFact \u044f\n'.encode()
     resolver = evidence.EvidenceResolver(tmp_path)
     with _original(raw) as content:
         resolver.resolve_bytes(_packet(raw), content, source_path=tmp_path)
-        bad = replace(_packet(raw), byte_start=raw.index('я'.encode()) + 1, byte_end=len(raw) - 1)
+        bad = replace(_packet(raw), byte_start=raw.index('\u044f'.encode()) + 1, byte_end=len(raw) - 1)
         with pytest.raises(evidence.EvidenceResolutionError, match='UTF-8 boundaries'):
             resolver.resolve_bytes(bad, content, source_path=tmp_path)
 

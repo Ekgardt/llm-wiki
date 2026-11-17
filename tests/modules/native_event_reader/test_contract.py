@@ -10,7 +10,7 @@ from tests.modules.native_event_reader.contract_helpers import _frame
 
 
 @pytest.mark.parametrize(('kind', 'payload', 'expected'), [
-    ('user_prompt', {'prompt': 'Полный текст ☃\r\n第二行'}, 'Полный текст ☃\r\n第二行'),
+    ('user_prompt', {'prompt': '\u041f\u043e\u043b\u043d\u044b\u0439 \u0442\u0435\u043a\u0441\u0442 ☃\r\n第二行'}, '\u041f\u043e\u043b\u043d\u044b\u0439 \u0442\u0435\u043a\u0441\u0442 ☃\r\n第二行'),
     ('post_tool_use', {'tool_name': 'read', 'target': 'file'}, None),
 ])
 def test_complete_native_record_is_decoded_only_once(kind, payload, expected, monkeypatch):

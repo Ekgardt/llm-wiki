@@ -1038,12 +1038,12 @@ def _packed_context(evidence: list[GroundedEvidence], index_text: str, budget: o
 # IP and R. See docs/research/2026-09-30-short-terms-are-evidence.md.
 _RELEVANCE_STOPWORDS = frozenset(
     {
-        "and", "are", "but", "для", "for", "from", "has", "have", "not", "the",
-        "that", "this", "was", "were", "with", "что", "как", "это", "или",
+        "and", "are", "but", "\u0434\u043b\u044f", "for", "from", "has", "have", "not", "the",
+        "that", "this", "was", "were", "with", "\u0447\u0442\u043e", "\u043a\u0430\u043a", "\u044d\u0442\u043e", "\u0438\u043b\u0438",
         "a", "an", "as", "at", "be", "by", "do", "if", "in", "is", "it",
         "no", "of", "on", "or", "so", "to", "us", "we",
-        "вы", "да", "до", "за", "из", "и", "к", "ко", "ли", "мы", "на",
-        "не", "ни", "но", "о", "об", "от", "по", "с", "со", "у", "я",
+        "\u0432\u044b", "\u0434\u0430", "\u0434\u043e", "\u0437\u0430", "\u0438\u0437", "\u0438", "\u043a", "\u043a\u043e", "\u043b\u0438", "\u043c\u044b", "\u043d\u0430",
+        "\u043d\u0435", "\u043d\u0438", "\u043d\u043e", "\u043e", "\u043e\u0431", "\u043e\u0442", "\u043f\u043e", "\u0441", "\u0441\u043e", "\u0443", "\u044f",
     }
 )
 
@@ -1060,7 +1060,7 @@ def content_tokens(text: str) -> set[str]:
     return words | {a + b for a, b in zip(ideographs, ideographs[1:])}
 
 
-_CYRILLIC = re.compile(r"[Ѐ-ӿ]")
+_CYRILLIC = re.compile(r"[\u0400-\u04ff]")
 _LATIN = re.compile(r"[a-z]")
 _HAN = re.compile(r"[㐀-鿿]")
 # Figures, versions, counts and code identifiers keep their surface form when a
@@ -1660,8 +1660,8 @@ def default_candidates(
     # cap on how many rows each backend may fetch before fusion. Passing the
     # answer size as the resource cap collapsed the pool to the answer, and a
     # pool the size of the answer cannot hold that many distinct pages — the
-    # defect `candidate_pool` exists to prevent. Measured on this vault, "как
-    # устроен повтор после карантина" returned twelve candidates of which ten
+    # defect `candidate_pool` exists to prevent. Measured on this vault, "how
+    # is the retry after quarantine built" (asked in Russian) returned twelve candidates of which ten
     # were chunks of one status document and none was the decision page;
     # without the cap the decision page is first.
     rows = retrieve_via_search_memory(

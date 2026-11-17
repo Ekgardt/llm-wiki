@@ -6,7 +6,7 @@ Measured on the live vault on 2026-08-26 and fixed in the same pass:
      one second, so no caller that passed a deadline could ever use it.
   2. `retrieve_via_search_memory` never resolved a query encoder, so the entry
      point the grounded answer uses got `generation_vectors_unavailable`.
-  3. A bare `после` / `after` routed a topic question to `TEMPORAL`, which
+  3. A bare Russian or English "after" routed a topic question to `TEMPORAL`, which
      declares no dense signal at all.
   4. The grounded answer passed its answer size as `max_candidates`, a resource
      cap on each backend's pool, collapsing the pool to the answer size.
@@ -25,10 +25,10 @@ from tests.slow_machine import LONG_TIMEOUT
 
 
 def test_a_bare_preposition_is_not_a_time_window() -> None:
-    """`после` in a topic name is sequence, not a date filter."""
+    """The Russian "after" in a topic name is sequence, not a date filter."""
     from retrieval import analyze_query
 
-    analysis = analyze_query("как устроен повтор после карантина")
+    analysis = analyze_query("\u043a\u0430\u043a \u0443\u0441\u0442\u0440\u043e\u0435\u043d \u043f\u043e\u0432\u0442\u043e\u0440 \u043f\u043e\u0441\u043b\u0435 \u043a\u0430\u0440\u0430\u043d\u0442\u0438\u043d\u0430")
 
     assert analysis.recommended_profile == "HYBRID"
     assert "temporal" not in analysis.intents
@@ -38,7 +38,7 @@ def test_a_bare_preposition_is_not_a_time_window() -> None:
     "question",
     [
         "decisions since 2025-01-01",
-        "решения с 2025-01-01",
+        "\u0440\u0435\u0448\u0435\u043d\u0438\u044f \u0441 2025-01-01",
         "自 2025-01-01 以来的决策",
         "what changed after 2026-01-01",
     ],
@@ -130,7 +130,7 @@ def test_the_grounded_answer_does_not_cap_its_own_candidate_pool(monkeypatch) ->
 
     monkeypatch.setattr(retrieval, "retrieve_via_search_memory", fake_retrieve)
     query_memory.default_candidates(
-        "вопрос", profile="HYBRID", deadline=time.monotonic() + LONG_TIMEOUT
+        "\u0432\u043e\u043f\u0440\u043e\u0441", profile="HYBRID", deadline=time.monotonic() + LONG_TIMEOUT
     )
 
     assert seen.get("limit") == query_memory.QA_MAX_CANDIDATES

@@ -16,12 +16,12 @@
       ]
     },
     {
-      "content": "Привет 日 🧭\n```\n---\n# quoted heading\n\"\\ ",
+      "content": "\u041f\u0440\u0438\u0432\u0435\u0442 日 🧭\n```\n---\n# quoted heading\n\"\\ ",
       "head": "knowledge/raw/sessions/2026-09-29/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.breadcrumb.md",
       "documents": [
         [
           "knowledge/raw/sessions/2026-09-29/69bcdc6cac59c6d4ba7dd662a3098eac1e36f263ade9389623c8fc82f261bedb.breadcrumb-part.md",
-          "---\ntype: raw-source\nsource_authority: session\nconfidence: medium\nrecord_schema: breadcrumb-source/v1\n---\n\n# Captured event — part 1\n\nSource: [complete captured event](aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.breadcrumb.md).\n\n## Integrity record\n\n    {\"index\":0,\"intent_id\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"previous_sha256\":null,\"schema_version\":\"breadcrumb-part/v1\",\"text\":\"Привет 日 🧭\\n```\\n---\\n# quoted heading\\n\\\"\\\\ \"}\n"
+          "---\ntype: raw-source\nsource_authority: session\nconfidence: medium\nrecord_schema: breadcrumb-source/v1\n---\n\n# Captured event — part 1\n\nSource: [complete captured event](aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.breadcrumb.md).\n\n## Integrity record\n\n    {\"index\":0,\"intent_id\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"previous_sha256\":null,\"schema_version\":\"breadcrumb-part/v1\",\"text\":\"\u041f\u0440\u0438\u0432\u0435\u0442 日 🧭\\n```\\n---\\n# quoted heading\\n\\\"\\\\ \"}\n"
         ],
         [
           "knowledge/raw/sessions/2026-09-29/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.breadcrumb.md",

@@ -4,7 +4,7 @@ import hashlib
 
 import pytest
 
-PARTS = [b'# First\n' + 'Я\n'.encode(), b'# Second\n' + '文\n'.encode()]
+PARTS = [b'# First\n' + '\u042f\n'.encode(), b'# Second\n' + '文\n'.encode()]
 
 
 SOURCE = b''.join(PARTS)

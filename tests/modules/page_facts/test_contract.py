@@ -88,7 +88,7 @@ def test_unreadable_page_has_no_facts(tmp_path, relative):
 
 
 def test_existing_head_limit_counts_decoded_characters(tmp_path):
-    prefix = '---\nextra: ' + 'я' * 5000 + '\nconfidence: low\n---\n'
+    prefix = '---\nextra: ' + '\u044f' * 5000 + '\nconfidence: low\n---\n'
     assert len(prefix.encode('utf-8')) > page_facts.MAX_FRONTMATTER_BYTES
     path = _page(tmp_path, prefix + 'x' * 9000)
     assert len(page_facts.read_head(path)) == page_facts.MAX_FRONTMATTER_BYTES

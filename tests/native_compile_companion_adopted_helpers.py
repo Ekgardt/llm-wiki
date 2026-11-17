@@ -37,7 +37,7 @@ def _adopted_environment(tmp_path, monkeypatch):
 
 def _committed_companion(tmp_path, monkeypatch):
     root, coordinator = _adopted_environment(tmp_path, monkeypatch)
-    inputs, _ = _native_inputs(root, monkeypatch, "A" * 18000 + "\nМой велосипед синий.")
+    inputs, _ = _native_inputs(root, monkeypatch, "A" * 18000 + "\n\u041c\u043e\u0439 \u0432\u0435\u043b\u043e\u0441\u0438\u043f\u0435\u0434 \u0441\u0438\u043d\u0438\u0439.")
     first = _part_with_key(inputs.dailies, _frame_covering_keys(inputs, inputs.dailies[0].original_content))
     historical = replace(inputs, dailies=(replace(first, native_frames=()),), sources=())
     old_batch = compile_pipeline_batches.pack_compile_batches(historical, model=None)[0]
@@ -52,6 +52,6 @@ def _pending_batch(root, coordinator, first):
     current = compile_pipeline_sources.snapshot_compile_inputs([root / first.logical_path], compiled=compile_receipts.receipt_predicate(coordinator))
     keys = _frame_covering_keys(current, first.original_content)
     batch = compile_pipeline_batches.pack_compile_batches(compile_pipeline_sources.subset_compile_inputs(current, keys), model=None)[0]
-    operation = _native_operation(batch.inputs, "Мой велосипед синий.")
+    operation = _native_operation(batch.inputs, "\u041c\u043e\u0439 \u0432\u0435\u043b\u043e\u0441\u0438\u043f\u0435\u0434 \u0441\u0438\u043d\u0438\u0439.")
     plan = compile_pipeline_prompts.normalize_plan(compile_pipeline_operations.with_derived_claims([operation], batch.inputs), batch.inputs)
     return batch, plan

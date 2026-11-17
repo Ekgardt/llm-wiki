@@ -13,7 +13,7 @@ from tests.compile_archive_daily_sharing_helpers import _parts, _reader
 
 
 def test_metadata_array_encoding_is_incremental_and_byte_identical(monkeypatch):
-    values = (("й", 0, 4), ("quoted\ntext", 4, 20))
+    values = (("\u0439", 0, 4), ("quoted\ntext", 4, 20))
     expected = controller.snapshot_json(values)
     encode = controller_archive.snapshot_json
 

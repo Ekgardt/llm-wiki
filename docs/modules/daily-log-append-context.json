@@ -303,7 +303,7 @@
       "names": [
         "owning_checkout"
       ],
-      "contract_sha256": "81358eecfb587a11eab044b6cff8528680c7c4d0dc09ef9ec397cee60642298c",
+      "contract_sha256": "857d39868a8723c53e5c49b15182e3cb4e46b0fda35a235e38c42ef935d081b4",
       "integration_tests": [
         "tests/test_a_block_opens_one_entry.py",
         "tests/test_a_redelivery_after_midnight_is_recognised.py",

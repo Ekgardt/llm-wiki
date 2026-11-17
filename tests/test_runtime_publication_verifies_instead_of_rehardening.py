@@ -119,7 +119,7 @@ def test_readonly_acl_verification_uses_the_same_exact_owner_policy_without_gran
 @pytest.mark.parametrize('listing', [
     f'artifact {OWNER}:(I)(F)\n',
     f'artifact {OWNER}:(R)\n',
-    f'artifact {OWNER}:(F)\n         PC\\Гость:(R)\n',
+    f'artifact {OWNER}:(F)\n         PC\\\u0413\u043e\u0441\u0442\u044c:(R)\n',
     f'artifact {OWNER}:(F)\n         {OWNER}:(R)\n',
 ], ids=['inherited-grant', 'incomplete-rights', 'another-reader', 'multiple-owner-entries'])
 def test_readonly_acl_verification_refuses_every_previously_forbidden_acl(tmp_path, monkeypatch, listing):

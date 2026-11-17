@@ -193,7 +193,7 @@ def _assert_tool_count_documented(relative_path: str, expected: int) -> None:
     """Every public document states the same MCP tool count as the server."""
     text = (ROOT / relative_path).read_text(encoding="utf-8")
     counts = re.findall(
-        r"\b(\d+)\s+(?:\S+\s+)?task-shaped\s+(?:MCP\s+)?(?:tools|инструмент\w*|工具)",
+        r"\b(\d+)\s+(?:\S+\s+)?task-shaped\s+(?:MCP\s+)?(?:tools|\u0438\u043d\u0441\u0442\u0440\u0443\u043c\u0435\u043d\u0442\w*|工具)",
         text,
         re.IGNORECASE,
     )
@@ -840,20 +840,20 @@ def test_every_borrowed_number_says_where_it_came_from():
 # reproduction was attributed to another vendor. This keeps all of that in place.
 # See `docs/research/2026-09-19-a-number-names-its-stand.md`.
 _RECONCILED = (
-    ("docs/COMPARISON-2026-09-07.md", "это EverMemOS"),
+    ("docs/COMPARISON-2026-09-07.md", "\u044d\u0442\u043e EverMemOS"),
     ("docs/COMPARISON-2026-09-07.md", "longmemeval-fixed-n200-r{1,2,3}.json"),
     ("docs/COMPARISON-2026-09-08.md", "second-look-n200-seed101-r1"),
-    ("docs/COMPARISON-2026-09-13.md", "артефактов этого прогона на диске нет"),
-    ("docs/COMPARISON-2026-09-13-memory.md", "этих артефактов на диске нет"),
-    ("docs/METRICS-2026-09-06.md", "прогона за этими тремя числами на диске нет"),
-    ("docs/PLAN-to-beat-them-2026-09-07.md", "Это число не из"),
+    ("docs/COMPARISON-2026-09-13.md", "\u0430\u0440\u0442\u0435\u0444\u0430\u043a\u0442\u043e\u0432 \u044d\u0442\u043e\u0433\u043e \u043f\u0440\u043e\u0433\u043e\u043d\u0430 \u043d\u0430 \u0434\u0438\u0441\u043a\u0435 \u043d\u0435\u0442"),
+    ("docs/COMPARISON-2026-09-13-memory.md", "\u044d\u0442\u0438\u0445 \u0430\u0440\u0442\u0435\u0444\u0430\u043a\u0442\u043e\u0432 \u043d\u0430 \u0434\u0438\u0441\u043a\u0435 \u043d\u0435\u0442"),
+    ("docs/METRICS-2026-09-06.md", "\u043f\u0440\u043e\u0433\u043e\u043d\u0430 \u0437\u0430 \u044d\u0442\u0438\u043c\u0438 \u0442\u0440\u0435\u043c\u044f \u0447\u0438\u0441\u043b\u0430\u043c\u0438 \u043d\u0430 \u0434\u0438\u0441\u043a\u0435 \u043d\u0435\u0442"),
+    ("docs/PLAN-to-beat-them-2026-09-07.md", "\u042d\u0442\u043e \u0447\u0438\u0441\u043b\u043e \u043d\u0435 \u0438\u0437"),
     ("docs/REPORT-2026-09-12-what-works-now.md", "code-parity-v2-2026-09-12-run{1,2,3}.json"),
-    ("docs/research/2026-08-27-number-one-memory-market-research.md", "Поправка 2026-09-19"),
+    ("docs/research/2026-08-27-number-one-memory-market-research.md", "\u041f\u043e\u043f\u0440\u0430\u0432\u043a\u0430 2026-09-19"),
 )
 # Numbers that traced to nothing and were replaced by ones that do.
 _REPLACED = (
-    ("docs/PLAN-to-beat-them-2026-09-07.md", "| токенов на вопрос | 12 099 |"),
-    ("docs/COMPARISON-2026-09-08.md", "| Токенов на вопрос | 13 400 |"),
+    ("docs/PLAN-to-beat-them-2026-09-07.md", "| \u0442\u043e\u043a\u0435\u043d\u043e\u0432 \u043d\u0430 \u0432\u043e\u043f\u0440\u043e\u0441 | 12 099 |"),
+    ("docs/COMPARISON-2026-09-08.md", "| \u0422\u043e\u043a\u0435\u043d\u043e\u0432 \u043d\u0430 \u0432\u043e\u043f\u0440\u043e\u0441 | 13 400 |"),
 )
 
 

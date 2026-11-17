@@ -5,10 +5,10 @@ import pytest
 
 @pytest.mark.parametrize(('is_query', 'prefix'), [(True, 'query:'), (False, 'passage:')])
 def test_roles_prefix_every_text_without_stripping_or_mutating(is_query, prefix):
-    texts = ['', '  文 Я 😀', 'query: already present']
+    texts = ['', '  文 \u042f 😀', 'query: already present']
     before = list(texts)
     assert embedding_model.prefixed_texts(texts, is_query) == [
-        prefix + ' ', prefix + '   文 Я 😀', prefix + ' query: already present',
+        prefix + ' ', prefix + '   文 \u042f 😀', prefix + ' query: already present',
     ]
     assert texts == before
     assert embedding_model.embedding_instruction(is_query) == prefix

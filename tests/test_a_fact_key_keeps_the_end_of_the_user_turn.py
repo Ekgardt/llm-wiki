@@ -9,7 +9,7 @@ from corpus_snapshot import MAX_SPAN_BYTES, collect_corpus
 
 
 @pytest.mark.parametrize(
-    "prefix", ["a" * 1700, "я" * 1700, "a" * 1550 + "😀" * 150],
+    "prefix", ["a" * 1700, "\u044f" * 1700, "a" * 1550 + "😀" * 150],
     ids=("ascii", "cyrillic", "escaped-boundary"),
 )
 def test_the_complete_admitted_turn_reaches_the_extractor(prefix):

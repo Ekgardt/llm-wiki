@@ -22,9 +22,9 @@ def test_entire_shipped_fixture_retains_serials_and_truth():
 
 def test_synthetic_fixture_roundtrip_reports_unparsed_lines(tmp_path):
     row = {
-        'context': '9. The capital of Test is Новый.\n0. The capital of Test is Old.\n'
+        'context': '9. The capital of Test is \u041d\u043e\u0432\u044b\u0439.\n0. The capital of Test is Old.\n'
                    '3. This numbered statement has no known frame.\nignored heading',
-        'answers': [['Новый']],
+        'answers': [['\u041d\u043e\u0432\u044b\u0439']],
     }
     fixture = data.build_fixture(row, row_id='synthetic', source_sha256='a' * 64)
     path = tmp_path / 'fixture.json'
@@ -35,5 +35,5 @@ def test_synthetic_fixture_roundtrip_reports_unparsed_lines(tmp_path):
     assert loaded['unparsed_lines'] == ['3. This numbered statement has no known frame.']
     assert loaded['source_sha256'] == 'a' * 64
     assert data.fixture_conflicts(loaded) == (
-        data.Conflict('Test', 'capital', ((0, 'Old'), (9, 'Новый')), 'Новый', True),
+        data.Conflict('Test', 'capital', ((0, 'Old'), (9, '\u041d\u043e\u0432\u044b\u0439')), '\u041d\u043e\u0432\u044b\u0439', True),
     )

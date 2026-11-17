@@ -454,7 +454,7 @@ def owning_checkout(project_dir: Path) -> Path:
     name as the project mints a journal per subagent run: measured on this vault
     on 2026-08-26, 46 of 61 project journals were named `agent-<hash>`, and they
     take answer slots from the pages that answer the question — nine of the
-    twelve candidates for "как устроен повтор после карантина" were project
+    twelve candidates for "how is the retry after quarantine built" (asked in Russian) were project
     journals, seven of them from agent worktrees.
 
     Only this exact layout is unwrapped. A worktree the owner made anywhere else

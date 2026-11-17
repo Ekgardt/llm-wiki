@@ -171,7 +171,7 @@ _CAMEL_RE = re.compile(r"\b(?P<camel>[A-Z][a-z0-9]+(?:[A-Z][a-z0-9]+)+)\b")
 _QUESTION_RE = re.compile(
     r"(?:"
     r"^(?P<q_en>who|what|when|where|why|how|which|does|do|is|are|can|should)\b"
-    r"|^(?P<q_ru>кто|что|когда|где|почему|зачем|как|какой|какая|какие|какое)\b"
+    r"|^(?P<q_ru>\u043a\u0442\u043e|\u0447\u0442\u043e|\u043a\u043e\u0433\u0434\u0430|\u0433\u0434\u0435|\u043f\u043e\u0447\u0435\u043c\u0443|\u0437\u0430\u0447\u0435\u043c|\u043a\u0430\u043a|\u043a\u0430\u043a\u043e\u0439|\u043a\u0430\u043a\u0430\u044f|\u043a\u0430\u043a\u0438\u0435|\u043a\u0430\u043a\u043e\u0435)\b"
     r"|^(?P<q_zh>谁|什么|何时|哪里|哪儿|为什么|怎么|如何|哪)"
     r"|[?？]"
     r")",
@@ -181,12 +181,12 @@ _QUESTION_RE = re.compile(
 _WHEN = (
     r"(?:\d{4}(?:-\d{2}(?:-\d{2})?)?"
     r"|yesterday|today|tomorrow|now"
-    r"|вчера|сегодня|завтра|сейчас)"
+    r"|\u0432\u0447\u0435\u0440\u0430|\u0441\u0435\u0433\u043e\u0434\u043d\u044f|\u0437\u0430\u0432\u0442\u0440\u0430|\u0441\u0435\u0439\u0447\u0430\u0441)"
 )
 # A relational preposition is temporal only when something temporal follows it.
-# `после` and `after` are ordinary sequence words, and reading them alone as a
-# time window costs the answer: measured on this vault, "как устроен повтор
-# после карантина" was routed to TEMPORAL, TEMPORAL declares no dense signal,
+# The Russian word for "after" and `after` are ordinary sequence words, and reading them alone as a
+# time window costs the answer: measured on this vault, "how is the retry after
+# quarantine built" (asked in Russian) was routed to TEMPORAL, TEMPORAL declares no dense signal,
 # so the grounded answer never asked the vectors. Retrieval returned six lexical
 # rows — four of them the same status document, none of them the decision page
 # the vault holds — and the provider honestly reported insufficient evidence.
@@ -197,8 +197,8 @@ _TEMPORAL_RE = re.compile(
     r"\b(?P<t_en_anchored>since|before|after|until|as of|from)\s+" + _WHEN + r"\b"
     r"|\b(?P<t_en>yesterday|today|last week|last month|last year"
     r"|in \d{4}|from \d{4}|between \d{4})\b"
-    r"|(?P<t_ru_anchored>(?:с|со|после|до|от)\s+" + _WHEN + r")"
-    r"|(?P<t_ru>вчера|сегодня|на этой неделе)"
+    r"|(?P<t_ru_anchored>(?:\u0441|\u0441\u043e|\u043f\u043e\u0441\u043b\u0435|\u0434\u043e|\u043e\u0442)\s+" + _WHEN + r")"
+    r"|(?P<t_ru>\u0432\u0447\u0435\u0440\u0430|\u0441\u0435\u0433\u043e\u0434\u043d\u044f|\u043d\u0430 \u044d\u0442\u043e\u0439 \u043d\u0435\u0434\u0435\u043b\u0435)"
     r"|(?P<t_zh>自\s*\d{4}|以来|自从)"
     r")",
     re.IGNORECASE,
@@ -207,7 +207,7 @@ _GRAPH_RE = re.compile(
     r"(?:"
     r"\b(?P<g_en>depends on|depended on|dependency|dependencies|calls|callers|"
     r"callees|related to|linked to|neighbors?|imports?|imported by)\b"
-    r"|(?P<g_ru>зависит|зависимости|связан)"
+    r"|(?P<g_ru>\u0437\u0430\u0432\u0438\u0441\u0438\u0442|\u0437\u0430\u0432\u0438\u0441\u0438\u043c\u043e\u0441\u0442\u0438|\u0441\u0432\u044f\u0437\u0430\u043d)"
     r"|(?P<g_zh>依赖|什么依赖|相关联)"
     r")",
     re.IGNORECASE,
@@ -216,7 +216,7 @@ _REPO_MAP_RE = re.compile(
     r"(?:"
     r"\b(?P<r_en>repo map|repository map|codebase map|architecture overview|"
     r"project structure|directory structure)\b"
-    r"|(?P<r_ru>карт[ауи]\s+репозитори[яию]|структур[аыу]\s+проекта)"
+    r"|(?P<r_ru>\u043a\u0430\u0440\u0442[\u0430\u0443\u0438]\s+\u0440\u0435\u043f\u043e\u0437\u0438\u0442\u043e\u0440\u0438[\u044f\u0438\u044e]|\u0441\u0442\u0440\u0443\u043a\u0442\u0443\u0440[\u0430\u044b\u0443]\s+\u043f\u0440\u043e\u0435\u043a\u0442\u0430)"
     r"|(?P<r_zh>仓库地图|显示仓库地图|项目结构)"
     r")",
     re.IGNORECASE,
@@ -225,7 +225,7 @@ _IMPACT_RE = re.compile(
     r"(?:"
     r"\b(?P<i_en>impact of|what breaks|affected by|blast radius|stale wiki|"
     r"downstream impact)\b"
-    r"|(?P<i_ru>влияние|что сломается)"
+    r"|(?P<i_ru>\u0432\u043b\u0438\u044f\u043d\u0438\u0435|\u0447\u0442\u043e \u0441\u043b\u043e\u043c\u0430\u0435\u0442\u0441\u044f)"
     r"|(?P<i_zh>影响|的影响)"
     r")",
     re.IGNORECASE,
@@ -234,7 +234,7 @@ _GLOBAL_RE = re.compile(
     r"(?:"
     r"\b(?P<s_en>synthesize|synthesis|across all projects|across projects|"
     r"overall architecture|compare across|global overview)\b"
-    r"|(?P<s_ru>синтез|глобальный обзор)"
+    r"|(?P<s_ru>\u0441\u0438\u043d\u0442\u0435\u0437|\u0433\u043b\u043e\u0431\u0430\u043b\u044c\u043d\u044b\u0439 \u043e\u0431\u0437\u043e\u0440)"
     r"|(?P<s_zh>跨项目|综合架构|全局概览)"
     r")",
     re.IGNORECASE,

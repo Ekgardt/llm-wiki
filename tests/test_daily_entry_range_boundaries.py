@@ -66,7 +66,7 @@ def test_invalid_long_heading_id_is_validated_without_materializing_it(tail, mes
 
 @pytest.mark.parametrize('transfer', [1, 2, 3])
 @pytest.mark.parametrize('identifier', [
-    b'id', b'x' * 200, b'x' * 201, 'aя'.encode(), b'a\xe2\x80', b'bad id\xff',
+    b'id', b'x' * 200, b'x' * 201, 'a\u044f'.encode(), b'a\xe2\x80', b'bad id\xff',
 ])
 def test_heading_id_validation_keeps_utf8_and_grammar_across_chunks(monkeypatch, transfer, identifier):
     monkeypatch.setattr(resolver, 'IO_CHUNK_BYTES', transfer)

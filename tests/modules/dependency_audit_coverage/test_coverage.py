@@ -76,7 +76,7 @@ def test_duplicate_identical_records_do_not_inflate_coverage():
 
 def test_cli_reads_utf8_and_reports_coverage(tmp_path, capsys):
     lock = tmp_path / 'uv.lock'
-    lock.write_text('# проверка\n[[package]]\nname = "example"\nversion = "1.0"\nsource = { registry = "https://example.invalid" }\n', encoding='utf-8')
+    lock.write_text('# \u043f\u0440\u043e\u0432\u0435\u0440\u043a\u0430\n[[package]]\nname = "example"\nversion = "1.0"\nsource = { registry = "https://example.invalid" }\n', encoding='utf-8')
     report = tmp_path / 'report.json'
     report.write_text(json.dumps(_report('1.0')), encoding='utf-8')
     assert main([str(lock), str(report)]) == 0

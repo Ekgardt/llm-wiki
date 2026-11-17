@@ -9,7 +9,7 @@ adapter = original.litragbench_data
 
 
 def test_local_conversion_writes_unicode_and_preserves_abstention(tmp_path):
-    row = dict(original.ANSWERABLE, question="Кто ответил?")
+    row = dict(original.ANSWERABLE, question="\u041a\u0442\u043e \u043e\u0442\u0432\u0435\u0442\u0438\u043b?")
     source = tmp_path / "source.jsonl"
     rows = [row, original.ABSTAINING]
     source.write_text("\n".join(json.dumps(r, ensure_ascii=False) for r in rows), encoding="utf-8")
@@ -19,7 +19,7 @@ def test_local_conversion_writes_unicode_and_preserves_abstention(tmp_path):
     rows = json.loads(target.read_text(encoding="utf-8"))
     assert len(rows) == 2
     assert rows[0]["question_id"] == 'LIT-000-R_multihop'
-    assert rows[0]["question"] == 'Кто ответил?'
+    assert rows[0]["question"] == '\u041a\u0442\u043e \u043e\u0442\u0432\u0435\u0442\u0438\u043b?'
     assert rows[0]["answer"] == '29th place'
     assert rows[1]["question_id"].endswith("_abs")
     assert rows[1]["answer"] == ""

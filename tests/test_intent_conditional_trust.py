@@ -31,7 +31,7 @@ def _weight(page_type, path, *, question):
 
 
 def test_a_knowledge_question_reads_code_root_sources_as_commentary():
-    question = "как вернуть в работу задачу, у которой кончились попытки"
+    question = "\u043a\u0430\u043a \u0432\u0435\u0440\u043d\u0443\u0442\u044c \u0432 \u0440\u0430\u0431\u043e\u0442\u0443 \u0437\u0430\u0434\u0430\u0447\u0443, \u0443 \u043a\u043e\u0442\u043e\u0440\u043e\u0439 \u043a\u043e\u043d\u0447\u0438\u043b\u0438\u0441\u044c \u043f\u043e\u043f\u044b\u0442\u043a\u0438"
 
     assert _weight("decision", KNOWLEDGE_PAGE, question=question) == (
         provenance.TYPE_WEIGHTS["decision"]
@@ -48,7 +48,7 @@ def test_a_code_question_leaves_code_and_docs_exactly_where_they_were():
     for question in (
         "what does scripts/retrieval.py::weigh_by_trust do",
         "who calls fuse_rrf",
-        "покажи структуру проекта",
+        "\u043f\u043e\u043a\u0430\u0436\u0438 \u0441\u0442\u0440\u0443\u043a\u0442\u0443\u0440\u0443 \u043f\u0440\u043e\u0435\u043a\u0442\u0430",
     ):
         assert _weight("code", SOURCE_FILE, question=question) == (
             provenance.DEFAULT_TYPE_WEIGHT

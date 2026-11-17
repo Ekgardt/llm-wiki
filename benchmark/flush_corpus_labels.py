@@ -11,7 +11,7 @@ from pathlib import Path
 
 KEEP_TO_TIER = {"much": "major", "little": "minor", "nothing": "ok"}
 KNOWN_KINDS = {"decision", "lesson", "command", "gotcha", "question"}
-CYRILLIC = re.compile(r"[Ѐ-ӿ]")
+CYRILLIC = re.compile(r"[\u0400-\u04ff]")
 WHITESPACE = re.compile(r"\s+")
 SENTENCE_END = re.compile(r"(?<=[.!?;:])\s+")
 # A sentence shorter than this is a term, not a passage, and proves nothing.

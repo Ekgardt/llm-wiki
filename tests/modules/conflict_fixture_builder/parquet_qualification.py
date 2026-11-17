@@ -14,8 +14,8 @@ from benchmark import build_conflict_fixture as builder
 ROOT = Path(__file__).resolve().parents[3]
 ROW = {
     'metadata': {'qa_pair_ids': ['factconsolidation_sh_6k_0']},
-    'context': '0. The capital of Test is Old.\n9. The capital of Test is Новый.\n3. Unknown frame.',
-    'answers': [['Новый']],
+    'context': '0. The capital of Test is Old.\n9. The capital of Test is \u041d\u043e\u0432\u044b\u0439.\n3. Unknown frame.',
+    'answers': [['\u041d\u043e\u0432\u044b\u0439']],
 }
 
 
@@ -29,8 +29,8 @@ def _args(source, output):
 
 
 def test_real_cli_binds_source_bytes_and_preserves_full_result(tmp_path):
-    source = _write(tmp_path / 'данные.parquet', [ROW])
-    output = tmp_path / 'результат.json'
+    source = _write(tmp_path / '\u0434\u0430\u043d\u043d\u044b\u0435.parquet', [ROW])
+    output = tmp_path / '\u0440\u0435\u0437\u0443\u043b\u044c\u0442\u0430\u0442.json'
     command = [sys.executable, str(ROOT / 'benchmark/build_conflict_fixture.py'), *_args(source, output)]
     result = subprocess.run(command, text=True, capture_output=True)
     assert result.returncode == 0, result.stderr
@@ -43,8 +43,8 @@ def test_real_cli_binds_source_bytes_and_preserves_full_result(tmp_path):
         'source_sha256': digest, 'numbered_lines': 3, 'parsed_facts': 2,
         'unparsed_lines': ['3. Unknown frame.'],
         'conflicts': [{'subject': 'Test', 'property': 'capital',
-                       'observations': [{'serial': 0, 'value': 'Old'}, {'serial': 9, 'value': 'Новый'}],
-                       'truth': 'Новый', 'gold_confirmed': True}],
+                       'observations': [{'serial': 0, 'value': 'Old'}, {'serial': 9, 'value': '\u041d\u043e\u0432\u044b\u0439'}],
+                       'truth': '\u041d\u043e\u0432\u044b\u0439', 'gold_confirmed': True}],
     }
     assert document == expected
     assert output.read_text(encoding='utf-8') == json.dumps(expected, indent=2, ensure_ascii=False, sort_keys=True) + '\n'

@@ -81,7 +81,7 @@ def test_the_capture_worker_names_the_same_code() -> None:
     assert (failure.error_code, failure.retry_after) == ("processor_failed:intent_fence_lost", None)
 
 
-@pytest.mark.parametrize('character', ['Я', '文', '😀'])
+@pytest.mark.parametrize('character', ['\u042f', '文', '😀'])
 @pytest.mark.parametrize(('permanent', 'expected_state'), [(False, 'ready'), (True, 'dead')])
 def test_unicode_reason_settles_the_real_v3_lease(tmp_path, character, permanent, expected_state):
     from tests.memory_queue_helpers import _v3_queue

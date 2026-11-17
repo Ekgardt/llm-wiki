@@ -23,7 +23,7 @@ from queue_core import (  # noqa: E402
 )
 
 _TOO_LONG = "e" * 65
-_CYRILLIC = "ошибка" * 8  # 48 characters, 96 bytes.
+_CYRILLIC = "\u043e\u0448\u0438\u0431\u043a\u0430" * 8  # 48 characters, 96 bytes.
 
 
 def _v3_queue(tmp_path: Path):

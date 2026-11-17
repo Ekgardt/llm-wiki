@@ -262,7 +262,7 @@
         "resolved_query_encoder",
         "retrieve_via_search_memory"
       ],
-      "contract_sha256": "74af48ab23ecfa1f63b45cd2d5da8ee06e628c0d2b4d43ae3d5e76c5d70afe82",
+      "contract_sha256": "80f1c8e107f7ff213837a262fe9dac682d0c5ed554c3faeb378b715a8271efd9",
       "integration_tests": [
         "tests/test_a_blocked_task_has_a_way_back.py",
         "tests/test_a_committed_source_resolves_an_older_compile_plan.py",

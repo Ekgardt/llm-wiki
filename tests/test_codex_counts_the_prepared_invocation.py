@@ -14,7 +14,7 @@ from tests.llm_descriptors_helpers import _write_dlp_policy
 def _call(counter):
     descriptor = llm_client.provider_candidates("codex", max_tokens=4000)[0]
     return llm_client.call_candidate(
-        descriptor, '{"user_prompt":"строка e\u0301\\n全体"}', "Only evidence",
+        descriptor, '{"user_prompt":"\u0441\u0442\u0440\u043e\u043a\u0430 e\u0301\\n全体"}', "Only evidence",
         max_tokens=4000, schema={"type": "object"}, available=True,
         token_adapters={"proof-model": counter},
     )

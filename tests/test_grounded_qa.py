@@ -430,7 +430,7 @@ def test_a_citation_about_something_else_is_rejected(vault: Path) -> None:  # no
     answer = json.loads(_answer_for_prompt(context.prompt_context))
     answer["claims"] = [
         {
-            "text": "Restic снимки шифруются перед отправкой.",
+            "text": "Restic \u0441\u043d\u0438\u043c\u043a\u0438 \u0448\u0438\u0444\u0440\u0443\u044e\u0442\u0441\u044f \u043f\u0435\u0440\u0435\u0434 \u043e\u0442\u043f\u0440\u0430\u0432\u043a\u043e\u0439.",
             "citation_ids": answer["claims"][0]["citation_ids"],
         }
     ]
@@ -462,7 +462,7 @@ def test_a_good_claim_survives_a_bad_one_beside_it(vault: Path) -> None:  # noqa
     citation_ids = answer["claims"][0]["citation_ids"]
     answer["claims"] = [
         {"text": "Alpha is enabled.", "citation_ids": citation_ids},
-        {"text": "Restic снимки шифруются перед отправкой.", "citation_ids": citation_ids},
+        {"text": "Restic \u0441\u043d\u0438\u043c\u043a\u0438 \u0448\u0438\u0444\u0440\u0443\u044e\u0442\u0441\u044f \u043f\u0435\u0440\u0435\u0434 \u043e\u0442\u043f\u0440\u0430\u0432\u043a\u043e\u0439.", "citation_ids": citation_ids},
     ]
 
     verdict = verify_grounded_answer(answer, context, vault=vault)
@@ -497,7 +497,7 @@ def test_a_claim_that_shares_a_term_with_its_citation_is_kept(vault: Path) -> No
 # first version of this gate failed the whole answer for that, which is every
 # correct answer in a mixed-language vault rather than an edge case.
 
-_RU_CLAIM = "Сторож повторяет отказ, пока обязательство не выполнено."
+_RU_CLAIM = "\u0421\u0442\u043e\u0440\u043e\u0436 \u043f\u043e\u0432\u0442\u043e\u0440\u044f\u0435\u0442 \u043e\u0442\u043a\u0430\u0437, \u043f\u043e\u043a\u0430 \u043e\u0431\u044f\u0437\u0430\u0442\u0435\u043b\u044c\u0441\u0442\u0432\u043e \u043d\u0435 \u0432\u044b\u043f\u043e\u043b\u043d\u0435\u043d\u043e."
 _EN_SPAN = "The gate repeats its refusal while the obligation stands."
 
 
@@ -512,10 +512,10 @@ def test_an_identifier_the_claim_keeps_must_still_appear() -> None:
     """`gate_stop` is not translated, so it is evidence the span has to carry."""
     from query_memory import require_citation_touches_claim
 
-    require_citation_touches_claim("Файл gate_stop меняет поведение.", "The gate_stop module changed.")
+    require_citation_touches_claim("\u0424\u0430\u0439\u043b gate_stop \u043c\u0435\u043d\u044f\u0435\u0442 \u043f\u043e\u0432\u0435\u0434\u0435\u043d\u0438\u0435.", "The gate_stop module changed.")
 
     with pytest.raises(GroundedQAError, match="shares no content"):
-        require_citation_touches_claim("Файл gate_stop меняет поведение.", "Alpha is enabled.")
+        require_citation_touches_claim("\u0424\u0430\u0439\u043b gate_stop \u043c\u0435\u043d\u044f\u0435\u0442 \u043f\u043e\u0432\u0435\u0434\u0435\u043d\u0438\u0435.", "Alpha is enabled.")
 
 
 def test_within_one_language_the_original_rule_is_unchanged() -> None:

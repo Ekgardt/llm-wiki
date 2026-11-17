@@ -60,7 +60,7 @@ def test_native_exec_disables_all_operator_servers_without_editing_configuration
     config = home / 'config.toml'
     original = ('[mcp_servers.memory]\ncommand="false"\n'
                 '[mcp_servers."other.server"]\ncommand="false"\n'
-                '[mcp_servers."сервер🚀"]\ncommand="false"\n')
+                '[mcp_servers."\u0441\u0435\u0440\u0432\u0435\u0440🚀"]\ncommand="false"\n')
     config.write_text(original)
     monkeypatch.setenv('CODEX_HOME', str(home))
     output = tmp_path / 'reply'
@@ -80,7 +80,7 @@ def test_native_exec_disables_all_operator_servers_without_editing_configuration
     executable = lc.bind_codex_executable(binary)
     command = lc.codex_command(binary, None, 'medium', str(output))
     assert lc.codex_last_message(command, str(prompt), str(output), executable=executable).text == 'ok'
-    assert {server['name'] for server in observed} == {'memory', 'other.server', 'сервер🚀'}
+    assert {server['name'] for server in observed} == {'memory', 'other.server', '\u0441\u0435\u0440\u0432\u0435\u0440🚀'}
     assert all(server['enabled'] is False for server in observed)
     assert config.read_text() == original
 

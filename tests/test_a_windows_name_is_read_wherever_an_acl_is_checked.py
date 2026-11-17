@@ -20,7 +20,7 @@ import archive_daily  # noqa: E402
 import queue_core  # noqa: E402
 from llm_wiki import windows_acl
 
-OWNER = "PC\\Оператор"
+OWNER = "PC\\\u041e\u043f\u0435\u0440\u0430\u0442\u043e\u0440"
 CODE_PAGE = "cp866"
 
 
@@ -52,7 +52,7 @@ def test_the_archive_seal_verifies_an_owner_named_in_cyrillic(tmp_path, monkeypa
 def test_the_archive_seal_still_refuses_a_second_principal(tmp_path, monkeypatch):
     path = tmp_path / "archive"
     path.write_bytes(b"archive")
-    _icacls_writing(monkeypatch, f"archive {OWNER}:(R)\n         PC\\Гость:(R)\n")
+    _icacls_writing(monkeypatch, f"archive {OWNER}:(R)\n         PC\\\u0413\u043e\u0441\u0442\u044c:(R)\n")
 
     with pytest.raises(PermissionError, match="principal other than"):
         archive_daily.DailyArchiver._windows_read_only_acl(path)
@@ -79,7 +79,7 @@ def test_the_queue_still_reads_a_shared_file_as_shared(tmp_path, monkeypatch):
     path = tmp_path / "queue.sqlite3"
     path.write_bytes(b"queue")
     _icacls_writing(
-        monkeypatch, f"queue.sqlite3 {OWNER}:(F)\n              PC\\Гость:(R)\n"
+        monkeypatch, f"queue.sqlite3 {OWNER}:(F)\n              PC\\\u0413\u043e\u0441\u0442\u044c:(R)\n"
     )
 
     assert queue_core.is_owner_only_windows(path) is False

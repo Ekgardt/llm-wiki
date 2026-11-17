@@ -3,18 +3,18 @@
 Date: 2026-09-28. Follow-up to `2026-09-28-an-update-replaces-what-it-owns.md` (law 2).
 Scope: `scripts/install_control.py`, `scripts/install_takeover.py`.
 
-## Кратко для владельца
+## Summary for the owner
 
-Три доделки к «обновление заменяет своё». Первое: файл-дополнение `50-local.conf`,
-который создало обновление, теперь записан как часть этого обновления, и откат
-этого обновления его убирает — иначе после отката перенесённая строка стояла бы и в
-старом юните, и в дополнении, и `ExecStart` выполнился бы дважды. Чужой
-`50-local.conf` не трогается никогда. Второе: копии заменённых файлов в
-`run/install/displaced/` живут столько же, сколько резервные копии конфигураций
-агентов (настройка `retention.config_backup_days`, 90 дней); копия, на которую
-указывает текущая точка отката, не удаляется. Третье: переезд профиля в другой файл
-тоже ставит новое раньше, чем убирает старое; только cron и задачи Windows по-прежнему
-снимаются первыми — их нельзя прочитать обратно, и установщик говорит это прямо.
+Three follow-ups to "an update replaces what it owns". First: the `50-local.conf` drop-in file
+that an update created is now recorded as part of that update, and the rollback
+of that update removes it. Otherwise, after a rollback, the moved line would stand both in
+the old unit and in the drop-in, and `ExecStart` would run twice. A `50-local.conf`
+someone else wrote is never touched. Second: copies of replaced files in
+`run/install/displaced/` live as long as the backup copies of agent
+configurations (the `retention.config_backup_days` setting, 90 days); the copy that
+the current rollback point refers to is not deleted. Third: moving a profile to another file
+also installs the new one before removing the old one; only cron and Windows tasks are still
+removed first, because they cannot be read back, and the installer says so plainly.
 
 ## Sources
 

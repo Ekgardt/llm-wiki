@@ -28,8 +28,8 @@ def test_base_slug_lowercase():
 
 
 def test_base_slug_preserves_cyrillic():
-    p = Path("/tmp/Тесты")
-    assert base_slug(p) == "тесты"
+    p = Path("/tmp/\u0422\u0435\u0441\u0442\u044b")
+    assert base_slug(p) == "\u0442\u0435\u0441\u0442\u044b"
 
 
 def test_base_slug_strips_unsafe_chars():

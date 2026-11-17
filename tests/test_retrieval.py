@@ -89,7 +89,7 @@ def test_profiles_are_closed_and_exported() -> None:
         ("synthesize architecture across all projects", "global_synthesis", "GLOBAL"),
         ("auth decision", None, "BASE"),
         # RU / ZH / fullwidth question mark
-        ("Что такое auth decision?", "question", "HYBRID"),
+        ("\u0427\u0442\u043e \u0442\u0430\u043a\u043e\u0435 auth decision?", "question", "HYBRID"),
         ("什么是 auth decision？", "question", "HYBRID"),
         ("auth decision？", "question", "HYBRID"),
         # filename, sqlite path, snake_case

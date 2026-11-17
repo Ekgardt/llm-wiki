@@ -45,7 +45,7 @@ def test_consuming_one_loaded_array_has_no_remainder_copy_amplification():
     assert observed['sliced_characters'] <= len(text)
 
 
-@pytest.mark.parametrize('value', [1234567, 'кириллица😀\\quote"', ''])
+@pytest.mark.parametrize('value', [1234567, '\u043a\u0438\u0440\u0438\u043b\u043b\u0438\u0446\u0430😀\\quote"', ''])
 @pytest.mark.parametrize('width', [1, 2, 7])
 def test_scalar_boundaries_keep_numbers_and_escaped_unicode_whole(value, width):
     reader = generation_search.VectorJSONReader(_TinyReads(json.dumps([value]), width), None)
@@ -56,7 +56,7 @@ def test_scalar_boundaries_keep_numbers_and_escaped_unicode_whole(value, width):
 
 
 def test_one_scalar_across_the_transport_block_is_not_truncated():
-    value = 'ё' * (64 * 1024 + 1)
+    value = '\u0451' * (64 * 1024 + 1)
     reader = generation_search.VectorJSONReader(io.StringIO(json.dumps([value], ensure_ascii=False)), None)
     reader.take('[')
     assert reader.scalar() == value

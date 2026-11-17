@@ -68,7 +68,7 @@ def test_idle_progress_keeps_clock_and_processed_count():
 
 
 @pytest.mark.parametrize(('name', 'expected'), [
-    ('Я' * 80, 'processor_failed:' + 'Я' * 23),
+    ('\u042f' * 80, 'processor_failed:' + '\u042f' * 23),
     ('文' * 80, 'processor_failed:' + '文' * 15),
     ('😀' * 80, 'processor_failed:' + '😀' * 11),
 ])

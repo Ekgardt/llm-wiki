@@ -2,28 +2,28 @@
 
 Date: 2026-09-28. Research only (law 2); no code changed.
 
-## Кратко для владельца
+## Summary for the owner
 
-Гипотеза «при обновлении удалить старую версию и поставить новую — тогда не будет
-конфликтов» верна наполовину. Она верна для файлов, которые целиком принадлежат
-установщику: файлы расписания, плагин, фрагмент в `~/.bashrc`. Их действительно
-надо не сверять, а перезаписывать целиком. Но удалить «всё старое» нельзя:
+The hypothesis "on update, remove the old version and install the new one, and there
+will be no conflicts" is half right. It is right for the files the installer owns
+entirely: the schedule files, the plugin, the fragment in `~/.bashrc`. Those really
+should not be compared; they should be overwritten whole. But removing "everything old" is not possible:
 
-- в той же папке лежит ваша память (`knowledge/`) и рабочее состояние (`run/`) —
-  их удалять нельзя никогда;
-- `~/.claude/settings.json` — общий файл с Claude Code и вашими правками; удалить и
-  записать заново — значит стереть чужие правки;
-- между «удалил» и «поставил» есть окно без расписания и хуков, и если новая
-  установка упадёт, машина останется без ничего (это уже случалось, поэтому сейчас
-  есть откат).
+- the same folder holds your memory (`knowledge/`) and working state (`run/`);
+  they must never be deleted;
+- `~/.claude/settings.json` is a file shared with Claude Code and your own edits; deleting
+  and writing it again means erasing other people's edits;
+- between "removed" and "installed" there is a window with no schedule and no hooks, and
+  if the new install fails, the machine is left with nothing (this has happened before, which is why
+  there is a rollback now).
 
-Рекомендую так (вариант E ниже): установщик полностью владеет своими файлами и при
-каждом обновлении перезаписывает их целиком, не спрашивая; ваши настройки живут
-отдельно, в файлах-дополнениях, которые он никогда не трогает (для расписания —
-`*.service.d/*.conf`, туда же переезжает строка с выбором модели); в общих файлах он меняет
-только свой кусок; новая версия ставится до того, как убирается старая, и при
-ошибке всё возвращается. Для вас это значит: обновление не останавливается на
-«файл изменён вручную», а ваши правки не пропадают.
+I recommend this (option E below): the installer fully owns its own files and
+overwrites them whole on every update, without asking; your settings live
+separately, in drop-in files it never touches (for the schedule,
+`*.service.d/*.conf`; the line with the model choice moves there too); in shared files it changes
+only its own section; the new version is installed before the old one is removed, and on
+error everything is restored. For you this means: an update does not stop at
+"file modified by hand", and your edits are not lost.
 
 ## Question
 

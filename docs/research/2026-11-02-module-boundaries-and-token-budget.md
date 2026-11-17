@@ -1,64 +1,64 @@
-# Предложение: изолированные модули LLM Wiki до 100 000 токенов
+# Proposal: isolated LLM Wiki modules of up to 100,000 tokens
 
-Дата исследования: 2026-11-02. Статус: **проект для согласования, не принятая архитектура**.
-Пользователь разрешил исследование и подготовку схемы. Перенос исходников,
-изменение путей и установка не выполнялись. Пауза прежней задачи по пункту 7
-не отменена этим исследованием.
+Research date: 2026-11-02. Status: **a draft for approval, not an accepted architecture**.
+The user allowed the research and the preparation of a scheme. No sources were
+moved, no paths were changed and nothing was installed. This research does not
+lift the pause of the earlier task under item 7.
 
-**Уточнение после проверки законов 4, 6 и 7:** число 74 и таблица ниже остаются
-первоначальными гипотезами, а не рекомендуемой к утверждению целевой структурой.
-Массовый перенос по этой таблице не обоснован. Актуальные результаты, сравнение
-вариантов и уточнённый пилот находятся в
-[проверке границ и реального расхода](2026-11-02-module-boundaries-validation.md).
-Она заменяет предложение утвердить всю раскладку и начать с файловой безопасности.
+**Clarification after checking laws 4, 6 and 7:** the number 74 and the table below
+remain initial hypotheses, not a target structure recommended for approval.
+A mass move by this table is not justified. The current results, the comparison
+of options and the refined pilot are in
+[the check of boundaries and real spending](2026-11-02-module-boundaries-validation.md).
+It replaces the proposal to approve the whole layout and to start with file security.
 
-## Предлагаемое решение
+## Proposed solution
 
-Сохранить один продукт, репозиторий, установку и существующие runtime-контракты.
-Выделить внутри него Python-пакеты с явными интерфейсами, однонаправленными
-зависимостями и владельцами изменяемого состояния. Предварительная карта ниже
-содержит 33 области и 74 кандидата в программные модули. Область — навигационная
-группа, а не модуль с отдельным лимитом. Границы определены ответственностью;
-74 — результат этой версии проекта, не квота и не требование создавать пустые пакеты.
+Keep one product, repository, installation and the existing runtime contracts.
+Inside it, extract Python packages with explicit interfaces, one-way
+dependencies and owners of mutable state. The preliminary map below
+contains 33 areas and 74 candidate program modules. An area is a navigation
+group, not a module with its own limit. Boundaries are defined by responsibility;
+74 is the result of this version of the draft, not a quota and not a requirement to create empty packages.
 
-Каждый конечный модуль должен проходить лимит вместе с тестами, инструкциями,
-схемами, фикстурами, документацией и необходимыми контрактами зависимостей.
-Существующие размеры измерены; размеры ещё не выделенных модулей **не измерены**.
-Эта схема не доказывает, что все 74 уже укладываются в потолок. Совместные тесты,
-бенчмарки и документация требуют собственных тематических пакетов и полного учёта.
-Согласование схемы разрешает последовательное выделение и проверку, а не объявление
-всего проекта соответствующим лимиту заранее.
+Each final module must pass the limit together with its tests, instructions,
+schemas, fixtures, documentation and the necessary dependency contracts.
+Existing sizes are measured; the sizes of modules not yet extracted are **not measured**.
+This scheme does not prove that all 74 already fit under the ceiling. Shared tests,
+benchmarks and documentation need their own topical packages and full accounting.
+Approval of the scheme allows step-by-step extraction and checking, not declaring
+the whole project compliant with the limit in advance.
 
-## Что установлено на диске
+## What is established on disk
 
-База установленного дерева: `e95f6a4a`; база незавершённой рабочей ветки:
-`3e1def7e`, `fix/compile-durable-progress-20261019`. Оба дерева были чистыми
-до исследования. Между ними 135 изменённых файлов, 28 877 добавленных и 847
-удалённых строк. Проектировать только по установленной версии было бы ошибкой:
-в рабочей ветке уже появились контроллер и журнал прогресса компиляции.
+Base of the installed tree: `e95f6a4a`; base of the unfinished working branch:
+`3e1def7e`, `fix/compile-durable-progress-20261019`. Both trees were clean
+before the research. Between them there are 135 changed files, 28 877 added and 847
+removed lines. Designing only from the installed version would be a mistake:
+the working branch already has the compile progress controller and journal.
 
-Подсчёт: `tiktoken==0.14.0`, `o200k_base`, `encode_ordinary`, UTF-8,
-каждый отслеживаемый Git файл целиком, включая комментарии. Для этих деревьев
-бинарных исключений в исходном измерении не было. Числа — сумма подсчётов файлов,
-без будущих разделителей пакета и сообщений чата. Это не стоимость API-запроса
-и не подтверждённый токенизатор конкретного провайдера.
+Counting: `tiktoken==0.14.0`, `o200k_base`, `encode_ordinary`, UTF-8,
+each Git-tracked file whole, including comments. For these trees there were
+no binary exclusions in the source measurement. The numbers are the sum of file counts,
+without future package separators and chat messages. This is not the cost of an API request
+and not a confirmed tokenizer of a specific provider.
 
-| Состав | Установленное дерево | Рабочая ветка |
+| Scope | Installed tree | Working branch |
 |---|---:|---:|
-| Все отслеживаемые файлы | 7 789 705 | 8 075 520 |
+| All tracked files | 7 789 705 | 8 075 520 |
 | `scripts/` | 1 856 210 | 1 925 057 |
 | `tests/` | 2 310 597 | 2 440 164 |
 | `docs/` | 1 737 929 | 1 824 380 |
 | `benchmark/` | 1 430 515 | 1 430 515 |
 
-В рабочей ветке только `scripts/` и `tests/` требуют арифметически не менее
-44 пакетов по 100 000 токенов, ещё без повторяемых инструкций и контрактов.
-Все отслеживаемые файлы — не менее 81 пакета при непересекающемся покрытии,
-если их текст сохраняется. Эти нижние границы не являются архитектурой.
-Приватные знания и runtime — отдельные данные продукта, а не бесплатная часть
-программного модуля. Если они входят в конкретный запрос, их токены считаются.
+In the working branch, `scripts/` and `tests/` alone arithmetically need at least
+44 packages of 100,000 tokens, still without repeated instructions and contracts.
+All tracked files need at least 81 packages with non-overlapping coverage,
+if their text is kept. These lower bounds are not an architecture.
+Private knowledge and runtime are separate product data, not a free part of a
+program module. If they enter a specific request, their tokens are counted.
 
-| Крупный исходник рабочей ветки | Токены без тестов |
+| Large source file of the working branch | Tokens without tests |
 |---|---:|
 | `memory_queue.py` | 137 223 |
 | `doctor.py` | 90 374 |
@@ -68,158 +68,158 @@
 | `mcp_server.py` | 53 799 |
 | `pyright_session.py` | 50 917 |
 
-`test_lsp_process.py` сам занимает 84 881 токен; тестовый JSON
-`compile-receipt-v3-foreign-body.json` — 94 311. Перенос тестов в общую папку
-не решает переполнение. Такой fixture либо остаётся отдельно учитываемым
-тестовым артефактом, либо воспроизводится генератором с проверкой точных байтов
-и сохранением назначения теста; генерировать его иначе лишь ради лимита нельзя.
+`test_lsp_process.py` alone takes 84 881 tokens; the test JSON
+`compile-receipt-v3-foreign-body.json` takes 94 311. Moving tests into a shared folder
+does not solve the overflow. Such a fixture either stays a separately counted
+test artifact, or is reproduced by a generator with a check of the exact bytes
+and with the purpose of the test preserved; generating it differently only for the limit is forbidden.
 
-Точный поиск одинаковых файлов дал только обязательную пару `AGENTS.md` /
-`CLAUDE.md` по 7 229 токенов. Удалять её нельзя: контракт требует обе копии.
-Доказанного большого резерва удаления идентичных файлов нет. Семантическое
-дублирование этим измерением не проверялось. `docs/research/` занимает
-1 205 316 токенов: полезен тематический доступ к истории, а не её удаление.
+An exact search for identical files found only the mandatory pair `AGENTS.md` /
+`CLAUDE.md` of 7 229 tokens each. It must not be deleted: the contract requires both copies.
+There is no proven large reserve from deleting identical files. Semantic
+duplication was not checked by this measurement. `docs/research/` takes
+1 205 316 tokens: topical access to the history is useful, not its deletion.
 
-## Исследование зависимостей и его пределы
+## Dependency research and its limits
 
-Первый MCP `get_architecture` завершился по таймауту. Проверка изменений
-сообщила `repository_index_unreadable`: отсутствовал читаемый манифест.
-Штатный `repository_index.py index` заново проиндексировал рабочую ветку:
-1 607 исходников, 6 972 chunks, 38 371 символ, 215,43 секунды;
-`generation-18e438e866f3c6a3-87d68ff4`. Активный индекс памяти не переключался.
-Повторный `get_architecture(mode=changes)` подтвердил `stale=false`, ноль
-добавленных, удалённых и изменённых исходников в покрытых корнях
-`scripts`, `tests`, `benchmark`. Документы и shell-инсталляторы проверялись
-отдельно: они не входят в эти корни.
+The first MCP `get_architecture` ended in a timeout. The changes check
+reported `repository_index_unreadable`: there was no readable manifest.
+The standard `repository_index.py index` re-indexed the working branch:
+1 607 sources, 6 972 chunks, 38 371 symbols, 215.43 seconds;
+`generation-18e438e866f3c6a3-87d68ff4`. The active memory index was not switched.
+A repeated `get_architecture(mode=changes)` confirmed `stale=false`, zero
+added, removed and changed sources in the covered roots
+`scripts`, `tests`, `benchmark`. Documents and shell installers were checked
+separately: they are not in these roots.
 
-Обзор через MCP продолжал упираться в занятые ранее работники. Та же встроенная
-функция `code_graph.get_architecture` в отдельном краткоживущем процессе прочитала
-новую генерацию. В графе 111 точек входа; среди наиболее используемых компонентов
-`reliable_memory` (234 импортирующих модуля), `markdown_transaction` (207),
-`compile_memory` (184), `memory_queue` (139). Здесь учтены тесты и бенчмарки.
-Граф прямо сообщает неполноту разрешения связей; он не доказывает отсутствие
-динамических вызовов или возможность удаления кода.
+The overview through MCP kept running into workers that were busy earlier. The same built-in
+function `code_graph.get_architecture` in a separate short-lived process read
+the new generation. The graph has 111 entry points; among the most used components are
+`reliable_memory` (234 importing modules), `markdown_transaction` (207),
+`compile_memory` (184), `memory_queue` (139). Tests and benchmarks are counted here.
+The graph states directly that link resolution is incomplete; it does not prove the absence
+of dynamic calls or that code can be deleted.
 
-Дополнительный AST-анализ явных импортов выполнен без исполнения исходников.
-Он обнаружил 902 связи и одну сильно связанную группу из 91 Python-файла.
-Он включает импорты внутри функций и ветвей, в том числе платформенные и
-`TYPE_CHECKING`, поэтому его циклы означают структурную связанность, а не
-обязательно ошибку импорта при запуске. Динамические импорты, subprocess,
-строковые пути, конфигурационные ссылки и monkeypatch требуют отдельных проверок.
+An additional AST analysis of explicit imports was done without executing the sources.
+It found 902 links and one strongly connected group of 91 Python files.
+It includes imports inside functions and branches, including platform and
+`TYPE_CHECKING` ones, so its cycles mean structural coupling, not
+necessarily an import error at startup. Dynamic imports, subprocess,
+string paths, configuration references and monkeypatch need separate checks.
 
-Подтверждённые по исходникам связи, которые необходимо исправлять по смыслу:
+Links confirmed from the sources that must be fixed by meaning:
 
-- `reliable_memory` заимствует файловые ACL-проверки из `memory_queue` и
-  `markdown_transaction`. Базовые правила файловой безопасности должны иметь
-  собственного владельца и не импортировать очередь или публикацию.
-- `operational_ownership` импортирует `markdown_transaction`; это мешает
-  получить нижний слой владения, от которого зависит публикация. Контракт
-  допуска и хранение реестра нужно отделить от операций над Markdown,
-  сохранив одну существующую ограду записи и базы.
-- `doctor` читает приватные функции разбора квитанций и дневников из
-  `compile_memory`. Ему нужны публичные read-only readers форматов, не
-  внутренности исполнителя компиляции.
-- `scheduled_nightly` импортирует обслуживание поколений из `doctor`.
-  Диагностика и выполнение обслуживания должны обращаться к выделенной операции
-  обслуживания; отчётчик не должен быть её владельцем.
-- `tests/conftest.py` и `pyproject.toml` добавляют `scripts` в `sys.path`.
-  При переносе необходима проверка идентичности модулей: нельзя загрузить одну
-  реализацию одновременно под старым и новым именем и получить два состояния.
+- `reliable_memory` borrows file ACL checks from `memory_queue` and
+  `markdown_transaction`. Basic file security rules must have
+  their own owner and must not import the queue or publication.
+- `operational_ownership` imports `markdown_transaction`; this prevents
+  getting a lower ownership layer that publication depends on. The admission
+  contract and registry storage must be separated from Markdown operations,
+  keeping the one existing fence of the writer and the database.
+- `doctor` reads private parsing functions of receipts and daily logs from
+  `compile_memory`. It needs public read-only format readers, not the
+  internals of the compile executor.
+- `scheduled_nightly` imports generation maintenance from `doctor`.
+  Diagnostics and maintenance execution must call a dedicated maintenance
+  operation; the reporter must not be its owner.
+- `tests/conftest.py` and `pyproject.toml` add `scripts` to `sys.path`.
+  A move needs a module identity check: one implementation must not be
+  loaded at the same time under the old and the new name, giving two states.
 
-## Что означает лимит
+## What the limit means
 
-Предлагается два измерения, без подмены одного другим:
+Two measurements are proposed, without substituting one for the other:
 
-1. **Размер владения:** полный исходный текст модуля, его тесты, fixture,
-   схемы, локальная документация и инструкции. Владелец назначен каждому файлу;
-   большой файл разбивается по ответственности, а не исключается из подсчёта.
-2. **Пакет работы:** уникальное содержимое из первого пункта плюс обязательные
-   инструкции и реально необходимые публичные контракты зависимостей. Учитываются
-   также обёртки и разделители сериализации. Потолок 100 000 относится к обоим.
+1. **Ownership size:** the full source text of the module, its tests, fixtures,
+   schemas, local documentation and instructions. Every file has an owner;
+   a large file is split by responsibility, not excluded from the count.
+2. **Work package:** the unique content of the first item plus the mandatory
+   instructions and the public dependency contracts that are really needed. Wrappers
+   and serialization separators are also counted. The 100,000 ceiling applies to both.
 
-`AGENTS.md` и девять законов сейчас занимают суммарно 9 815 токенов. При одной
-копии одинаковых правил остаётся не более 90 185 на остальное, ещё до контрактов
-зависимостей. Если клиент фактически отправляет обе копии, считаются обе.
-Не вводится дополнительный произвольный потолок 60/80 тысяч или число импортов.
-Запас определяется измеренным обязательным окружением каждого модуля.
+`AGENTS.md` and the nine laws currently take 9 815 tokens in total. With one
+copy of identical rules, no more than 90 185 remain for the rest, before dependency
+contracts. If the client actually sends both copies, both are counted.
+No additional arbitrary ceiling of 60/80 thousand or a number of imports is introduced.
+The margin is defined by the measured mandatory environment of each module.
 
-Транзитивный код зависимостей не считается собственностью потребителя, но при
-его фактической загрузке обязательно входит в расход задачи. Межмодульная задача
-может потребовать больше одного пакета; это явно показывается, а не обрезается.
-Схемы и общие fixtures имеют владельца, а их загруженные байты учитываются у
-каждого потребителя. Простая ссылка вместо необходимого контекста не считается
-успешным сжатием.
+Transitive dependency code is not counted as the consumer's property, but when
+it is actually loaded it must enter the task's spending. A cross-module task
+may need more than one package; this is shown explicitly, not cut off.
+Schemas and shared fixtures have an owner, and their loaded bytes are counted for
+each consumer. A plain reference instead of the needed context does not count as
+successful compression.
 
-Все отслеживаемые файлы должны иметь классификацию: программный модуль,
-межмодульный сценарий, инструмент измерения, исторический документ, установочный
-контракт или тестовые данные. Нельзя оставить неограниченный `common`, `tests`
-или `misc` и объявить проект соответствующим. Контроль полноты сравнивает
-манифест владения с `git ls-files`, а не только с уже назначенными файлами.
+All tracked files must have a classification: program module,
+cross-module scenario, measurement tool, historical document, installation
+contract or test data. An unbounded `common`, `tests`
+or `misc` must not be left while the project is declared compliant. The completeness check compares
+the ownership manifest with `git ls-files`, not only with files already assigned.
 
-## Архитектура и интерфейсы
+## Architecture and interfaces
 
-Предлагаемые пути после согласования:
+Proposed paths after approval:
 
 ```text
 scripts/llm_wiki/<area>/<module>/
-    __init__.py     # только объявленный публичный интерфейс
-    api.py          # типы и операции контракта, если нужны отдельно
-    ...            # внутренняя реализация
+    __init__.py     # only the declared public interface
+    api.py          # contract types and operations, if needed separately
+    ...            # internal implementation
 tests/modules/<area>/<module>/
 tests/scenarios/<scenario>/
 docs/modules/<area>/<module>.md
 ```
 
-Это новые пути внутри существующих разрешённых зон, не новый корень runtime.
-Одна поставка и один lockfile. Выделять отдельные distributions, сервисы или
-универсальную шину событий сейчас нет подтверждённой необходимости.
-Нынешние документированные CLI-файлы в `scripts/` сохраняют свои имена как
-тонкие входы. Они не копируют бизнес-логику. Имена модулей ниже — проектные,
-не объявленные сегодня стабильные внешние API.
+These are new paths inside the existing allowed zones, not a new runtime root.
+One distribution and one lockfile. There is no confirmed need now to extract separate
+distributions, services or a universal event bus.
+The current documented CLI files in `scripts/` keep their names as
+thin entry points. They do not copy business logic. The module names below are draft names,
+not stable external APIs declared today.
 
-Направление зависимостей:
+Dependency direction:
 
 ```mermaid
 flowchart TD
-  A[CLI · MCP · lifecycle adapters · scheduled passes] --> B[Сценарии компиляции, поиска, захвата, установки]
-  B --> C[Публичные API предметных модулей]
-  C --> D[Форматы, типы, IO, безопасность, владение]
-  E[Диагностика] --> C
+  A[CLI · MCP · lifecycle adapters · scheduled passes] --> B[Compile, search, capture, install scenarios]
+  B --> C[Public APIs of domain modules]
+  C --> D[Formats, types, IO, security, ownership]
+  E[Diagnostics] --> C
   E --> D
 ```
 
-Сборка сценариев связывает модули явными аргументами и небольшими Protocol там,
-где действительно нужны альтернативные исполнители. Без универсального
-контейнера зависимостей. Внутренние API соседей закрыты import-контрактами.
-Проверки типов не заменяют runtime-валидацию недоверенных данных.
+Scenario assembly links modules with explicit arguments and small Protocols where
+alternative executors are really needed. No universal
+dependency container. Neighbours' internal APIs are closed by import contracts.
+Type checks do not replace runtime validation of untrusted data.
 
-| Контракт | Единственный владелец | Потребители и сохраняемый инвариант |
+| Contract | Sole owner | Consumers and the invariant kept |
 |---|---|---|
-| `OwnerLease`, admission, deadline | ownership | Все писатели; прежний общий fencing, неизвестный владелец не считается мёртвым |
-| Queue enqueue/claim/heartbeat/settle | queue | Адаптеры и workers; hash payload, at-least-once, неизменяемые результаты |
-| Verified source stream + provenance | compile.sources | Planner, archive, receipt reader; точные байты, логический путь, digest и диапазон |
-| Validated plan + publication receipt | compile.validation/publication | CLI/MCP/nightly; не выдавать постановку в очередь за публикацию |
-| Protected request/result | models.gateway/policy | Семантические сценарии; общий fail-closed DLP |
-| Durable call outcome | compile.call_recovery/progress | Controller; неизвестный исход не означает разрешение повторного вызова |
-| Prepare/apply/recover/undo | transactions | Все Markdown-писатели; CAS, hashes и recoverability |
-| Generation reader/publisher | generations | Search/code/maintenance; неизменяемая генерация и один указатель |
-| Navigation request/result | code_navigation | MCP; deadline, readiness, containment и явная неполнота |
-| Health finding + coverage | health | MCP/CLI/nightly; read-only наблюдение не является разрешением удаления |
+| `OwnerLease`, admission, deadline | ownership | All writers; the same shared fencing, an unknown owner is not considered dead |
+| Queue enqueue/claim/heartbeat/settle | queue | Adapters and workers; payload hash, at-least-once, immutable results |
+| Verified source stream + provenance | compile.sources | Planner, archive, receipt reader; exact bytes, logical path, digest and range |
+| Validated plan + publication receipt | compile.validation/publication | CLI/MCP/nightly; do not present queueing as publication |
+| Protected request/result | models.gateway/policy | Semantic scenarios; shared fail-closed DLP |
+| Durable call outcome | compile.call_recovery/progress | Controller; an unknown outcome does not mean a repeat call is allowed |
+| Prepare/apply/recover/undo | transactions | All Markdown writers; CAS, hashes and recoverability |
+| Generation reader/publisher | generations | Search/code/maintenance; immutable generation and one pointer |
+| Navigation request/result | code_navigation | MCP; deadline, readiness, containment and explicit incompleteness |
+| Health finding + coverage | health | MCP/CLI/nightly; read-only observation is not a deletion permit |
 
-Форматы сохранённых данных и владельцы SQLite остаются прежними. Реорганизация
-кода сама по себе не разрешает миграцию баз, пересоздание `run/`, удаление журналов
-или потерю совместимости backup/restore. Импорт JSON-схем и путей ресурсов должен
-работать и из CLI, и из MCP, и в установленной копии.
+Stored data formats and SQLite owners stay the same. Reorganizing
+the code does not by itself allow database migration, recreating `run/`, deleting journals
+or losing backup/restore compatibility. Importing JSON schemas and resource paths must
+work from the CLI, from MCP and in the installed copy.
 
-## Карта кандидатов
+## Candidate map
 
-Следующая таблица добавлена из полного списка Python-файлов рабочей ветки.
-«Код + однозначные тесты» — нижняя оценка сегодняшней области, не прогноз размера
-каждого будущего модуля. Правило привязки тестов: совпадающее имя исходника либо
-единственный обнаруженный явный импорт из `scripts`. Неоднозначные тесты не
-считаются лишними и отдельно перечислены в локальных измерениях.
+The following table was added from the full list of Python files of the working branch.
+"Code + unambiguous tests" is a lower estimate of today's area, not a size forecast
+for each future module. The test binding rule: a matching source name or
+the single explicit import from `scripts` found. Ambiguous tests are not
+considered superfluous and are listed separately in the local measurements.
 
-| Область | Код + однозначные тесты, токенов | Предлагаемые модули |
+| Area | Code + unambiguous tests, tokens | Proposed modules |
 |---|---:|---|
 | foundation | 135 640 | `configuration`, `byte_io`, `sqlite`, `filesystem_security` |
 | ownership | 26 314 | `ownership` |
@@ -255,159 +255,159 @@ flowchart TD
 | traces | 12 641 | `traces` |
 | quality | 16 449 | `quality` |
 
-Неоднозначная автоматическая привязка: 728 тестовых файлов, 1,173,552 токенов. Эти тесты не включены в нижние оценки таблицы.
+Ambiguous automatic binding: 728 test files, 1,173,552 tokens. These tests are not included in the lower estimates of the table.
 
-Непитоновские assets `scripts/queries`, `scripts/schemas`, JS/PowerShell adapters
-получают владельцев соответственно code_parse, модуль формата и adapters/install.
-Они входят в итоговый лимит; нижняя оценка таблицы их не скрывает как доказанный
-размер будущего пакета. Тесты с несколькими зависимостями назначаются по проверяемому
-сценарию, а не автоматически по самому большому импортируемому файлу.
+The non-Python assets `scripts/queries`, `scripts/schemas` and the JS/PowerShell adapters
+get owners code_parse, the format module and adapters/install respectively.
+They are part of the final limit; the lower estimate of the table does not hide them as a proven
+size of a future package. Tests with several dependencies are assigned by the scenario
+they check, not automatically by the largest imported file.
 
-Для сценариев нужны отдельные пакеты: capture→terminal, compile→publication,
+Scenarios need separate packages: capture→terminal, compile→publication,
 compile→recovery, queue→ownership, transaction→recovery, backup→restore,
 install→upgrade, retrieval→answer, code→navigation, LSP→platform containment,
-nightly→completion, MCP→lifecycle. Это начальные границы; каждый пакет также
-измеряется. Большой сценарий делится по различимым гарантиям, не по алфавиту тестов.
-Бенчмарки делятся на существующие задачи retrieval, code navigation, recovery,
-compilation и answer-cost; исторические отчёты остаются доступными по индексу.
+nightly→completion, MCP→lifecycle. These are initial boundaries; each package is also
+measured. A large scenario is split by distinct guarantees, not by the alphabet of tests.
+Benchmarks are split into the existing retrieval, code navigation, recovery,
+compilation and answer-cost tasks; historical reports stay reachable through the index.
 
-## Первые конкретные разрезы
+## First concrete cuts
 
-**Очередь.** `store` владеет SQL и форматом заданий, `delivery` — lease и
-переходами исполнения, `results` — подтверждёнными результатами, `operator` —
-inspect/cancel/redrive/corrupt-evidence операциями, `migration` — совместимостью
-версий. Запись результата и завершение lease сохраняют текущую атомарность:
-несколько модулей не означают несколько независимых транзакций.
+**Queue.** `store` owns SQL and the job format, `delivery` owns leases and
+execution transitions, `results` owns confirmed results, `operator` owns
+inspect/cancel/redrive/corrupt-evidence operations, `migration` owns version
+compatibility. Writing a result and finishing a lease keep the current atomicity:
+several modules do not mean several independent transactions.
 
-**Компиляция.** `sources` собирает проверенные потоки, `planning` подбирает полные
-единицы и контекст, `validation` проверяет план и доказательства, `publication`
-связывает CAS-запись с квитанцией, `progress` хранит шаги, `call_recovery` управляет
-внешним вызовом и неопределённым исходом. Существующее согласование durable dry-run
-сохраняется; этот проект не объявляет его реализацию завершённой.
+**Compilation.** `sources` collects verified streams, `planning` selects whole
+units and context, `validation` checks the plan and the evidence, `publication`
+ties the CAS write to the receipt, `progress` stores the steps, `call_recovery` manages
+the external call and the uncertain outcome. The existing approval of the durable dry-run
+is kept; this draft does not declare its implementation finished.
 
-**Markdown-транзакции.** `images` владеет форматом before/after images,
-`publication` — prepare/CAS/apply, `recovery` — recovery/undo/retention.
-Владелец SQLite и общий admission остаются единственными. Не заменять
-координатор множеством конкурирующих писателей.
+**Markdown transactions.** `images` owns the format of before/after images,
+`publication` owns prepare/CAS/apply, `recovery` owns recovery/undo/retention.
+The SQLite owner and the shared admission stay single. Do not replace
+the coordinator with many competing writers.
 
-**LSP.** Разделить протокол и безопасность, запуск и containment, документы,
-жизненный цикл и профили. Windows Job Object, POSIX-группа, heartbeat и очистка
-должны иметь один lifecycle owner; изолированный пакет не является OS sandbox.
+**LSP.** Separate the protocol and security, launch and containment, documents,
+lifecycle and profiles. Windows Job Object, the POSIX group, the heartbeat and cleanup
+must have one lifecycle owner; an isolated package is not an OS sandbox.
 
-**Doctor.** Operational readers, historical readers и generation maintenance
-разделяются по разным полномочиям. Ночной запуск вызывает maintenance напрямую,
-а health собирает результаты через публичный контракт.
+**Doctor.** Operational readers, historical readers and generation maintenance
+are separated by different authorities. The nightly run calls maintenance directly,
+and health collects the results through a public contract.
 
-## Почему этот вариант
+## Why this option
 
-Исследованы три независимые группы первичных источников на 2026-11-02:
+Three independent groups of primary sources were researched as of 2026-11-02:
 
 - [Martin Fowler: Bounded Context](https://martinfowler.com/bliki/BoundedContext.html)
-  и [Strangler Fig](https://martinfowler.com/bliki/StranglerFigApplication.html):
-  предметные границы и постепенное замещение. Это устойчивые принципы из старых
-  публикаций, не новые результаты измерения данного проекта. Здесь они обосновывают
-  явные отношения модулей и перенос небольшими законченными шагами.
+  and [Strangler Fig](https://martinfowler.com/bliki/StranglerFigApplication.html):
+  domain boundaries and gradual replacement. These are stable principles from older
+  publications, not new measurement results of this project. Here they justify
+  explicit module relations and moving in small finished steps.
 - [Import Linter: contracts](https://import-linter.readthedocs.io/en/stable/contract_types/),
   [protected](https://import-linter.readthedocs.io/en/stable/contract_types/protected/),
   [acyclic siblings](https://import-linter.readthedocs.io/en/stable/contract_types/acyclic_siblings/)
-  и [release notes](https://import-linter.readthedocs.io/en/stable/release_notes/).
-  Документация перечисляет 2.15 от 2026-09-04; кандидат на dev-only проверку.
-  Обеспечивает проверяемые границы импортов, но не контролирует subprocess,
-  данные или runtime-права. Совместимость конкретного набора зависимостей должна
-  пройти resolver и существующую матрицу CI перед добавлением в lockfile.
-- [Python PEP 544](https://peps.python.org/pep-0544/) и
-  [typing для Python 3.10](https://docs.python.org/3.10/library/typing.html):
-  Protocol доступен в поддерживаемом проектом синтаксисе и позволяет задавать
-  узкие контракты без нового runtime-framework. Аннотации сами не проверяют
-  значения при выполнении. [Правила mock patching](https://docs.python.org/3.10/library/unittest.mock.html#where-to-patch)
-  важны для переноса тестов: патч должен остаться в пространстве имён потребителя.
+  and [release notes](https://import-linter.readthedocs.io/en/stable/release_notes/).
+  The documentation lists 2.15 of 2026-09-04; a candidate for a dev-only check.
+  It provides checkable import boundaries, but does not control subprocess,
+  data or runtime permissions. Compatibility of the specific dependency set must
+  pass the resolver and the existing CI matrix before it is added to the lockfile.
+- [Python PEP 544](https://peps.python.org/pep-0544/) and
+  [typing for Python 3.10](https://docs.python.org/3.10/library/typing.html):
+  Protocol is available in the syntax the project supports and allows defining
+  narrow contracts without a new runtime framework. Annotations do not check
+  values at run time by themselves. [The mock patching rules](https://docs.python.org/3.10/library/unittest.mock.html#where-to-patch)
+  matter for moving tests: a patch must stay in the consumer's namespace.
 
-Документация Python помечает 3.10 как более не поддерживаемую upstream версию.
-Текущий контракт репозитория всё ещё `>=3.10`; менять его в рамках дробления
-самовольно нельзя. Пересмотр поддержки — отдельное решение с проверкой потребителей.
+The Python documentation marks 3.10 as a version no longer supported upstream.
+The current repository contract is still `>=3.10`; it must not be changed on one's own
+within the decomposition. Revising support is a separate decision with a check of consumers.
 
-| Альтернатива | Вывод для этого проекта |
+| Alternative | Conclusion for this project |
 |---|---|
-| Только краткие сводки и выбор контекста | Полезно немедленно, но циклы и внутренние импорты сохранятся |
-| Деление файлов по 100k без учёта смысла | Отвергнуто: размер выдержан ценой межмодульной связанности |
-| Изолированные пакеты внутри одной установки | Рекомендуется: проверяемые границы при сохранении транзакций и эксплуатации |
-| Отдельные репозитории/distributions | Сейчас усложняют версии, установку и атомарные изменения; потребность не доказана |
-| Микросервисы/daemon/message bus | Добавляют сетевые отказы и противоречат текущим ограничениям продукта |
-| Минификация/удаление истории/ослабление тестов | Не сохраняют нужные свойства, поэтому не являются безопасным сжатием |
+| Only short summaries and context selection | Useful immediately, but cycles and internal imports will remain |
+| Splitting files by 100k without regard to meaning | Rejected: the size is met at the cost of cross-module coupling |
+| Isolated packages inside one installation | Recommended: checkable boundaries while keeping transactions and operations |
+| Separate repositories/distributions | Now complicate versions, installation and atomic changes; the need is not proven |
+| Microservices/daemon/message bus | Add network failures and contradict the current product constraints |
+| Minification/deleting history/weakening tests | Do not keep the needed properties, so they are not safe compression |
 
-## Перенос и откат
+## Migration and rollback
 
-1. Согласовать этот проект и точный смысл лимита. Затем записать decision page,
-   обновить `docs/STRUCTURE.md`, согласованно `AGENTS.md`/`CLAUDE.md` и structural
-   tests. До этого шага не создавать целевую структуру реализации.
-2. Зафиксировать полное владение файлами, размеры и пары реальных задач для
-   сравнения. Добавить измерение пакета и проверки импортов. Существующие нарушения
-   показывать явно; нельзя выдавать baseline-исключения за выполненный конечный gate.
-3. Первоначальный кандидат (пересмотрен в исследовании выше) — byte IO и файловая безопасность: убрать обратные заимствования
-   ACL, сохранив байты, ошибки, сроки и POSIX/Windows-поведение. Если анализ покажет,
-   что выделение нарушает атомарность, корректировать проект до переноса.
-4. Выделить read-only контракты источников/квитанций и health readers. Затем очередь,
-   transaction API и компиляцию. Изменения незавершённого пункта 7 сначала сверить
-   с рабочей веткой; не устанавливать её целиком только ради новой структуры.
-5. Перенести остальные области снизу вверх; CLI/MCP/install adapters — после
-   контрактов. На каждом шаге проверить imports, ресурсы, mocks, установку,
-   стоимость контекста и откат. Нельзя смешивать механическое перемещение с
-   изменением форматов или поведения в одной непроверяемой операции.
-6. После квалификации выполнить поддерживаемую установку с verified preimages,
-   maintenance fence и перезапуском владельцев штатным путём. Сохранить старый
-   код и lockfile для отката; выполнить backup/restore в отдельном staging root
-   до изменения живой установки. Прямой `git reset` работающего vault не является
-   процедурой восстановления.
-7. Удалить заменённую реализацию после проверки всех потребителей. Стабильный
-   CLI-wrapper — поддерживаемый вход, а не временный дубликат. Временные import
-   adapters имеют перечень потребителей и условие удаления: все мигрированы,
-   поиск и интеграционные проверки не находят обращений. Не оставлять двойных
-   реализаций или бессрочных исключений в проверках.
+1. Approve this draft and the exact meaning of the limit. Then write a decision page,
+   update `docs/STRUCTURE.md`, `AGENTS.md`/`CLAUDE.md` consistently and the structural
+   tests. Before this step, do not create the target implementation structure.
+2. Record full file ownership, sizes and pairs of real tasks for
+   comparison. Add package measurement and import checks. Show existing violations
+   explicitly; baseline exceptions must not be presented as a finished final gate.
+3. The initial candidate (revised in the research above) is byte IO and file security: remove the reverse borrowings
+   of ACL, keeping bytes, errors, deadlines and POSIX/Windows behaviour. If the analysis shows
+   that the extraction breaks atomicity, correct the draft before the move.
+4. Extract read-only contracts of sources/receipts and health readers. Then the queue,
+   the transaction API and compilation. First reconcile the changes of the unfinished item 7
+   with the working branch; do not install it whole only for the new structure.
+5. Move the remaining areas bottom-up; CLI/MCP/install adapters after
+   the contracts. At each step check imports, resources, mocks, installation,
+   context cost and rollback. A mechanical move must not be mixed with
+   a change of formats or behaviour in one uncheckable operation.
+6. After qualification, perform a supported installation with verified preimages,
+   maintenance fence and restart of the owners by the standard path. Keep the old
+   code and lockfile for rollback; perform backup/restore in a separate staging root
+   before changing the live installation. A direct `git reset` of the running vault is not
+   a recovery procedure.
+7. Delete the replaced implementation after checking all consumers. A stable
+   CLI wrapper is a supported entry point, not a temporary duplicate. Temporary import
+   adapters have a list of consumers and a removal condition: all are migrated,
+   search and integration checks find no references. Do not leave double
+   implementations or indefinite exceptions in the checks.
 
-Каждый перенос допускается к установке после связанных регрессий, lizard CCN≤5
-для каждой изменённой функции, проверки ограничений вложенности, ruff, проверки
-контрактов, token gate и CI по поддерживаемым платформам. Перед завершением
-изменения структуры — полный pytest и checks из `docs/STRUCTURE.md`.
-README меняются синхронно на EN/RU/ZH, если меняются пользовательские команды;
-release/version bump требует согласованных CHANGELOG и pyproject по контракту.
+Each move is admitted to installation after the related regressions, lizard CCN≤5
+for each changed function, the nesting limit check, ruff, the contract
+check, the token gate and CI on the supported platforms. Before finishing
+the structure change: full pytest and the checks from `docs/STRUCTURE.md`.
+READMEs change in sync in EN/RU/ZH if user commands change;
+a release/version bump needs consistent CHANGELOG and pyproject by the contract.
 
-## Проверка безопасности и полезности
+## Checking safety and usefulness
 
-Обязательные сценарии: потеря lease; падение между SQL/файловыми действиями;
-неизвестный исход model call; повторная доставка; DLP refusal; изменение источника
-между чтением и публикацией; undo; Restic restore; cold/warm startup MCP;
-Windows/POSIX LSP cleanup; установка и откат с сохранением частных данных.
-Результат — сравнение семантики, точных источников и доказательств, не только
-зелёные модульные тесты. Не запускать платный повтор исполнения исторических
-работ ради демонстрации структуры.
+Mandatory scenarios: lease loss; a crash between SQL/file actions;
+an unknown model call outcome; repeated delivery; DLP refusal; a source change
+between reading and publication; undo; Restic restore; cold/warm MCP startup;
+Windows/POSIX LSP cleanup; installation and rollback with private data preserved.
+The result is a comparison of semantics, exact sources and evidence, not only
+green module tests. Do not run a paid repeat execution of historical
+work to demonstrate the structure.
 
-Пары реальных задач берутся из компиляции, поиска, захвата, LSP, установки и
-восстановления. На одинаковых входных данных и модели фиксируются качество,
-все input/output/cache tokens, повторные вызовы, время, peak RSS и вмешательство
-оператора. Число прогонов определяется разбросом измерений и покрытием сценариев,
-а не произвольной квотой. Процент экономии заранее не обещается. Удаление кода,
-размер пакета, фактический контекст и полный расход задачи — разные метрики.
+Pairs of real tasks are taken from compilation, search, capture, LSP, installation and
+recovery. On the same input data and model, quality,
+all input/output/cache tokens, repeated calls, time, peak RSS and operator
+intervention are recorded. The number of runs is set by the spread of measurements and scenario coverage,
+not by an arbitrary quota. No savings percentage is promised in advance. Code deletion,
+package size, actual context and full task spending are different metrics.
 
-## Ограничения текущей готовности
+## Limits of current readiness
 
-Operational doctor от 2026-11-02 завершился `error`: nightly/weekly неуспешны;
-есть накопленные потери capture и ограничения очистки LSP. Полная историческая
-целостность и восстановление backup этой проверкой не исследовались. Работают
-MCP-процессы. Это позволяет подготовить проект, но не позволяет назвать живую
-установку готовой к массовой миграции. Ничьи процессы не останавливались,
-`run/` не очищался, компиляция/переход незавершённой ветки не запускались.
+The operational doctor of 2026-11-02 ended with `error`: nightly/weekly failed;
+there are accumulated capture losses and LSP cleanup limits. Full historical
+integrity and backup restore were not examined by this check. MCP processes
+are running. This allows preparing the draft, but does not allow calling the live
+installation ready for a mass migration. Nobody's processes were stopped,
+`run/` was not cleaned, compilation/switching to the unfinished branch were not started.
 
-Нужно довести распределение тестов/fixtures/docs до полного манифеста и измерить
-реальные выделенные пакеты. Сейчас есть карта всех Python-исходников, а не
-доказательство изоляции каждого будущего модуля. Неразрешённые графом связи и
-мультикомпонентные тесты остаются явной частью работ по каждому переносу.
+The distribution of tests/fixtures/docs must be brought to a full manifest, and
+the real extracted packages measured. Today there is a map of all Python sources, not
+proof of isolation of each future module. Links the graph did not resolve and
+multi-component tests stay an explicit part of the work for each move.
 
-## Локальные доказательства
+## Local evidence
 
-Полные файловые размеры, SHA-256, консервативные импорты, результаты встроенного
-индексирования, графа и operational doctor сохранены в gitignored
-`logs/modularity-2026-11-02-*`. Там также полный список исходников по областям.
-Эти данные отражают названные commits до добавления данного отчёта. Открытие
-документа не означает, что все локальные доказательства опубликованы.
-Повторный замер должен читать `git ls-files -z`, считать каждый файл тем же
-токенизатором и сравнивать SHA-256; после изменения набора файлов результат новый.
+Full file sizes, SHA-256, conservative imports, the results of the built-in
+indexing, the graph and the operational doctor are saved in the gitignored
+`logs/modularity-2026-11-02-*`. The full list of sources by area is there as well.
+These data reflect the named commits before this report was added. Opening
+the document does not mean that all local evidence is published.
+A repeated measurement must read `git ls-files -z`, count each file with the same
+tokenizer and compare SHA-256; after the file set changes, the result is new.

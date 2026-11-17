@@ -20,37 +20,37 @@ from retrieval_v2_contract import (
 from retrieval_v2_corpus import filter_candidates
 
 ALIASES = {
-    "каталог": "catalog",
+    "\u043a\u0430\u0442\u0430\u043b\u043e\u0433": "catalog",
     "目录": "catalog",
-    "путь": "path",
-    "пути": "path",
+    "\u043f\u0443\u0442\u044c": "path",
+    "\u043f\u0443\u0442\u0438": "path",
     "路径": "path",
-    "проверка": "check",
-    "проверки": "check",
+    "\u043f\u0440\u043e\u0432\u0435\u0440\u043a\u0430": "check",
+    "\u043f\u0440\u043e\u0432\u0435\u0440\u043a\u0438": "check",
     "检查": "check",
     "健": "health",
     "康": "health",
     "检": "check",
     "查": "check",
-    "команда": "command",
+    "\u043a\u043e\u043c\u0430\u043d\u0434\u0430": "command",
     "命令": "command",
     "命": "command",
     "令": "command",
-    "очереди": "queue",
-    "очередь": "queue",
+    "\u043e\u0447\u0435\u0440\u0435\u0434\u0438": "queue",
+    "\u043e\u0447\u0435\u0440\u0435\u0434\u044c": "queue",
     "队列": "queue",
-    "доставки": "delivery",
-    "доставка": "delivery",
+    "\u0434\u043e\u0441\u0442\u0430\u0432\u043a\u0438": "delivery",
+    "\u0434\u043e\u0441\u0442\u0430\u0432\u043a\u0430": "delivery",
     "交付": "delivery",
-    "текущий": "current",
-    "текущему": "current",
+    "\u0442\u0435\u043a\u0443\u0449\u0438\u0439": "current",
+    "\u0442\u0435\u043a\u0443\u0449\u0435\u043c\u0443": "current",
     "当前": "current",
-    "решение": "decision",
+    "\u0440\u0435\u0448\u0435\u043d\u0438\u0435": "decision",
     "决定": "decision",
-    "удалить": "delete",
-    "удаления": "delete",
+    "\u0443\u0434\u0430\u043b\u0438\u0442\u044c": "delete",
+    "\u0443\u0434\u0430\u043b\u0435\u043d\u0438\u044f": "delete",
     "删除": "delete",
-    "кэша": "cache",
+    "\u043a\u044d\u0448\u0430": "cache",
     "缓存": "cache",
 }
 STOPWORDS = {
@@ -61,10 +61,10 @@ STOPWORDS = {
     "what",
     "where",
     "which",
-    "как",
-    "какая",
-    "какой",
-    "что",
+    "\u043a\u0430\u043a",
+    "\u043a\u0430\u043a\u0430\u044f",
+    "\u043a\u0430\u043a\u043e\u0439",
+    "\u0447\u0442\u043e",
     "的",
     "哪",
     "是",
@@ -76,7 +76,7 @@ STOPWORDS = {
 def tokens(value: str) -> tuple[str, ...]:
     normalized = unicodedata.normalize("NFKC", value).casefold()
     # Keep code symbols intact while splitting paths into searchable components.
-    raw = re.findall(r"[a-zа-яё0-9_]+|[\u3400-\u9fff]", normalized)
+    raw = re.findall(r"[a-z\u0430-\u044f\u04510-9_]+|[\u3400-\u9fff]", normalized)
     return tuple(ALIASES.get(token, token) for token in raw if token and token not in STOPWORDS)
 
 

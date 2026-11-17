@@ -8,13 +8,13 @@ from types import SimpleNamespace
 import pytest
 from llm_wiki import windows_acl as acl
 
-OWNER = 'PC\\Оператор'
+OWNER = 'PC\\\u041e\u043f\u0435\u0440\u0430\u0442\u043e\u0440'
 
 
 @pytest.mark.parametrize(('listing', 'accepted'), [
     ([f'artifact {OWNER}:(F)'], True), ([f'artifact {OWNER}:(I)(F)'], True),
     ([f'artifact {OWNER}:(R)'], False), ([], False),
-    ([f'artifact {OWNER}:(F)', 'PC\\Гость:(R)'], False),
+    ([f'artifact {OWNER}:(F)', 'PC\\\u0413\u043e\u0441\u0442\u044c:(R)'], False),
     ([f'artifact {OWNER}:(F)', f'{OWNER}:(F)'], False),
     ([f'artifact {OWNER}-other:(F)'], False),
 ])
@@ -23,7 +23,7 @@ def test_boolean_queue_policy_is_preserved(listing, accepted):
 
 
 @pytest.mark.parametrize('listing', [f'artifact {OWNER}:(I)(F)', f'artifact {OWNER}:(R)',
-                                     f'artifact {OWNER}:(F)\nPC\\Гость:(R)', ''])
+                                     f'artifact {OWNER}:(F)\nPC\\\u0413\u043e\u0441\u0442\u044c:(R)', ''])
 def test_strict_verifier_keeps_its_stronger_explicit_acl_contract(listing):
     result = subprocess.CompletedProcess(['icacls'], 0, listing, '')
     with pytest.raises(PermissionError, match='owner-only ACL'):
@@ -82,11 +82,11 @@ def test_console_codec_is_preferred_and_deduplicated(monkeypatch):
 
 
 def test_identity_uses_domain_and_username(monkeypatch):
-    monkeypatch.setenv('USERNAME', 'Оператор')
+    monkeypatch.setenv('USERNAME', '\u041e\u043f\u0435\u0440\u0430\u0442\u043e\u0440')
     monkeypatch.setenv('USERDOMAIN', 'PC')
     assert acl.windows_acl_identity() == OWNER
     monkeypatch.delenv('USERDOMAIN')
-    assert acl.windows_acl_identity() == 'Оператор'
+    assert acl.windows_acl_identity() == '\u041e\u043f\u0435\u0440\u0430\u0442\u043e\u0440'
 
 
 def test_import_and_parsing_do_not_load_runtime_or_launch_commands():

@@ -148,7 +148,7 @@ def test_short_writes_complete_one_utf8_record(trail, monkeypatch, with_byte_loc
         return real_write(descriptor, data[:1])
 
     monkeypatch.setattr(os, "write", short_write)
-    record = {"reason": "ошибка записи"}
+    record = {"reason": "\u043e\u0448\u0438\u0431\u043a\u0430 \u0437\u0430\u043f\u0438\u0441\u0438"}
     assert capture_diagnostics.append_failure_line(record)
     assert [json.loads(line) for line in trail.read_bytes().splitlines()] == [
         {"reason": "existing"}, record,

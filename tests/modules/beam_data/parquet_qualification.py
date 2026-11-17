@@ -12,9 +12,9 @@ from tests.beam_becomes_a_question_this_stand_can_read_helpers import CONVERSATI
 
 def test_real_nested_unicode_parquet_round_trip_and_conversion(tmp_path):
     row = deepcopy(CONVERSATION)
-    row['conversation_id'] = 'разговор-世界'
-    row['chat'][0][0]['content'] = 'Привет 世界 🧭 ->-> 1,1'
-    source = tmp_path / 'разговор.parquet'
+    row['conversation_id'] = '\u0440\u0430\u0437\u0433\u043e\u0432\u043e\u0440-世界'
+    row['chat'][0][0]['content'] = '\u041f\u0440\u0438\u0432\u0435\u0442 世界 🧭 ->-> 1,1'
+    source = tmp_path / '\u0440\u0430\u0437\u0433\u043e\u0432\u043e\u0440.parquet'
     pq.write_table(pa.Table.from_pylist([row]), source)
     assert beam_data.load_rows(source) == [row]
     target = tmp_path / 'converted' / 'questions.json'
@@ -22,7 +22,7 @@ def test_real_nested_unicode_parquet_round_trip_and_conversion(tmp_path):
     questions = json.loads(target.read_text(encoding='utf-8'))
     assert questions == beam_data.converted_questions([row])
     assert len(questions) == 2
-    assert questions[0]['haystack_sessions'][0][0]['content'] == 'Привет 世界 🧭'
+    assert questions[0]['haystack_sessions'][0][0]['content'] == '\u041f\u0440\u0438\u0432\u0435\u0442 世界 🧭'
 
 
 def test_empty_real_parquet_emits_empty_questions(tmp_path):

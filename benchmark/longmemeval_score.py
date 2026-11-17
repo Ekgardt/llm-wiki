@@ -29,7 +29,7 @@ if str(BENCHMARK_DIR) not in sys.path:
 import longmemeval_data  # noqa: E402
 
 _ARTICLES = frozenset({"a", "an", "the"})
-_NON_ALNUM = re.compile(r"[^0-9a-zЀ-ӿ]+")
+_NON_ALNUM = re.compile(r"[^0-9a-z\u0400-\u04ff]+")
 
 PROVIDER_ERROR_KINDS = frozenset(
     {"provider_no_response", "provider_invalid_json", "provider_deadline"}

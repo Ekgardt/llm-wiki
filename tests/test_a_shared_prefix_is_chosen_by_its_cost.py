@@ -3,7 +3,7 @@ import answer_budget
 import pytest
 
 
-@pytest.mark.parametrize("prefix", ["/a/", "/ж/"])
+@pytest.mark.parametrize("prefix", ["/a/", "/\u0436/"])
 def test_short_prefix_is_used_when_its_complete_shape_is_cheaper(prefix):
     rows = [{"path": f"{prefix}{index}"} for index in range(40)]
     result = answer_budget.prefixes_if_cheaper("rows", rows)

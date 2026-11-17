@@ -53,7 +53,7 @@ def test_utf8_multiple_physical_parts_preserve_raw_source_and_every_offered_row(
     from tests.a_long_entry_is_cut_inside_itself_helpers import LOGICAL, _entry
 
     raw = _entry(1, b'\n## [12:26:31] pre-compact | session\n' +
-                 b''.join(f'- точный факт номер {n}.\n'.encode() for n in range(900)))
+                 b''.join(f'- \u0442\u043e\u0447\u043d\u044b\u0439 \u0444\u0430\u043a\u0442 \u043d\u043e\u043c\u0435\u0440 {n}.\n'.encode() for n in range(900)))
     parts = tuple(compile_pipeline_sources.daily_parts(LOGICAL, raw))
     inputs = compile_pipeline_sources.CompileInputs(parts, (), ())
     batches = compile_pipeline_batches.pack_compile_batches(inputs, model=None)

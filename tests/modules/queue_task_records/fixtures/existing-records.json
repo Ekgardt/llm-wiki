@@ -40,14 +40,14 @@
       "link": null,
       "seal": null,
       "payload": {
-        "prompt": "Пример 文"
+        "prompt": "\u041f\u0440\u0438\u043c\u0435\u0440 文"
       },
       "expected_task": {
         "id": "e26abc91da274be486eb57374cb2d9f2",
         "kind": "query",
         "handler_version": 3,
         "payload": {
-          "prompt": "Пример 文"
+          "prompt": "\u041f\u0440\u0438\u043c\u0435\u0440 文"
         },
         "input_hash": "537b1e6f6be85903f1a640a205c5dca50046730e2203f7fba0d2b04ab51dac1f",
         "dedupe_key": "record-fixture",
@@ -75,7 +75,7 @@
         "kind": "query",
         "handler_version": 3,
         "payload": {
-          "prompt": "Пример 文"
+          "prompt": "\u041f\u0440\u0438\u043c\u0435\u0440 文"
         },
         "input_hash": "537b1e6f6be85903f1a640a205c5dca50046730e2203f7fba0d2b04ab51dac1f",
         "dedupe_key": "record-fixture",
@@ -115,7 +115,7 @@
         "kind": "query",
         "last_attempt_at": null,
         "payload": {
-          "prompt": "Пример 文"
+          "prompt": "\u041f\u0440\u0438\u043c\u0435\u0440 文"
         },
         "priority": 0,
         "redrive_of": null,
@@ -163,14 +163,14 @@
       "link": null,
       "seal": null,
       "payload": {
-        "prompt": "Пример 文"
+        "prompt": "\u041f\u0440\u0438\u043c\u0435\u0440 文"
       },
       "expected_task": {
         "id": "e26abc91da274be486eb57374cb2d9f2",
         "kind": "query",
         "handler_version": 3,
         "payload": {
-          "prompt": "Пример 文"
+          "prompt": "\u041f\u0440\u0438\u043c\u0435\u0440 文"
         },
         "input_hash": "537b1e6f6be85903f1a640a205c5dca50046730e2203f7fba0d2b04ab51dac1f",
         "dedupe_key": "record-fixture",
@@ -198,7 +198,7 @@
         "kind": "query",
         "handler_version": 3,
         "payload": {
-          "prompt": "Пример 文"
+          "prompt": "\u041f\u0440\u0438\u043c\u0435\u0440 文"
         },
         "input_hash": "537b1e6f6be85903f1a640a205c5dca50046730e2203f7fba0d2b04ab51dac1f",
         "dedupe_key": "record-fixture",
@@ -243,7 +243,7 @@
         "kind": "query",
         "last_attempt_at": null,
         "payload": {
-          "prompt": "Пример 文"
+          "prompt": "\u041f\u0440\u0438\u043c\u0435\u0440 文"
         },
         "priority": 0,
         "redrive_of": null,
@@ -291,14 +291,14 @@
       "link": null,
       "seal": null,
       "payload": {
-        "prompt": "Пример 文"
+        "prompt": "\u041f\u0440\u0438\u043c\u0435\u0440 文"
       },
       "expected_task": {
         "id": "e26abc91da274be486eb57374cb2d9f2",
         "kind": "query",
         "handler_version": 3,
         "payload": {
-          "prompt": "Пример 文"
+          "prompt": "\u041f\u0440\u0438\u043c\u0435\u0440 文"
         },
         "input_hash": "537b1e6f6be85903f1a640a205c5dca50046730e2203f7fba0d2b04ab51dac1f",
         "dedupe_key": "record-fixture",
@@ -326,7 +326,7 @@
         "kind": "query",
         "handler_version": 3,
         "payload": {
-          "prompt": "Пример 文"
+          "prompt": "\u041f\u0440\u0438\u043c\u0435\u0440 文"
         },
         "input_hash": "537b1e6f6be85903f1a640a205c5dca50046730e2203f7fba0d2b04ab51dac1f",
         "dedupe_key": "record-fixture",
@@ -375,7 +375,7 @@
         "kind": "query",
         "last_attempt_at": null,
         "payload": {
-          "prompt": "Пример 文"
+          "prompt": "\u041f\u0440\u0438\u043c\u0435\u0440 文"
         },
         "priority": 0,
         "redrive_of": null,
@@ -431,14 +431,14 @@
       "link": null,
       "seal": null,
       "payload": {
-        "prompt": "Пример 文"
+        "prompt": "\u041f\u0440\u0438\u043c\u0435\u0440 文"
       },
       "expected_task": {
         "id": "e26abc91da274be486eb57374cb2d9f2",
         "kind": "query",
         "handler_version": 3,
         "payload": {
-          "prompt": "Пример 文"
+          "prompt": "\u041f\u0440\u0438\u043c\u0435\u0440 文"
         },
         "input_hash": "537b1e6f6be85903f1a640a205c5dca50046730e2203f7fba0d2b04ab51dac1f",
         "dedupe_key": "record-fixture",
@@ -474,7 +474,7 @@
         "kind": "query",
         "handler_version": 3,
         "payload": {
-          "prompt": "Пример 文"
+          "prompt": "\u041f\u0440\u0438\u043c\u0435\u0440 文"
         },
         "input_hash": "537b1e6f6be85903f1a640a205c5dca50046730e2203f7fba0d2b04ab51dac1f",
         "dedupe_key": "record-fixture",
@@ -534,7 +534,7 @@
         "kind": "query",
         "last_attempt_at": null,
         "payload": {
-          "prompt": "Пример 文"
+          "prompt": "\u041f\u0440\u0438\u043c\u0435\u0440 文"
         },
         "priority": 0,
         "redrive_of": null,

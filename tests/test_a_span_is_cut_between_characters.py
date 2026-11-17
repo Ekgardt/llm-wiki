@@ -29,7 +29,7 @@ import corpus_snapshot  # noqa: E402
 
 def _unbroken_cyrillic(byte_length: int) -> bytes:
     """Prose with no newline anywhere, so only the byte ceiling can cut it."""
-    word = "тест "
+    word = "\u0442\u0435\u0441\u0442 "
     text = word * (byte_length // len(word.encode("utf-8")) + 2)
     return text.encode("utf-8")
 
@@ -56,7 +56,7 @@ def test_the_pieces_still_cover_the_whole_span_without_overlap() -> None:
 
 
 def test_a_cut_inside_a_character_walks_back_to_its_start() -> None:
-    content = "аб".encode()  # two bytes each
+    content = "\u0430\u0431".encode()  # two bytes each
 
     assert corpus_snapshot.character_boundary(content, 1) == 0
     assert corpus_snapshot.character_boundary(content, 2) == 2

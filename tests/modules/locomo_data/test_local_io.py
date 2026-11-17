@@ -9,7 +9,7 @@ adapter = original.locomo_data
 
 
 def test_local_conversion_writes_unicode_and_preserves_abstention(tmp_path):
-    conversation = dict(original.CONVERSATION, sample_id="разговор")
+    conversation = dict(original.CONVERSATION, sample_id="\u0440\u0430\u0437\u0433\u043e\u0432\u043e\u0440")
     source = tmp_path / "source.json"
     source.write_text(json.dumps([conversation], ensure_ascii=False), encoding="utf-8")
     target = tmp_path / "nested" / "converted.json"
@@ -17,7 +17,7 @@ def test_local_conversion_writes_unicode_and_preserves_abstention(tmp_path):
     assert adapter.convert(source, target) == target
     rows = json.loads(target.read_text(encoding="utf-8"))
     assert len(rows) == 2
-    assert rows[0]["question_id"] == 'разговор_0'
+    assert rows[0]["question_id"] == '\u0440\u0430\u0437\u0433\u043e\u0432\u043e\u0440_0'
     assert rows[0]["question"] == 'What did Ann do?'
     assert rows[0]["answer"] == 'ran a race'
     assert rows[1]["question_id"].endswith("_abs")

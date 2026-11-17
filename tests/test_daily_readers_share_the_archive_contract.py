@@ -10,7 +10,7 @@ from tests.compile_transactions_helpers import vault as vault
 
 
 def _large_day(root):
-    phrase = "Большая дневная запись без потери байтов. ".encode()
+    phrase = "\u0411\u043e\u043b\u044c\u0448\u0430\u044f \u0434\u043d\u0435\u0432\u043d\u0430\u044f \u0437\u0430\u043f\u0438\u0441\u044c \u0431\u0435\u0437 \u043f\u043e\u0442\u0435\u0440\u0438 \u0431\u0430\u0439\u0442\u043e\u0432. ".encode()
     content = b"# 2026-07-14\n## [10:00:00] session-end | manual\n" + phrase * (compile_pipeline_sources.MAX_SOURCE_BYTES // len(phrase) + 1)
     path = root / "knowledge/daily/2026-07-14.md"
     path.write_bytes(content)

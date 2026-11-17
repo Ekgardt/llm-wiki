@@ -238,7 +238,7 @@ def test_projects_daily_and_code_are_explicitly_bounded_by_policy(vault: Path):
     "body",
     [
         "english_identifier = another_identifier\n",
-        "пример = другой_идентификатор\n",
+        "\u043f\u0440\u0438\u043c\u0435\u0440 = \u0434\u0440\u0443\u0433\u043e\u0439_\u0438\u0434\u0435\u043d\u0442\u0438\u0444\u0438\u043a\u0430\u0442\u043e\u0440\n",
     ],
 )
 def test_supported_code_suffixes_override_natural_language_inference(
@@ -301,7 +301,7 @@ def test_non_markdown_code_does_not_treat_yaml_looking_content_as_metadata(vault
     ("body", "language"),
     [
         ("English prose remains inferred.\n", "en"),
-        ("Русский текст по-прежнему определяется.\n", "ru"),
+        ("\u0420\u0443\u0441\u0441\u043a\u0438\u0439 \u0442\u0435\u043a\u0441\u0442 \u043f\u043e-\u043f\u0440\u0435\u0436\u043d\u0435\u043c\u0443 \u043e\u043f\u0440\u0435\u0434\u0435\u043b\u044f\u0435\u0442\u0441\u044f.\n", "ru"),
     ],
 )
 def test_unknown_text_suffixes_retain_natural_language_inference(
@@ -353,7 +353,7 @@ def test_historical_policies_recover_archived_directory_sources(vault: Path):
     ("name", "body", "language"),
     [
         ("en.md", "# Title\nEnglish evidence here.\n", "en"),
-        ("ru.md", "# Заголовок\nРусское свидетельство.\n", "ru"),
+        ("ru.md", "# \u0417\u0430\u0433\u043e\u043b\u043e\u0432\u043e\u043a\n\u0420\u0443\u0441\u0441\u043a\u043e\u0435 \u0441\u0432\u0438\u0434\u0435\u0442\u0435\u043b\u044c\u0441\u0442\u0432\u043e.\n", "ru"),
         ("zh.md", "# 标题\n中文证据。\n", "zh"),
     ],
 )

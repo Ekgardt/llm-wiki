@@ -47,7 +47,7 @@ def assert_committed_sources(repository, expected):
 
 
 def test_build_creates_two_committed_repositories(tmp_path):
-    output = tmp_path / 'стенд с пробелами'
+    output = tmp_path / '\u0441\u0442\u0435\u043d\u0434 \u0441 \u043f\u0440\u043e\u0431\u0435\u043b\u0430\u043c\u0438'
     service, client = builder.build(output)
     assert (service, client) == (output / 'service-repo', output / 'client-repo')
     assert_committed_sources(service, builder.SERVICE_FILES)

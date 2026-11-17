@@ -1,344 +1,344 @@
-# Рефакторинг компиляции, очереди, диагностики и ночного обслуживания
+# Refactoring of compilation, the queue, diagnostics and nightly maintenance
 
-Дата исследования: 2026-10-17. Статус: согласовано владельцем 2026-10-17; реализация и установка ещё не завершены.
+Research date: 2026-10-17. Status: approved by the owner on 2026-10-17; implementation and installation are not yet complete.
 
-Цель — отделить проверку текущей работы от проверки всей накопленной истории, сделать результаты ночного цикла однозначными и перестать блокировать пригодные источники из-за соседнего слишком большого источника. Это изменение поведения диагностики и исполнения. Владелец дал явное согласование по разделу 0 AGENTS.md; решение записано в knowledge/notes/compile-queue-health-nightly-refactoring-decision-20261017.md. Новые базы, демон, зависимости и корни runtime не предлагаются.
+The goal is to separate checking current work from checking the whole accumulated history, to make the nightly cycle's results unambiguous, and to stop blocking usable sources because of a neighbouring source that is too large. This is a change in the behaviour of diagnostics and execution. The owner gave explicit approval under section 0 of AGENTS.md; the decision is recorded in knowledge/notes/compile-queue-health-nightly-refactoring-decision-20261017.md. No new databases, daemon, dependencies or runtime roots are proposed.
 
-## Что подтверждено сейчас
+## What is confirmed now
 
-В установленном коде проверка завершения процесса компиляции вызывает `maybe_compile.status()`. Когда процесс уже завершился, эта функция дополнительно проверяет накопленные дневники и авторитетность квитанций. Поэтому завершение процесса может быть скрыто за долгой проверкой истории или её ошибкой. Исправление в отдельной рабочей копии отделяет `process_status()` от полной `status()`. Исходный сбой воспроизведён тестом; 69 связанных тестов проходят. Код ещё не установлен. Дополнительно подготовлено различение физической ошибки SQLite и нарушения внешних ключей без изменения проверок: два новых теста воспроизвели прежнее неоднозначное сообщение; связанные проверки дали 117 passed, 5 skipped. Сложность изменённой функции равна 4, Ruff и грамматика Python 3.10 проходят.
+In the installed code, the check for completion of the compile process calls `maybe_compile.status()`. When the process has already finished, this function additionally checks the accumulated daily logs and the authority of receipts. So the completion of the process can be hidden behind a long history check or its error. The fix in a separate working copy separates `process_status()` from the full `status()`. The original failure is reproduced by a test; 69 related tests pass. The code is not yet installed. In addition, a distinction between a physical SQLite error and a foreign-key violation has been prepared without changing the checks: two new tests reproduced the previous ambiguous message; the related checks gave 117 passed, 5 skipped. The complexity of the changed function is 4; Ruff and the Python 3.10 grammar pass.
 
-Профилирование `doctor` с бюджетом 60 секунд показало около 17,5 секунды на сертификацию баз и 42,8 секунды на транзакции. Большинство следующих разделов не проверено. Это измерение с накладными расходами профилировщика, а не чистый тест производительности. Полная проверка действительно нужна: она обнаружила повреждение пяти индексов таблицы владельцев координатора. Восстановление индексов проверено на отдельной онлайн-копии, затем выполнено под существующим владельцем обслуживания и одной транзакцией SQLite. Проверки координатора прошли, строки владельцев сохранены. Причина возникновения повреждения не установлена; это восстановление, а не доказательство устранения причины.
+Profiling `doctor` with a 60-second budget showed about 17.5 seconds on database certification and 42.8 seconds on transactions. Most of the following sections were not checked. This is a measurement with profiler overhead, not a clean performance test. The full check really is needed: it found corruption of five indexes of the coordinator's owners table. Index recovery was verified on a separate online copy, then performed under the existing maintenance owner in one SQLite transaction. The coordinator checks passed and the owner rows were preserved. The cause of the corruption is not established; this is a recovery, not proof that the cause has been removed.
 
-При проверке упаковки текущего дневника с установленным Codex, моделью gpt-6-luna и reasoning medium 12 из 63 частей превысили расчётный бюджет. Реализация исключила весь день, включая остальные 51 часть. Числа относятся к сохранённому снимку; дневник продолжает расти. Расчёт размера здесь не является измерением фактических токенов провайдера. Подтверждённое окно планирования провайдер не предоставил. Поднимать предполагаемую ёмкость модели без доказательств нельзя.
+When checking the packing of the current daily log with the installed Codex, model gpt-6-luna and reasoning medium, 12 of 63 parts exceeded the computed budget. The implementation excluded the whole day, including the other 51 parts. The numbers refer to a saved snapshot; the daily log keeps growing. The size calculation here is not a measurement of the provider's actual tokens. The provider did not give a confirmed planning window. Raising the assumed model capacity without evidence is not allowed.
 
-Ночной цикл уже сообщает об отложенной компиляции отдельным признаком, а doctor учитывает его. Однако общий результат прохода может одновременно содержать `success` и отложенные зависимые этапы. Это неоднозначный контракт, а не полное отсутствие диагностики.
+The nightly cycle already reports a deferred compile with a separate flag, and doctor takes it into account. However, the overall result of a pass can contain `success` and deferred dependent stages at the same time. This is an ambiguous contract, not a total absence of diagnostics.
 
-Доказательства сохранены приватно в `logs/refactor-20261017-*`: профили, снимок отказа упаковки, исходный падающий тест, результаты проверок, проверки повреждения и восстановления. Их содержимое не требуется публиковать с кодом.
+The evidence is kept privately in `logs/refactor-20261017-*`: profiles, a snapshot of the packing refusal, the original failing test, check results, and the corruption and recovery checks. Their content does not need to be published with the code.
 
-## Предлагаемое поведение
+## Proposed behaviour
 
-### Компиляция
+### Compilation
 
-Планирование, исполнение и подтверждение записи становятся отдельными последовательными шагами внутри существующего механизма. Единица работы — целый проверенный исходный элемент с необходимым контекстом. Связанные части нативного события остаются одной единицей. Разбиение не должно разрывать цитаты, происхождение, исходные хеши или обязательный контекст.
+Planning, execution and write confirmation become separate sequential steps inside the existing mechanism. The unit of work is a whole verified source element with its required context. Linked parts of a native event stay one unit. Splitting must not break citations, provenance, source hashes or required context.
 
-Отказ одной независимой единицы не запрещает обработку остальных. При этом день не помечается полностью обработанным, пока остаются неподтверждённые единицы. Для каждого отказа сохраняются причина, исходная идентичность и возможность последующего выполнения. Отказ по размеру сохранённого источника не считается потерей захвата. Исторические счётчики ошибок не очищаются.
+A refusal of one independent unit does not prevent processing the others. At the same time, the day is not marked fully processed while unconfirmed units remain. For each refusal, the reason, the source identity and the possibility of later execution are kept. A refusal because of the size of a stored source is not counted as a capture loss. Historical error counters are not cleared.
 
-Рабочий размер пакета и подтверждённая ёмкость провайдера — разные величины. Неподтверждённая ёмкость остаётся неизвестной. Политика обработки источника, превышающего рабочий пакет, должна опираться на проверенное разбиение или подтверждённые возможности провайдера. До такой квалификации источник остаётся явно заблокированным; увеличение числа в конфигурации не считается исправлением.
+The working batch size and the confirmed provider capacity are different quantities. Unconfirmed capacity stays unknown. The policy for a source larger than the working batch must rest on verified splitting or on confirmed provider capabilities. Until such qualification the source stays explicitly blocked; raising a number in the configuration does not count as a fix.
 
-Повторное использование допускается для чистого разбора неизменных байтов внутри одного плана. Проверки действующих прав, владельцев, текущих источников, полных цитат и условий записи выполняются на соответствующих границах заново. Измерение эффективности охватывает планирование, все обращения к модели, исправления, проверку и подтверждённый полезный результат.
+Reuse is allowed for pure parsing of unchanged bytes within one plan. Checks of current rights, owners, current sources, complete citations and write conditions are performed again at the corresponding boundaries. Efficiency measurement covers planning, all model calls, corrections, verification and the confirmed useful result.
 
-### Очередь
+### Queue
 
-Сохранить существующие базы Reliability V3, доставку как минимум один раз, проверку хешей нагрузки и защиту владельцев. Обычная операция проверяет свой запрос, переход состояния и связанные записи. Полное обследование всех завершённых задач не становится её скрытой зависимостью. Уже реализованное отделение допуска акторов от сертификации истории сохраняется.
+Keep the existing Reliability V3 databases, at-least-once delivery, payload hash checks and owner protection. A normal operation checks its own request, state transition and related records. A full survey of all completed tasks does not become its hidden dependency. The already implemented separation of actor admission from history certification is kept.
 
-Проверить реальные SQL-планы выборки готовой работы, просроченных владельцев и результатов на установленном объёме данных. Изменение индексов или схемы, если оно понадобится, потребует отдельного описания миграции и согласования. История не удаляется для ускорения теста. Повторные попытки принадлежат одному уровню исполнения и не умножаются между планировщиком, очередью и провайдером.
+Check the real SQL plans for selecting ready work, expired owners and results on the installed data volume. Changing indexes or the schema, if needed, will require a separate migration description and approval. History is not deleted to speed up a test. Retries belong to one execution level and are not multiplied between the scheduler, the queue and the provider.
 
-### Проверка здоровья
+### Health check
 
-Разделить две явно названные области: оперативное состояние и полную проверку целостности. Оперативная проверка отвечает о доступности, владельцах, активной работе, накоплении, последних исходах и известных ошибках. Она не выдаёт заключения о физической целостности всех исторических записей.
+Split into two explicitly named scopes: operational state and the full integrity check. The operational check answers about availability, owners, active work, backlog, recent outcomes and known errors. It does not give a verdict on the physical integrity of all historical records.
 
-Полная проверка сохраняет SQLite integrity_check, внешние ключи, семантические инварианты, артефакты и проверки происхождения. Для каждой области отчёт указывает охват, время наблюдения и завершённость. Последний исторический результат не подменяет текущую сертификацию изменившейся базы. Прерванная проверка остаётся незавершённой. Известное повреждение остаётся ошибкой до подтверждённого восстановления.
+The full check keeps SQLite integrity_check, foreign keys, semantic invariants, artifacts and provenance checks. For each scope the report states the coverage, the observation time and the completeness. The last historical result does not stand in for the current certification of a changed database. An interrupted check stays incomplete. Known corruption stays an error until a confirmed recovery.
 
-Предлагаемый интерфейс: `doctor --scope full|operational`; значение по умолчанию `full` сохраняет действующее назначение CLI и проверки установщика. MCP и автоматический контекст сессии явно используют `operational`. Отчёт явно называет область проверки; общий статус относится только к ней, а отдельный пункт сообщает о последней полной проверке, её возрасте и известных отказах. Полный ночной отчёт остаётся в `logs/doctor-report.json`; краткий оперативный результат не перезаписывает его. Изменение схемы ответа и все её потребители обновляются вместе. Быстрая проверка никогда не разрешает удаление `run/`; действующие полные условия удаления сохраняются.
+Proposed interface: `doctor --scope full|operational`; the default `full` keeps the current purpose of the CLI and the installer checks. MCP and the automatic session context explicitly use `operational`. The report explicitly names the scope of the check; the overall status refers only to it, and a separate item reports the last full check, its age and known failures. The full nightly report stays in `logs/doctor-report.json`; the short operational result does not overwrite it. A change to the response schema and all its consumers are updated together. The quick check never permits deleting `run/`; the current full deletion conditions are kept.
 
-### Ночной цикл
+### Nightly cycle
 
-Сохранить один последовательный проход с явными зависимостями этапов. Каждый этап возвращает завершённость, ошибку либо причину отсрочки. Общий успех допустим только при завершении обязательных этапов; отсутствие ошибок в исполненных этапах недостаточно.
+Keep one sequential pass with explicit stage dependencies. Each stage returns completion, an error or a reason for deferral. Overall success is allowed only when the required stages are complete; the absence of errors in the stages that ran is not enough.
 
-Результат компиляции должен относиться к конкретной запущенной или наблюдаемой работе, а не выводиться только из изменения глобальной отметки времени. Повторный ночной запуск пользуется существующими квитанциями и идентичностью задач. Он не обещает выполнение ровно один раз и не удаляет источники по одному факту постановки в очередь.
+The compile result must refer to a specific started or observed job, not be inferred only from a change of a global timestamp. A repeated nightly run uses the existing receipts and task identity. It does not promise exactly-once execution and does not delete sources on the mere fact of enqueueing.
 
-Полная проверка истории выполняется отдельным явным этапом. Её стоимость и завершённость видны в итоговом отчёте. Оперативная диагностика не ждёт этого обхода. Увеличение таймаута не заменяет устранение повторной работы.
+The full history check runs as a separate explicit stage. Its cost and completeness are visible in the final report. Operational diagnostics do not wait for this traversal. Raising a timeout does not replace removing repeated work.
 
-## Основания выбора и альтернативы
+## Grounds for the choice and alternatives
 
-Источники проверены 2026-10-17. Это три независимых первичных источника; выбранная схема является выводом для данного проекта, а не готовым рецептом из одного документа.
+Sources checked on 2026-10-17. These are three independent primary sources; the chosen scheme is a conclusion for this project, not a ready recipe from one document.
 
-- [Google SRE, Monitoring](https://sre.google/workbook/monitoring/) различает быстрые эксплуатационные сигналы и подробный анализ истории, обсуждает свежесть и стоимость больших выборок. Отсюда выбор двух явно обозначенных областей проверки.
-- [AWS Builders Library, Timeouts, retries, and backoff with jitter](https://aws.amazon.com/builders-library/timeouts-retries-and-backoff-with-jitter/) объясняет усиление нагрузки повторами и необходимость учитывать побочные эффекты. Здесь это основание проверить владельца повторов и сохранять идемпотентность, а не добавлять случайные задержки.
-- [SQLite, Transactions](https://www.sqlite.org/lang_transaction.html) описывает снимки чтения, единственного писателя и поведение блокировок. Это основание сохранять короткие согласованные чтения и транзакционные переходы, не обещая актуальность снимка после его завершения.
-- [SQLite, How To Corrupt An SQLite Database File](https://www.sqlite.org/howtocorrupt.html) описывает опасность стороннего закрытия файлового дескриптора при открытых соединениях и безопасные способы копирования. Этот механизм ранее исправлялся в проекте; его связь с нынешним повреждением не доказана.
+- [Google SRE, Monitoring](https://sre.google/workbook/monitoring/) distinguishes fast operational signals from detailed history analysis and discusses freshness and the cost of large samples. Hence the choice of two explicitly labelled check scopes.
+- [AWS Builders Library, Timeouts, retries, and backoff with jitter](https://aws.amazon.com/builders-library/timeouts-retries-and-backoff-with-jitter/) explains load amplification by retries and the need to account for side effects. Here this is the ground for checking who owns retries and for keeping idempotency, rather than adding random delays.
+- [SQLite, Transactions](https://www.sqlite.org/lang_transaction.html) describes read snapshots, the single writer and locking behaviour. This is the ground for keeping short consistent reads and transactional transitions, without promising that a snapshot is current after it ends.
+- [SQLite, How To Corrupt An SQLite Database File](https://www.sqlite.org/howtocorrupt.html) describes the danger of a third party closing a file descriptor while connections are open, and safe ways to copy. This mechanism was fixed in the project earlier; its connection to the present corruption is not proven.
 
-Установленный runtime: Python 3.12.3, SQLite 3.45.1, локальный ext4. Минимальная совместимость Python 3.10 сохраняется. Переключение на WAL, замена SQLite, установка сервера очередей или фонового демона не предлагаются: они расширяют систему и не устраняют доказанные лишние обходы. Поддержку платформ следует подтвердить существующей матрицей CI, а не только Linux-тестами.
+Installed runtime: Python 3.12.3, SQLite 3.45.1, local ext4. Minimum compatibility with Python 3.10 is kept. Switching to WAL, replacing SQLite, installing a queue server or a background daemon are not proposed: they expand the system and do not remove the proven redundant traversals. Platform support should be confirmed by the existing CI matrix, not only by Linux tests.
 
-Альтернатива «увеличить все таймауты» оставляет стоимость зависимой от всей истории и не решает неоднозначность исходов. Альтернатива «кешировать зелёное здоровье» скрывает новые повреждения. Альтернатива «удалить историю» нарушает восстановление и удержание данных. Разделение областей делает результат точнее, но требует обновить всех потребителей статуса и явно показывать непроверенную область.
+The alternative "raise all timeouts" leaves the cost dependent on the whole history and does not resolve the ambiguity of outcomes. The alternative "cache a green health result" hides new corruption. The alternative "delete history" breaks recovery and data retention. Splitting the scopes makes the result more precise, but requires updating all status consumers and explicitly showing the unchecked scope.
 
-## Приёмка по девяти законам
+## Acceptance under the nine laws
 
-1. Перед каждой частью исследовать актуальный граф, вызовы, конфигурацию и работающие процессы; неполные сведения графа дополнять источниками. После установки обновить индекс.
-2. Для изменения контрактов зафиксировать решение владельца и обновить STRUCTURE до кода; при новых проектных вопросах дополнить исследование.
-3. Отдельно сообщать, что подготовлено, проверено и установлено. Нынешнее восстановление индексов не закрывает причину повреждения.
-4. Сравнить исходную и новую реализации на одинаковых снимках, включая полный полезный цикл модели, задержку, память и внимание оператора.
-5. Измерять CCN каждой изменённой функции, вложенность и число if. Пороги 5/2/2 обязательны для кода и тестов.
-6. Сохранить отказ при нарушении безопасности, обязательные проверки и ошибки. Непроверенное не обозначать успешным.
-7. Сначала воспроизвести исходный дефект, затем получить прохождение регрессии и связанных сценариев. Причина физического повреждения базы остаётся открытой до доказательства.
-8. После проверенной установки удалить заменённые вызовы и реализации, обновить документацию и индекс. Существующие исторические форматы сохранять только с указанными потребителями и условием удаления.
-9. Не вводить новые числовые пределы без основания. Существующие пределы проверить на соответствие ресурсам, провайдеру и контрактам; неподтверждённые значения не считать технической ёмкостью.
+1. Before each part, research the current graph, calls, configuration and running processes; supplement incomplete graph information from sources. Update the index after installation.
+2. For contract changes, record the owner's decision and update STRUCTURE before the code; for new design questions, extend the research.
+3. Report separately what is prepared, verified and installed. The present index recovery does not close the cause of the corruption.
+4. Compare the original and new implementations on identical snapshots, including the full useful model cycle, latency, memory and operator attention.
+5. Measure the CCN of each changed function, the nesting and the number of ifs. The 5/2/2 thresholds are mandatory for code and tests.
+6. Keep refusal on a security violation, mandatory checks and errors. Do not mark the unverified as successful.
+7. First reproduce the original defect, then get the regression and related scenarios to pass. The cause of the physical database corruption stays open until proven.
+8. After a verified installation, remove the replaced calls and implementations, and update the documentation and the index. Keep existing historical formats only with named consumers and a removal condition.
+9. Do not introduce new numeric limits without grounds. Check existing limits against resources, the provider and contracts; do not treat unconfirmed values as technical capacity.
 
-Критерии завершения: компиляция проблемного источника до проверенного результата либо точного непреодолённого ограничения; корректный повтор после прерывания; очередь не теряет нагрузку; диагностика охватывает заявленную область; полный ночной цикл имеет честный итог; установка и очистка заменённого кода подтверждены. Одни локальные тесты и отдельное восстановление базы всей задачи не закрывают.
+Completion criteria: compilation of the problem source to a verified result or to an exact unresolved limitation; correct retry after interruption; the queue does not lose payload; diagnostics cover the declared scope; the full nightly cycle has an honest outcome; installation and cleanup of replaced code are confirmed. Local tests and a separate database recovery alone do not close the whole task.
 
-## Реализация в рабочей копии, 2026-10-17
+## Implementation in the working copy, 2026-10-17
 
-Изменения ещё не установлены. Допуск теперь разделяет атомарные единицы, а не исключает весь день. Обязательный контекст и физические границы сохраняются. Успешный коммит не снимает отказ для другого вхождения одинаковых байтов. Удалена запись сохранённого отказа компиляции как потери захвата; сам отказ сохраняется в очереди. Исторические счётчики автоматически не обнулялись.
+The changes are not yet installed. Admission now separates atomic units instead of excluding the whole day. Required context and physical boundaries are kept. A successful commit does not lift a refusal for another occurrence of identical bytes. Recording a stored compile refusal as a capture loss was removed; the refusal itself is kept in the queue. Historical counters were not reset automatically.
 
-В парном опыте предварительного планирования на одинаковом реальном источнике и контексте исходная реализация допустила 0 из 63 частей; кандидат допустил 51, оставив 12 отказов. Кандидат выполнил эту фазу за 4,905 секунды. Это не измерение токенов провайдера и не проверка полезного результата: модель не вызывалась. Отдельная первоначальная проба использовала преждевременную сборку окончательного контекста всех запросов и была прервана; её нельзя сравнивать с производственным последовательным путём как доказательство скорости.
+In a paired preliminary-planning experiment on the same real source and context, the original implementation admitted 0 of 63 parts; the candidate admitted 51, leaving 12 refusals. The candidate completed this phase in 4.905 seconds. This is not a measurement of provider tokens and not a check of the useful result: the model was not called. A separate initial probe used premature assembly of the final context for all requests and was interrupted; it cannot be compared with the production sequential path as evidence of speed.
 
-Оперативный `doctor` проверяет допуск писателей, окружение, каталоги runtime, диагностические записи захвата, расписание, модели, настройки, ошибки хуков, LSP, файловую блокировку и SQL-счётчики очереди/транзакций. Он не проверяет содержимое всей истории, её артефакты, архивы, claims, backup, checkpoints, MCP/integration installation, Pyright installation или полноту поколения. Ответ явно содержит `scope`, `coverage` и `duration_seconds`; это добавочные поля существующего JSON-ответа. MCP status передаёт область, покрытие и время измерения. Удаление runtime в оперативном режиме всегда остаётся непроверенным и запрещённым. Полный режим сохраняет прежние проверки и остаётся значением по умолчанию. Изменения схемы SQLite и индексов не требуются: измеренные агрегаты на живых базах заняли около 0,3 секунды для очереди и 0,25 секунды для транзакций; транзакционный агрегат выполняет просмотр таблицы, а не обещает постоянное время.
+The operational `doctor` checks writer admission, the environment, runtime directories, capture diagnostic records, the schedule, models, settings, hook errors, LSP, file locking and the SQL counters of the queue/transactions. It does not check the content of the whole history, its artifacts, archives, claims, backup, checkpoints, MCP/integration installation, Pyright installation or generation completeness. The response explicitly contains `scope`, `coverage` and `duration_seconds`; these are additional fields of the existing JSON response. MCP status passes on the scope, coverage and measurement time. Deleting runtime in operational mode always stays unverified and forbidden. Full mode keeps the previous checks and stays the default. No SQLite schema or index changes are required: the measured aggregates on live databases took about 0.3 seconds for the queue and 0.25 seconds for transactions; the transaction aggregate performs a table scan and does not promise constant time.
 
-Оперативный проход кандидата по живой системе завершился за 1,143 секунды со всеми проверками своей области. Он сообщил реальные текущие ошибки; это не сертификат исправности всей системы. Контекст сессии по-прежнему ограничен прежним бюджетом 0,1 секунды и может быть неполным. Завершённые проверки остаются видимыми; непроверенные перечисляются. Исторический ночной отчёт датирован отдельно и больше не подменяет текущую проверку.
+The candidate's operational pass over the live system finished in 1.143 seconds with all checks of its scope. It reported real current errors; this is not a certificate of health for the whole system. The session context is still bounded by the previous 0.1-second budget and may be incomplete. Completed checks stay visible; unchecked ones are listed. The historical nightly report is dated separately and no longer stands in for the current check.
 
-Ночная компиляция выполняется собственным дочерним процессом через существующий runner. Его выход и артефакты принадлежат конкретному шагу. Общие отметки начала/конца компиляции больше не используются для вывода о его результате. Сохраняется существующий настраиваемый `MEMORY_COMPILE_WAIT_SECONDS`; теперь это предел ожидания собственного дочернего процесса, чей таймаут является отказом шага с сохранением уже подтверждённых квитанций. Занятый чужой компилятор приводит к явной отсрочке без изменения его исходных страниц. Зависимые этапы после отказа своего компилятора не запускаются. Состояние ночи различает `success`, `failed`, `deferred`; только полное завершение обновляет отметку последнего успеха. Неполный полный health-report даёт отсрочку, ошибка исполнения проверки — отказ, обнаруженная проверкой неисправность остаётся в самом отчёте. Это различает завершение диагностики и исправность проверяемой системы.
+The nightly compile runs as its own child process through the existing runner. Its output and artifacts belong to a specific step. The shared compile start/end marks are no longer used to infer its result. The existing configurable `MEMORY_COMPILE_WAIT_SECONDS` is kept; it is now the wait limit for its own child process, whose timeout is a step failure that keeps the receipts already confirmed. A busy foreign compiler leads to an explicit deferral without changing its source pages. Dependent stages do not start after their own compiler fails. The night state distinguishes `success`, `failed`, `deferred`; only full completion updates the last-success mark. An incomplete full health report gives a deferral, a check execution error gives a failure, and a fault found by the check stays in the report itself. This distinguishes completion of diagnostics from the health of the checked system.
 
-Удалены заменённые дневные фильтры, неиспользуемая проверка размера целого дня, фиктивный тест записи отказа и ночной опрос результата через глобальные timestamps. Историческое поле `nightly_deferred_compile` продолжает читаться до первого успешно завершённого нового прохода; тогда оно снимается, поскольку новый результат прямо выражает завершённость. Старые форматы квитанций сохраняют существующих читателей и не превращаются в авторитетные квитанции текущих физических частей.
+Removed: the replaced daily filters, the unused whole-day size check, the fake refusal-recording test and the nightly polling of the result through global timestamps. The historical field `nightly_deferred_compile` is still read until the first successfully completed new pass; then it is cleared, because the new result expresses completion directly. Old receipt formats keep their existing readers and do not become authoritative receipts for the current physical parts.
 
-Проверки на данном промежуточном этапе: объединённый набор дал 1169 passed, 3 skipped; отдельные проверки физических квитанций — ещё 3 passed. Анализатор проверил 119 изменённых/новых функций, пороги 5/2/2 соблюдены; Ruff прошёл. Первый полный прогон был остановлен после 1959 passed, 4 skipped для исправления классификации исторических отказов; это не успешный полный прогон. Новый полный прогон выполняется. Найденная при дополнительной проверке неточность поля `adoption_error` воспроизведена отдельным падающим тестом и исправлена; 70 проверок диагностики и контекста прошли отдельно, поскольку основной процесс уже загрузил предыдущую версию модуля. Структурный линтер с явно заданными корнями рабочей копии не нашёл нарушений; отдельный запуск на живой памяти обнаружил устаревшую компиляцию дневника 15 октября. Установка и окончательная очистка пока не завершены.
+Checks at this intermediate stage: the combined set gave 1169 passed, 3 skipped; separate checks of physical receipts gave another 3 passed. The analyzer checked 119 changed/new functions; the 5/2/2 thresholds are met; Ruff passed. The first full run was stopped after 1959 passed, 4 skipped to fix the classification of historical refusals; this is not a successful full run. A new full run is in progress. An inaccuracy of the `adoption_error` field found during an additional check was reproduced by a separate failing test and fixed; 70 diagnostics and context checks passed separately, because the main process had already loaded the previous version of the module. The structural linter with the working copy's roots set explicitly found no violations; a separate run on the live memory found a stale compile of the October 15 daily log. Installation and final cleanup are not yet complete.
 
-### Полезный цикл с реальным провайдером
+### Useful cycle with a real provider
 
-Парный опыт выполнен в двух изолированных тестовых хранилищах с одинаковыми исходными байтами и обязательным контекстом, Codex/gpt-6-luna, reasoning medium. В одном источнике две независимые части: первая содержит два проверяемых факта, обязательный контекст второй не помещается в подтверждённый рабочий бюджет. Исходная реализация отказала обеим частям: ноль вызовов модели и ноль сохранённых страниц. Кандидат сохранил одну страницу с обоими подтверждёнными фактами за 15,889 секунды: два вызова (черновик и критик), 23 783 входных и 571 выходной токен. 15 104 кешированных входных токена входят в указанное входное число и повторно не прибавляются.
+A paired experiment was run in two isolated test stores with identical source bytes and required context, Codex/gpt-6-luna, reasoning medium. One source has two independent parts: the first contains two verifiable facts; the required context of the second does not fit into the confirmed working budget. The original implementation refused both parts: zero model calls and zero saved pages. The candidate saved one page with both confirmed facts in 15.889 seconds: two calls (draft and critic), 23,783 input and 571 output tokens. The 15,104 cached input tokens are included in the stated input number and are not added again.
 
-Повторный запуск занял 1,695 секунды и не вызвал модель. Исходные байты сохранены, авторитетная квитанция есть только для первой части, весь день остаётся незавершённым, отказ второй части остаётся в очереди. Это подтверждение полезного цикла на контролируемом примере, включая проверку и повтор; оно не подтверждает завершение всей установленной памяти. Предварительный опыт без счётчика провайдера не включён в эти числа; его стоимость неизвестна.
+The repeated run took 1.695 seconds and did not call the model. The source bytes are kept, an authoritative receipt exists only for the first part, the whole day stays incomplete, and the refusal of the second part stays in the queue. This confirms the useful cycle on a controlled example, including verification and retry; it does not confirm completion of the whole installed memory. The preliminary experiment without the provider counter is not included in these numbers; its cost is unknown.
 
-Проверка SQL-планов на живых базах: группировка очереди использует `queue_claim_order`, поиск повторной задачи — `queue_redrive_parent`, подсчёт отказов — существующий индекс `source_failures`. Агрегат транзакций читает таблицу; измерение при текущей нагрузке заняло 0,465 секунды. Эти результаты не обосновывают изменение схемы или новый индекс.
+Checking the SQL plans on live databases: queue grouping uses `queue_claim_order`, the search for a retry task uses `queue_redrive_parent`, and the refusal count uses the existing `source_failures` index. The transaction aggregate reads the table; the measurement under the current load took 0.465 seconds. These results do not justify a schema change or a new index.
 
-### Зависимости и повторные запуски: дополнительная проверка 17 октября
+### Dependencies and repeated runs: additional check on October 17
 
-Исходный ежедневный контракт catch-up нарушался после ошибки или отсрочки: новый сеанс снова запускал весь проход, поскольку проверялся только день последнего успеха. Три регрессии воспроизвели это через настоящий производитель ночного результата и потребитель в начале сеанса. Catch-up теперь учитывает день записанной попытки отдельно от дня успеха. Это существующая суточная периодичность, а не новый числовой предел. Ручной запуск остаётся доступен; истёкшая заявка без записанного исхода остаётся повторяемой. 99 связанных тестов прошли.
+The original daily catch-up contract was broken after an error or a deferral: a new session started the whole pass again, because only the day of the last success was checked. Three regressions reproduced this through the real producer of the nightly result and the consumer at session start. Catch-up now takes the day of the recorded attempt into account separately from the day of success. This is the existing daily periodicity, not a new numeric limit. A manual run stays available; an expired claim without a recorded outcome stays retryable. 99 related tests passed.
 
-CI обнаружил CVE-2026-59951 в закреплённой `mcp 1.29.0`. Наш HTTP-адаптер создаёт `StreamableHTTPSessionManager` в затронутом режиме с состоянием. Версия 1.30.0 сохраняет поддержку Python 3.10 и исправляет освобождение сеансов. Минимальная зависимость, lock-файл и проверяющий её sync-контракт обновлены вместе. В lock-файле поменялся только MCP; переход на несовместимую ветку 2.x не требуется. 456 проверок MCP, HTTP, ресурсов и синхронизации прошли, 6 пропущены. Обе проверки зависимостей из CI — PyPI и строгая OSV, включая `torch +cpu` — не нашли известных уязвимостей. Анализ сложности охватил 135 изменённых функций без превышений.
+CI found CVE-2026-59951 in the pinned `mcp 1.29.0`. Our HTTP adapter creates `StreamableHTTPSessionManager` in the affected stateful mode. Version 1.30.0 keeps Python 3.10 support and fixes session release. The minimum dependency, the lock file and the sync contract that checks it were updated together. In the lock file only MCP changed; moving to the incompatible 2.x branch is not required. 456 MCP, HTTP, resource and sync checks passed, 6 were skipped. Both dependency checks from CI, PyPI and strict OSV, including `torch +cpu`, found no known vulnerabilities. Complexity analysis covered 135 changed functions with no violations.
 
-Новые значения по умолчанию SDK для HTTP-сеансов — освобождение после 1800 секунд простоя и максимум 10000 сеансов — являются документированной защитой upstream от подтверждённого исчерпания памяти. Работающие запросы не прерываются из-за простоя. Это настройки `StreamableHTTPSessionManager`, а не лимиты компиляции или очереди; их следует пересматривать при изменении доступной памяти и профиля HTTP-нагрузки. Поддерживаемые upstream параметры `session_idle_timeout` и `max_sessions` описаны в advisory.
+The SDK's new defaults for HTTP sessions, release after 1800 seconds of idleness and a maximum of 10000 sessions, are upstream's documented protection against a confirmed memory exhaustion. Running requests are not interrupted because of idleness. These are `StreamableHTTPSessionManager` settings, not compile or queue limits; they should be revisited when the available memory or the HTTP load profile changes. The upstream-supported parameters `session_idle_timeout` and `max_sessions` are described in the advisory.
 
-Источники: [официальное описание CVE](https://github.com/modelcontextprotocol/python-sdk/security/advisories/GHSA-84m7-p3x7-pcfv), [изменения SDK 1.30.0](https://github.com/modelcontextprotocol/python-sdk/releases/tag/v1.30.0), [требования к Python в релизе](https://github.com/modelcontextprotocol/python-sdk/blob/v1.30.0/pyproject.toml). Предыдущий локальный общий прогон остановлен после 2514 passed, 6 skipped для замены уязвимой зависимости; он не считается полным прохождением. Окончательный общий прогон идёт в отдельном окружении с новым lock-файлом.
+Sources: [the official CVE description](https://github.com/modelcontextprotocol/python-sdk/security/advisories/GHSA-84m7-p3x7-pcfv), [SDK 1.30.0 changes](https://github.com/modelcontextprotocol/python-sdk/releases/tag/v1.30.0), [the Python requirements in the release](https://github.com/modelcontextprotocol/python-sdk/blob/v1.30.0/pyproject.toml). The previous local full run was stopped after 2514 passed, 6 skipped to replace the vulnerable dependency; it does not count as a full pass. The final full run is in progress in a separate environment with the new lock file.
 
-### Поиск после частичного результата
+### Search after a partial result
 
-Проверка зависимости от поискового индекса обнаружила ещё один дефект: CLI обновлял поколение только при коде выхода 0. Сохранённые страницы частично неуспешного прохода оставались вне действующего индекса. Регрессия построила настоящий исходный индекс, смоделировала подтверждённую запись страницы и отказ другой части на границе компилятора, затем воспроизвела отсутствие сохранённого факта в поиске. После изменения завершённая попытка CLI обновляет производное поколение независимо от итогового кода компиляции; dry-run по-прежнему не запускает обновление. Код отказа сохраняется. Существующие ограждение поколения, проверка снимка, ограничения ресурсов и явные отказы построителя не меняются.
+A check of the dependency on the search index found another defect: the CLI refreshed the generation only on exit code 0. Pages saved by a partly failed pass stayed outside the active index. The regression built a real source index, simulated a confirmed page write and a refusal of another part at the compiler boundary, and then reproduced the absence of the saved fact in search. After the change, a completed CLI attempt refreshes the derived generation regardless of the final compile code; dry-run still does not start the refresh. The failure code is kept. The existing generation fencing, snapshot check, resource limits and explicit builder refusals do not change.
 
-78 проверок поколения и поиска прошли, 2 пропущены; 13 проверок границы CLI прошли после дополнения неполного тестового аргумента `dry_run`. В прежнем изолированном примере с реальным провайдером повтор занял 3,370 секунды, не вызвал модель и построил индекс ранее сохранённой страницы. Публичный поиск по действующему поколению нашёл оба проверенных факта. Вторая часть по-прежнему отказана, код компиляции — 1. Это проверка полезного результата до поиска, а не только наличия Markdown.
+78 generation and search checks passed, 2 were skipped; 13 CLI boundary checks passed after completing the incomplete test argument `dry_run`. In the earlier isolated example with a real provider, the retry took 3.370 seconds, did not call the model and built the index of the previously saved page. Public search over the active generation found both verified facts. The second part is still refused; the compile code is 1. This is a check of the useful result up to search, not only of the presence of Markdown.
 
-CI выявил три оставшихся обращения тестов к удалённому ночному опросу. Они заменены проверками нового результата и миграции: неполный проход сохраняет исторический признак отсрочки, полный проход снимает его, чужая отметка компиляции не превращает свою отсрочку в успех. 50 связанных тестов прошли. Поиск ссылок на удалённые функции не выявил оставшихся потребителей; одноимённый `_safe_state` в `episode_consolidation` является отдельной действующей функцией. Сложность проверена для 145 изменённых функций, пороги соблюдены.
+CI found three remaining test calls to the removed nightly polling. They were replaced with checks of the new result and migration: an incomplete pass keeps the historical deferral flag, a full pass clears it, and a foreign compile mark does not turn one's own deferral into success. 50 related tests passed. A search for references to the removed functions found no remaining consumers; the same-named `_safe_state` in `episode_consolidation` is a separate live function. Complexity was checked for 145 changed functions; the thresholds are met.
 
-Полная диагностика живого хранилища закончилась за 1618 секунд без исчерпания общего бюджета. Это не сертификат исправности: чтение артефактов транзакций завершилось `TimeoutError`, проверка доказательств очереди — `database is locked`, а проверка поколения обнаружила превышение настроенного `corpus.max_total_bytes`. Полная проверка не была заменена оперативной, неисправности не очищались, производственные таймауты и предел корпуса не повышались. Оперативный проход текущего кандидата завершил свою область за 1,816 секунды с явным статусом error. Установка и подтверждение полного ночного цикла остаются незавершёнными.
+Full diagnostics of the live store finished in 1618 seconds without exhausting the overall budget. This is not a certificate of health: reading transaction artifacts ended with `TimeoutError`, the queue evidence check with `database is locked`, and the generation check found that the configured `corpus.max_total_bytes` was exceeded. The full check was not replaced by the operational one, faults were not cleared, and production timeouts and the corpus limit were not raised. The current candidate's operational pass completed its scope in 1.816 seconds with an explicit error status. Installation and confirmation of the full nightly cycle remain incomplete.
 
-### Срок дочернего компилятора учитывает построение индекса
+### The child compiler's deadline accounts for index building
 
-Проверка всей цепочки обнаружила ошибку нового синхронного вызова: внешний срок равнялся только `MEMORY_COMPILE_WAIT_SECONDS`, хотя CLI перед выходом выполняет обновление с отдельным `generation.post_compile_seconds`. Для установленного профиля 1800 секунд обрывали бы индекс, которому конфигурация отводит 6919 секунд. Две регрессии подтвердили недостаточный срок и потерю настройки целевого vault при расчёте планировщика. Срок дочернего процесса теперь складывается из этих существующих бюджетов и существующего запаса запуска; общий срок прохода использует настройки переданного vault. Бюджеты самих операций не повышены, новые настройки не введены.
+A check of the whole chain found an error in the new synchronous call: the outer deadline equalled only `MEMORY_COMPILE_WAIT_SECONDS`, although before exiting the CLI performs a refresh with a separate `generation.post_compile_seconds`. For the installed profile, 1800 seconds would cut off an index for which the configuration allows 6919 seconds. Two regressions confirmed the insufficient deadline and the loss of the target vault's setting in the scheduler's calculation. The child process deadline is now the sum of these existing budgets and the existing launch margin; the overall pass deadline uses the settings of the passed vault. The budgets of the operations themselves were not raised, and no new settings were introduced.
 
-Прежняя проверка Windows дополнительно обнаружила, что полный бюджет по умолчанию, 15092 секунды в режиме auto, превышает запасной четырёхчасовой срок. Общая таблица и PowerShell теперь задают пять часов — округление полного бюджета с запасом запуска; установщик по-прежнему выводит больший срок из конкретных настроек. Проверка этого неравенства сохранена. Пересмотр требуется при изменении состава шагов, бюджетов или провайдера; тест проверяет сумму автоматически.
+The earlier Windows check also found that the default full budget, 15092 seconds in auto mode, exceeds the fallback four-hour deadline. The shared table and PowerShell now set five hours, the full budget rounded up with the launch margin; the installer still derives a larger deadline from the specific settings. The check of this inequality is kept. A revision is required when the set of steps, the budgets or the provider change; the test checks the sum automatically.
 
-Общий локальный прогон, начатый до последнего изменения поиска, завершился с 12671 passed, 234 skipped и тремя падениями старых, уже загруженных тестов удалённых ночных функций. Актуальные версии трёх файлов отдельно дали 21 passed. Такой результат не обозначается полным прохождением последнего коммита; актуальные связанные проверки и матрица CI учитываются отдельно.
+The full local run, started before the last search change, finished with 12671 passed, 234 skipped and three failures of old, already loaded tests of the removed nightly functions. The current versions of the three files gave 21 passed separately. Such a result is not labelled a full pass of the last commit; the current related checks and the CI matrix are counted separately.
 
-### Установка и состояние проверки, 17 октября, 13:25 UTC
+### Installation and check state, October 17, 13:25 UTC
 
-Код e09c7b19 установлен штатным контроллером; запись установки 43 подтверждает commit, lock-файл и четыре управляемых ресурса. MCP обновлён с 1.29.0 до 1.30.0, другие установленные пакеты сохранены. Локальный планировщик получил семь часов: его 25200 секунд превышают расчётные 24668 секунд профиля auto с рабочими настройками. Это состояние установки уточняет более ранние записи выше о ещё не установленном кандидате.
+Code e09c7b19 was installed by the standard controller; installation record 43 confirms the commit, the lock file and four managed resources. MCP was updated from 1.29.0 to 1.30.0; other installed packages were kept. The local scheduler got seven hours: its 25200 seconds exceed the computed 24668 seconds of the auto profile with the working settings. This installation state refines the earlier records above about a not-yet-installed candidate.
 
-Оперативная диагностика установленной версии завершилась за 1,344 секунды с error. Новый процесс MCP предоставил прежние 12 инструментов и вернул явную оперативную область с исключениями. Уже открытые процессы сохраняют старые модули до штатного перезапуска; активные сеансы не прерывались. Изолированный повтор дал 73 passed. Запуск этих тестов прямо в живом vault также зафиксировал несопоставимость теста стандартного срока с рабочими настройками и новые файлы параллельного захвата; этот прогон не считается успешным. Отдельно проверены фактическая служба и расчёт рабочего срока.
+Operational diagnostics of the installed version finished in 1.344 seconds with error. A new MCP process offered the same 12 tools and returned an explicit operational scope with exclusions. Already open processes keep the old modules until a normal restart; active sessions were not interrupted. An isolated repeat gave 73 passed. Running these tests directly in the live vault also recorded that the standard-deadline test is not comparable with the working settings, and new files from parallel capture; this run does not count as successful. The actual service and the working deadline calculation were checked separately.
 
-CI нашёл пропущенное старое число в руководстве и тест установки, чья подстановка `TimeoutStartSec=4h` перестала менять файл. Руководство синхронизировано. Тест теперь получает исходный срок из конфигурации и требует, чтобы подстановка действительно изменила строку; проверки сохранности пользовательского изменения не ослаблены. Полная матрица CI и завершение полного ночного прохода на рабочем корпусе остаются отдельными незакрытыми проверками.
+CI found a missed old number in the guide and an installation test whose substitution of `TimeoutStartSec=4h` no longer changed the file. The guide was synchronized. The test now takes the original deadline from the configuration and requires the substitution to actually change the line; the checks that a user change is preserved were not weakened. The full CI matrix and completion of the full nightly pass on the working corpus remain separate open checks.
 
-### Полный обход захватов использует бюджет очереди
+### The full capture traversal uses the queue budget
 
-Повторный полный doctor завершился за 506,555 секунды: транзакции прочитаны без `read_error`, одна неразрешённая отказанная операция остаётся видимой. Пустой незарегистрированный остаток подготовки перед этим удалён существующим методом только после проверки отсутствия строки/операций, пустых образов и доказательства смерти владельца. Это восстановление остатка, а не установление причины смерти процесса или прежнего повреждения SQLite. Разные проходы выполнялись при разной нагрузке; их длительности не являются парным сравнением производительности.
+A repeated full doctor finished in 506.555 seconds: transactions were read without `read_error`, and one unresolved refused operation stays visible. An empty unregistered preparation leftover was removed beforehand by the existing method, only after checking for the absence of a row/operations, empty images and proof of the owner's death. This is recovery of a leftover, not establishing the cause of the process's death or of the earlier SQLite corruption. The different passes ran under different loads; their durations are not a paired performance comparison.
 
-Обход сохранённых захватов дважды отказал с `database is locked`. Регрессия на настоящем SQLite воспроизвела отказ при коммите, который дольше начального ожидания doctor 250 мс, но короче бюджета вызывающего полного обследования. Другой тест показал, что прежнее ожидание не уменьшалось до оставшихся 125 мс. Обе проверки падают на исходной функции. Теперь перед каждой порцией SQL обновляется существующий `busy_timeout`: берётся уже установленный бюджет очереди `DEFAULTS.queue_busy_ms`, а общий помощник ограничивает его оставшимся сроком. Проверки содержимого не меняются, задержки и повторы поверх SQLite не добавляются; завершённый SELECT по-прежнему освобождает читателя перед файловой проверкой.
+The traversal of stored captures failed twice with `database is locked`. A regression on real SQLite reproduced the failure with a commit longer than doctor's initial 250 ms wait but shorter than the budget of the calling full survey. Another test showed that the previous wait was not reduced to the remaining 125 ms. Both checks fail on the original function. Now the existing `busy_timeout` is refreshed before each SQL batch: it takes the already established queue budget `DEFAULTS.queue_busy_ms`, and a shared helper bounds it by the remaining deadline. The content checks do not change, and no delays or retries are added on top of SQLite; a completed SELECT still releases the reader before the file check.
 
-Основание: [SQLite busy timeout](https://www.sqlite.org/c3ref/busy_timeout.html) и [Python sqlite3 timeout](https://docs.python.org/3/library/sqlite3.html#sqlite3.connect), проверены 2026-10-17; общий выбор коротких эксплуатационных сигналов и полного обследования опирается также на приведённое выше исследование Google SRE и AWS. Новое числовое ограничение не вводится. Исследован свежий граф ROOT для 1166e92a; отдельная рабочая копия создана от этого же коммита.
+Grounds: [SQLite busy timeout](https://www.sqlite.org/c3ref/busy_timeout.html) and [Python sqlite3 timeout](https://docs.python.org/3/library/sqlite3.html#sqlite3.connect), checked on 2026-10-17; the general choice of short operational signals and a full survey also rests on the Google SRE and AWS research cited above. No new numeric limit is introduced. A fresh ROOT graph for 1166e92a was researched; a separate working copy was created from the same commit.
 
-83 связанные проверки прошли, 3 пропущены; ещё 31 проверка сроков и потребителей прошла, 2 PowerShell-проверки пропущены из-за отсутствия оболочки. На живом корпусе кандидат проверил 100382 сохранённых захвата за 113,826 секунды без ошибки чтения. Последующее полное обследование очереди заняло 152,430 секунды: `read_error=false`, неполных захватов нет, два законченных ожидающих записи сохранены для восстановления. Очередь остаётся degraded по реальным ожидающим работам, а не объявляется полностью здоровой. Это не доказательство завершения полного ночного цикла. Анализ сложности охватил 154 изменённых Python-функции без превышений.
+83 related checks passed, 3 were skipped; another 31 deadline and consumer checks passed, and 2 PowerShell checks were skipped because the shell is absent. On the live corpus the candidate checked 100382 stored captures in 113.826 seconds without a read error. The subsequent full queue survey took 152.430 seconds: `read_error=false`, no incomplete captures, and two finished pending records were kept for recovery. The queue stays degraded because of real pending work, rather than being declared fully healthy. This is not proof that the full nightly cycle completed. Complexity analysis covered 154 changed Python functions with no violations.
 
-CI дополнительно нашёл старое значение 4 в ожидаемом результате PowerShell-теста; ожидание теперь берётся из общей таблицы установщика, а явные операторские значения проверяются прежним способом. При ручном обновлении выявлена также ошибка процедуры: вызов низкоуровневого установщика без сохранённого окружения заменил выбор провайдера. Исходные команды восстановлены по хешам предыдущей установки, доверие Codex hooks снова подтверждено. Для следующего обновления обязательны чтение проверенного `installed_codex_provider_bundle` до изменения и сверка желаемых фрагментов перед записью; сами настройки доверия не изменялись. Влияние промежутка изменённых hooks на полноту захвата отдельно не доказано.
+CI also found the old value 4 in the expected result of a PowerShell test; the expectation is now taken from the installer's shared table, and explicit operator values are checked as before. A manual update also revealed a procedure error: calling the low-level installer without the saved environment replaced the provider choice. The original commands were restored from the hashes of the previous installation, and Codex hooks trust was confirmed again. For the next update it is mandatory to read the verified `installed_codex_provider_bundle` before the change and to compare the desired fragments before writing; the trust settings themselves were not changed. The effect of the interval with changed hooks on capture completeness is not separately proven.
 
-### Настраиваемое полное обследование и проверка пределов, 17 октября
+### Configurable full survey and limit review, October 17
 
-Владелец поручил продолжить после конкретного предложения настройки и отдельно
-потребовал соответствия всех ограничений закону9. Решение и STRUCTURE записаны до
-изменения кода. Реестр теперь содержит `doctor.nightly_seconds` с обычным алиасом
-окружения; ночной doctor и расчёт внешнего срока читают одно значение выбранного
-vault. Неверные значения явно отказывают. Прежние60 секунд — совместимый исходный
-профиль, достаточность которого не доказана для произвольного корпуса. Сам факт
-наличия настройки не доказывает обоснованность её значения. Для данного vault
-предложены3600 секунд: два полных обследования заняли507 и1618 секунд, запас
-учитывает наблюдаемую вариацию нагрузки при ограниченной стоимости обслуживания.
-Пересмотр обязателен после роста истории, нагрузки или изменения ресурсов.
+The owner instructed to continue after a specific settings proposal and separately
+required all limits to comply with law 9. The decision and STRUCTURE were recorded before
+the code change. The registry now contains `doctor.nightly_seconds` with the usual environment
+alias; the nightly doctor and the outer deadline calculation read one value of the selected
+vault. Invalid values are explicitly refused. The previous 60 seconds is a compatible original
+profile whose sufficiency for an arbitrary corpus is not proven. The mere existence
+of a setting does not prove that its value is justified. For this vault
+3600 seconds is proposed: two full surveys took 507 and 1618 seconds, and the margin
+accounts for the observed load variation at a bounded maintenance cost.
+A revision is mandatory after growth of history, load or a change of resources.
 
-Три независимых источника повторно проверены2026-10-17: Google SRE Monitoring,
-AWS Timeouts/retries/backoff и SQLite Transaction (ссылки выше). Выбор3600 является
-местным эксплуатационным компромиссом, а не их численной рекомендацией. Альтернативы
-и последствия зафиксированы в решении. Никакие проверки не исключены ради срока.
-Новые регрессии воспроизвели отсутствие настройки, затем97 связанных проверок
-прошли,2 PowerShell-проверки пропущены локально. Сложность158 изменённых функций
-прошла5/2/2, Ruff прошёл. Установка и фактическое полное обследование отдельно.
+Three independent sources were checked again on 2026-10-17: Google SRE Monitoring,
+AWS Timeouts/retries/backoff and SQLite Transaction (links above). The choice of 3600 is
+a local operational trade-off, not their numeric recommendation. Alternatives
+and consequences are recorded in the decision. No checks were excluded for the sake of the deadline.
+New regressions reproduced the absence of the setting; then 97 related checks
+passed, and 2 PowerShell checks were skipped locally. The complexity of 158 changed functions
+passed 5/2/2, and Ruff passed. Installation and the actual full survey are separate.
 
-Конечная предыдущая CI-матрица e909 завершилась ошибкой одного теста на пяти
-Windows-версиях Python: тест искал POSIX-разделитель в Windows-пути. Теперь он
-сравнивает полный ожидаемый путь через pathlib; требование прямого запуска
-compile_memory сохранено. Это не свидетельство ошибки рабочего запуска Windows.
+The final previous CI matrix e909 ended with a failure of one test on five
+Windows Python versions: the test looked for a POSIX separator in a Windows path. Now it
+compares the full expected path through pathlib; the requirement to launch
+compile_memory directly is kept. This is not evidence of an error in the working Windows launch.
 
-Живая компиляция PID1376057 продолжала публиковать части почти три часа.
-Две трассировки показали полное чтение и разбор каталога квитанций заново внутри
-публикации и зеркала статуса после каждой части. Это подтверждённая повторная
-работа, но доля общего времени ещё не измерена. Процесс не убивали, проверки
-авторитетности не обходили. Оптимизация и полная приёмка остаются открытыми;
-увеличение бюджета doctor не исправляет эту причину. Полного соответствия всех
-старых ограничений закону9 данный узкий набор изменений не доказывает.
+The live compile PID 1376057 kept publishing parts for almost three hours.
+Two traces showed the receipt directory being fully read and parsed again inside
+publication and the status mirror after each part. This is confirmed repeated
+work, but its share of the total time is not yet measured. The process was not killed, and the authority
+checks were not bypassed. Optimization and full acceptance remain open;
+raising the doctor budget does not fix this cause. This narrow set of changes does not prove
+full compliance of all old limits with law 9.
 
-### Повторный разбор квитанций, 17 октября
+### Repeated receipt parsing, October 17
 
-30-секундный профиль действующего компилятора дал2328 образцов стека, из них1365
-(58,6%) внутри загрузки каталога квитанций. Это измерение данного интервала, не
-доля всего прохода. Регрессия на двух селекторах воспроизвела повторную полную
-валидацию неизменного документа. Теперь один compile-call владеет контекстом
-чистого разбора. Для каждого пути хранится только последний SHA256 прочитанных
-байтов и канонически закодированный дескриптор источника. Повторный обход снова
-читает все файлы, проверяет актуальную схему и имя; изменение байтов запускает
-полную проверку. Каждому потребителю возвращается отдельный объект. Проверки
-SQL-транзакции, внешнего источника, квитанции при положительном совпадении и
-срока остаются живыми. Контекст освобождается в finally перед построением индекса;
-вне compile-call повторного использования нет. Нового числового предела нет:
-память растёт с числом путей уже существующего каталога и не хранит их версии.
+A 30-second profile of the running compiler gave 2328 stack samples, of which 1365
+(58.6%) were inside loading the receipt directory. This is a measurement of that interval, not
+a share of the whole pass. A regression on two selectors reproduced repeated full
+validation of an unchanged document. Now one compile-call owns the pure-parse
+context. For each path only the last SHA256 of the bytes read
+and the canonically encoded source descriptor are kept. A repeated traversal again
+reads all files and checks the current schema and name; a change of bytes starts
+a full check. Each consumer gets a separate object. The checks of the
+SQL transaction, the external source, the receipt on a positive match and the
+deadline stay live. The context is released in finally before index building;
+outside a compile-call there is no reuse. There is no new numeric limit:
+memory grows with the number of paths of the already existing directory and does not keep their versions.
 
-На одном замороженном списке8036 реальных путей два исходных обхода заняли
-13,790 и13,086s, два обхода кандидата13,678 и1,690s. Во всех случаях один SHA256
-каталога и8024 ключа источников. Пик RSS отдельных процессов54204 и59196KiB;
-дополнительная память около4,9MiB. Измерение включает чтение и сравнение каталога,
-не весь compile и не его LLM-вызовы. Общая машина и порядок прогонов ограничивают
-точность сравнения. Первый измерительный скрипт отказал из-за tuple вместо JSON
-list; исправлен только скрипт, не продукт. Источники не менялись экспериментом.
+On one frozen list of 8036 real paths, two original traversals took
+13.790 and 13.086 s, and two candidate traversals 13.678 and 1.690 s. In all cases one SHA256
+of the directory and 8024 source keys. Peak RSS of the separate processes was 54204 and 59196 KiB;
+the additional memory is about 4.9 MiB. The measurement covers reading and comparing the directory,
+not the whole compile and not its LLM calls. A shared machine and the order of runs limit
+the precision of the comparison. The first measurement script failed because of a tuple instead of a JSON
+list; only the script was fixed, not the product. The experiment did not change the sources.
 
-149 связанных проверок прошли; дополнительно51 проверка нативных источников и
-исторической авторитетности прошла. Наборы пересекаются. Регрессии сохраняют
-перечитывание байтов, ловят изменение с сохранённым mtime, изменение схемы,
-мутацию возвращённого объекта и отказ авторитетности после успешного чтения.
-174 изменённые функции проходят реальные измерения5/2/2. Python3.10 grammar и
-Ruff прошли; поддержка Python3.10 в продукте не означает upstream security support.
+149 related checks passed; in addition 51 checks of native sources and
+historical authority passed. The sets overlap. The regressions keep
+re-reading bytes, catch a change with a preserved mtime, a schema change,
+mutation of the returned object and an authority refusal after a successful read.
+174 changed functions pass the real 5/2/2 measurements. The Python 3.10 grammar and
+Ruff passed; Python 3.10 support in the product does not mean upstream security support.
 
-Источники проверены2026-10-17: [Python contextvars](https://docs.python.org/3.10/library/contextvars.html),
+Sources checked on 2026-10-17: [Python contextvars](https://docs.python.org/3.10/library/contextvars.html),
 [Git racy-file identity](https://git-scm.com/docs/racy-git),
-[SQLite isolation](https://www.sqlite.org/isolation.html). По этим ограничениям
-отвергнуты кэш по mtime и сохранение вердикта авторитетности; выбран только
-изолированный разбор содержимого. Альтернатива постоянного индекса потребовала бы
-новой координации и миграции, не нужных для устранения повторной валидации.
+[SQLite isolation](https://www.sqlite.org/isolation.html). Because of these constraints,
+an mtime-based cache and keeping the authority verdict were rejected; only
+isolated content parsing was chosen. The alternative of a persistent index would require
+new coordination and a migration, which are not needed to remove the repeated validation.
 
-### Причина сохранения старых владельцев LSP, 17 октября
+### Why old LSP owners are kept, October 17
 
-Полная проверка установленного c4a8 завершила все22 раздела за409,7s, но
-сохранила ошибку LSP. Все20 исторических записей читаются и проходят проверку
-формата; в них нет идентичности запуска владельца. PID без этой идентичности
-не доказывает смерть сохранённого процесса, в том числе в другом пространстве
-PID. Диагностика теперь указывает отсутствующие идентичности и причину запрета
-очистки. Коды ошибки, read_error и критерии доказанной смерти не изменены.
-Ни запись, ни новое наблюдение не дополняют историческую идентичность задним числом.
+The full check of the installed c4a8 completed all 22 sections in 409.7 s, but
+kept the LSP error. All 20 historical records are readable and pass the format
+check; they contain no launch identity of the owner. A PID without this identity
+does not prove the death of the stored process, including in another PID
+namespace. Diagnostics now name the missing identities and the reason cleanup
+is forbidden. The error codes, read_error and the proven-death criteria are not changed.
+Neither the record nor a new observation fills in the historical identity retroactively.
 
-Регрессия сначала воспроизвела недостаточную диагностику. Затем205 проверок
-doctor и process_liveness прошли,3 платформенные проверки пропущены. Чтение
-реальных20 владельцев показало20 отсутствующих идентичностей и0 доказанных
-смертей; SHA256 всех файлов записей до и после совпадают. Это исправление
-объяснения блокировки, не завершение восстановления исторических владельцев.
-Новых ограничений и зависимостей нет; сохранение этих записей необходимо,
-пока не появится проверяемое основание для их безопасного завершения.
+The regression first reproduced the insufficient diagnostics. Then 205 checks of
+doctor and process_liveness passed, and 3 platform checks were skipped. Reading
+the real 20 owners showed 20 missing identities and 0 proven
+deaths; the SHA256 of all record files before and after match. This fixes the
+explanation of the block; it does not complete the recovery of the historical owners.
+There are no new limits or dependencies; keeping these records is necessary
+until a verifiable ground for their safe completion appears.
 
-Источники проверены2026-10-17:
+Sources checked on 2026-10-17:
 [Linux PID namespaces](https://man7.org/linux/man-pages/man7/pid_namespaces.7.html),
 [Python os.kill](https://docs.python.org/3/library/os.html#os.kill),
 [Windows GetProcessTimes](https://learn.microsoft.com/en-us/windows/win32/api/processthreadsapi/nf-processthreadsapi-getprocesstimes).
-Проверка только локального PID и выдумывание недостающей идентичности отвергнуты:
-они не дают доказательства состояния исторического владельца. Выбрано точное
-объяснение имеющихся данных с сохранением действующего запрета удаления.
+Checking only the local PID and inventing the missing identity were rejected:
+they give no proof of the historical owner's state. The chosen option is an exact
+explanation of the available data while keeping the current deletion ban.
 
-### Срок ожидания при записи проекта, 17 октября
+### Wait deadline for a project write, October 17
 
-CI39055059082, Linux Python3.14, обнаружил отказ двух одновременных записей
-проекта при ожидании общего писателя. Трасса проходит через checkpoint,
-prepare и recover. Переданный writer_wait_seconds доходил до apply, но терялся
-в prepare/recover; после adoption он также терялся при заимствовании gate
-существующего владельца. Использовался стандартный срок вместо явно переданного.
+CI 39055059082, Linux Python 3.14, found a failure of two concurrent project
+writes while waiting for the shared writer. The trace goes through checkpoint,
+prepare and recover. The passed writer_wait_seconds reached apply but was lost
+in prepare/recover; after adoption it was also lost when borrowing the gate of
+the existing owner. The standard deadline was used instead of the explicitly passed one.
 
-Регрессия создаёт реального конкурирующего писателя и освобождает его после
-первой неудачной попытки захвата. Стандартный срок в тесте установлен в0,
-чтобы потеря явного бюджета проявлялась без ожидания по настенным часам.
-На исходном коде воспроизводится TimeoutError; исходная проверка единственной
-записи события сохранена. Отдельный adopted-сценарий проверяет передачу бюджета
-при реальном checkpoint с сохранением прежнего канонического владельца.
+The regression creates a real competing writer and releases it after
+the first failed acquisition attempt. The standard deadline in the test is set to 0,
+so that the loss of the explicit budget shows without waiting on wall-clock time.
+On the original code a TimeoutError is reproduced; the original check of the single
+event record is kept. A separate adopted scenario checks passing the budget
+during a real checkpoint while keeping the previous canonical owner.
 
-Теперь prepare принимает существующий необязательный writer_wait_seconds и
-передаёт его recover; ProjectStore передаёт его на обеих границах.
-Числовые сроки, повторы, порядок захвата и сроки жизни блокировок не изменены.
-Новой зависимости нет. Вариант удержания legacy gate через подготовку и apply
-отвергнут: проверка обновления аренды выявила изменение срока владения.
-Исключение TimeoutError из теста и произвольное увеличение сроков также
-отвергнуты: они не устраняют потерю параметра.
+Now prepare accepts the existing optional writer_wait_seconds and
+passes it to recover; ProjectStore passes it at both boundaries.
+Numeric deadlines, retries, acquisition order and lock lifetimes are not changed.
+There is no new dependency. The option of holding the legacy gate through prepare and apply
+was rejected: the lease-renewal check revealed a change in the ownership duration.
+Excluding TimeoutError from the test and arbitrarily raising deadlines were also
+rejected: they do not remove the parameter loss.
 
-Исследование2026-10-17:
+Research on 2026-10-17:
 [SQLite rollback locking](https://www.sqlite.org/lockingv3.html),
 [Python threading context managers](https://docs.python.org/3.14/library/threading.html),
 [PostgreSQL lock ordering](https://www.postgresql.org/docs/current/explicit-locking.html).
-Использованы принципы явного владения, симметричного освобождения и сохранения
-порядка захвата; PostgreSQL не добавляется в зависимости. Изменение совместимо
-с Python3.10 и сохраняет прежний default для остальных вызывающих функций.
+The principles of explicit ownership, symmetric release and preserved
+acquisition order were used; PostgreSQL is not added to the dependencies. The change is compatible
+with Python 3.10 and keeps the previous default for the other callers.
 
-Проверки окончательного варианта:198passed/5platform skips для проекта и
-транзакций;226passed для восстановления, автоматических писателей и отката
-checkpoint. На Python3.14.7 с зависимостями из того же uv.lock108 проектных
-проверок прошли, включая исходный параллельный сценарий CI. Это связанные
-наборы, не утверждение о завершении полной матрицы.189 изменённых функций
-проходят реальные Lizard/AST пределы5/2/2; Python3.10 grammar и Ruff проходят.
-uv pip check подтвердил совместимость97 установленных пакетов.
+Checks of the final version: 198 passed/5 platform skips for project and
+transactions; 226 passed for recovery, automatic writers and checkpoint
+rollback. On Python 3.14.7 with dependencies from the same uv.lock, 108 project
+checks passed, including the original parallel CI scenario. These are related
+sets, not a claim that the full matrix is complete. 189 changed functions
+pass the real Lizard/AST 5/2/2 limits; the Python 3.10 grammar and Ruff pass.
+uv pip check confirmed the compatibility of 97 installed packages.
 
-### Вместимость измеряется сборщиком своего корпуса, 17 октября
+### Capacity is measured by the collector of its own corpus, October 17
 
-Диагностика settings складывала все Markdown из notes/projects/daily для
-corpus и extraction. Это не область индексатора: обычные дневники не выбраны,
-журнал проекта исключён, а проверенные связанные записи сессий включены.
-На живом хранилище эта оценка расходилась с непосредственным чтением корпуса.
-Порог extraction применяется к входу конкретного вызова: knowledge extraction
-получает выбранные источники памяти без проектов, project extraction — один
-источник. Общее число Markdown не является ни одним из этих измерений.
+Settings diagnostics summed all Markdown from notes/projects/daily for
+corpus and extraction. That is not the indexer's scope: ordinary daily logs are not selected,
+the project journal is excluded, and verified linked session records are included.
+On the live store this estimate diverged from a direct reading of the corpus.
+The extraction threshold applies to the input of a specific call: knowledge extraction
+gets the selected memory sources without projects, and project extraction gets one
+source. The total number of Markdown files is neither of these measurements.
 
-Теперь CorpusSnapshot несёт необязательные наблюдения выполненного сбора:
-число просмотренных записей каталога, обнаруженных источников и прочитанные
-байты до семантической фильтрации. Они не входят в persisted manifest/hash и
-не становятся доказательством авторитетности. Снимок, созданный вручную,
-суженный для поиска либо полученный от старого живого потребителя, не получает
-выдуманных нулей. Doctor берёт эти наблюдения из уже выполняемой полной
-проверки поколения; повторного обхода нет. Число источников knowledge extraction
-берётся из той же функции отбора, которую вызывает его адаптер.
+Now CorpusSnapshot carries optional observations of the completed collection:
+the number of directory entries scanned, sources found and bytes read
+before semantic filtering. They are not part of the persisted manifest/hash and
+do not become evidence of authority. A snapshot created by hand,
+narrowed for search or received from an old live consumer does not get
+invented zeros. Doctor takes these observations from the full generation check that already
+runs; there is no repeated traversal. The number of knowledge extraction sources
+is taken from the same selection function that its adapter calls.
 
-Settings больше не обходит projects/daily ради этой ложной оценки и явно
-пишет, что corpus capacity здесь не измерена. Полная проверка публикует отдельно
-entries/sources/bytes, размер knowledge extraction и максимальный размер
-одного project extraction, вместе с их фактическими пределами.
-Сохранён прежний порог предупреждения80%; близость к пределу не разрешает
-автоматическую пересборку исправного индекса. Превышение entry budget теперь
-передаёт существующий CorpusCapacityExceeded с observed_minimum: отказ по
-вместимости не означает повреждения неизменного поколения. Остальные ошибки
-чтения и проверки по-прежнему остаются ошибками, свежесть при отказе неизвестна.
+Settings no longer traverses projects/daily for this false estimate and explicitly
+writes that corpus capacity is not measured here. The full check publishes separately
+entries/sources/bytes, the knowledge extraction size and the maximum size of
+one project extraction, together with their actual limits.
+The previous 80% warning threshold is kept; nearness to the limit does not permit
+an automatic rebuild of a healthy index. Exceeding the entry budget now
+passes the existing CorpusCapacityExceeded with observed_minimum: a capacity
+refusal does not mean corruption of the unchanged generation. Other read
+and check errors still stay errors; freshness on refusal is unknown.
 
-Общая подсказка settings.raise_hint сохраняет имена TOML/env controls, но
-требует измерить ресурсы перед изменением, а не автоматически поднять число.
-Значения пределов не изменены. Нет нового лимита, зависимости, хранилища или
-изменения runtime layout. Отдельный подсчёт по новым копиям фильтров отвергнут:
-он вновь расходился бы со сборщиком и удваивал чтение. Подмена отсутствующего
-измерения числом из старого поколения также отвергнута.
+The shared hint settings.raise_hint keeps the names of the TOML/env controls, but
+requires measuring resources before a change, rather than automatically raising the number.
+Limit values were not changed. There is no new limit, dependency, store or
+runtime layout change. A separate count with new copies of the filters was rejected:
+it would diverge from the collector again and double the reading. Substituting a missing
+measurement with a number from the old generation was also rejected.
 
-Исследование2026-10-17:
+Research on 2026-10-17:
 [Prometheus instrumentation](https://prometheus.io/docs/practices/instrumentation/),
 [Google SRE monitoring](https://sre.google/workbook/monitoring/),
 [OpenTelemetry metrics data model](https://opentelemetry.io/docs/specs/otel/metrics/data-model/).
-Выбран учёт в месте выполнения операции с явной областью наблюдения; эти
-системы мониторинга не добавляются в зависимости. Их общие рекомендации не
-подменяют контракт локального хранилища и не обосновывают новые числовые лимиты.
+Counting at the place where the operation runs, with an explicit observation scope, was chosen; these
+monitoring systems are not added to the dependencies. Their general recommendations do not
+replace the local store's contract and do not justify new numeric limits.
 
-Четыре новые регрессии упали на прежнем коде; отдельно воспроизведена подсказка
-с безусловным увеличением лимита. Проверки сохраняют подтверждение полных
-breadcrumb parts, исключение обычных dumps и журналов, учёт superseded байтов
-до фильтрации, один вызов collection и отсутствие фиктивного измерения.
-Связанные наборы226passed/3skipped и213passed/3skipped; потребители снимков
-443passed/1skipped; окончательный набор corpus/settings164passed/3skipped.
-Наборы пересекаются, это не сумма уникальных тестов полной матрицы.
-На живом дереве settings занял0,317s; generation check подтвердил минимум204011
-entries при204010, сохранив freshness=unknown и repairable=false. Измерение
-29,580s включает оба вызова и не доказывает скорость полной компиляции.
+Four new regressions failed on the previous code; the hint with an unconditional
+limit increase was reproduced separately. The checks keep the confirmation of complete
+breadcrumb parts, the exclusion of ordinary dumps and journals, counting superseded bytes
+before filtering, one collection call and the absence of a fake measurement.
+Related sets 226 passed/3 skipped and 213 passed/3 skipped; snapshot consumers
+443 passed/1 skipped; the final corpus/settings set 164 passed/3 skipped.
+The sets overlap; this is not a sum of unique tests of the full matrix.
+On the live tree settings took 0.317 s; the generation check confirmed a minimum of 204011
+entries against 204010, keeping freshness=unknown and repairable=false. The measurement of
+29.580 s covers both calls and does not prove the speed of a full compile.
 
 ## Adoption reads wait for the existing store lock budget (2026-10-17)
 

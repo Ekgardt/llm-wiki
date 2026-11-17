@@ -46,7 +46,7 @@ def _original_output(text):
     'PWD=/home/user OLDPWD=/tmp password_reset_url=https://example.test',
     'api_key:\nabcdefghijk',
     'api_key\u2028=abcdefghijk',
-    'ключ_secret = "abcdefghijk"',
+    '\u043a\u043b\u044e\u0447_secret = "abcdefghijk"',
     'İtoken="abcdefghijk"',
     r'\"client_secret\":\"abcdefghijk\"',
     r'"client_secret": "abc\\def"',
@@ -64,7 +64,7 @@ def test_indexed_redaction_matches_original_detector_bytes(text):
 def test_seeded_mixed_grammar_has_identical_original_redactions():
     rng = random.Random(20261009)
     names = ['token', 'secret', 'client_secret', 'AWS_SECRET_ACCESS_KEY', 'PWD',
-             'api_key', 'private-key', 'tokenizer_name', 'ключ_secret', 'İtoken',
+             'api_key', 'private-key', 'tokenizer_name', '\u043a\u043b\u044e\u0447_secret', 'İtoken',
              'x' * 50 + 'token', 'x' * 51 + 'token']
     separators = ['=', ':', ' = ', "':", '\\":', '\t:\t', '\u2028=']
     values = ['abcdefghijk', '"abcdefghi"', "'abcd efghijk'", 'NULL',

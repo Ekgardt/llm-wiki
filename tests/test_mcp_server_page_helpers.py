@@ -71,13 +71,13 @@ class TestHelperFunctions:
 
         notes = tmp_path / "knowledge" / "notes"
         notes.mkdir(parents=True)
-        (notes / "Проект notes.md").write_text("safe content", encoding="utf-8")
+        (notes / "\u041f\u0440\u043e\u0435\u043a\u0442 notes.md").write_text("safe content", encoding="utf-8")
         monkeypatch.setenv("LLM_WIKI_ROOT", str(tmp_path))
 
-        result = read_page("Проект notes")
+        result = read_page("\u041f\u0440\u043e\u0435\u043a\u0442 notes")
 
         assert result["content"] == "safe content"
-        assert result["slug"] == "Проект notes"
+        assert result["slug"] == "\u041f\u0440\u043e\u0435\u043a\u0442 notes"
 
     def test_read_page_resolves_content_addressed_evidence(self, tmp_path, monkeypatch):
         from mcp_server import read_page

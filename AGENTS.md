@@ -11,8 +11,8 @@ it loads.
 
 ## 0. Process rules (mandatory)
 
-### Обязательные законы разработки
-Перед началом работы обязательно прочитай [Обязательные законы разработки](rules/development-laws.md) полностью и соблюдай все девять законов при исследовании, проектировании, разработке, тестировании, установке изменений и сопровождении системы. Файл содержит текст законов пользователя с прямо согласованными им изменениями; сведения о редакции указаны в самом файле. Изменять, ослаблять или обходить эти законы без прямого указания пользователя запрещено. Если требование невозможно выполнить, прямо сообщи об этом; не выдавай невыполненное за выполненное.
+### Mandatory development laws
+Before starting work, read the [mandatory development laws](rules/development-laws.md) in full and follow all nine laws when researching, designing, developing, testing, deploying changes to and maintaining the system. The file holds the user's text of the laws with the changes the user explicitly approved; its revision details are stated in the file itself. Changing, weakening or circumventing these laws without the user's direct instruction is forbidden. If a requirement cannot be met, say so directly; do not present what was not done as done.
 
 ### How to talk to the user
 - Write in **plain human language**. Short sentences.

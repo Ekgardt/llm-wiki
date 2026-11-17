@@ -41,10 +41,10 @@ def test_frozen_readings_keep_their_field_contract():
 
 def test_case_preserves_provenance_language_and_contested_reading():
     verdict = labels.Verdict('ok', (), ('ignored marker',))
-    case = labels.build_case(Path('Тест.jsonl'), 3, 'Привет мир', verdict, labels.QuoteReading(None, 'void'))
+    case = labels.build_case(Path('\u0422\u0435\u0441\u0442.jsonl'), 3, '\u041f\u0440\u0438\u0432\u0435\u0442 \u043c\u0438\u0440', verdict, labels.QuoteReading(None, 'void'))
     assert case == {
         'case_id': 'live-003', 'language': 'RU', 'event': 'session-end',
-        'content_classes': [], 'transcript': 'Привет мир', 'expected_tier': 'ok',
+        'content_classes': [], 'transcript': '\u041f\u0440\u0438\u0432\u0435\u0442 \u043c\u0438\u0440', 'expected_tier': 'ok',
         'required_markers': [], 'label_provenance': 'readings', 'label_status': 'contested',
         'readings': {'rubric': 'ok', 'quote': None, 'passage': 'void'},
     }

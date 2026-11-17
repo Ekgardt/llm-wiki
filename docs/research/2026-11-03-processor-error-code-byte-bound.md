@@ -7,7 +7,8 @@ This is a pre-existing defect, not a claimed benefit of moving definitions.
 
 processor_error_code uses a Python string slice of 64 characters. The real v3
 attempt_history CHECK measures length(CAST(error_code AS BLOB)), i.e. UTF-8 bytes.
-An exception type named 'Ошибка' repeated twenty times yields a 64-character,
+An exception type named with a Cyrillic word meaning 'Error' (six two-byte
+letters) repeated twenty times yields a 64-character,
 111-byte code. The real candidate v3 queue accepts/leases an ordinary query but
 queue.fail raises IntegrityError and leaves it leased. Evidence:
 logs/queue-error-unicode-baseline.json (isolated SQLite constraint),

@@ -92,8 +92,8 @@ def test_loaded_layer_must_match_actual_config_bytes(tmp_path):
 
 def test_verified_layer_accepts_non_ascii_without_normalization(tmp_path):
     path = tmp_path / 'config.toml'
-    path.write_text('name = "е́"\n', encoding='utf-8')
-    layer = _layer(path, {'name': 'е́'})
+    path.write_text('name = "\u0435́"\n', encoding='utf-8')
+    layer = _layer(path, {'name': '\u0435́'})
     assert lc.codex_config_layers_verified({'layers': [layer]})
 
 

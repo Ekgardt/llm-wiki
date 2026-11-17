@@ -5,7 +5,7 @@ import llm_client
 import pytest
 
 
-@pytest.mark.parametrize('payload', ('one\ntwo\n', 'one\r\ntwo\n', '完整 e\u0301\nточный факт\n'))
+@pytest.mark.parametrize('payload', ('one\ntwo\n', 'one\r\ntwo\n', '完整 e\u0301\n\u0442\u043e\u0447\u043d\u044b\u0439 \u0444\u0430\u043a\u0442\n'))
 def test_prepared_provider_input_retains_every_utf8_byte_on_windows(monkeypatch, payload):
     native_factory = llm_client.tempfile.NamedTemporaryFile
 
