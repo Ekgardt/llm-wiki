@@ -61,39 +61,46 @@ Two defects made ordinary questions search by spelling only.
 
 The 49 affected questions of LongMemEval-S (every question the old router sent to `EXACT`,
 `TEMPORAL`, `GRAPH` or `IMPACT`), retrieval only, `run_longmemeval.py --full --retrieval-only`.
-Before: commit a32a8354; after: commit c1221ddc, each from a clean `git archive` export with the
-same models (multilingual-e5-small, bge-reranker-v2-m3). Bounded to 8 cores and 2 workers on a
-shared server.
+Before: commit a32a8354; after: commit 072737a9 (the routing change plus the displacement fix
+below), each from a clean `git archive` export with the same models (multilingual-e5-small,
+bge-reranker-v2-m3). Bounded to 8 cores and 2 workers on a shared server.
 
 | Metric (49 questions) | Before | After |
 |---|---|---|
-| Turn recall at 12 | 0.644 | 0.926 |
-| Session recall at 12 | 0.910 | 0.958 |
-| All evidence turns in the top 12 | 29 | 41 |
-| Turn recall at 24 / 48 | 0.713 / 0.909 | 0.960 / 0.969 |
+| Turn recall at 12 | 0.644 | 0.937 |
+| All evidence turns in the top 12 | 29 | 42 |
+| Turn recall at 24 / 48 | 0.713 / 0.909 | 0.971 / 0.979 |
+| All evidence turns in the top 24 / 48 | 32 / 41 | 45 / 47 |
 | Answer session ranked first | 44 | 47 |
-| Reranker applied | 5 | 44 |
-| Retrieval seconds, median / p90 / max | 0.16 / 1.9 / 4.4 | 2.67 / 4.8 / 14.7 |
+| Retrieval seconds, median | 0.16 | 2.31 |
 
-Turn recall at 12 changed on 19 questions: 17 better, 2 worse.
+Turn recall at 12 changed on 18 questions: 17 better, 1 worse. At 24, 15 better and none worse;
+at 48, 6 better and none worse.
 
-- `3fe836c9` (pre-approval amount against the sale price) fell from 1.0 to 0.5 at every depth,
-  and this change does not fix it. One of its two evidence turns no longer reaches the top 48.
-  Diagnosed by wrapping every stage of `retrieve` on this question's vault: the turn is found
-  (lexical rank 3, dense rank 2, second in the fused order), and the coverage step
-  `_pulled_into_window` displaces it for chunks of other sessions admitted for coverage;
-  `_capped` cuts it. At depth 300, where everything fits, it stays second.
-  The cause, confirmed by setting the counted kind to empty on this question, after which the
-  turn is second in the top 12: `aggregation_pass.counted_kind` reads "how much more was the
-  pre-approval than" as counting "more", so every session saying "more" becomes an aspect to
-  cover. 48 of the 500 questions get such a kind from a comparison or a time span ("than",
-  "how many days ago"). A word rule for differences was written and withdrawn: the kind is read
-  from the question's words, and another phrasing would slip past any list. Follow-up, checked
-  by this question returning to 1.0 at 12 with no other question of the 500 losing turn recall:
-  the coverage step stops depending on words parsed from the question, in the multi-session
-  packing and word-list router items.
-- `gpt4_93159ced` fell from 1.0 to 0.67 at 12 and is complete again at 24. It is an ordering
-  of the cross-encoder, not of coverage, and is a regression case of the reranker comparison.
+- `3fe836c9` (pre-approval amount against the sale price) had fallen from 1.0 to 0.5 at every
+  depth on the routing change alone, and is 1.0 again. Traced through `_pulled_into_window` on
+  this question's vault: its evidence turn is its session's first chunk, second in the window.
+  The coverage step admitted that session's third chunk, which covers more of the question, and
+  the displacement then protected only the admitted chunk and a source's last chunk inside the
+  window, so it moved the evidence turn from place 2 to place 49 and `_capped` cut it. The
+  counted kind ("more", read from "how much more ... than") only made the step pull in 29
+  chunks instead of a few. Fixed in the shared rule, not in the kind: `_displaceable` never
+  displaces a source's first chunk inside the window
+  (`test_a_source_keeps_its_lane_best_chunk_when_a_later_one_is_admitted`, which fails on the
+  old rule). On the 48 questions that read a counted kind, the fix gains turn recall on 2
+  questions at every depth and loses it on none, against the commit before it.
+- `gpt4_93159ced` ("How long have I been working before I started my current job at
+  NovaTech?") falls from 1.0 to 0.67 at 12 and is complete at 24. The answer needs two turns:
+  "I've been working at NovaTech for about 4 years and 3 months", first and second after the
+  change, and "I've been working professionally for 9 years", which was eighth under the old
+  lexical-only route (lexical rank 18) and is fourteenth now. The coverage step does nothing
+  here (all three admitted chunks are inside the window). With the reranker scoring 20 instead
+  of 10 passages it lands tenth, but the cross-encoder scores it -7.6, far below the turns
+  around it: it rises only because the passages it is scored against fall, and every search
+  would pay the deeper rerank. Not taken. The turn shares only "working" with the question;
+  finding the second fact of a two-fact question is the coverage work of the word-independent
+  coverage and routing item, and this question is its check: turn recall 1.0 at 12 there, with
+  no question of the 500 losing.
 
 Where the reranker did not run after the change:
 
