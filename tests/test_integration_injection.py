@@ -2413,8 +2413,8 @@ def test_codex_mcp_config_state_accepts_exact_enabled_table(tmp_path, quoted):
     "omitted", ["", 'omit_tools_from = []\n', 'omit_tools_from = ["code_mode"]\n']
 )
 def test_codex_mcp_config_state_names_an_entry_whose_tools_wait_for_tool_search(
-    tmp_path, omitted
-):
+    tmp_path: Path, omitted: str
+) -> None:
     """Our entry without `omit_tools_from = ["deferred"]` is ours, but Codex hides its tools."""
     _ensure_scripts_on_path()
     import codex_memory

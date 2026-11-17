@@ -242,6 +242,10 @@ existing_target_advice() {
   echo "Remote install target already exists: $target. It is not an LLM-Wiki checkout; move it away and run the same command again"
 }
 
+# Sourced, as tests/install_codex_mcp.bats does to call the functions above, the
+# installer stops here; run with bash, it goes on.
+(return 0 2>/dev/null) && return 0
+
 # ─── 1. Resolve vault root ──────────────────────────────────────────
 
 if [[ -n "${BASH_SOURCE[0]:-}" && -f "${BASH_SOURCE[0]}" ]]; then
