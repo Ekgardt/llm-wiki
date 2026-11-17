@@ -669,7 +669,7 @@ def _mcp_expected_args(vault_root: Path) -> list[str]:
 
 
 def _mcp_entry_state(table: dict[str, Any], vault_root: Path) -> str:
-    """`equivalent`, `deferred` (ours, but Codex hides its tools behind tool search), or `conflict`."""
+    """`equivalent`, `conflict`, or `deferred`: ours, but its tools wait for tool search."""
     equivalent = (
         table.get("command") == "uv"
         and table.get("args") == _mcp_expected_args(vault_root)
