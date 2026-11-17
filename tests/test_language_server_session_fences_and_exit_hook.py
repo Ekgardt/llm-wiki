@@ -9,6 +9,7 @@ from lsp_profiles import PYRIGHT_PROFILE, TYPESCRIPT_PROFILE
 from repository_scope import resolve_repository_scope
 
 from tests.pyright_session_helpers import _missing_identity
+from tests.slow_machine import SHORT_TIMEOUT
 
 
 @pytest.fixture
@@ -78,11 +79,11 @@ def test_a_busy_session_is_not_reserved_for_an_idle_close(
 ) -> None:
     setattr(session, busy_flag, True)
 
-    assert session._reserve_idle_close(time.monotonic() + 5.0) is False
+    assert session._reserve_idle_close(time.monotonic() + SHORT_TIMEOUT) is False
 
 
 def test_an_idle_session_is_reserved_for_close(session: LanguageServerSession) -> None:
-    assert session._reserve_idle_close(time.monotonic() + 5.0) is True
+    assert session._reserve_idle_close(time.monotonic() + SHORT_TIMEOUT) is True
     assert session._closing is True
 
 

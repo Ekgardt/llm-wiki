@@ -12,6 +12,7 @@ from lsp_security import resolve_repository_source
 from repository_scope import resolve_repository_scope
 
 from tests.pyright_session_helpers import _missing_identity
+from tests.slow_machine import SHORT_TIMEOUT
 
 
 class _GenerationSwitchingProcess:
@@ -58,7 +59,7 @@ def _key(document: OpenDocument, generation: str) -> tuple[str, str, int]:
 
 
 def _deadline() -> float:
-    return time.monotonic() + 5.0
+    return time.monotonic() + SHORT_TIMEOUT
 
 
 def test_discarding_the_current_wire_generation_forgets_its_opens(

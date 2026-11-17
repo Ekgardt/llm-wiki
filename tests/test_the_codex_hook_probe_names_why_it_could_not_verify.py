@@ -13,6 +13,8 @@ import pytest
 from llm_wiki import doctor_integrations as integrations
 from llm_wiki import doctor_schedule
 
+from tests.slow_machine import SHORT_TIMEOUT
+
 _Hook = dict[str, object]
 
 
@@ -105,7 +107,9 @@ def test_a_peer_that_cannot_be_spawned_leaves_the_probe_incomplete(
         raise OSError("no codex")
 
     monkeypatch.setattr(lsp_process_tree.ProcessTree, "spawn_with_deadline", refuse)
-    outcome = integrations.run_codex_probe(["codex"], tmp_path, tmp_path, time.monotonic() + 1)
+    outcome = integrations.run_codex_probe(
+        ["codex"], tmp_path, tmp_path, time.monotonic() + SHORT_TIMEOUT
+    )
     assert outcome is doctor_schedule.PROBE_INCOMPLETE
 
 
@@ -126,14 +130,16 @@ def test_a_probe_that_fails_kills_the_tree_and_survives_a_failed_close(
         raise ValueError("garbled")
 
     monkeypatch.setattr(integrations, "_probed_codex_tree", fail)
-    outcome = integrations.run_codex_probe(["codex"], tmp_path, tmp_path, time.monotonic() + 1)
+    outcome = integrations.run_codex_probe(
+        ["codex"], tmp_path, tmp_path, time.monotonic() + SHORT_TIMEOUT
+    )
     assert outcome is doctor_schedule.PROBE_INCOMPLETE
     assert (tree.terminated, tree.closed) == (1, 1)
 
 
 def test_a_peer_without_its_pipes_is_killed_before_it_is_asked() -> None:
     tree = _Tree(_Process(None, io.BytesIO(b"")))
-    outcome = integrations._probed_codex_tree(tree, b"payload\n", time.monotonic() + 1)
+    outcome = integrations._probed_codex_tree(tree, b"payload\n", time.monotonic() + SHORT_TIMEOUT)
     assert outcome is doctor_schedule.PROBE_INCOMPLETE
     assert tree.terminated == 1
 

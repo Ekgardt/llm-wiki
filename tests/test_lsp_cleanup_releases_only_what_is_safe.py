@@ -14,8 +14,9 @@ from llm_wiki.lsp_process_owner import OwnerDirectory
 from llm_wiki.lsp_process_state import Generation, LifecycleCoordinator, LifecyclePhase
 from lsp_protocol import LspProtocol
 
+from tests.slow_machine import LONG_TIMEOUT, PAUSE_TIMEOUT, SHORT_TIMEOUT
+
 NONCE = "d" * 32
-LONG_DEADLINE_SECONDS = 30.0
 SHORT_DEADLINE_SECONDS = 0.1
 
 
@@ -104,7 +105,7 @@ def _coordinator_with(generation: Generation | None) -> LifecycleCoordinator:
 
 
 def _release(
-    coordinator: LifecycleCoordinator, seconds: float = LONG_DEADLINE_SECONDS
+    coordinator: LifecycleCoordinator, seconds: float = LONG_TIMEOUT
 ) -> list[BaseException]:
     return lsp_process_cleanup.drive_cleanup(
         None, time.monotonic() + seconds, terminal=False, coordinator_override=coordinator
@@ -112,7 +113,7 @@ def _release(
 
 
 def _blocked_thread(release: threading.Event) -> threading.Thread:
-    thread = threading.Thread(target=release.wait, args=(LONG_DEADLINE_SECONDS,), daemon=True)
+    thread = threading.Thread(target=release.wait, args=(PAUSE_TIMEOUT,), daemon=True)
     thread.start()
     return thread
 
@@ -276,7 +277,7 @@ def test_a_startup_cleanup_retry_raises_the_failure_it_met() -> None:
     coordinator = _startup_coordinator(_generation(FakeServer(exit_code=None), tree))
 
     with pytest.raises(PermissionError, match="kill refused"):
-        lsp_process_cleanup.retry_startup_cleanup(coordinator, time.monotonic() + 5)
+        lsp_process_cleanup.retry_startup_cleanup(coordinator, time.monotonic() + SHORT_TIMEOUT)
     assert coordinator.cleanup_result.tree_termination == "failed"
 
 
@@ -284,7 +285,7 @@ def test_a_startup_cleanup_retry_that_still_owns_a_live_server_says_so() -> None
     coordinator = _startup_coordinator(_generation(FakeServer(exit_code=None)))
 
     with pytest.raises(TimeoutError, match="retains retryable ownership"):
-        lsp_process_cleanup.retry_startup_cleanup(coordinator, time.monotonic() + 5)
+        lsp_process_cleanup.retry_startup_cleanup(coordinator, time.monotonic() + SHORT_TIMEOUT)
     assert coordinator.terminal_code == "startup_failed"
 
 
@@ -302,7 +303,7 @@ def test_exit_cleanup_of_startups_survives_a_failing_retry() -> None:
 def test_a_startup_cleanup_error_without_a_coordinator_owes_nothing() -> None:
     error = StartupCleanupError("startup failed")
 
-    error.retry_cleanup(time.monotonic() + 1)
+    error.retry_cleanup(time.monotonic() + SHORT_TIMEOUT)
     error.transfer_cleanup_ownership()
 
     assert error.coordinator is None
@@ -317,7 +318,7 @@ def _terminal_with_owner(owner: FakeOwner, outcome: str) -> LifecycleCoordinator
 
 
 def _close_terminally(
-    coordinator: LifecycleCoordinator, seconds: float = 5.0
+    coordinator: LifecycleCoordinator, seconds: float = SHORT_TIMEOUT
 ) -> list[BaseException]:
     return lsp_process_cleanup.drive_cleanup(
         None, time.monotonic() + seconds, terminal=True, coordinator_override=coordinator

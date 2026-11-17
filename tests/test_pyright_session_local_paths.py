@@ -12,9 +12,11 @@ from llm_wiki.pyright_session_paths import (
     validated_local_file,
 )
 
+from tests.slow_machine import SHORT_TIMEOUT
+
 
 def _deadline() -> float:
-    return time.monotonic() + 5.0
+    return time.monotonic() + SHORT_TIMEOUT
 
 
 def test_an_expired_startup_deadline_is_refused() -> None:

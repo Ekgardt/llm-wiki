@@ -15,6 +15,8 @@ from llm_wiki import lsp_process_owner
 from llm_wiki.lsp_process_limits import MAX_PENDING_CHILD_HANDLES
 from llm_wiki.lsp_process_owner import OwnerDirectory
 
+from tests.slow_machine import LONG_TIMEOUT, SHORT_TIMEOUT
+
 _IDS = itertools.count(1)
 
 
@@ -201,7 +203,7 @@ def volume(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> FakeWindowsVolume
 
 
 def _deadline() -> float:
-    return time.monotonic() + 30
+    return time.monotonic() + LONG_TIMEOUT
 
 
 def _created_owner(tmp_path: Path) -> OwnerDirectory:
@@ -432,8 +434,8 @@ def _write_lease(owner: OwnerDirectory, generation: str, stop: threading.Event |
     now = time.monotonic()
     owner.write_lease(
         {"generation": generation},
-        deadline=now + 5,
-        expires_monotonic=now + 30,
+        deadline=now + SHORT_TIMEOUT,
+        expires_monotonic=now + LONG_TIMEOUT,
         retry_stop=stop,
     )
 

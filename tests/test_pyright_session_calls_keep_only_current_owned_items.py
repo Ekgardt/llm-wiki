@@ -19,6 +19,7 @@ from tests.language_server_session_state import (
     retire_generation,
     unstarted_session,
 )
+from tests.slow_machine import SHORT_TIMEOUT
 
 _RANGE = {"start": {"line": 0, "character": 0}, "end": {"line": 0, "character": 3}}
 _WIDE = {"start": {"line": 0, "character": 0}, "end": {"line": 4, "character": 0}}
@@ -38,7 +39,7 @@ def document(session: LanguageServerSession) -> OpenDocument:
 
 
 def _deadline() -> float:
-    return time.monotonic() + 5.0
+    return time.monotonic() + SHORT_TIMEOUT
 
 
 def _item(document: OpenDocument, **fields: object) -> dict[str, object]:

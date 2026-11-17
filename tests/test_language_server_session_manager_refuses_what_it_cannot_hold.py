@@ -19,7 +19,7 @@ from repository_scope import RepositoryScope, resolve_repository_scope
 
 from tests.language_server_session_state import unstarted_session
 from tests.pyright_session_helpers import _missing_identity
-from tests.slow_machine import SHORT_TIMEOUT
+from tests.slow_machine import LONG_TIMEOUT, PAUSE_TIMEOUT, SHORT_TIMEOUT
 
 _KEY = ("checkout", _missing_identity())
 _NEW_KEY = ("new", _missing_identity())
@@ -41,7 +41,7 @@ def session(repository: Path, state_root: Path) -> LanguageServerSession:
 
 
 def _deadline() -> float:
-    return time.monotonic() + 5.0
+    return time.monotonic() + SHORT_TIMEOUT
 
 
 def _expired() -> float:
@@ -135,11 +135,11 @@ def test_a_release_while_another_thread_holds_the_manager_is_queued(
     def hold_manager() -> None:
         with manager._lock:
             held.set()
-            done.wait(5.0)
+            done.wait(PAUSE_TIMEOUT)
 
     holder = threading.Thread(target=hold_manager)
     holder.start()
-    held.wait(5.0)
+    assert held.wait(LONG_TIMEOUT)
     manager._release_key_lock_reference(_KEY, state)
     queued = (state.references, manager._key_lock_releases.qsize())
     done.set()

@@ -10,6 +10,8 @@ from pathlib import Path
 import pytest
 from markdown_transaction import MarkdownCoordinator
 
+from tests.slow_machine import LONG_TIMEOUT
+
 _CHECKPOINT = """
 import json, sys
 from pathlib import Path
@@ -80,7 +82,7 @@ def crashed(tmp_path: Path) -> _Crashed:
         capture_output=True,
         text=True,
         env=environment,
-        timeout=60,
+        timeout=LONG_TIMEOUT,
     )
     assert finished.returncode == 86, finished.stderr
     return _Crashed(vault, state_root)

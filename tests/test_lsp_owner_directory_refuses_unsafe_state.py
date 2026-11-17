@@ -12,6 +12,8 @@ from llm_wiki import lsp_process_owner
 from llm_wiki.lsp_process_limits import MAX_ACL_OUTPUT_BYTES
 from llm_wiki.lsp_process_owner import ObjectIdentity, OwnerDirectory
 
+from tests.slow_machine import LONG_TIMEOUT
+
 pytestmark = pytest.mark.skipif(os.name != "posix", reason="POSIX owner directory semantics")
 
 ACL_IDENTITY = "HOST\\alice"
@@ -19,7 +21,7 @@ ACL_IDENTITY = "HOST\\alice"
 
 def _created_owner(tmp_path: Path) -> OwnerDirectory:
     owner = OwnerDirectory.open(tmp_path / "run" / "owner-1")
-    owner.create(time.monotonic() + 30)
+    owner.create(time.monotonic() + LONG_TIMEOUT)
     return owner
 
 
@@ -295,7 +297,7 @@ def test_an_owner_root_acl_is_narrowed_to_its_owner_and_verified(
 ) -> None:
     tool = AclTool(_listing(f"{ACL_IDENTITY}:(OI)(CI)(F)", tmp_path))
 
-    _secure(monkeypatch, tool, tmp_path, time.monotonic() + 30)
+    _secure(monkeypatch, tool, tmp_path, time.monotonic() + LONG_TIMEOUT)
 
     target = str(tmp_path)
     assert tool.commands == [
@@ -326,7 +328,7 @@ def test_an_owner_root_acl_that_is_not_owner_only_is_refused(
     tool = AclTool(_listing(entry, tmp_path), *codes)
 
     with pytest.raises(PermissionError, match=message):
-        _secure(monkeypatch, tool, tmp_path, time.monotonic() + 30)
+        _secure(monkeypatch, tool, tmp_path, time.monotonic() + LONG_TIMEOUT)
 
 
 def test_an_owner_root_acl_past_its_deadline_runs_nothing(
@@ -352,7 +354,7 @@ def test_an_acl_tool_that_cannot_run_is_a_permission_failure(
     monkeypatch.setattr(subprocess, "run", broken_run)
 
     with pytest.raises(PermissionError, match="ACL command failed") as raised:
-        lsp_process_owner._run_windows_owner_acl(["icacls"], time.monotonic() + 30)
+        lsp_process_owner._run_windows_owner_acl(["icacls"], time.monotonic() + LONG_TIMEOUT)
     assert raised.value.__cause__ is failure
 
 
@@ -362,7 +364,7 @@ def test_an_acl_tool_that_talks_too_much_is_refused(
     tool = AclTool(b"x" * (MAX_ACL_OUTPUT_BYTES + 1))
 
     with pytest.raises(PermissionError, match="output exceeded its byte bound"):
-        _secure(monkeypatch, tool, tmp_path, time.monotonic() + 30)
+        _secure(monkeypatch, tool, tmp_path, time.monotonic() + LONG_TIMEOUT)
 
 
 def test_an_owner_directory_cannot_be_opened_on_an_unsupported_platform(

@@ -18,9 +18,10 @@ from llm_wiki.lsp_process_state import (
 )
 from lsp_protocol import LocalRequestViolation, LspProtocol, ProtocolViolation
 
+from tests.slow_machine import LONG_TIMEOUT
+
 FIRST_NONCE = "a" * 32
 SECOND_NONCE = "b" * 32
-WAIT_SECONDS = 30.0
 
 
 class FakeServerProcess:
@@ -88,7 +89,7 @@ def _running(generation: Generation) -> tuple[FakeLspInstance, LspProcessHandle]
 
 
 def _deadline() -> float:
-    return time.monotonic() + WAIT_SECONDS
+    return time.monotonic() + LONG_TIMEOUT
 
 
 def _replace_active_on_failure(
@@ -129,7 +130,7 @@ def _recovery_owner(
 def _settle_on_wake(
     coordinator: LifecycleCoordinator, settle: Callable[[LifecycleCoordinator], None]
 ) -> None:
-    coordinator.recovery_wake.wait(WAIT_SECONDS)
+    assert coordinator.recovery_wake.wait(LONG_TIMEOUT)
     coordinator.recovery_wake.clear()
     with coordinator.condition:
         settle(coordinator)
@@ -190,7 +191,8 @@ def test_an_expired_drain_hands_the_request_to_the_replacement_generation() -> N
     recovery = _replace_active_on_failure(instance._coordinator, fresh)
 
     assert _request(handle) == {"answer": "ok"}
-    recovery.join(WAIT_SECONDS)
+    recovery.join(LONG_TIMEOUT)
+    assert not recovery.is_alive()
     assert stale.failure_queued
     assert fresh_protocol.requests == ["textDocument/hover"]
 
@@ -202,7 +204,8 @@ def test_an_exited_server_whose_replacement_failed_reports_the_restart_cause() -
 
     with pytest.raises(ProtocolViolation, match="replacement startup failed") as raised:
         _request(handle)
-    recovery.join(WAIT_SECONDS)
+    recovery.join(LONG_TIMEOUT)
+    assert not recovery.is_alive()
     assert isinstance(raised.value.__cause__, RuntimeError)
     assert "PermissionError" in str(raised.value.__cause__)
 
@@ -218,7 +221,8 @@ def test_a_replacement_failure_without_a_recorded_cause_has_no_cause() -> None:
     recovery = _recovery_owner(instance._coordinator, give_up_silently)
     with pytest.raises(ProtocolViolation, match="replacement startup failed") as raised:
         _request(handle)
-    recovery.join(WAIT_SECONDS)
+    recovery.join(LONG_TIMEOUT)
+    assert not recovery.is_alive()
     assert raised.value.__cause__ is None
 
 
@@ -229,7 +233,8 @@ def test_an_exited_server_that_ended_the_lifecycle_refuses_the_request() -> None
 
     with pytest.raises(ProtocolViolation, match="fatally unavailable"):
         _request(handle)
-    recovery.join(WAIT_SECONDS)
+    recovery.join(LONG_TIMEOUT)
+    assert not recovery.is_alive()
 
 
 def test_a_violation_on_a_healthy_generation_is_the_callers_error() -> None:
@@ -271,7 +276,8 @@ def test_a_violation_from_a_dying_server_is_retried_on_its_replacement() -> None
     recovery = _replace_active_on_failure(instance._coordinator, fresh)
 
     assert _request(handle) == {"answer": "ok"}
-    recovery.join(WAIT_SECONDS)
+    recovery.join(LONG_TIMEOUT)
+    assert not recovery.is_alive()
     assert stale.failure_queued
 
 
@@ -300,7 +306,8 @@ def test_a_second_dying_generation_ends_the_request() -> None:
     recovery = _recovery_owner(instance._coordinator, replace, end_lifecycle)
     with pytest.raises(ProtocolViolation, match="connection lost"):
         _request(handle)
-    recovery.join(WAIT_SECONDS)
+    recovery.join(LONG_TIMEOUT)
+    assert not recovery.is_alive()
     assert stale.failure_queued
     assert also_dying.failure_queued
 

@@ -26,6 +26,8 @@ from llm_wiki.lsp_process_state import (
 )
 from lsp_protocol import LspProtocol
 
+from tests.slow_machine import SHORT_TIMEOUT
+
 OWNER_NONCE = "a" * 32
 GENERATION_NONCE = "b" * 32
 OTHER_NONCE = "c" * 32
@@ -36,7 +38,7 @@ def _expired() -> float:
 
 
 def _later() -> float:
-    return time.monotonic() + 5.0
+    return time.monotonic() + SHORT_TIMEOUT
 
 
 def _shortly() -> float:

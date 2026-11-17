@@ -14,6 +14,8 @@ from pathlib import Path
 
 import pytest
 
+from tests.slow_machine import SHORT_TIMEOUT
+
 SCRIPTS_DIR = Path(__file__).resolve().parent.parent / "scripts"
 if str(SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_DIR))
@@ -46,6 +48,8 @@ def _write(path: Path, text: str) -> None:
     """Exact bytes with LF: `write_text` would give a Windows runner CRLF, and
     the byte offsets and diff lines the tests assert are those of these bytes."""
     path.write_bytes(text.encode("utf-8"))
+
+
 BAD_PY = "def f(:\n    pass\n"
 EMPTY_AFFECTED = {"decisions": [], "pages": [], "tests": [], "checkpoints": []}
 
@@ -99,7 +103,7 @@ def indexed(tmp_path_factory):
 
 
 def _deadline() -> float:
-    return time.monotonic() + 10
+    return time.monotonic() + SHORT_TIMEOUT
 
 
 def _picked(mapping: dict, expected: dict) -> dict:
@@ -436,7 +440,9 @@ def _dirty_reach(repository: Path) -> tuple[dict, dict]:
     import impact_analysis
     from impact_symbols import affected_symbols
 
-    impact = impact_analysis.analyze_impact(root=repository, comparison="dirty", deadline=_deadline())
+    impact = impact_analysis.analyze_impact(
+        root=repository, comparison="dirty", deadline=_deadline()
+    )
     return impact, affected_symbols(repository, impact["changed_symbols"], _deadline())
 
 
@@ -479,7 +485,9 @@ def test_search_and_depth_are_declared_on_get_architecture():
     assert accepted == [None, None, None]
     assert "depth" in validate({"directory": "x", "mode": "snippet", "symbol": "top", "depth": 3})
     assert "symbol" in validate({"directory": "x", "mode": "search"})
-    assert "search" in mcp_server.TOOL_INPUT_SCHEMAS["get_architecture"]["properties"]["mode"]["enum"]
+    assert (
+        "search" in mcp_server.TOOL_INPUT_SCHEMAS["get_architecture"]["properties"]["mode"]["enum"]
+    )
 
 
 def _architecture(directory: str, **arguments) -> dict:
@@ -494,7 +502,7 @@ def _rows(answer: dict, key: str) -> list[dict]:
     cols = answer.get(f"{key}_cols")
     if cols is None:
         return answer[key]
-    return [dict(zip(cols, row)) for row in answer[key]]
+    return [dict(zip(cols, row, strict=True)) for row in answer[key]]
 
 
 def test_get_architecture_serves_search_and_snippet(indexed):

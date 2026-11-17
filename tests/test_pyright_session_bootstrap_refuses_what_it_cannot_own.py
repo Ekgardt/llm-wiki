@@ -22,6 +22,7 @@ from repository_scope import resolve_repository_scope
 
 from tests.language_server_session_state import document_of, unstarted_session
 from tests.pyright_session_helpers import _missing_identity
+from tests.slow_machine import SHORT_TIMEOUT
 
 _OWNER = "owner-accepted"
 _GENERATION = "generation-new"
@@ -60,7 +61,7 @@ def document(session: LanguageServerSession) -> OpenDocument:
 
 
 def _deadline() -> float:
-    return time.monotonic() + 5.0
+    return time.monotonic() + SHORT_TIMEOUT
 
 
 def _qualified(

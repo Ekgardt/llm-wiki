@@ -17,7 +17,7 @@ from corpus_snapshot import collect_corpus
 from llm_wiki.generation_catalog_store import GenerationCatalog
 
 from tests.generation_catalog_helpers import NOW, _publish
-from tests.slow_machine import SHORT_TIMEOUT
+from tests.slow_machine import LONG_TIMEOUT
 
 NOTE = "---\ntype: concept\n---\n# {title}\n\nA page about {title}.\n"
 PROJECT_STATE = "---\ntype: project-state\n---\n# Lantern\n\nThe lantern project.\n"
@@ -159,7 +159,7 @@ def test_a_project_page_is_extracted_into_the_generation(tmp_path: Path) -> None
     project = root / "knowledge" / "projects" / "lantern"
     project.mkdir()
     (project / "state.md").write_text(PROJECT_STATE, encoding="utf-8")
-    outcome = _maintain(root, state, time_budget_seconds=120.0, max_sources=10)
+    outcome = _maintain(root, state, time_budget_seconds=LONG_TIMEOUT, max_sources=10)
     assert outcome["status"] == "built", outcome
     assert outcome["sources"] == 2
 
@@ -168,7 +168,7 @@ def test_a_corpus_larger_than_its_source_limit_is_deferred(tmp_path: Path) -> No
     root, state = _vault(tmp_path)
     _note(root, "first")
     _note(root, "second")
-    outcome = _maintain(root, state, time_budget_seconds=120.0, max_sources=1)
+    outcome = _maintain(root, state, time_budget_seconds=LONG_TIMEOUT, max_sources=1)
     assert outcome["status"] == "deferred"
     assert outcome["reason"] == "source_limit"
 
@@ -190,7 +190,7 @@ def test_a_failed_refresh_names_its_cause(
 ) -> None:
     root, state = _vault(tmp_path)
     monkeypatch.setattr(generation_maintenance, "refreshed_generation", _raising(error))
-    outcome = _maintain(root, state, time_budget_seconds=120.0, max_sources=10)
+    outcome = _maintain(root, state, time_budget_seconds=LONG_TIMEOUT, max_sources=10)
     assert (outcome["status"], outcome["reason"]) == (status, reason)
 
 
@@ -208,7 +208,7 @@ def test_a_busy_maintenance_fence_names_its_holder(
     held_maintenance: tuple[Path, Path, Any, dict[str, object]],
 ) -> None:
     root, state, _coordinator, _lease = held_maintenance
-    outcome = _maintain(root, state, time_budget_seconds=120.0, max_sources=10)
+    outcome = _maintain(root, state, time_budget_seconds=LONG_TIMEOUT, max_sources=10)
     assert outcome["reason"] == "maintenance_owner_busy"
     assert outcome["details"]["holder"]["present"] is True
 
@@ -252,7 +252,7 @@ def test_a_heartbeat_cleanup_returns_what_the_cleanup_returned(tmp_path: Path) -
     assert acquired is not None
     coordinator, lease = acquired
     heartbeat: Any = generation_maintenance.MaintenanceHeartbeat(
-        coordinator, lease, deadline=time.monotonic() + SHORT_TIMEOUT
+        coordinator, lease, deadline=time.monotonic() + LONG_TIMEOUT
     )
     with heartbeat as guard:
         assert guard.cleanup(lambda value: value * 2, 21) == 42
@@ -279,8 +279,8 @@ def test_an_intact_or_linked_unregistered_generation_is_not_removable(tmp_path: 
     directory, _manifest = _publish(catalog, "g1")
     link = catalog.generations_path / "g2"
     link.symlink_to(directory, target_is_directory=True)
-    assert not _is_removable(catalog, directory, time.monotonic() + SHORT_TIMEOUT)
-    assert not _is_removable(catalog, link, time.monotonic() + SHORT_TIMEOUT)
+    assert not _is_removable(catalog, directory, time.monotonic() + LONG_TIMEOUT)
+    assert not _is_removable(catalog, link, time.monotonic() + LONG_TIMEOUT)
 
 
 def test_an_orphan_check_past_its_deadline_stops(tmp_path: Path) -> None:
@@ -308,7 +308,7 @@ def test_an_orphan_cleanup_cancelled_between_children_stops(tmp_path: Path) -> N
             catalog,
             catalog.state_root,
             set(),
-            time.monotonic() + SHORT_TIMEOUT,
+            time.monotonic() + LONG_TIMEOUT,
             _cancelled_after(2),
         )
 
@@ -360,7 +360,7 @@ def test_an_orphan_cleanup_keeps_a_registered_generation(tmp_path: Path) -> None
     catalog = _catalog(tmp_path)
     directory, _manifest = _publish(catalog, "g1")
     removed = generation_maintenance._cleanup_generation_orphans(
-        catalog, catalog.state_root, {"g1"}, time.monotonic() + SHORT_TIMEOUT, None
+        catalog, catalog.state_root, {"g1"}, time.monotonic() + LONG_TIMEOUT, None
     )
     assert removed == 0
     assert directory.is_dir()

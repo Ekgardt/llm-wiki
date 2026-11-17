@@ -13,6 +13,8 @@ from typing import Any
 import pytest
 from repository_scope import resolve_repository_scope
 
+from tests.slow_machine import LONG_TIMEOUT
+
 helpers = importlib.import_module("tests.retrieval_v2_helpers")
 operator_corpus = importlib.import_module("navigation_benchmark_operator_corpus")
 deadlines = importlib.import_module("navigation_benchmark_deadlines")
@@ -20,7 +22,7 @@ SCRIPTS = helpers.BENCHMARK.parent / "scripts"
 
 
 def _deadline() -> float:
-    return time.monotonic() + 30
+    return time.monotonic() + LONG_TIMEOUT
 
 
 def _source(root: Path, relative: str, text: str) -> Path:

@@ -28,6 +28,7 @@ from tests.language_server_session_state import (
     unstarted_session,
 )
 from tests.pyright_session_helpers import _missing_identity
+from tests.slow_machine import SHORT_TIMEOUT
 
 _RANGE = {"start": {"line": 0, "character": 0}, "end": {"line": 0, "character": 3}}
 _WIDE = {"start": {"line": 0, "character": 0}, "end": {"line": 4, "character": 0}}
@@ -45,7 +46,7 @@ def document(session: LanguageServerSession) -> OpenDocument:
 
 
 def _deadline() -> float:
-    return time.monotonic() + 5.0
+    return time.monotonic() + SHORT_TIMEOUT
 
 
 def _symbol(**fields: object) -> dict[str, object]:

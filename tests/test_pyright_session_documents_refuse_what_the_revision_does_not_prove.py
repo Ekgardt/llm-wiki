@@ -26,6 +26,7 @@ from tests.language_server_session_state import (
     document_of,
     unstarted_session,
 )
+from tests.slow_machine import SHORT_TIMEOUT
 
 
 class _RefusingProcess:
@@ -52,7 +53,7 @@ def document(session: LanguageServerSession) -> OpenDocument:
 
 
 def _deadline() -> float:
-    return time.monotonic() + 5.0
+    return time.monotonic() + SHORT_TIMEOUT
 
 
 def _entry(document: OpenDocument, size: object) -> RevisionEntry:

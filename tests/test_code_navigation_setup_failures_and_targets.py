@@ -1,4 +1,7 @@
-"""Navigation falls back to fresh structural evidence when the provider fails, and validates every provider target against the revision."""
+"""Navigation falls back to structural evidence when the provider fails.
+
+Every provider target is validated against the revision.
+"""
 
 from __future__ import annotations
 
@@ -73,9 +76,7 @@ def test_provider_failure_still_uses_deadline_aware_structural_fallback(
     document = _open_document(scope, "pkg/service.py")
     seen_deadlines: list[float] = []
 
-    def structural(
-        request: NavigationRequest, deadline: float
-    ) -> tuple[NavigationLocation, ...]:
+    def structural(request: NavigationRequest, deadline: float) -> tuple[NavigationLocation, ...]:
         seen_deadlines.append(deadline)
         return (_graph_location("pkg/api.py", 6, 15),)
 
@@ -94,9 +95,7 @@ def test_provider_failure_still_uses_deadline_aware_structural_fallback(
     absolute_deadline = time.monotonic() + 5
     try:
         result = navigation.query(
-            NavigationRequest(
-                scope, Capability.DEFINITIONS, "pkg/service.py", 10, 20
-            ),
+            NavigationRequest(scope, Capability.DEFINITIONS, "pkg/service.py", 10, 20),
             deadline=absolute_deadline,
         )
         assert result.status is expected
@@ -107,7 +106,9 @@ def test_provider_failure_still_uses_deadline_aware_structural_fallback(
             assert seen_deadlines == [absolute_deadline]
             assert len(result.locations) == 1
             assert result.locations[0].resolution is ResolutionLabel.GRAPH_CANDIDATE
-        assert all("private" not in warning and "secret" not in warning for warning in result.warnings)
+        assert all(
+            "private" not in warning and "secret" not in warning for warning in result.warnings
+        )
     finally:
         session.close(deadline=time.monotonic() + 5)
 
@@ -125,9 +126,7 @@ def test_provider_setup_failure_publishes_only_fresh_structural_fallback(
     document = _open_document(scope, "pkg/service.py")
     callbacks = 0
 
-    def structural(
-        request: NavigationRequest, deadline: float
-    ) -> tuple[NavigationLocation, ...]:
+    def structural(request: NavigationRequest, deadline: float) -> tuple[NavigationLocation, ...]:
         nonlocal callbacks
         callbacks += 1
         return (_graph_location("pkg/api.py", 6, 15),)
@@ -147,9 +146,7 @@ def test_provider_setup_failure_publishes_only_fresh_structural_fallback(
     monkeypatch.setattr(session, stage, fail)
     try:
         result = navigation.query(
-            NavigationRequest(
-                scope, Capability.DEFINITIONS, "pkg/service.py", 10, 20
-            ),
+            NavigationRequest(scope, Capability.DEFINITIONS, "pkg/service.py", 10, 20),
             deadline=time.monotonic() + SHORT_TIMEOUT,
         )
         assert callbacks == 1
@@ -183,9 +180,7 @@ def test_setup_failure_never_bypasses_request_source_or_anchor_validation(
     revision = _revision(repository, "a")
     structural_calls = 0
 
-    def structural(
-        request: NavigationRequest, deadline: float
-    ) -> tuple[NavigationLocation, ...]:
+    def structural(request: NavigationRequest, deadline: float) -> tuple[NavigationLocation, ...]:
         nonlocal structural_calls
         structural_calls += 1
         return (_graph_location("pkg/api.py", 6, 15),)
@@ -243,16 +238,12 @@ def test_setup_failure_retries_request_source_disk_mismatch_before_fallback(
     revision_calls = 0
     structural_calls = 0
 
-    def compute(
-        repository_scope: RepositoryScope, *, deadline: float
-    ) -> WorkspaceRevision:
+    def compute(repository_scope: RepositoryScope, *, deadline: float) -> WorkspaceRevision:
         nonlocal revision_calls
         revision_calls += 1
         return revision
 
-    def structural(
-        request: NavigationRequest, deadline: float
-    ) -> tuple[NavigationLocation, ...]:
+    def structural(request: NavigationRequest, deadline: float) -> tuple[NavigationLocation, ...]:
         nonlocal structural_calls
         structural_calls += 1
         return (_graph_location("pkg/api.py", 6, 15),)
@@ -311,9 +302,7 @@ def test_setup_failure_validates_after_synchronize_before_aba_fallback(
     structural_calls = 0
     events: list[str] = []
 
-    def compute(
-        repository_scope: RepositoryScope, *, deadline: float
-    ) -> WorkspaceRevision:
+    def compute(repository_scope: RepositoryScope, *, deadline: float) -> WorkspaceRevision:
         return revisions[source_path.read_bytes()]
 
     def synchronize(value: WorkspaceRevision, *, deadline: float) -> None:
@@ -329,9 +318,7 @@ def test_setup_failure_validates_after_synchronize_before_aba_fallback(
                 source_path.write_bytes(content_a)
         raise RuntimeError("provider setup failed after mutation")
 
-    def structural(
-        request: NavigationRequest, deadline: float
-    ) -> tuple[NavigationLocation, ...]:
+    def structural(request: NavigationRequest, deadline: float) -> tuple[NavigationLocation, ...]:
         nonlocal structural_calls
         structural_calls += 1
         events.append("structural")
@@ -466,9 +453,7 @@ def test_provider_setup_distinguishes_not_ready_from_timeout(
     monkeypatch.setattr(session, stage, fail)
     try:
         result = navigation.query(
-            NavigationRequest(
-                scope, Capability.DEFINITIONS, "pkg/service.py", 10, 20
-            ),
+            NavigationRequest(scope, Capability.DEFINITIONS, "pkg/service.py", 10, 20),
             deadline=time.monotonic() + 5,
         )
         assert result.status is expected
@@ -499,23 +484,15 @@ def test_setup_failure_fallback_retries_freshness_before_publication(
     current_revision = 0
     callbacks = 0
 
-    def compute(
-        repository: RepositoryScope, *, deadline: float
-    ) -> WorkspaceRevision:
+    def compute(repository: RepositoryScope, *, deadline: float) -> WorkspaceRevision:
         return revisions[current_revision]
 
-    def structural(
-        request: NavigationRequest, deadline: float
-    ) -> tuple[NavigationLocation, ...]:
+    def structural(request: NavigationRequest, deadline: float) -> tuple[NavigationLocation, ...]:
         nonlocal callbacks, current_revision
         callbacks += 1
         if callbacks == 1 or mutate_every_attempt:
             current_revision += 1
-        return (
-            (_graph_location("pkg/api.py", 6, 15),)
-            if useful_graph
-            else ()
-        )
+        return (_graph_location("pkg/api.py", 6, 15),) if useful_graph else ()
 
     navigation, session = _navigation(
         repository,
@@ -532,9 +509,7 @@ def test_setup_failure_fallback_retries_freshness_before_publication(
     )
     try:
         result = navigation.query(
-            NavigationRequest(
-                scope, Capability.DEFINITIONS, "pkg/service.py", 10, 20
-            ),
+            NavigationRequest(scope, Capability.DEFINITIONS, "pkg/service.py", 10, 20),
             deadline=time.monotonic() + SHORT_TIMEOUT,
         )
         assert callbacks == 2
@@ -589,9 +564,7 @@ def test_setup_timeout_after_absolute_deadline_skips_structural_fallback(
     monkeypatch.setattr(code_navigation.time, "monotonic", lambda: clock["now"])
     try:
         result = navigation.query(
-            NavigationRequest(
-                scope, Capability.DEFINITIONS, "pkg/service.py", 10, 20
-            ),
+            NavigationRequest(scope, Capability.DEFINITIONS, "pkg/service.py", 10, 20),
             deadline=10.0,
         )
         assert result.status is NavigationStatus.TIMEOUT
@@ -628,7 +601,7 @@ def _patch_early_revision(monkeypatch, early_stage: str, revision) -> None:
 def _early_deadline(early_stage: str) -> float:
     if early_stage == "expired":
         return 0.0
-    return time.monotonic() + 5
+    return time.monotonic() + SHORT_TIMEOUT
 
 
 @pytest.mark.parametrize(
@@ -691,9 +664,7 @@ def test_setup_failure_structural_interruption_still_propagates(
     try:
         with pytest.raises(code_navigation.NavigationInterruption):
             navigation.query(
-                NavigationRequest(
-                    scope, Capability.DEFINITIONS, "pkg/service.py", 10, 20
-                ),
+                NavigationRequest(scope, Capability.DEFINITIONS, "pkg/service.py", 10, 20),
                 deadline=time.monotonic() + 5,
             )
     finally:
@@ -751,15 +722,11 @@ def test_post_setup_empty_results_preserve_readiness_and_empty_contract(
     monkeypatch.setattr(
         session,
         "definition",
-        lambda anchor, *, deadline: ProviderLocations(
-            (), "provider_reported", False
-        ),
+        lambda anchor, *, deadline: ProviderLocations((), "provider_reported", False),
     )
     revision_calls = 0
 
-    def compute(
-        repository: RepositoryScope, *, deadline: float
-    ) -> WorkspaceRevision:
+    def compute(repository: RepositoryScope, *, deadline: float) -> WorkspaceRevision:
         nonlocal revision_calls
         revision_calls += 1
         return _revision_for_stage(stage, revisions, revision_calls)
@@ -829,17 +796,12 @@ def test_callback_exceptions_are_redacted_at_every_boundary(
     )
     try:
         if callback_kind == "structural":
-            _patch_empty_definitions(
-                monkeypatch, session, _open_document(scope, "pkg/service.py")
-            )
-        result = _navigation_operation(
-            callback_kind, navigation, scope, time.monotonic() + 5
-        )
+            _patch_empty_definitions(monkeypatch, session, _open_document(scope, "pkg/service.py"))
+        result = _navigation_operation(callback_kind, navigation, scope, time.monotonic() + 5)
         assert result.status is expected
         assert result.locations == ()
         assert all(
-            "private" not in warning and "secret" not in warning
-            for warning in result.warnings
+            "private" not in warning and "secret" not in warning for warning in result.warnings
         )
     finally:
         session.close(deadline=time.monotonic() + SHORT_TIMEOUT)
@@ -872,13 +834,9 @@ def test_navigation_interruption_propagates_from_every_callback_boundary(
     )
     try:
         if callback_kind == "structural":
-            _patch_empty_definitions(
-                monkeypatch, session, _open_document(scope, "pkg/service.py")
-            )
+            _patch_empty_definitions(monkeypatch, session, _open_document(scope, "pkg/service.py"))
         with pytest.raises(code_navigation.NavigationInterruption):
-            _navigation_operation(
-                callback_kind, navigation, scope, time.monotonic() + 5
-            )
+            _navigation_operation(callback_kind, navigation, scope, time.monotonic() + 5)
     finally:
         session.close(deadline=time.monotonic() + 5)
 
@@ -925,7 +883,7 @@ def test_cross_file_unicode_targets_use_negotiated_position_encoding(
             },
         },
     )
-    navigation, session = _navigation(repository, state_root, fixture)
+    navigation, _session = _navigation(repository, state_root, fixture)
     try:
         result = navigation.query(
             NavigationRequest(
@@ -960,9 +918,7 @@ def test_provider_target_with_stale_pre_revision_hash_returns_stale(
     revision = replace(
         clean_revision,
         entries=tuple(
-            replace(entry, sha256="0" * 64)
-            if entry.path == "pkg/api.py"
-            else entry
+            replace(entry, sha256="0" * 64) if entry.path == "pkg/api.py" else entry
             for entry in clean_revision.entries
         ),
     )
@@ -986,9 +942,7 @@ def test_provider_target_with_stale_pre_revision_hash_returns_stale(
     )
     try:
         result = navigation.query(
-            NavigationRequest(
-                scope, Capability.DEFINITIONS, "pkg/service.py", 10, 20
-            ),
+            NavigationRequest(scope, Capability.DEFINITIONS, "pkg/service.py", 10, 20),
             deadline=time.monotonic() + SHORT_TIMEOUT,
         )
         assert result.status is NavigationStatus.STALE
@@ -1059,13 +1013,10 @@ def test_provider_uri_normalization_is_attempt_local_for_repeated_locations(
         ),
     )
     normalized_uris = _record_normalized_uris(monkeypatch)
-    request = NavigationRequest(
-        scope, Capability.DEFINITIONS, "pkg/service.py", 10, 20
-    )
+    request = NavigationRequest(scope, Capability.DEFINITIONS, "pkg/service.py", 10, 20)
     try:
         results = tuple(
-            navigation.query(request, deadline=time.monotonic() + SHORT_TIMEOUT)
-            for _ in range(2)
+            navigation.query(request, deadline=time.monotonic() + SHORT_TIMEOUT) for _ in range(2)
         )
 
         for result in results:
@@ -1113,9 +1064,7 @@ def test_external_provider_target_is_filtered_without_path_disclosure(
     )
     try:
         result = navigation.query(
-            NavigationRequest(
-                scope, Capability.DEFINITIONS, "pkg/service.py", 10, 20
-            ),
+            NavigationRequest(scope, Capability.DEFINITIONS, "pkg/service.py", 10, 20),
             deadline=time.monotonic() + SHORT_TIMEOUT,
         )
         assert result.status is NavigationStatus.PARTIAL
@@ -1135,9 +1084,7 @@ def test_structural_targets_are_revision_validated_and_rebuilt(
     revision = _revision(repository, "a")
     document = _open_document(scope, "pkg/service.py")
 
-    def structural(
-        request: NavigationRequest, deadline: float
-    ) -> tuple[NavigationLocation, ...]:
+    def structural(request: NavigationRequest, deadline: float) -> tuple[NavigationLocation, ...]:
         return (
             _graph_location("pkg/api.py", 6, 15),
             _graph_location("pkg/missing.py", 0, 1),
@@ -1154,15 +1101,11 @@ def test_structural_targets_are_revision_validated_and_rebuilt(
     monkeypatch.setattr(
         session,
         "definition",
-        lambda anchor, *, deadline: ProviderLocations(
-            (), "provider_reported", False
-        ),
+        lambda anchor, *, deadline: ProviderLocations((), "provider_reported", False),
     )
     try:
         result = navigation.query(
-            NavigationRequest(
-                scope, Capability.DEFINITIONS, "pkg/service.py", 10, 20
-            ),
+            NavigationRequest(scope, Capability.DEFINITIONS, "pkg/service.py", 10, 20),
             deadline=time.monotonic() + SHORT_TIMEOUT,
         )
         assert result.status is NavigationStatus.PARTIAL

@@ -12,6 +12,8 @@ import pytest
 from llm_wiki import doctor_generation
 from llm_wiki.generation_catalog_store import GenerationCatalog
 
+from tests.slow_machine import LONG_TIMEOUT
+
 GENERATIONS = Path("cache") / "evidence-graph" / "generations"
 
 
@@ -37,14 +39,14 @@ def _check(root: Path, state: Path, deadline: float) -> dict[str, Any]:
 
 
 def _generous() -> float:
-    return time.monotonic() + 120.0
+    return time.monotonic() + LONG_TIMEOUT
 
 
 def _built_generation(root: Path, state: Path) -> Path:
     note = root / "knowledge" / "notes" / "first.md"
     note.write_text("---\ntype: concept\n---\n# First\n\nA first page.\n", encoding="utf-8")
     built = generation_maintenance.run_generation_maintenance(
-        root=root, state_root=state, time_budget_seconds=120.0, max_sources=10
+        root=root, state_root=state, time_budget_seconds=LONG_TIMEOUT, max_sources=10
     )
     assert built.get("generation_id"), built
     return state / GENERATIONS / str(built["generation_id"])

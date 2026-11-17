@@ -10,6 +10,7 @@ from typing import Any
 import pytest
 
 from tests.retrieval_v2_helpers import BENCHMARK, CORPUS, ROOT, SCHEMA, spec_identity
+from tests.slow_machine import LONG_TIMEOUT
 
 helpers = importlib.import_module("tests.retrieval_v2_helpers")
 reports_helpers = importlib.import_module("tests.retrieval_v2_reports_helpers")
@@ -153,7 +154,7 @@ def test_a_selection_run_through_the_bound_transport_publishes_release_evidence(
         output_path="benchmark/results/selection.json",
         measured_at=MEASURED_AT,
         cache_root=cache,
-        deadline_seconds=60.0,
+        deadline_seconds=LONG_TIMEOUT,
     )
 
     published = json.loads((repo / "benchmark/results/selection.json").read_bytes())

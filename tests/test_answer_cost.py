@@ -12,10 +12,12 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 
-from answer_cost import (  # noqa: E402
+from answer_cost import (
     COST_KEY,
     MODE_ENV,
 )
+
+from tests.slow_machine import LONG_TIMEOUT
 
 # --- the number itself -------------------------------------------------------
 
@@ -26,6 +28,7 @@ from answer_cost import (  # noqa: E402
 # --- the telemetry obeys the law it measures --------------------------------
 
 # --- the wiring into the answer path ----------------------------------------
+
 
 def test_a_real_tool_answer_carries_its_cost(monkeypatch) -> None:
     import mcp_server
@@ -66,4 +69,4 @@ def test_a_telemetry_failure_never_costs_the_caller_the_answer(monkeypatch) -> N
 def _deadline() -> float:
     import time
 
-    return time.monotonic() + 60.0
+    return time.monotonic() + LONG_TIMEOUT
