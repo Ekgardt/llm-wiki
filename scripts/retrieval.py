@@ -490,6 +490,10 @@ _FILENAME_RE = re.compile(
 _SLUG_RE = re.compile(r"\b(?P<slug>[a-z0-9]+(?:-[a-z0-9]+){1,12})\b")
 _SNAKE_RE = re.compile(r"\b(?P<snake>[a-z][a-z0-9]*(?:_[a-z0-9]+)+)\b")
 _CAMEL_RE = re.compile(r"\b(?P<camel>[A-Z][a-z0-9]+(?:[A-Z][a-z0-9]+)+)\b")
+# What is left of a lookup once its names are taken out: `.run` after a name is
+# a member of it, and any other letter is a word of a sentence.
+_MEMBER_RE = re.compile(r"(?<!\w)\.\w+")
+_SENTENCE_WORD_RE = re.compile(r"[^\W\d_]")
 _QUESTION_RE = re.compile(
     r"(?:"
     r"^(?P<q_en>who|what|when|where|why|how|which|does|do|is|are|can|should)\b"
@@ -706,15 +710,29 @@ def _is_question(stripped: str, normalized: str) -> bool:
     return stripped.endswith("?") or stripped.endswith("？")
 
 
-def _is_identifier_lookup(normalized: str, identifiers: tuple[str, ...]) -> bool:
-    """The whole query is one name and nothing else.
+def _without_names(normalized: str, identifiers: tuple[str, ...]) -> str:
+    """The query with every name taken out, longest first so a path goes whole."""
+    rest = normalized
+    for name in sorted(identifiers, key=len, reverse=True):
+        rest = rest.replace(name, " ")
+    return rest
 
-    A name inside a sentence is a hint the lexical leg rewards; it does not make
-    the sentence a lookup. Before 2026-11-17 it did, and 40 of LongMemEval's 500
-    questions ran without the cross-encoder because they held a hyphenated word
-    such as "5-day" (docs/research/2026-11-17-a-name-inside-a-question-keeps-every-leg.md).
+
+def _is_identifier_lookup(normalized: str, identifiers: tuple[str, ...]) -> bool:
+    """The query is names and their decoration, and no word of a sentence.
+
+    Backticks, quotes, brackets, a question mark, a `:120` line or a `.member`
+    after a name are decoration: `` `QueueWorker` `` and `QueueWorker.run` are
+    lookups. A name inside a sentence is a hint the lexical leg rewards; it does
+    not make the sentence a lookup. Before 2026-11-17 it did, and 40 of
+    LongMemEval's 500 questions ran without the cross-encoder because they held a
+    hyphenated word such as "5-day"
+    (docs/research/2026-11-17-a-name-inside-a-question-keeps-every-leg.md).
     """
-    return normalized in identifiers
+    if not identifiers:
+        return False
+    rest = _MEMBER_RE.sub(" ", _without_names(normalized, identifiers))
+    return _SENTENCE_WORD_RE.search(rest) is None
 
 
 def _shape_intents(

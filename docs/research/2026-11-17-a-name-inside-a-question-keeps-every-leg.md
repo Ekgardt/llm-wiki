@@ -9,8 +9,10 @@ Two defects made ordinary questions search by spelling only.
 
 1. **A word with a hyphen or an underscore made the whole query a lookup.** `analyze_query`
    marks such a word as `exact_identifier`, and that intent mapped to the lexical-only `EXACT`
-   profile. "How many shirts did I pack for my 5-day trip?" therefore ran BM25 alone. The
-   reranker also skipped every query carrying the intent (`exact_identifier_bypass`). On
+   profile. The search tools, which pass no profile, still ran lexical and dense search for
+   "How many shirts did I pack for my 5-day trip?", because `planned_request` turns a non-graph
+   recommendation into `HYBRID`; but the reranker skipped every query carrying the intent
+   (`exact_match_bypass`). The answer path and the benchmark ran it BM25 alone (defect 2). On
    LongMemEval-S (500 questions) 40 questions were routed this way.
 2. **Two callers passed the planner's recommendation back as the caller's choice.** The answer
    path (`query_memory.grounded_qa`) and the benchmark asked retrieval with
@@ -21,15 +23,39 @@ Two defects made ordinary questions search by spelling only.
 
 ## What changed
 
-- Only a query that is one name and nothing else is a lookup (`identifier_lookup` → `EXACT`):
-  `hook-scripts-defense-in-depth`, `auth-decision.md`, `QueueWorker`, `scripts/retrieval.py`. A
-  name inside a question stays a ranking hint and the question runs the planned legs.
-- The reranker is skipped only for a quoted phrase or an explicit `EXACT`/`DIRECT` profile. A file
-  whose name matches the query is still promoted to the top after reranking
-  (`_promote_exact_filename`), so a lookup does not need the bypass.
+- Only a lookup is a lookup (`identifier_lookup`): a query made of names and their decoration
+  and no word of a sentence. `hook-scripts-defense-in-depth`, `auth-decision.md`,
+  `QueueWorker`, `` `QueueWorker` ``, `QueueWorker.run`, `search_memory_rebuild()` and
+  `queue_worker.py:120` are lookups. A name inside a question stays a ranking hint, and the
+  question runs the planned legs and the cross-encoder.
+- A lookup keeps what it had before this change: the planned lexical and dense legs, and no
+  cross-encoder (`exact_match_bypass`, now keyed on `identifier_lookup` instead of
+  `exact_identifier`). Its result order and its latency do not change. A quoted phrase and an
+  explicit `EXACT`/`DIRECT` profile skip the cross-encoder as before.
 - The answer path and the benchmark ask with no profile unless the caller chose one, so the
   planner adds the dense leg. `planned_profile(query)` reports the profile that actually runs;
-  the benchmark records that one.
+  the benchmark, the answer path and the MCP trace record that one.
+
+## Alternatives considered
+
+1. **Rerank lookups too** (the first version of this change). A cross-encoder scores a passage
+   against a sentence; a bare name gives it nothing to read but the name, and
+   `_promote_exact_filename` protects only a file whose stem is the query, not a class or a
+   function named inside a file. Vaquill reranks identifier queries, but only after a hard
+   filter on the parsed identifier has already fixed the candidate set (Vaquill, in Sources), which this
+   vault does not have. No measurement of lookups exists here, so the change would have moved
+   their order and their latency (0.16 s to about 2.5 s at the median) unmeasured. Rejected.
+2. **Route lookups lexical only.** Short navigational queries do favour BM25 (BigDataBoutique, in Sources), but
+   fusion beats choosing one retriever per query: on financial retrieval, three adaptive routers
+   failed to beat a fixed sparse-dense blend, and fusing both improved Hit@10 by about 28 % over
+   either alone (arXiv 2608.00183, in Sources). The base already ran lookups through both legs; taking the dense leg
+   away would be a new, unmeasured restriction. Rejected.
+3. **Symbol-aware promotion** (put a chunk defining the named class or function first after
+   reranking). It would make reranking lookups safe, but it needs symbol extraction for every
+   language the vault holds; that is the code-navigation work, not a routing fix. Deferred.
+4. **Chosen: a name inside a question is a hint; a bare name keeps the base behaviour.** The
+   measured defect (49 questions losing the dense leg or the cross-encoder) is fixed, and the
+   unmeasured case is left as it was. Revisit option 1 when a lookup benchmark exists.
 
 ## Measurement
 
@@ -52,8 +78,16 @@ shared server.
 Turn recall at 12 changed on 19 questions: 17 better, 2 worse.
 
 - `3fe836c9` (pre-approval amount against the sale price) fell from 1.0 to 0.5 at every depth.
-  One of its two evidence turns no longer reaches the top 48. The cross-encoder now ranks it,
-  and lexical overlap alone ranked it higher.
+  One of its two evidence turns no longer reaches the top 48, with or without the cross-encoder.
+  Diagnosed by wrapping every stage of `retrieve` on this question's vault: the turn is found
+  (lexical rank 3, dense rank 2, second in the fused order), and the coverage step
+  `_pulled_into_window` then displaces it to make room for chunks of other sessions admitted
+  for coverage; `_capped` cuts it. At depth 300, where everything fits, it stays second.
+  Inferred, not yet verified: the session's admitted chunk is its assistant reply on mortgage
+  insurance, which shares more question words ("more", "amount", "than", "price") than the user
+  turn holding the figure, so the user turn counts as a spare; the dense leg adds candidates,
+  so more places are handed over than before. The step belongs to the multi-session packing
+  item and is fixed there, with this question as its regression case.
 - `gpt4_93159ced` fell from 1.0 to 0.67 at 12 and is complete again at 24.
 
 Where the reranker did not run after the change:
@@ -82,3 +116,14 @@ Where the reranker did not run after the change:
   cross-encoder stage applied to the fused candidates.
 - Anthropic, "Introducing Contextual Retrieval" (2024): hybrid BM25 plus embeddings plus
   reranking beats either leg alone, <https://www.anthropic.com/news/contextual-retrieval>.
+- Vaquill, "Hybrid Retrieval for Law, and the Citation-to-a-Subsection Problem" (2026-02-25):
+  an exact identifier parsed from the query becomes a filter, and the cross-encoder then orders
+  the filtered candidates,
+  <https://www.vaquill.ai/engineering/hybrid-retrieval-and-the-exact-identifier-problem>.
+- BigDataBoutique, "Hybrid Search Explained" (2026-06-08): "Short navigational queries (one or
+  two tokens) usually favor BM25; long natural-language questions favor dense",
+  <https://bigdataboutique.com/blog/hybrid-search-explained>.
+- "Evidence-Unit Fairness and the Limits of Query-Adaptive Sparse-Dense Fusion in Financial
+  Document Retrieval" (arXiv 2608.00183, 2026): no adaptive router reliably beat the fixed
+  blend; fusion improved Hit@10 by about 28 % over either component,
+  <https://arxiv.org/abs/2608.00183>.

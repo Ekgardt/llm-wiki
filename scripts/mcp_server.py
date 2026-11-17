@@ -1028,9 +1028,9 @@ def _row_trace(row: Mapping[str, object]) -> dict[str, object]:
 
 def _unreported_trace(query: str) -> dict[str, object]:
     """Nothing reported a trace: say so, and never guess a generation."""
-    from retrieval import analyze_query, planned_request
+    from retrieval import planned_profile
 
-    requested, _signals = planned_request(None, analyze_query(query), semantic=True)
+    requested = planned_profile(query)
     return _reported_trace(
         {
             "requested_mode": requested,
