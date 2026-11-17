@@ -3625,6 +3625,14 @@ def _appended_an_equivalent_entry(config: Path, original: str, before: bytes) ->
     return appended and codex_memory.codex_mcp_config_state(config, ROOT) == "equivalent"
 
 
+_EXTEND_THE_LIST = 'add "deferred" to its omit_tools_from list'
+
+
+def _advice_fits(scenario: str, output: str) -> bool:
+    """A deferred entry is told to extend its list, never to add a second key."""
+    return (scenario == "deferred") == (_EXTEND_THE_LIST in output)
+
+
 def _codex_mcp_toml(
     vault: Path, *, quoted: bool, conflicting: bool = False, deferred: bool = False
 ) -> str:
@@ -3657,7 +3665,9 @@ def test_unix_installer_mcp_function_uses_parser_in_temp_home(tmp_path, scenario
     if not bash.exists():
         pytest.skip("Git Bash unavailable")
     source = (ROOT / "install.sh").read_text(encoding="utf-8")
-    function = _shell_functions(source, "write_codex_mcp_block", "add_codex_mcp_block", "codex_mcp_state_status", "configure_codex_mcp")
+    warn = re.search(r"(?m)^warn\(\)\s*\{.*\}$", source)
+    assert warn, "warn missing"
+    function = warn.group(0) + "\n" + _shell_functions(source, "write_codex_mcp_block", "add_codex_mcp_block", "codex_mcp_state_status", "configure_codex_mcp")
     home = tmp_path / "home"
     config = home / ".codex" / "config.toml"
     config.parent.mkdir(parents=True)
@@ -3700,7 +3710,8 @@ def test_unix_installer_mcp_function_uses_parser_in_temp_home(tmp_path, scenario
     assert (
         _mcp_config_kept(config, scenario, original, before),
         config.read_text(encoding="utf-8").count("[mcp_servers."),
-    ) == (True, 1)
+        _advice_fits(scenario, result.stdout + result.stderr),
+    ) == (True, 1, True)
 
 
 @pytest.mark.parametrize(
@@ -3732,12 +3743,14 @@ def test_windows_installer_mcp_function_uses_parser_in_temp_home(tmp_path, scena
         $ast = [System.Management.Automation.Language.Parser]::ParseFile(
             {ps_literal(str(source))}, [ref]$tokens, [ref]$errors)
         if ($errors.Count) {{ throw ($errors | Out-String) }}
-        $fn = $ast.Find({{ param($node)
-            $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
-            $node.Name -eq 'Install-CodexMcp'
-        }}, $true)
-        if ($null -eq $fn) {{ throw 'Install-CodexMcp missing' }}
-        Invoke-Expression $fn.Extent.Text
+        foreach ($name in @('Warn', 'Install-CodexMcp')) {{
+            $fn = $ast.Find({{ param($node)
+                $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
+                $node.Name -eq $name
+            }}, $true)
+            if ($null -eq $fn) {{ throw "$name missing" }}
+            Invoke-Expression $fn.Extent.Text
+        }}
         function uv {{
             $all = @($args)
             $index = [Array]::IndexOf($all, 'config-state')
@@ -3761,7 +3774,8 @@ def test_windows_installer_mcp_function_uses_parser_in_temp_home(tmp_path, scena
     assert (
         _mcp_config_kept(config, scenario, original, before),
         config.read_text(encoding="utf-8").count("[mcp_servers."),
-    ) == (True, 1)
+        _advice_fits(scenario, result.stdout + result.stderr),
+    ) == (True, 1, True)
 
 
 def test_unix_installer_probe_reports_absent_without_touching_the_file(tmp_path):

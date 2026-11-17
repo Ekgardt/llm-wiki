@@ -75,13 +75,6 @@ def test_both_installers_keep_codex_from_deferring_the_tools() -> None:
         assert re.search(line, block, re.M), installer
 
 
-def test_the_deferred_advice_extends_an_existing_list() -> None:
-    """An entry may already list other surfaces; a second key would break the file."""
-    for installer in _WRITTEN_BLOCK:
-        text = (ROOT / installer).read_text(encoding="utf-8")
-        assert 'add "deferred" to its omit_tools_from list' in text, installer
-
-
 def test_an_installed_codex_entry_with_the_line_is_equivalent(tmp_path: Path) -> None:
     import codex_memory
 

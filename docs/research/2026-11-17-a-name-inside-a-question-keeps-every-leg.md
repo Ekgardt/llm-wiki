@@ -72,7 +72,8 @@ bge-reranker-v2-m3). Bounded to 8 cores and 2 workers on a shared server.
 | Turn recall at 24 / 48 | 0.713 / 0.909 | 0.971 / 0.979 |
 | All evidence turns in the top 24 / 48 | 32 / 41 | 45 / 47 |
 | Answer session ranked first | 44 | 47 |
-| Retrieval seconds, median | 0.16 | 2.31 |
+| Reranker applied | 5 | 48 |
+| Retrieval seconds, median / p90 / max | 0.16 / 1.9 / 4.4 | 2.31 / 3.24 / 3.93 |
 
 Turn recall at 12 changed on 18 questions: 17 better, 1 worse. At 24, 15 better and none worse;
 at 48, 6 better and none worse.
@@ -80,9 +81,10 @@ at 48, 6 better and none worse.
 - `3fe836c9` (pre-approval amount against the sale price) had fallen from 1.0 to 0.5 at every
   depth on the routing change alone, and is 1.0 again. Traced through `_pulled_into_window` on
   this question's vault: its evidence turn is its session's first chunk, second in the window.
-  The coverage step admitted that session's third chunk, which covers more of the question, and
-  the displacement then protected only the admitted chunk and a source's last chunk inside the
-  window, so it moved the evidence turn from place 2 to place 49 and `_capped` cut it. The
+  The coverage step admitted that session's third chunk, which covers more of the question. The
+  old displacement kept one chunk per source inside the window, and when the source had an
+  admitted chunk that one counted as the kept chunk, so the session's first chunk was free to
+  go: the evidence turn moved from place 2 to place 49 and `_capped` cut it. The
   counted kind ("more", read from "how much more ... than") only made the step pull in 29
   chunks instead of a few. Fixed in the shared rule, not in the kind: `_displaceable` never
   displaces a source's first chunk inside the window
@@ -102,16 +104,14 @@ at 48, 6 better and none worse.
   coverage and routing item, and this question is its check: turn recall 1.0 at 12 there, with
   no question of the 500 losing.
 
-Where the reranker did not run after the change:
-
-- 4 questions: `optional_stage_timeout`, the reranker's deadline, on a server under heavy
-  shared load.
-- 1 `IMPACT` question: `profile_bypass`. `IMPACT` is not a reranking profile, and that is
-  unchanged here.
+Where the reranker did not run on 072737a9: 1 `IMPACT` question, `profile_bypass`. `IMPACT` is
+not a reranking profile, and that is unchanged here. (An earlier run of the routing change alone,
+c1221ddc, on a more heavily loaded server also had 4 `optional_stage_timeout` questions, the
+reranker's deadline; whether it runs depends on the load.)
 
 ## Trade-offs
 
-- Latency: the questions that now get the cross-encoder pay for it, about 2.5 s at the median on
+- Latency: the questions that now get the cross-encoder pay for it, about 2.3 s at the median (p90 3.2 s) on
   this CPU-bound setup. The reranker's existing deadline still bounds the tail, and when it ends
   the stage the fused order is kept.
 - `CODE_SHAPED_INTENTS` still treats a hyphenated English word as code-shaped. This only boosts
