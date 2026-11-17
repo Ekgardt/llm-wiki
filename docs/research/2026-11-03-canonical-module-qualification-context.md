@@ -1,6 +1,6 @@
 # Canonical qualification contract versus repeated pilot history
 
-Date: 2026-11-03. Investigation under the decomposition mandate;
+Date: 2026-11-03. Investigation under the decomposition plan;
 implemented after the separate queue byte-bound correction.
 
 The three historical pilot documents are included in every current manifest:

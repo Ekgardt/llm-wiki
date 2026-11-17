@@ -18,7 +18,8 @@ or a claim that all product callers have been independently modularized.
 
 Source: ../research/2026-11-02-existing-leaf-contracts.md.
 
-`parse_python` returns the ordinary AST and preserves `PARSE_FAILURES`. the Python 3.14 runtime provides its own compiler depth guard. The obsolete
+`parse_python` returns the ordinary AST and preserves `PARSE_FAILURES`. The
+Python 3.14 runtime provides its own compiler depth guard. The obsolete
 3.10 operator-chain preflight and its constants are removed; small-stack and flat
 literal regression scenarios remain, exercising the real parser.
 

@@ -1,6 +1,6 @@
 # Queue worker value/state boundary
 
-Date: 2026-11-03. Prepared at 1214d765 under the decomposition mandate.
+Date: 2026-11-03. Prepared at 1214d765 under the decomposition plan.
 
 Move QueueRetryPolicy, _ProcessorOutcome, _WorkerProgress (including advance),
 processor_error_code and its two existing constants from memory_queue to

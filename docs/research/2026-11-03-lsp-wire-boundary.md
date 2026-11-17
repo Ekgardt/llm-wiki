@@ -1,6 +1,6 @@
 # LSP wire boundary
 
-Date: 2026-11-03. Status: designed under the decomposition mandate;
+Date: 2026-11-03. Status: designed under the decomposition plan;
 implemented; qualification recorded below. Base: 9c38cbd5, isolated candidate.
 
 ## Responsibility and research

@@ -28,7 +28,7 @@ toolchain stay available. No changes to limits, runtime roots or pins are made.
 
 ## Qualification — 2026-11-03
 
-The autonomous plan retains the existing dedicated compiler step.
+The decomposition plan retains the existing dedicated compiler step.
 Inlining it into the installer would mix responsibilities; a new build framework
 or service adds no demonstrated benefit. Complete SourceBuild implementation and
 its profile guide remain explicit dependencies, not signature-only summaries.

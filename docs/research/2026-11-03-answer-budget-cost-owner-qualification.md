@@ -1,7 +1,7 @@
 # Existing answer shaping and cost telemetry owners
 
 Date: 2026-11-03. Qualify scripts/answer_budget.py and scripts/answer_cost.py in
-place under the completion mandate. Production bytes, defaults, public
+place under the completion plan. Production bytes, defaults, public
 imports, environment contract, report fields and response behavior stay unchanged.
 The runtime byte estimate is not the o200k_base tokenizer used for maintenance
 packets, and neither is a provider billing measurement.

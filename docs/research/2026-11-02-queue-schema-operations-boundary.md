@@ -1,6 +1,6 @@
 # Queue schema inspection and repair on a supplied connection
 
-2026-11-02; completion mandate; baseline df42c0e2.
+2026-11-02; completion plan; baseline df42c0e2.
 
 The new `llm_wiki.queue_schema_operations` owns 14 existing functions:
 _normalized_sql, _queue_v3_object_matches, _queue_v3_statements,

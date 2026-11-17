@@ -1,6 +1,6 @@
 # Runtime filesystem responsibilities
 
-2026-11-03, completion mandate; baseline f19217d3. Split the existing
+2026-11-03, completion plan; baseline f19217d3. Split the existing
 reliable_memory filesystem responsibilities into five one-way owners under
 scripts/llm_wiki, preserving exact function/class bodies and current algorithms:
 
@@ -86,7 +86,7 @@ contracts in its packet. No required context is omitted from any actual dependen
 All six bodies and legacy callable pickle paths stay identical. This separates
 normal read validation from explicitly offline, two-pass fingerprinting and adds
 no resource, bound, facade or behavior. It follows the same source research and
-dependency-oriented refinement mandate.
+dependency-oriented refinement plan.
 
 ## Qualification
 

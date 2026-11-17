@@ -1,6 +1,6 @@
 # Existing pure boundaries are qualified in place
 
-2026-11-02, completion mandate. Source baseline f187e32c.
+2026-11-02, completion plan. Source baseline f187e32c.
 No production source moves or changes: python_parse, calendar_pass, iso_time,
 reply_json, page_status and code_intelligence already have stdlib-only boundaries.
 They represent safe Python parsing, calendar arithmetic, timestamp normalization,

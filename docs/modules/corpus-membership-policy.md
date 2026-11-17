@@ -42,7 +42,7 @@ measurement or prove whole-task LLM savings.
 Copying the values would create competing policy authorities. Hiding the import
 would preserve the dependency. Introducing runtime interfaces for immutable
 data would add machinery. The chosen boundary keeps one concrete data owner and
-existing public aliases under the autonomous completion plan.
+existing public aliases under the completion plan.
 
 Three independent primary sources reviewed on this date:
 [Fowler bounded contexts](https://martinfowler.com/bliki/BoundedContext.html),

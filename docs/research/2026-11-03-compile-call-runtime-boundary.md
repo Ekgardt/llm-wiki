@@ -1,6 +1,6 @@
 # Durable compile call lifecycle without compiler orchestration
 
-Date: 2026-11-03. Internal boundary refinement under the completion mandate.
+Date: 2026-11-03. Internal boundary refinement under the completion plan.
 After saved-answer representation was separated, memory_queue still imports the
 large compile_controller for resolve_model_call at settlement and operator recovery.
 The lifecycle already uses an explicit queue object and a supplied protected invoke

@@ -1,6 +1,6 @@
 # Ownership input validation and marker representation
 
-Date: 2026-11-03. Investigation under the whole-project mandate;
+Date: 2026-11-03. Investigation under the whole-project plan;
 not implemented or qualified by this document.
 
 The registry combines pure checks of incoming values and stored marker fields with

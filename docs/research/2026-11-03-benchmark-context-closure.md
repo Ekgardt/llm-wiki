@@ -1,6 +1,7 @@
 # Python context closure must include benchmark code
 
-Date: 2026-11-03. A prerequisite for qualifying benchmark owners under the whole-project decomposition mandate. This strengthens test-only packet validation;
+Date: 2026-11-03. A prerequisite for qualifying benchmark owners under the
+whole-project decomposition plan. This strengthens test-only packet validation;
 no product import path, runtime behavior, dependency version or deployment changes.
 
 ## Reproduction and cause

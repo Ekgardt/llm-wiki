@@ -1,6 +1,6 @@
 # Qualify existing leaf owners without moving their production code
 
-Date: 2026-11-03. Boundaries under the whole-project mandate;
+Date: 2026-11-03. Boundaries under the whole-project plan;
 production files qualified in place.
 
 Source inspection identifies five existing standard-library-only responsibilities:
@@ -40,7 +40,7 @@ Primary practice checked 2026-11-03, three independent publishers:
 Alternatives rejected: relocate already independent code (unneeded compatibility
 work), group by small byte size (unrelated state owners), mock away integration
 imports to force packet size (unqualified behavior), change pinned model or host
-environment contracts during decomposition (outside the mandate). Fresh built-in
+environment contracts during decomposition (outside the plan). Fresh built-in
 caller/dependency graph, source test inventory, exact-transfer proof, real consumers,
 Python 3.10, CCN and packet reconstruction remain required before completion.
 

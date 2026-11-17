@@ -1,6 +1,6 @@
 # A maintenance packet includes the test loader
 
-2026-11-02. Completion mandate; measurement correction, no product change.
+2026-11-02. Completion plan; measurement correction, no product change.
 
 ## Reproduced cause
 

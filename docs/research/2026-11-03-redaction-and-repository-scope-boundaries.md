@@ -1,6 +1,6 @@
 # Redaction and repository scope remain independent owners
 
-2026-11-03, completion mandate; baseline 717160fc. Qualify secret_redact and
+2026-11-03, completion plan; baseline 717160fc. Qualify secret_redact and
 repository_scope in place, preserving production files byte for byte. Both have
 only standard-library imports. Their public paths and consumers stay unchanged.
 

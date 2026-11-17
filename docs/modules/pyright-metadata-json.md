@@ -1,6 +1,6 @@
 # Pyright metadata JSON values
 
-Under the decomposition mandate, the existing strict JSON
+Under the decomposition plan, the existing strict JSON
 object decoder, JSONC comment/trailing-comma passes and shared metadata exception
 move to `llm_wiki.pyright_metadata_json`. Every function/class body is preserved with
 direct aliases in pyright_profile, including the exception's serialization path.

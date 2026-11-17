@@ -24,7 +24,7 @@ schema drift and mutable return protection.
 
 ## Boundary research — 2026-11-03
 
-The complete-project plan permits this existing responsibility boundary.
+The complete-project plan proposes this existing responsibility boundary.
 Keeping the state import couples wire syntax to environment resolution; copying
 the bound risks writer/reader disagreement. The existing reliability policy leaf
 provides the same value without either problem. Separate per-helper owners would

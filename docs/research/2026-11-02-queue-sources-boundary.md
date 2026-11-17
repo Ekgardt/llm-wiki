@@ -1,6 +1,6 @@
 # Queue source identities
 
-Under the completion mandate, 2026-11-02, baseline bccb6a9c.
+Under the completion plan, 2026-11-02, baseline bccb6a9c.
 Responsibility: pure extraction of source identity from payloads, canonical daily
 identity validation, and general task source-link validation. This is not source
 IO, migration, authorization, or a new source identity model.

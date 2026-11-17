@@ -1,6 +1,6 @@
 # Code classification and repository refusal packets
 
-Date: 2026-11-03. Prepared after daf01519 under the decomposition mandate.
+Date: 2026-11-03. Prepared after daf01519 under the decomposition plan.
 These are two already isolated production owners, not a new combined subsystem.
 Production modules and public import paths remain byte-identical.
 

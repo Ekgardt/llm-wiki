@@ -5,7 +5,7 @@ pilot research stays intact in the repository and in the formats and tooling
 packets. Selecting relevant maintenance context does not delete that history.
 Full AGENTS.md, CLAUDE.md, development-laws.md and STRUCTURE.md remain in every
 packet. Their authority, security, recovery and deployment rules are not replaced
-by this guide. The completion plan permits internal boundary refinement;
+by this guide. The completion plan proposes internal boundary refinement;
 installation in the live vault still needs separate owner permission.
 
 ## Responsibility and compatibility

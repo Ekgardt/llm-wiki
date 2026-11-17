@@ -31,7 +31,7 @@ entrypoint matrix retain their own tests and remain necessary.
 
 ## Qualification — 2026-11-03
 
-The autonomous plan permits an existing cohesive owner to remain at its
+The decomposition plan proposes an existing cohesive owner to remain at its
 current path. A new analysis framework would change dependencies and detection
 behavior; folding mutation implementations into the analyzer would destroy this
 boundary. Neither is needed to qualify its maintenance packet.

@@ -1,6 +1,6 @@
 # Qualify current position refresh and pinned transfer owners
 
-Date: 2026-11-03. Internal qualification under the completion mandate.
+Date: 2026-11-03. Internal qualification under the completion plan.
 No production move, new runtime path, command change or dependency is proposed.
 
 `fresh_positions.py` already owns read-only Python definition/line refresh. Keep

@@ -1,8 +1,8 @@
 {
   "schema": "module-records/v1",
   "source": "CHANGELOG.md",
-  "bytes": 230801,
-  "sha256": "409fc9d3048976bfb353801d8a267baf1e64f8ce313eed20c141b1735e634413",
+  "bytes": 230878,
+  "sha256": "4f0e4af95ff2c112c9fecbc7d639883eb4a1afed2882cab4421c7e5f33fb781a",
   "records": [
     {
       "id": "preamble",
@@ -15,77 +15,77 @@
       "id": "unreleased",
       "label": "## [Unreleased]",
       "start": 208,
-      "end": 103804,
-      "sha256": "78ea84b387348716d940c807d03c03dc89546a7e0faaecc16d634ef608df28f1"
+      "end": 103881,
+      "sha256": "892182ab0fe48a7eba7d54360921e1d8f6f47c9babf0e4f8eb5c6788c90aabb2"
     },
     {
       "id": "v5-0-0",
       "label": "## [5.0.0] — 2026-09-24",
-      "start": 103804,
-      "end": 187340,
+      "start": 103881,
+      "end": 187417,
       "sha256": "2843152d97988a969c45768b37526e2d0aa4cbd0729e799462b379d6bfdd963e"
     },
     {
       "id": "v4-0-0",
       "label": "## [4.0.0] — 2026-08-25",
-      "start": 187340,
-      "end": 212521,
+      "start": 187417,
+      "end": 212598,
       "sha256": "5b29185997bc4a8f708b61cb3b429b8416cd10770031b08e93661d4fe6efecb3"
     },
     {
       "id": "v3-4-0",
       "label": "## [3.4.0] — 2026-07-11",
-      "start": 212521,
-      "end": 220212,
+      "start": 212598,
+      "end": 220289,
       "sha256": "65121143f109916e704fe00914ec68675c2da9b32ef938440ee03616ac11a584"
     },
     {
       "id": "v3-3-3",
       "label": "## [3.3.3] — 2026-07-10",
-      "start": 220212,
-      "end": 220834,
+      "start": 220289,
+      "end": 220911,
       "sha256": "0275077cd20a4aee05653f9c4365b8436f5ad2d695d6f0d5ed51a6bd50c59309"
     },
     {
       "id": "v3-3-2",
       "label": "## [3.3.2] — 2026-07-09",
-      "start": 220834,
-      "end": 224931,
+      "start": 220911,
+      "end": 225008,
       "sha256": "a8cc24d453ea78f1646c84b5be7cf64c471b20931067ad969ae2c4f6077b000e"
     },
     {
       "id": "v3-3-1",
       "label": "## [3.3.1] — 2026-07-09",
-      "start": 224931,
-      "end": 226616,
+      "start": 225008,
+      "end": 226693,
       "sha256": "30bea719db2a4e9662a37191dbc22e1198cc8674d404068f812a037a19164222"
     },
     {
       "id": "v3-3-0",
       "label": "## [3.3.0] — 2026-07-04",
-      "start": 226616,
-      "end": 227069,
+      "start": 226693,
+      "end": 227146,
       "sha256": "6f43fcac3e2acce05956401d99256e521b5694f36e71cbb4e8f92d5cf6684a28"
     },
     {
       "id": "v3-2-0",
       "label": "## [3.2.0] — 2026-07-03 — \"Proactive Intelligence + Multi-Agent Coordination\"",
-      "start": 227069,
-      "end": 229903,
+      "start": 227146,
+      "end": 229980,
       "sha256": "a4787e89898df26892dba614afb4b9bc180e3ea511ff699f30f04c56b72d96c4"
     },
     {
       "id": "v2-1",
       "label": "## [2.1] — 2026-07-03 — \"Multi-tool, zero ops\"",
-      "start": 229903,
-      "end": 230396,
+      "start": 229980,
+      "end": 230473,
       "sha256": "c3d0c6f0bb89da193a0f3c1102a31daf2fa9e6b616fe8903e947d9416321c265"
     },
     {
       "id": "v1-0",
       "label": "## [1.0] — 2026-04 — \"Karpathy-style vault with session memory\"",
-      "start": 230396,
-      "end": 230801,
+      "start": 230473,
+      "end": 230878,
       "sha256": "24c69cbb9f7d53eb02add7d1e2c6292b9470fb295ff924e2737557ea88964548"
     }
   ]

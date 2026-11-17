@@ -1,6 +1,6 @@
 # Language-server install manifest values
 
-Under the decomposition mandate, the deterministic
+Under the decomposition plan, the deterministic
 install-manifest builder and validator move from lsp_identity to
 llm_wiki.lsp_install_manifest. The existing constants, class and function bodies
 move unchanged. lsp_identity keeps direct aliases, including private helpers;

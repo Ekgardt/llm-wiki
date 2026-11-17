@@ -1,6 +1,6 @@
 # SQLite value contracts without filesystem IO
 
-2026-11-02, completion mandate. Baseline a49f7a81.
+2026-11-02, completion plan. Baseline a49f7a81.
 Move OperationalDatabaseContract, OperationalDatabaseContractError,
 MigrationStatement, their existing `_require_positive_int` and
 `_require_migration_text` validators, and `quote_sqlite_identifier` from

@@ -1,6 +1,6 @@
 # Queue artifact IO ownership
 
-2026-11-03; completion mandate, baseline 88a6b897.
+2026-11-03; completion plan, baseline 88a6b897.
 Separate 22 file/stream functions and _ArtifactOutput from memory_queue into
 llm_wiki.queue_artifacts. They own owner-only metadata checks, stable digest/read,
 exclusive temporary creation, sequential producer writes, link-if-absent

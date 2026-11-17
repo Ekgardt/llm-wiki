@@ -1,6 +1,6 @@
 # Coordinator schema declarations and inspection
 
-Date: 2026-11-03. Internal transfer under the decomposition mandate.
+Date: 2026-11-03. Internal transfer under the decomposition plan.
 The separately reproduced literal-normalization defect was repaired first in
 243fe271. This transfer preserves that corrected behavior exactly.
 

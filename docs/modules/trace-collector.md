@@ -28,7 +28,7 @@ Writing replaces the caller-selected destination and creates no parent directory
 
 ## Qualification — 2026-11-03
 
-The autonomous decomposition plan permits existing cohesive owners to
+The decomposition plan proposes existing cohesive owners to
 stay in place. Combining trusted profile loading with untrusted trace ingestion
 would lose the existing security separation. A replacement collector, protocol
 wrapper or new runtime store is unnecessary for ownership qualification.

@@ -43,5 +43,5 @@ The process-tree qualification now separates its shared test subprocess fixture
 from fake LSP protocol/semantic behavior; production `lsp_process_tree` stays in
 place. The process-only proc-scanning regressions move intact to the owner suite.
 See `docs/research/2026-11-03-lsp-process-tree-packet.md`; this boundary is covered
-by the autonomous decomposition mandate. Its complete packet passes the
+by the decomposition plan. Its complete packet passes the
 budget and focused Linux checks; native platform CI remains pending.

@@ -21,7 +21,7 @@ included as packet context. Existing public constants remain supported.
 
 ## Qualification — 2026-11-03
 
-The whole-project plan permits internal ownership boundaries. Keeping
+The whole-project plan proposes internal ownership boundaries. Keeping
 these small existing modules in place avoids unnecessary compatibility wrappers.
 Duplicating policy in consumers would risk drift; including every runtime consumer
 would defeat independent qualification. No dependency or behavior change is needed.

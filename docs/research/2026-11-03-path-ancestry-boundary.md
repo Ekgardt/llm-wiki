@@ -1,6 +1,6 @@
 # Shared path ancestry policy
 
-2026-11-03, refinement under the decomposition completion mandate.
+2026-11-03, refinement under the decomposition completion plan.
 The initial complete sqlite_io packet measures 100325 tokens with its own tests:
 325 over the user's bound. Its only bounded_io call is _acceptable_ancestor,
 which brings all unrelated bounded reading/decoding logic into the dependency

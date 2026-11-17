@@ -1,6 +1,6 @@
 # Existing LSP source positions as an isolated packet
 
-Date: 2026-11-03. Decomposition mandate; qualified at
+Date: 2026-11-03. Decomposition plan; qualified at
 4abf9ccd. Keep scripts/lsp_positions.py and tests/test_lsp_positions.py unchanged.
 The existing owner converts validated source bytes, negotiated LSP coordinates
 and file URIs; code_intelligence supplies the shared value contracts.

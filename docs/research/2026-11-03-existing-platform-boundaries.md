@@ -1,6 +1,6 @@
 # Existing platform boundaries
 
-2026-11-03; completion mandate; candidate baseline e91402e0.
+2026-11-03; completion plan; candidate baseline e91402e0.
 
 Qualify existing independent owners in place: windows_workspace owns Windows
 handle-relative filesystem operations; lsp_process_tree owns spawned-process

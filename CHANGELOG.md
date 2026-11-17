@@ -40,7 +40,7 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 - The CI policy test sees `--ignore-vuln` in any step of the dependency audit, in its
   bash-array, requirement-step and `=` forms, not only on the `pip-audit --locked` line.
 
-- The November 2026 research notes, the module guides, `docs/MODULES.md` and the agent contract no longer claim an owner approval they cannot cite: headings and first lines drop "approved", plans read as proposals, and the Python 3.14 runtime quotes the owner's request. Contracts dated before November keep their own decision records.
+- The November 2026 research notes, the module guides, `docs/MODULES.md` and the agent contract no longer claim an owner approval they cannot cite: headings and first lines drop "approved", a "mandate" that "permits" a boundary is now a plan that proposes it, and the Python 3.14 runtime section points to the note that quotes the owner's request. Contracts dated before November keep their own decision records.
 - A context test no longer leaves a ten-token budget behind for every later test in its process: the session-start module and the context compiler are imported before the shared budget is patched, and a guard test fails if either first import under the patch comes back, including the compiler's default `budget` argument.
 
 - `scripts/generation_catalog.py`, a facade that only re-exported the generation modules under

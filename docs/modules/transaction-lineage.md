@@ -40,7 +40,7 @@ integrations remain separate, preserved obligations.
 
 ## Qualification — 2026-11-03
 
-The autonomous plan permits this existing cohesive owner. Duplicating
+The decomposition plan proposes this existing cohesive owner. Duplicating
 fixtures or carrying the whole coordinator/doctor in every reader packet is
 unnecessary. Keep concrete stdlib-only source and one shared fixture definition.
 Research checked:

@@ -1,6 +1,6 @@
 # One explicit SQLite transaction primitive
 
-2026-11-02, completion mandate. The first complete schema-operations packet was
+2026-11-02, completion plan. The first complete schema-operations packet was
 101618 tokens when it included reliable_memory to supply begin_immediate. That
 failed the owner limit. The dependency also unnecessarily coupled explicit SQL
 transactions to filesystem IO. Neither omitting required files nor increasing the

@@ -1,6 +1,6 @@
 # Canonical module contracts beside their owners
 
-2026-11-03; full decomposition mandate; baselinef95cb681.
+2026-11-03; full decomposition plan; baselinef95cb681.
 The largest packet is97517 tokens. STRUCTURE has accumulated detailed descriptions
 of each extracted module, so every isolated owner repeatedly receives contracts
 for unrelated modules. The append-only style also left stale ownership prose,
@@ -8,7 +8,7 @@ corrected in the preceding phase. Do not remove necessary context or weaken the
 limit. Decompose this documentation by the code responsibilities.
 
 Keep docs/STRUCTURE.md as the canonical entry point: original global architecture,
-three-zone/runtime/security contracts, completion mandate, whole-packet rules,
+three-zone/runtime/security contracts, completion plan, whole-packet rules,
 serialization, bootstrap and ownership requirements remain. Keep existing section
 anchors/navigation for moved descriptions. Transfer per-module contract blocks
 verbatim to existing docs/modules/<owner>.md, with one-time byte-conservation

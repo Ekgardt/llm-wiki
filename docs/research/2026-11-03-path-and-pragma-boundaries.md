@@ -1,6 +1,6 @@
 # Relative path policy and SQLite connection policy
 
-2026-11-03; completion mandate; baseline 8779ad5a.
+2026-11-03; completion plan; baseline 8779ad5a.
 
 llm_wiki.restricted_paths owns six unchanged functions: _is_posix_relative_text,
 _require_posix_relative_text, _require_normalized_relative, _under_root,

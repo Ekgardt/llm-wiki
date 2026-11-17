@@ -1,6 +1,6 @@
 # Queue task record boundary
 
-Date: 2026-11-03. Under the autonomous decomposition mandate, move record
+Date: 2026-11-03. Under the decomposition plan, move record
 construction/serialization from memory_queue into llm_wiki.queue_task_records.
 This is a representation boundary, not another queue or transaction owner.
 

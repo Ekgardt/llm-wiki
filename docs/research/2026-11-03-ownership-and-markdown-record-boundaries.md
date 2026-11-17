@@ -1,6 +1,6 @@
 # Ownership and Markdown transaction value boundaries
 
-Date: 2026-11-03. Proposed internal sequence under the mandate.
+Date: 2026-11-03. Proposed internal sequence under the plan.
 
 The ownership registry imports the Markdown coordinator, while a transaction
 intent-fence annotation refers back to OwnerLease. Move record definitions before

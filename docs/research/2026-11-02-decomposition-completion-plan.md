@@ -48,7 +48,7 @@ overview reported busy workers; a separate code_graph.get_architecture process
 read the index. The graph is incomplete and is supplemented by the sources. The source index
 matches bccb6a9c; docs and installers are checked separately.
 
-## Proposed overall architectural mandate
+## Proposed overall architecture
 
 Approve the following families of responsibilities and a step-by-step move
 into scripts/llm_wiki/<responsibility>.py or a package of the same name when several
@@ -96,7 +96,7 @@ a standalone duty, not by lines or the size of an arbitrary slice.
 It is proposed to allow such refinements within the listed families without
 a new sign-off for each file. Deviation from these bounds needs approval.
 
-## What the mandate does not include
+## What the plan does not include
 
 No installation into the live vault, no change of the runtime root, databases, formats, public
 behaviour, security model, Python support, dependencies or release.

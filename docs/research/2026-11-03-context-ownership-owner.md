@@ -1,6 +1,6 @@
 # File-ownership inventory is a separate maintenance owner
 
-Date: 2026-11-03. Internal refinement under the whole-project mandate.
+Date: 2026-11-03. Internal refinement under the whole-project plan.
 
 The context-tooling packet is 97806 o200k_base tokens at 19d78215. Its ownership
 inventory is already a separate implementation, tests/module_ownership.py, with

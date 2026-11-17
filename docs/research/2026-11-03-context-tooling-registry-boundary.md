@@ -1,6 +1,6 @@
 # Tooling unit tests and whole-repository registry checks
 
-Date: 2026-11-03. Internal refinement under the completion mandate.
+Date: 2026-11-03. Internal refinement under the completion plan.
 
 The context-tooling packet still owns tests that enumerate every module manifest
 or boundary source in the checkout, then read files absent from its own manifest.

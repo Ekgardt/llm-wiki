@@ -44,7 +44,7 @@ Adding PyArrow to the base would impose an unrelated binary package on every
 memory installation. Replacing the existing reader changes behavior and still
 adds a dependency. A separate extra expresses the current benchmark-only need.
 The package and actual OS runs require qualification; available wheels alone
-are not a pass. the Python 3.14 runtime remains unchanged.
+are not a pass. The Python 3.14 runtime remains unchanged.
 
 Primary sources rechecked today: [Apache Arrow installation](https://arrow.apache.org/docs/python/install.html),
 [release metadata](https://pypi.org/pypi/pyarrow/26.0.1/json),

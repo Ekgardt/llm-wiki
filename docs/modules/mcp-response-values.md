@@ -32,7 +32,7 @@ There is one implementation of each rule, no forwarding wrapper or service.
 
 ## Qualification — 2026-11-03
 
-The autonomous plan permits this internal split. Keeping values mixed
+The decomposition plan proposes this internal split. Keeping values mixed
 with default runtime loading prevents independent qualification. Hiding that
 dependency in the context manifest would be incorrect; adding a validation
 framework would change dependencies and behavior. Moving the unchanged functions

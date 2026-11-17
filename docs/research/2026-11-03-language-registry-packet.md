@@ -1,6 +1,6 @@
 # Language registry maintenance packet
 
-Date: 2026-11-03. Base: 8f61a0e4. Decomposition mandate.
+Date: 2026-11-03. Base: 8f61a0e4. Decomposition plan.
 After the preceding data extraction, lsp_profiles imports only standard libraries,
 lsp_paths, lsp_server_profile and llm_wiki.pyright_configuration. Qualify this
 existing owner in place, with no change to algorithms, pins, platform archives,

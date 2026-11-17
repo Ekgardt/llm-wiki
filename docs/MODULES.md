@@ -57,9 +57,9 @@ and dependency guides in full; global authority and runtime rules above still ap
 
 [windows-native](modules/windows-native.md), [windows-acl](modules/windows-acl.md).
 
-### Completion mandate (2026-11-02)
+### Completion plan (2026-11-02)
 
-Sequential completion follows
+Sequential completion follows the proposal
 `docs/research/2026-11-02-decomposition-completion-plan.md`, including refinement
 of internal boundaries within its responsibility families. Each boundary is
 documented and qualified before acceptance. Full maintenance packets remain
@@ -342,10 +342,10 @@ Queue and coordinator schema validators share it; schema versions remain unchang
 ### Unified Python runtime
 
 The supported runtime is Python 3.14.x for installation, development and CI. The
-owner requested it with the module decomposition ("Yes, change the CI, including
-the move to Python 3.14", rendered in English). Metadata excludes 3.15 until required
-binary dependencies provide compatible builds; reassess that boundary when upstream
-support arrives.
+request it answers is quoted in
+[the runtime note](research/2026-11-03-python314-unified-runtime-proposal.md).
+Metadata excludes 3.15 until required binary dependencies provide compatible
+builds; reassess that boundary when upstream support arrives.
 A project interpreter pin selects 3.14, and installers select that series for
 bootstrap and environment creation. Linux, Windows and macOS remain tested; the
 current native macOS lane is ARM64. Intel macOS full dependencies are not qualified:

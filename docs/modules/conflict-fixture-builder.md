@@ -30,7 +30,7 @@ uv run --locked --extra benchmark-data pytest tests/modules/conflict_fixture_bui
 
 ## Boundary research — 2026-11-03
 
-The autonomous decomposition mandate permits qualifying this existing
+The decomposition plan proposes qualifying this existing
 CLI separately from parsing and resolution. Folding it into the pure parser
 would mix optional file decoding with deterministic fact interpretation;
 splitting its small IO sequence further would add indirection. Its only local

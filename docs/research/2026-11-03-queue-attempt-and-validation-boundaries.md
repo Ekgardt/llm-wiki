@@ -1,6 +1,6 @@
 # Queue attempt operations and argument validation
 
-2026-11-03; completion mandate; baseline 1d7cb29c.
+2026-11-03; completion plan; baseline 1d7cb29c.
 
 Two boundaries retain the exact function bodies and caller transaction ownership:
 

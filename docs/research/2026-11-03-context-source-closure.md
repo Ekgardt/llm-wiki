@@ -1,6 +1,6 @@
 # Maintenance context must retain local source dependencies
 
-2026-11-03; decomposition-completion mandate; baseline c8036cde.
+2026-11-03; decomposition-completion plan; baseline c8036cde.
 The ad-hoc AST audit of all44 current packets found no omitted statically visible
 local source dependency. However the common measurement helper enforces pytest
 bootstrap and the codec, but has no regression guard against a future local

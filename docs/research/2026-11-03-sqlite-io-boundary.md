@@ -1,6 +1,6 @@
 # SQLite connection and lock-probe ownership
 
-2026-11-03; completion mandate; baseline 8d8df4c4.
+2026-11-03; completion plan; baseline 8d8df4c4.
 
 Move the 29 remaining reliable_memory functions into llm_wiki.sqlite_io:
 connection open/configure/close-on-failure, bounded two-connection lock probes,

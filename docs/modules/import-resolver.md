@@ -30,7 +30,7 @@ The graph caller owns how these records enter a user answer or generation.
 
 ## Qualification — 2026-11-03
 
-The autonomous plan permits this existing boundary to stay in place.
+The decomposition plan proposes this existing boundary to stay in place.
 Merging it with graph orchestration would expand its responsibility. Replacing it
 with LSP would change fallback behavior and lifecycle. Neither is needed here.
 

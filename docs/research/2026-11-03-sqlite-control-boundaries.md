@@ -1,6 +1,6 @@
 # SQLite deadlines and resumable statement execution
 
-2026-11-03; completion mandate. Two independent responsibilities:
+2026-11-03; completion plan. Two independent responsibilities:
 
 - llm_wiki.sqlite_deadlines owns operational_deadline_active, operational_busy_ms,
   configure_operational_deadline, refresh_operational_deadline and the existing
