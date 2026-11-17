@@ -1,7 +1,8 @@
 # Proposal: isolated LLM Wiki modules of up to 100,000 tokens
 
 Research date: 2026-11-02. Status: **a draft for approval, not an accepted architecture**.
-The user allowed the research and the preparation of a scheme. No sources were
+The working session of that branch records that the user allowed the research and the
+preparation of a scheme. No sources were
 moved, no paths were changed and nothing was installed. This research does not
 lift the pause of the earlier task under item 7.
 
@@ -282,8 +283,8 @@ several modules do not mean several independent transactions.
 **Compilation.** `sources` collects verified streams, `planning` selects whole
 units and context, `validation` checks the plan and the evidence, `publication`
 ties the CAS write to the receipt, `progress` stores the steps, `call_recovery` manages
-the external call and the uncertain outcome. The existing approval of the durable dry-run
-is kept; this draft does not declare its implementation finished.
+the external call and the uncertain outcome. The durable dry-run keeps the status its own
+decision gave it; this draft does not declare its implementation finished.
 
 **Markdown transactions.** `images` owns the format of before/after images,
 `publication` owns prepare/CAS/apply, `recovery` owns recovery/undo/retention.

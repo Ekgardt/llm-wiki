@@ -5,16 +5,23 @@
   "files": [
     "AGENTS.md",
     "CLAUDE.md",
+    "benchmark/__init__.py",
+    "benchmark/retrieval_v2_contract.py",
+    "benchmark/retrieval_v2_sqlite_lexical.py",
     "docs/AGENTS.md",
     "docs/STRUCTURE.md",
+    "docs/modules/benchmark-retrieval-v2-contract.md",
     "docs/modules/benchmark-retrieval-v2-sqlite-lexical-tests-lexical-index-refuses-bad-input-and-maps-query-failures-context.json",
     "docs/modules/benchmark-retrieval-v2-sqlite-lexical-tests-lexical-index-refuses-bad-input-and-maps-query-failures.md",
+    "docs/modules/benchmark-retrieval-v2-sqlite-lexical.md",
+    "docs/modules/benchmark-run-benchmark.md",
     "docs/modules/context-bundle.md",
     "docs/modules/context-records.md",
     "docs/modules/context-tooling.md",
     "docs/modules/model-choice.md",
     "docs/modules/product-structure.md",
     "docs/modules/project-governance.md",
+    "docs/modules/reliable-memory-tests-retrieval-v2-benchmark.md",
     "docs/modules/test-support.md",
     "rules/development-laws.md",
     "scripts/__init__.py",
@@ -29,6 +36,7 @@
     "tests/module_qualification.py",
     "tests/module_record_context.py",
     "tests/module_records.py",
+    "tests/retrieval_v2_helpers.py",
     "tests/shared_fixtures.py",
     "tests/slow_machine.py",
     "tests/test_lexical_index_refuses_bad_input_and_maps_query_failures.py"
@@ -41,6 +49,59 @@
     ]
   },
   "qualified_dependencies": [
+    {
+      "provider": "benchmark/retrieval_v2_corpus.py",
+      "names": [
+        "filter_candidates",
+        "normalized_id"
+      ],
+      "contract_sha256": "2877d4e64a2a6ad0a6379a073e3a1e7761fc4b6b19e2e94bfe912ba60f50745b",
+      "integration_tests": [
+        "tests/test_authoritative_selection_binds_each_worker_and_refuses_gaps.py",
+        "tests/test_retrieval_v2_adapters.py",
+        "tests/test_retrieval_v2_aggregation.py"
+      ]
+    },
+    {
+      "provider": "benchmark/retrieval_v2_environment.py",
+      "names": [
+        "load_pinned_jieba"
+      ],
+      "contract_sha256": "654e149869edad07253d473c7d5f7952fa6fec37adf630412c5d331850f1acdf",
+      "integration_tests": [
+        "tests/test_authoritative_selection_binds_each_worker_and_refuses_gaps.py",
+        "tests/test_retrieval_v2_adapters.py",
+        "tests/test_retrieval_v2_aggregation.py"
+      ]
+    },
+    {
+      "provider": "benchmark/retrieval_v2_outputs.py",
+      "names": [
+        "is_reparse_point",
+        "same_path_identity",
+        "validate_cache_root"
+      ],
+      "contract_sha256": "1b90fac8157f3be77f2a9b5e0e5dc6c1af0903d4cbe0c4debe2758ae5835556e",
+      "integration_tests": [
+        "tests/test_authoritative_selection_binds_each_worker_and_refuses_gaps.py",
+        "tests/test_retrieval_v2_aggregation.py",
+        "tests/test_retrieval_v2_benchmark.py"
+      ]
+    },
+    {
+      "provider": "benchmark/retrieval_v2_scoring.py",
+      "names": [
+        "candidate_text",
+        "fts5_tokens",
+        "reciprocal_rank_fusion"
+      ],
+      "contract_sha256": "f831fc1e99bc0a5e40e9ba9724fe76aa3f4153ec71eb187eb956208fcbcf1df9",
+      "integration_tests": [
+        "tests/test_authoritative_selection_binds_each_worker_and_refuses_gaps.py",
+        "tests/test_retrieval_v2_adapters.py",
+        "tests/test_retrieval_v2_benchmark.py"
+      ]
+    },
     {
       "provider": "scripts/llm_wiki/generation_catalog_store.py",
       "names": [

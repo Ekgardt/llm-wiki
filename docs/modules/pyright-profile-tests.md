@@ -3,8 +3,7 @@
 - `tests/install_pyright_helpers.py`: Helpers shared by test_install_pyright.py and the test files importing them.
 - `tests/pyright_profile_helpers.py`: Helpers shared by test_pyright_profile.py and the test files importing them.
 
-`scripts/pyright_profile.py` itself belongs to another module: this packet carries its exact derived
-description, and these tests are the evidence that the description matches real use.
+`scripts/pyright_profile.py` itself belongs to another module: this packet carries its whole source, and these tests exercise it.
 
 The owned files and the complete maintenance context are listed in the `-context.json`
 manifest next to this guide.

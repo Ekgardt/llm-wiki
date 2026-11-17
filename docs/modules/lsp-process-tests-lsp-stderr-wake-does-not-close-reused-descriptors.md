@@ -1,9 +1,9 @@
-# Tests of `scripts/lsp_process.py`
+# Tests filed with `scripts/lsp_process.py`
 
-`tests/test_lsp_stderr_wake_does_not_close_reused_descriptors.py` exercise `scripts/lsp_process.py` through its public names.
+These files do not import `scripts/lsp_process.py`, the module they are filed with. The product code they import directly is carried in this packet as follows:
 
-`scripts/lsp_process.py` itself is not part of this module: the packet carries its exact derived
-description, and these tests are the evidence that the description matches real use.
+- `scripts/llm_wiki/lsp_process_cleanup.py`: its exact derived description.
+- `scripts/llm_wiki/lsp_process_state.py`: its exact derived description.
 
 The owned files and the complete maintenance context are listed in the `-context.json`
 manifest next to this guide.

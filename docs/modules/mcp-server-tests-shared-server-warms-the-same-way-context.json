@@ -66,6 +66,16 @@
       ]
     },
     {
+      "provider": "scripts/mcp_http.py",
+      "names": [],
+      "contract_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "integration_tests": [
+        "tests/test_a_new_token_never_lands_in_someone_elses_file.py",
+        "tests/test_mcp_http.py",
+        "tests/test_the_http_guard_refuses_what_it_cannot_judge.py"
+      ]
+    },
+    {
       "provider": "scripts/reliable_memory.py",
       "names": [
         "validate_state_root"

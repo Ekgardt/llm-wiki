@@ -1,6 +1,7 @@
 # The first module: formats and source identity
 
-2026-11-02. Implementation of the approved bounded pilot on the base `3e1def7e`.
+2026-11-02. Implementation of the bounded pilot on the base `3e1def7e`; its approval is recorded in
+the working session of that branch, which the repository does not hold.
 This is not the completion of splitting the whole project and not an installation of the unfinished
 compile branch into the working vault.
 
@@ -27,7 +28,8 @@ were adjusted to the new package depth; the schemas themselves and the wire form
 its own tests and byte samples, schemas, documentation, mandatory instructions,
 the dependency declaration and the shared timeout helper. With the full `docs/STRUCTURE.md`, both preceding studies and this report,
 the size is about 77 thousand `o200k_base` tokens; an automatic test prints the exact value.
-The 100,000 limit is set by the user. Added files are counted automatically.
+The 100,000 limit is the user's requirement for the module decomposition, restated in the
+2026-11 branch-audit task. Added files are counted automatically.
 
 An isolated run does not need global integration fixtures; a full run
 keeps all shared checks. Joint scenarios were not removed for the budget.

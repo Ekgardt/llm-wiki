@@ -13,7 +13,7 @@
     "docs/modules/context-tooling.md",
     "docs/modules/evidence-graph-builder.md",
     "docs/modules/evidence-graph-tests-evidence-graph.md",
-    "docs/modules/generation-catalog-tests-generation-catalog-helpers.md",
+    "docs/modules/generation-catalog-store-tests-generation-catalog-helpers.md",
     "docs/modules/memory-state-tests-repository-index-helpers.md",
     "docs/modules/model-choice.md",
     "docs/modules/product-structure.md",

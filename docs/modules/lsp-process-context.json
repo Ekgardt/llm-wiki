@@ -168,7 +168,7 @@
         "validated_deadline",
         "write_all_descriptor"
       ],
-      "contract_sha256": "4d26b46b868ad6657099f54a67561bc2482f2449d7d5befe374aad5fe487074e",
+      "contract_sha256": "ddfe05539038edaad1f010d8a398afc9c5ce8c6b73919f8a35cb988539c0fe12",
       "integration_tests": [
         "tests/test_a_native_server_copy_leaves_with_its_owner.py",
         "tests/test_lsp_process.py"

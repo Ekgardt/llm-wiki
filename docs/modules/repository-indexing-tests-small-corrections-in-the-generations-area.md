@@ -1,9 +1,8 @@
 # Tests of `scripts/repository_indexing.py`
 
-`tests/test_small_corrections_in_the_generations_area.py` exercise `scripts/repository_indexing.py` through its public names.
+`tests/test_small_corrections_in_the_generations_area.py` exercise `scripts/repository_indexing.py`.
 
-`scripts/repository_indexing.py` itself is not part of this module: the packet carries its exact derived
-description, and these tests are the evidence that the description matches real use.
+`scripts/repository_indexing.py` itself belongs to another module: this packet carries its whole source, and these tests exercise it.
 
 The owned files and the complete maintenance context are listed in the `-context.json`
 manifest next to this guide.

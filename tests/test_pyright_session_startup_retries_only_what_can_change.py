@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import cast
 
 import pytest
+from llm_wiki.lsp_process_owner import OwnerAclDeadlineExpired
 from llm_wiki.pyright_session_core import LanguageServerSession
 from llm_wiki.pyright_session_startup import (
     STARTUP_RETRY_BACKOFF,
@@ -75,8 +76,14 @@ def test_a_permission_refusal_caused_by_a_process_timeout_is_a_startup_timeout()
     assert _startup_code(error) == "pyright_startup_timeout"
 
 
-def test_a_permission_refusal_naming_an_expired_deadline_is_a_startup_timeout() -> None:
-    assert _startup_code(PermissionError("lease deadline expired")) == "pyright_startup_timeout"
+def test_the_owner_acl_running_out_of_time_is_a_startup_timeout() -> None:
+    refused = OwnerAclDeadlineExpired("owner-only LSP ACL deadline expired")
+
+    assert _startup_code(refused) == "pyright_startup_timeout"
+
+
+def test_a_permission_refusal_is_not_read_as_a_timeout_from_its_words() -> None:
+    assert _startup_code(PermissionError("lease deadline expired")) == "pyright_startup_failed"
 
 
 def test_no_cleanup_error_carries_no_interruption() -> None:

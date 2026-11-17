@@ -1,9 +1,12 @@
-# Tests of `scripts/install_control.py`
+# Tests filed with `scripts/install_control.py`
 
 - `tests/test_a_scheduled_run_keeps_the_uv_link.py`: A scheduled run calls uv by the path the operator's PATH gives, links kept.
 
-`scripts/install_control.py` itself belongs to another module: this packet carries its exact derived
-description, and these tests are the evidence that the description matches real use.
+These files do not import `scripts/install_control.py`, the module they are filed with. The product code they import directly is carried in this packet as follows:
+
+- `scripts/installer_config.py`: its exact derived description.
+- `scripts/llm_wiki/doctor_schedule.py`: its exact derived description.
+- `scripts/llm_wiki/install_scheduler_render.py`: its exact derived description.
 
 The owned files and the complete maintenance context are listed in the `-context.json`
 manifest next to this guide.

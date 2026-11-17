@@ -6,6 +6,33 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+- Test data no longer writes Russian text (law 10). Incidental phrases became English or
+  CJK data; a test whose subject is Cyrillic input builds its words from code points and is
+  named, with the behaviour that needs it, in `tests/test_tests_write_no_russian_text.py`,
+  which fails on any other test that writes a Cyrillic letter or builds a Cyrillic word.
+
+- The module context follows imports written as calls: `importlib.import_module("name")`
+  and `pytest.importorskip("name")` now bring the imported file into a packet, as an
+  `import` statement does. Before, a test that imported its subject that way left the
+  subject out of its packet. `tests/test_integration_hook_config.py` moved into the
+  `integration-hook-config` packet so `repository-policy-tests-1` stays under its budget.
+
+- A test packet's guide tells the truth about the code its tests import.
+  `tests/test_a_test_guide_names_what_its_tests_import.py` renders the statement from the
+  manifest and the packet's own imports: "Tests of `X`" says whether the packet carries the
+  exact derived description of `X` or its whole source, and a packet whose tests never
+  import `X` is titled "Tests filed with `X`" and lists what they do import. A guide no
+  longer says its tests use only the public names of a module the packet carries whole.
+
+- `scripts/install-scheduled-tasks.ps1` honours `-WhatIf`: it reports each scheduled-task
+  registration, removal and start without making it, and a test proves an uninstall under
+  `-WhatIf` unregisters nothing.
+
+- `scripts/generation_catalog.py`, a facade that only re-exported the generation modules under
+  `scripts/llm_wiki/generation_*.py`, is removed with its guide and the test that checked the
+  re-exports: no script or test imported it any more. Its four test packets now belong to
+  `generation-catalog-store`, the module their tests actually exercise.
+
 - The module ownership gate covers the tokenizer vocabulary that budget measurement vendors under `tests/data/tiktoken/` only through its pin: the file name must be the SHA-1 of its source URL, its bytes must have the SHA-256 that the installed tiktoken itself verifies, no other tracked file may sit in that directory, and no module may also claim it (`docs/research/2026-11-11-the-tokenizer-vocabulary-is-pinned-data.md`). The report counts it in `pinned_count`, apart from `owned_count`, and an untracked file beside it is not inventory. The new `benchmark/__init__.py` belongs to the `benchmark-run-benchmark` module. The MCP `CallToolResult` type is detected on its own import, so a missing resource helper no longer turns off structured tool results, and a missing `mcp.server` no longer reports them as available.
 
 - Test inputs no longer look like credentials to a secret scanner that reads the target branch's configuration: the queue record fixtures name operations, packages, fences and leases with one repeated hexadecimal digit, the two digests the code recomputes from neighbouring bytes were recomputed, and the credential-shaped strings in Python tests are assembled at run time. The five allowlists that named the old values are gone (`docs/research/2026-11-03-native-ci-fixture-secret-findings.md`). `import scripts.code_graph` works again without `scripts/` on the path, the MCP server keeps its core tools when the optional resource types are missing, `benchmark/` is one package for type checking, the Python 3.10 `tomli` fallback is gone, and `[tool.deptry]` names the packages loaded by name through `importlib`.
@@ -118,6 +145,15 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 
 ### Fixed
+
+- A language server start no longer reads a timeout from the words of a permission error.
+  The owner-only ACL step raises `OwnerAclDeadlineExpired`, which is a `TimeoutError`, and
+  a refusal caused by a process timeout is recognised by its cause's type; a refusal that
+  merely says "deadline expired" is a startup failure, not a retryable timeout.
+
+- An install origin's preimage reference must name one plain file inside `preimages/`:
+  `preimages/../../x`, `preimages/..`, nested paths, backslashes and colons are refused as
+  `install_preimage_reference_invalid` instead of being read from outside the install root.
 
 - Breadcrumb publication and queue registration reuse one canonical capture owner, validating supplied ownership and retaining complete evidence on registration failure.
 

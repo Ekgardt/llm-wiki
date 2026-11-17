@@ -27,7 +27,7 @@ class _ObservedBytes(bytes):
 
 
 def test_full_layout_does_not_decode_same_raw_source_for_every_row(tmp_path, monkeypatch):
-    inputs = _legacy_packet(tmp_path, monkeypatch, [f'\u0424\u0430\u043a\u0442 {index} is settled.' for index in range(30)])
+    inputs = _legacy_packet(tmp_path, monkeypatch, [f'事实 {index} is settled.' for index in range(30)])
     _ObservedBytes.calls = 0
     source = replace(inputs.sources[0], content=_ObservedBytes(inputs.sources[0].content))
     inputs = replace(inputs, sources=(source,))
@@ -43,7 +43,7 @@ def _original_position(content, character_offset):
 
 
 @pytest.mark.parametrize('raw', [b'', b'a', b'a\n', b'a\r\nb\r\n',
-                               '\u0414\u043e\n\n事实\nlast'.encode(), b'\x00\nlast'])
+                               '之前\n\n事实\nlast'.encode(), b'\x00\nlast'])
 def test_exact_raw_lf_positions_preserve_utf8_and_crlf(raw):
     positions = compile_pipeline_prompts.raw_choice_row_positions(raw)
     for character_offset, actual in positions.items():
@@ -56,7 +56,7 @@ def _old_position(source, character_offset):
 
 
 def test_entire_layout_schema_and_bindings_equal_original_position_logic(tmp_path, monkeypatch):
-    inputs = _legacy_packet(tmp_path, monkeypatch, ['\u041f\u0435\u0440\u0432\u044b\u0439 \u0444\u0430\u043a\u0442.', '', 'Second fact.', 'Last fact.'])
+    inputs = _legacy_packet(tmp_path, monkeypatch, ['第一 事实.', '', 'Second fact.', 'Last fact.'])
     context = b'Complete independent context.\r\n'
     page = compile_receipts.SourceSnapshot('knowledge/notes/a-context.md', context, compile_pipeline.sha256_bytes(context))
     inputs = replace(inputs, sources=tuple(sorted((*inputs.sources, page), key=lambda source: source.logical_path)))
@@ -83,7 +83,7 @@ def test_scope_restores_on_exception_and_different_source_bytes():
 def test_full_optional_selection_matches_baseline_and_records_cost(tmp_path, monkeypatch, record_property, row_count):
     import time
 
-    inputs = _legacy_packet(tmp_path, monkeypatch, [f'\u0424\u0430\u043a\u0442 {index} is settled.' for index in range(row_count)])
+    inputs = _legacy_packet(tmp_path, monkeypatch, [f'事实 {index} is settled.' for index in range(row_count)])
     parts = tuple(compile_pipeline_sources.daily_parts(inputs.dailies[0].logical_path, inputs.dailies[0].content))
     inputs = replace(inputs, dailies=parts, sources=(*inputs.sources, *_context_pages()))
     current = compile_pipeline_prompts.choice_row_position

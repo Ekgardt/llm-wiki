@@ -9,7 +9,7 @@ from reliable_memory import sha256_bytes
 
 def _inputs(legacy=False, optional=False):
     path = "knowledge/daily/2026-10-02.md"
-    content = "## [10:00:00] session-end | manual\n\u041f\u043e\u043b\u043d\u044b\u0439 \u0444\u0430\u043a\u0442 \u043e \u0432\u0435\u043b\u043e\u0441\u0438\u043f\u0435\u0434\u0435.\n".encode()
+    content = "## [10:00:00] session-end | manual\n完整 事实 关于 自行车.\n".encode()
     part = compile_pipeline_sources.daily_parts(path, content)[0]
     if legacy:
         part = replace(part, original_content=None, original_sha256="", original_entries=())

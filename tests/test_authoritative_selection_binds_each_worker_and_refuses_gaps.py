@@ -1,27 +1,31 @@
 from __future__ import annotations
 
 import argparse
-import importlib
 import json
 import subprocess
+import sys
 from pathlib import Path
 from typing import Any
 
 import pytest
 
+from tests import retrieval_v2_helpers as helpers
+from tests import retrieval_v2_reports_helpers as reports_helpers
 from tests.retrieval_v2_helpers import BENCHMARK, CORPUS, ROOT, SCHEMA, spec_identity
 from tests.slow_machine import LONG_TIMEOUT
 
-helpers = importlib.import_module("tests.retrieval_v2_helpers")
-reports_helpers = importlib.import_module("tests.retrieval_v2_reports_helpers")
-orchestration = importlib.import_module("retrieval_v2_orchestration")
-contract = importlib.import_module("retrieval_v2_contract")
-corpus_module = importlib.import_module("retrieval_v2_corpus")
-environment = importlib.import_module("retrieval_v2_environment")
-matrix_module = importlib.import_module("retrieval_v2_matrix")
-outputs = importlib.import_module("retrieval_v2_outputs")
-run_module = importlib.import_module("retrieval_v2_run")
-gates = importlib.import_module("retrieval_v2_selection_gates")
+assert str(BENCHMARK) in sys.path, "tests.retrieval_v2_helpers puts benchmark/ on sys.path"
+
+import retrieval_v2_aggregation  # noqa: E402
+import retrieval_v2_contract as contract  # noqa: E402
+import retrieval_v2_corpus as corpus_module  # noqa: E402
+import retrieval_v2_environment as environment  # noqa: E402
+import retrieval_v2_matrix as matrix_module  # noqa: E402
+import retrieval_v2_orchestration as orchestration  # noqa: E402
+import retrieval_v2_outputs as outputs  # noqa: E402
+import retrieval_v2_recompute  # noqa: E402
+import retrieval_v2_run as run_module  # noqa: E402
+import retrieval_v2_selection_gates as gates  # noqa: E402
 
 MATRIX_PATH = BENCHMARK / "model-matrix-v1.json"
 MEASURED_AT = "2026-07-17T12:00:00Z"
@@ -80,8 +84,8 @@ def _trusted(**overrides: object) -> Any:
         "lexical_arguments": orchestration.lexical_ablation_worker_arguments,
         "lexical_selector": gates.select_lexical_winner,
         "candidate_arguments": orchestration.candidate_worker_arguments,
-        "candidate_key": importlib.import_module("retrieval_v2_recompute").candidate_key,
-        "aggregator": importlib.import_module("retrieval_v2_aggregation").aggregate_reports,
+        "candidate_key": retrieval_v2_recompute.candidate_key,
+        "aggregator": retrieval_v2_aggregation.aggregate_reports,
         "lexical_contract_sha256": environment.sha256_json(contract.LEXICAL_CONFIGURATIONS),
         "lexical_levels": ("L0", "L1", "L2", "L3", "L4"),
         "candidate_count": 27,

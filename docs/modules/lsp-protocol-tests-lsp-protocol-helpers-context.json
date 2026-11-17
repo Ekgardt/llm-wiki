@@ -12,6 +12,7 @@
     "docs/modules/context-tooling.md",
     "docs/modules/lsp-protocol-tests-lsp-protocol-helpers-context.json",
     "docs/modules/lsp-protocol-tests-lsp-protocol-helpers.md",
+    "docs/modules/lsp-protocol.md",
     "docs/modules/model-choice.md",
     "docs/modules/product-structure.md",
     "docs/modules/project-governance.md",
@@ -20,6 +21,7 @@
     "scripts/__init__.py",
     "scripts/llm_wiki/__init__.py",
     "scripts/llm_wiki/context_bundle.py",
+    "scripts/lsp_protocol.py",
     "tests/__init__.py",
     "tests/conftest.py",
     "tests/lsp_protocol_helpers.py",
@@ -31,16 +33,31 @@
     "tests/module_record_context.py",
     "tests/module_records.py",
     "tests/shared_fixtures.py",
-    "tests/slow_machine.py"
+    "tests/slow_machine.py",
+    "tests/test_lsp_protocol_outcomes.py"
   ],
   "ownership": {
     "files": [
       "docs/modules/lsp-protocol-tests-lsp-protocol-helpers-context.json",
       "docs/modules/lsp-protocol-tests-lsp-protocol-helpers.md",
-      "tests/lsp_protocol_helpers.py"
+      "tests/lsp_protocol_helpers.py",
+      "tests/test_lsp_protocol_outcomes.py"
     ]
   },
   "qualified_dependencies": [
+    {
+      "provider": "scripts/interruption.py",
+      "names": [
+        "exception_reaches",
+        "interruption_in_chain"
+      ],
+      "contract_sha256": "288b7463bff31b2c554d75143cbdba78b132dcc3d0575468eecff830bd9b4ab9",
+      "integration_tests": [
+        "tests/modules/interruption/test_errors.py",
+        "tests/test_a_dead_owner_root_is_swept_when_the_next_server_starts.py",
+        "tests/test_a_document_is_opened_in_its_own_language.py"
+      ]
+    },
     {
       "provider": "scripts/llm_wiki/generation_catalog_store.py",
       "names": [
@@ -51,6 +68,27 @@
         "tests/test_a_blocked_task_has_a_way_back.py",
         "tests/test_a_build_in_flight_is_not_an_orphan.py",
         "tests/test_a_capacity_refusal_does_not_corrupt_a_generation.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/lsp_wire.py",
+      "names": [
+        "FrameTooLarge",
+        "JSON_RPC_INTEGER_MAX",
+        "JsonRpcFrameReader",
+        "MAX_FRAME_BYTES",
+        "MAX_HEADER_BYTES",
+        "MAX_JSON_DEPTH",
+        "MAX_SKIPPED_FRAME_BYTES",
+        "ProtocolViolation",
+        "encode_frame",
+        "json_depth"
+      ],
+      "contract_sha256": "828591752c1c468fa2ef87c1eb990efb86277f6fc6720292d5c424a6fae72bec",
+      "integration_tests": [
+        "tests/modules/lsp_wire/test_wire.py",
+        "tests/test_a_dead_owner_root_is_swept_when_the_next_server_starts.py",
+        "tests/test_a_document_is_opened_in_its_own_language.py"
       ]
     },
     {
@@ -65,15 +103,27 @@
       ]
     },
     {
-      "provider": "scripts/lsp_protocol.py",
+      "provider": "scripts/lsp_profiles.py",
       "names": [
-        "LspProtocol"
+        "server_notification_union"
       ],
-      "contract_sha256": "29ff245836be64bfa845eedb6f65f168acfecb1043504fae1f2b9a87952fe81a",
+      "contract_sha256": "74fdcd7bc1dd21b34cd2403e710b76b641c939fd537d32c034c0bff481808cfb",
       "integration_tests": [
-        "tests/fake_lsp_server.py",
-        "tests/lsp_protocol_helpers.py",
-        "tests/test_a_fallback_names_its_cause.py"
+        "tests/modules/lsp_profiles/test_registry.py",
+        "tests/test_a_dead_owner_root_is_swept_when_the_next_server_starts.py",
+        "tests/test_a_directory_link_inside_the_checkout_does_not_refuse_the_revision.py"
+      ]
+    },
+    {
+      "provider": "scripts/lsp_security.py",
+      "names": [
+        "redact_lsp_text"
+      ],
+      "contract_sha256": "a31622c6f2f15f192191200f623f9a6844bd45a1b8b9bf6bd6a3c7474eff2593",
+      "integration_tests": [
+        "tests/test_a_context_answer_fits_the_budget_it_was_given.py",
+        "tests/test_a_cut_in_the_core_says_what_it_left_out.py",
+        "tests/test_a_dead_owner_root_is_swept_when_the_next_server_starts.py"
       ]
     },
     {

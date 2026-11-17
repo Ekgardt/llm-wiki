@@ -67,7 +67,7 @@ def test_a_derivation_over_one_span_is_not_a_derivation() -> None:
 
 
 def test_a_derived_claim_still_has_to_share_words_with_every_input() -> None:
-    supplied = {**SUPPLIED, "E2": {"text": "\u0422\u0438\u0448\u0438\u043d\u0430 \u0432 \u0441\u043e\u0432\u0435\u0440\u0448\u0435\u043d\u043d\u043e \u0438\u043d\u043e\u043c \u043f\u0440\u0435\u0434\u043c\u0435\u0442\u0435."}}
+    supplied = {**SUPPLIED, "E2": {"text": "Silence about an entirely unrelated subject."}}
     claim = _claim("Gifts for my sister cost $300 in total.", ["E1", "E2"], "sum")
 
     with pytest.raises((query_memory.GroundedQAError, EvidenceResolutionError)):

@@ -11,20 +11,26 @@
     "docs/modules/context-records.md",
     "docs/modules/context-tooling.md",
     "docs/modules/formats.md",
+    "docs/modules/install-control.md",
     "docs/modules/integration-hook-config-context.json",
     "docs/modules/integration-hook-config.md",
     "docs/modules/integration-launch-values.md",
+    "docs/modules/merge-claude-settings.md",
     "docs/modules/model-choice.md",
     "docs/modules/product-structure.md",
     "docs/modules/project-governance.md",
+    "docs/modules/reliable-memory.md",
     "docs/modules/test-support.md",
     "rules/development-laws.md",
     "scripts/__init__.py",
+    "scripts/install_control.py",
+    "scripts/integration_config_backup.py",
     "scripts/integration_hook_config.py",
     "scripts/llm_wiki/__init__.py",
     "scripts/llm_wiki/context_bundle.py",
     "scripts/llm_wiki/formats/__init__.py",
     "scripts/llm_wiki/integration_launch_values.py",
+    "scripts/reliable_memory.py",
     "tests/__init__.py",
     "tests/codex_installed_provider_bundle_reaches_launch_helpers.py",
     "tests/conftest.py",
@@ -41,6 +47,7 @@
     "tests/test_claude_provider_projection_round_trips.py",
     "tests/test_codex_installed_provider_bundle_reaches_launch.py",
     "tests/test_codex_provider_bootstrap_preserves_runtime_choice.py",
+    "tests/test_integration_hook_config.py",
     "tests/test_the_installed_choice_of_provider_travels_whole.py"
   ],
   "ownership": {
@@ -53,10 +60,23 @@
       "tests/test_claude_provider_projection_round_trips.py",
       "tests/test_codex_installed_provider_bundle_reaches_launch.py",
       "tests/test_codex_provider_bootstrap_preserves_runtime_choice.py",
+      "tests/test_integration_hook_config.py",
       "tests/test_the_installed_choice_of_provider_travels_whole.py"
     ]
   },
   "qualified_dependencies": [
+    {
+      "provider": "scripts/bounded_io.py",
+      "names": [
+        "IO_CHUNK_BYTES"
+      ],
+      "contract_sha256": "832f143c7663b746e254455c650afd8b3ccb426152369aa1345298267ee40739",
+      "integration_tests": [
+        "tests/modules/breadcrumb_decision/test_wire.py",
+        "tests/modules/breadcrumb_documents/test_contract.py",
+        "tests/modules/breadcrumb_documents/test_rendering.py"
+      ]
+    },
     {
       "provider": "scripts/codex_config_state.py",
       "names": [
@@ -93,19 +113,6 @@
       ]
     },
     {
-      "provider": "scripts/integration_config_backup.py",
-      "names": [
-        "publish_configuration"
-      ],
-      "contract_sha256": "d5faae82d9a0b561078812ee28da89de8f0a8c6e8f6d9d158728ce7f929291a8",
-      "integration_tests": [
-        "tests/test_claude_provider_projection_round_trips.py",
-        "tests/test_codex_installed_provider_bundle_reaches_launch.py",
-        "tests/test_codex_provider_bootstrap_preserves_runtime_choice.py",
-        "tests/test_the_installed_choice_of_provider_travels_whole.py"
-      ]
-    },
-    {
       "provider": "scripts/llm_client.py",
       "names": [
         "forced_provider"
@@ -118,14 +125,29 @@
     {
       "provider": "scripts/llm_wiki/formats/canonical.py",
       "names": [
-        "canonical_json_bytes"
+        "canonical_json_bytes",
+        "sha256_bytes"
       ],
-      "contract_sha256": "679597eaf19bb4eef12b405f35978a452a06007dd565b01d3f0d04a4f1116c49",
+      "contract_sha256": "2e42a7aefcb66ac2515f6665a03feae34e6f7bad4807787a789ce031f9f3a9c1",
       "integration_tests": [
         "tests/test_claude_provider_projection_round_trips.py",
         "tests/test_codex_installed_provider_bundle_reaches_launch.py",
         "tests/test_codex_provider_bootstrap_preserves_runtime_choice.py",
         "tests/test_the_installed_choice_of_provider_travels_whole.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/formats/schema.py",
+      "names": [
+        "SchemaValidationError",
+        "validate_schema",
+        "validate_schema_object"
+      ],
+      "contract_sha256": "46d24c7a6473d3ea49408722a1dcd3ba46d71ea5a0b5f9caf95082dd7e8baba1",
+      "integration_tests": [
+        "tests/modules/breadcrumb_decision/test_wire.py",
+        "tests/modules/breadcrumb_documents/test_contract.py",
+        "tests/modules/breadcrumb_documents/test_rendering.py"
       ]
     },
     {
@@ -141,11 +163,145 @@
       ]
     },
     {
+      "provider": "scripts/llm_wiki/install_cron.py",
+      "names": [
+        "cron_scheduler_resource",
+        "render_cron_block"
+      ],
+      "contract_sha256": "3e2b2a3aebb870f538c416e95d252fc4a1eec99cfcf20a5375620a2d9f6175df",
+      "integration_tests": [
+        "tests/test_a_rerun_may_ask_for_fewer_things.py",
+        "tests/test_an_uninstall_names_what_it_leaves.py",
+        "tests/test_an_update_replaces_what_it_owns.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/install_inspection.py",
+      "names": [
+        "inspect_install_state",
+        "installed_at",
+        "unowned_agent_registrations"
+      ],
+      "contract_sha256": "965f37aa7fd1326ee14e3c48f100ef8523cf29443acbb25fac53f162b19e3f15",
+      "integration_tests": [
+        "tests/test_a_check_is_judged_when_it_ends.py",
+        "tests/test_a_claude_prompt_takes_the_ingest_path.py",
+        "tests/test_a_failing_nightly_is_visible.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/install_launchd.py",
+      "names": [
+        "LAUNCHD_SERVICE_NOT_FOUND",
+        "bootout_if_loaded",
+        "launchd_scheduler_resource",
+        "uninstall_launchd"
+      ],
+      "contract_sha256": "a82de5a6c234a88e51d5b0737f6d9d747684d2c1ff6f72f2163c713be8443abc",
+      "integration_tests": [
+        "tests/test_a_rerun_may_ask_for_fewer_things.py",
+        "tests/test_an_uninstall_names_what_it_leaves.py",
+        "tests/test_an_update_replaces_what_it_owns.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/install_profile.py",
+      "names": [
+        "profile_resource"
+      ],
+      "contract_sha256": "bda4f6096153dc26b5e56acc1ed247d092387e9393ae717356d1ab73b53344c9",
+      "integration_tests": [
+        "tests/test_a_rerun_may_ask_for_fewer_things.py",
+        "tests/test_an_uninstall_names_what_it_leaves.py",
+        "tests/test_an_update_honors_explicit_resource_adoption.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/install_provider_files.py",
+      "names": [
+        "codex_desired_bundle",
+        "provider_binary_file",
+        "provider_handle_identity",
+        "provider_open",
+        "provider_security_identity",
+        "require_provider_identity"
+      ],
+      "contract_sha256": "7aa8b53499ab4044e9cc9ae7fac0b060bcb407d3ac8c73df395d0354f2b5eb1a",
+      "integration_tests": [
+        "tests/test_a_check_is_judged_when_it_ends.py",
+        "tests/test_a_claude_prompt_takes_the_ingest_path.py",
+        "tests/test_a_failing_nightly_is_visible.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/install_provider_proof.py",
+      "names": [
+        "installed_codex_provider_bundle",
+        "provider_snapshot_proof"
+      ],
+      "contract_sha256": "faccb503b39a55c5ff3891f726b48710935023228ff7d3486a8f990a2ad376a1",
+      "integration_tests": [
+        "tests/test_a_check_is_judged_when_it_ends.py",
+        "tests/test_a_claude_prompt_takes_the_ingest_path.py",
+        "tests/test_a_failing_nightly_is_visible.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/install_rebuild.py",
+      "names": [
+        "resources_from_existing_args"
+      ],
+      "contract_sha256": "c57a43a0d81ec03630cffd9bc10d02828fdea500131c9a41bfbfcfe5161fc601",
+      "integration_tests": [
+        "tests/test_a_rerun_may_ask_for_fewer_things.py",
+        "tests/test_an_uninstall_names_what_it_leaves.py",
+        "tests/test_an_update_replaces_what_it_owns.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/install_record_reader.py",
+      "names": [
+        "existing_record"
+      ],
+      "contract_sha256": "8549ec15f131d5a49cdb94b2c4cc401741cd2bf55a6f8028492e18c3a96bd2a6",
+      "integration_tests": [
+        "tests/test_a_check_is_judged_when_it_ends.py",
+        "tests/test_a_claude_prompt_takes_the_ingest_path.py",
+        "tests/test_a_failing_nightly_is_visible.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/install_records.py",
+      "names": [
+        "PROFILE_END",
+        "install_lock"
+      ],
+      "contract_sha256": "411f17cbd266a82e6d7d9a4f72a9a525ee4075cec03b11f53924be023fdc1156",
+      "integration_tests": [
+        "tests/test_a_changed_task_setting_reaches_an_installed_machine.py",
+        "tests/test_a_first_format_install_refuses_what_it_cannot_prove.py",
+        "tests/test_a_rerun_may_ask_for_fewer_things.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/install_release.py",
+      "names": [
+        "build_release_identity"
+      ],
+      "contract_sha256": "bc62d4f35445a8db90edd38825221aa68df56e89c8b78a24f20bd8c73d501d65",
+      "integration_tests": [
+        "tests/test_a_rerun_may_ask_for_fewer_things.py",
+        "tests/test_an_uninstall_names_what_it_leaves.py",
+        "tests/test_an_update_replaces_what_it_owns.py"
+      ]
+    },
+    {
       "provider": "scripts/llm_wiki/install_requests.py",
       "names": [
+        "install_from_args",
         "marked_adopted"
       ],
-      "contract_sha256": "863b329cf10bf649d68ac050dc44c17ca6265cad3a2b6fb700c4ad075757b4b3",
+      "contract_sha256": "a262c9494d1a11aac836963879721b2a9d20b04716f5fe332796de2101fcc9c1",
       "integration_tests": [
         "tests/test_a_rerun_may_ask_for_fewer_things.py",
         "tests/test_a_rollback_undoes_only_what_it_did.py",
@@ -153,11 +309,46 @@
       ]
     },
     {
+      "provider": "scripts/llm_wiki/install_resource_builder.py",
+      "names": [
+        "base_install_resources",
+        "build_install_resources",
+        "opencode_plugin_destination",
+        "posix_scheduler_resource",
+        "selected_backend"
+      ],
+      "contract_sha256": "3cdb4558bbb5e39a86ba01febb2dc626b9f5d45580bc9e56159cd25d2b40160f",
+      "integration_tests": [
+        "tests/test_a_check_is_judged_when_it_ends.py",
+        "tests/test_a_claude_prompt_takes_the_ingest_path.py",
+        "tests/test_a_failing_nightly_is_visible.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/install_scheduler_projection.py",
+      "names": [
+        "definition_digest"
+      ],
+      "contract_sha256": "bfbb64f581f8a2728fe7fa1c703d101c99f20cbc283208f63d3f5b0c1929b27e",
+      "integration_tests": [
+        "tests/test_a_changed_task_setting_reaches_an_installed_machine.py",
+        "tests/test_a_rerun_may_ask_for_fewer_things.py",
+        "tests/test_an_uninstall_names_what_it_leaves.py"
+      ]
+    },
+    {
       "provider": "scripts/llm_wiki/install_scheduler_render.py",
       "names": [
+        "SCHEDULER_LIMIT_HOURS",
+        "launchd_job",
+        "render_launchd_definitions",
+        "render_systemd_definitions",
+        "scheduled_arguments",
+        "scheduler_limit_hours",
+        "select_scheduler_backend",
         "systemd_service"
       ],
-      "contract_sha256": "b45ca4259f4ac9273c1d96762ffca440d61ecf068f6d42cb285194394d704b93",
+      "contract_sha256": "ec03952cdc1377d824f425629b93a688f30238d244829a1bb298000e19f6961e",
       "integration_tests": [
         "tests/test_a_scheduled_run_keeps_the_uv_link.py",
         "tests/test_a_weekly_waits_for_the_nightly.py",
@@ -165,15 +356,52 @@
       ]
     },
     {
+      "provider": "scripts/llm_wiki/install_systemd.py",
+      "names": [
+        "systemd_scheduler_resource"
+      ],
+      "contract_sha256": "4c49876010df5e0b233ccb29222eedbfbfa42614f0e99b7eed75614ff585b9c4",
+      "integration_tests": [
+        "tests/test_a_rerun_may_ask_for_fewer_things.py",
+        "tests/test_an_uninstall_names_what_it_leaves.py",
+        "tests/test_an_update_replaces_what_it_owns.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/install_transactions.py",
+      "names": [
+        "set_transaction_state"
+      ],
+      "contract_sha256": "854e3921c816b22d5f2a7c8426dd51a5f923dfdc4e13cd74951056139014399f",
+      "integration_tests": [
+        "tests/test_a_changed_task_setting_reaches_an_installed_machine.py",
+        "tests/test_a_first_format_install_refuses_what_it_cannot_prove.py",
+        "tests/test_a_rerun_may_ask_for_fewer_things.py"
+      ]
+    },
+    {
       "provider": "scripts/llm_wiki/install_uninstall_rollback.py",
       "names": [
-        "rollback_resources"
+        "rollback_resources",
+        "uninstall_resources"
       ],
-      "contract_sha256": "a47951c1c7c8b2c13581ece72a5d5ceded49d526cb2b49b7bb97afd40e0adc8d",
+      "contract_sha256": "624562915228514c2dbc18f5860dab5fc810154dc1b8f3ad54c02b3d827e18da",
       "integration_tests": [
         "tests/test_a_rollback_undoes_only_what_it_did.py",
         "tests/test_an_update_honors_explicit_resource_adoption.py",
         "tests/test_claude_provider_projection_round_trips.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/install_v2_mutation.py",
+      "names": [
+        "v2_mutate_resources"
+      ],
+      "contract_sha256": "32bbf94fd20d24bd40c67e3d5f8481133242636906654c12ec4517e468bd33ff",
+      "integration_tests": [
+        "tests/test_a_changed_task_setting_reaches_an_installed_machine.py",
+        "tests/test_a_first_format_install_refuses_what_it_cannot_prove.py",
+        "tests/test_a_rerun_may_ask_for_fewer_things.py"
       ]
     },
     {
@@ -189,6 +417,23 @@
       ]
     },
     {
+      "provider": "scripts/llm_wiki/install_windows.py",
+      "names": [
+        "WINDOWS_TASK_LIMIT_HOURS",
+        "decode_windows_task_spec",
+        "render_windows_task_spec",
+        "windows_environment_resources",
+        "windows_task_command_from_spec",
+        "windows_task_scheduler_resource"
+      ],
+      "contract_sha256": "e34a79810daa08076dde0ab07c4e4e1fba5653f2fb52f291115bd7c7c6d7f634",
+      "integration_tests": [
+        "tests/test_a_changed_task_setting_reaches_an_installed_machine.py",
+        "tests/test_a_rerun_may_ask_for_fewer_things.py",
+        "tests/test_an_uninstall_names_what_it_leaves.py"
+      ]
+    },
+    {
       "provider": "scripts/llm_wiki/model_choice.py",
       "names": [
         "using_root"
@@ -199,6 +444,311 @@
         "tests/test_codex_installed_provider_bundle_reaches_launch.py",
         "tests/test_codex_provider_bootstrap_preserves_runtime_choice.py",
         "tests/test_the_installed_choice_of_provider_travels_whole.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/reliability_defaults.py",
+      "names": [
+        "DEFAULTS",
+        "MAX_CAPTURE_DECISION_BYTES",
+        "ReliableMemoryDefaults"
+      ],
+      "contract_sha256": "00576c5ace3900bbac5c6f1e329a9463c410f3371bac0050683d1128930a9eb1",
+      "integration_tests": [
+        "tests/modules/breadcrumb_decision/test_wire.py",
+        "tests/modules/breadcrumb_documents/test_contract.py",
+        "tests/modules/breadcrumb_documents/test_rendering.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/restricted_paths.py",
+      "names": [
+        "is_posix_relative_text",
+        "require_inside_a_root",
+        "require_normalized_relative",
+        "require_posix_relative_text",
+        "restricted_relative_path",
+        "under_root"
+      ],
+      "contract_sha256": "85d629b86e4d034e2a4f87ffcc9f55ac07a5a2be7534c5ace32af1d3c50dd519",
+      "integration_tests": [
+        "tests/modules/queue_validation/test_capture_checks.py",
+        "tests/modules/restricted_paths/test_paths.py",
+        "tests/test_a_backup_image_carries_what_git_does_not.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/runtime_contracts.py",
+      "names": [
+        "MetadataDurabilityUnavailable",
+        "RuntimeFileIdentity",
+        "UnsafeStateRoot"
+      ],
+      "contract_sha256": "f790d8fec138e7a73aeb10ddcce9949319460759efa061fe6be4e07603f38d28",
+      "integration_tests": [
+        "tests/modules/coordinator_validation/test_database.py",
+        "tests/modules/ownership_validation/test_contract.py",
+        "tests/modules/ownership_validation/test_marker_rows.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/runtime_environment.py",
+      "names": [
+        "CLOUD_DIRECTORY_NAMES",
+        "chmod_or_warn",
+        "decode_mount_path",
+        "harden_runtime_owner_only",
+        "has_reparse_attribute",
+        "is_network_filesystem",
+        "known_network_path",
+        "owner_permissions_supported",
+        "parse_darwin_mounts",
+        "parse_posix_mounts",
+        "path_is_under",
+        "platform_system",
+        "posix_mount_table",
+        "posix_network_path",
+        "query_darwin_mounts",
+        "read_posix_mount_data",
+        "require_applied_mode",
+        "require_local_non_reparse_root",
+        "require_owner_only_file",
+        "require_windows_owner_only",
+        "set_owner_only",
+        "warn_if_cloud_synchronized",
+        "windows_network_anchor",
+        "windows_reparse_point"
+      ],
+      "contract_sha256": "35c6e60985600244454435ececa8a0368680e7164b1578a4ea0646ae845688b7",
+      "integration_tests": [
+        "tests/modules/coordinator_validation/test_database.py",
+        "tests/modules/queue_artifacts/test_artifacts.py",
+        "tests/modules/runtime_environment/test_environment.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/runtime_fingerprints.py",
+      "names": [
+        "digest_runtime_descriptor",
+        "fingerprint_metadata",
+        "fingerprint_regular_file",
+        "fingerprint_runtime_file",
+        "require_fingerprint_metadata",
+        "verified_runtime_digest"
+      ],
+      "contract_sha256": "164330508f19dc7e78d2c6e1fbf009862bc7f139833eeb7fa9d67f98ecce58fd",
+      "integration_tests": [
+        "tests/modules/runtime_fingerprints/test_fingerprints.py",
+        "tests/modules/runtime_fingerprints/test_windows_metadata.py",
+        "tests/test_a_blocked_task_has_a_way_back.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/runtime_publication.py",
+      "names": [
+        "adopted_or_duplicate",
+        "discard_staged",
+        "durable_publish_file",
+        "fsync_parent_on_posix",
+        "link_then_unlink",
+        "move_into_place",
+        "move_posix",
+        "move_windows",
+        "publication_digest",
+        "publish_runtime_file",
+        "publish_staged",
+        "replace_in_place",
+        "require_create_only_carries_no_evidence",
+        "require_distinct_siblings",
+        "require_publication_arguments",
+        "require_replacement_carries_evidence",
+        "require_replacement_evidence",
+        "require_replacement_shape",
+        "require_runtime_arguments",
+        "require_runtime_mode",
+        "require_runtime_payload",
+        "require_unchanged_identity",
+        "resolved_parents",
+        "resolved_runtime_destination",
+        "resolved_sibling_pair",
+        "settled_publication",
+        "unlink_staged",
+        "verify_published_runtime_permissions",
+        "write_all",
+        "write_staged_bytes"
+      ],
+      "contract_sha256": "313aeb59ddc66ce043b7702c23c88123eea0b87b9bc7afea152d807d1b1fe596",
+      "integration_tests": [
+        "tests/modules/runtime_publication/test_publication.py",
+        "tests/test_a_block_opens_one_entry.py",
+        "tests/test_a_blocked_task_has_a_way_back.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/runtime_records.py",
+      "names": [
+        "capture_operational_database_identity",
+        "capture_runtime_file_identity",
+        "confirm_runtime_identity",
+        "contained_runtime_metadata",
+        "posix_runtime_identity_names",
+        "read_runtime_bytes",
+        "require_bounded_regular_file",
+        "require_file_size_budget",
+        "require_nonnegative_file_budget",
+        "require_runtime_parent_containment",
+        "require_stable_read",
+        "runtime_identity_from_metadata",
+        "validate_operational_db_file",
+        "validate_runtime_file",
+        "validated_runtime_metadata",
+        "windows_runtime_identity_names"
+      ],
+      "contract_sha256": "bbb2899e154f4aa8ab7d6f9dbad03b5c0e31bba0fe4e20751f5e0768bdd8a8a3",
+      "integration_tests": [
+        "tests/modules/runtime_fingerprints/test_fingerprints.py",
+        "tests/modules/runtime_fingerprints/test_windows_metadata.py",
+        "tests/modules/runtime_publication/test_publication.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/runtime_sync.py",
+      "names": [
+        "close_windows_handle",
+        "file_sync_mode",
+        "fsync_directory",
+        "fsync_directory_posix",
+        "fsync_directory_windows",
+        "fsync_file",
+        "metadata_durability_error",
+        "opened_directory_descriptor",
+        "sync_runtime_directory"
+      ],
+      "contract_sha256": "0f2d9c18e2b30fb7d5328583bc0ff9adfc9cf054a2963a8357559e3d687f6e53",
+      "integration_tests": [
+        "tests/modules/queue_artifacts/test_artifacts.py",
+        "tests/modules/runtime_publication/test_publication.py",
+        "tests/modules/runtime_sync/test_sync.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/sqlite_contracts.py",
+      "names": [
+        "MigrationStatement",
+        "OperationalDatabaseContract",
+        "OperationalDatabaseContractError",
+        "quote_sqlite_identifier",
+        "require_migration_text",
+        "require_positive_int"
+      ],
+      "contract_sha256": "be0748b89bfdb7d33cbca2bf3a4206fc79767cbb9a18c1a5a940116a0e264bf6",
+      "integration_tests": [
+        "tests/modules/coordinator_invariants/test_integrity.py",
+        "tests/modules/coordinator_invariants/test_rows.py",
+        "tests/modules/coordinator_schema/test_contract.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/sqlite_deadlines.py",
+      "names": [
+        "OPERATIONAL_PROGRESS_VM_STEPS",
+        "configure_operational_deadline",
+        "operational_busy_ms",
+        "operational_deadline_active",
+        "refresh_operational_deadline"
+      ],
+      "contract_sha256": "061d661051d2ea383c7701e47357b59650f12d000eb76d14907f666339152257",
+      "integration_tests": [
+        "tests/modules/coordinator_validation/test_database.py",
+        "tests/modules/queue_artifacts/test_artifacts.py",
+        "tests/modules/queue_heartbeat/test_renewal.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/sqlite_io.py",
+      "names": [
+        "JOURNAL_REPLAY_BUSY_MS",
+        "OPERATIONAL_SCAN_BATCH_ROWS",
+        "cleanup_lock_probe",
+        "close_probe_connections",
+        "configure_operational_connection",
+        "contained_lock_probe",
+        "hot_journal",
+        "initialize_probe_directory",
+        "open_operational_db",
+        "open_readonly_operational_db",
+        "opened_probe",
+        "opened_readonly_operational_db",
+        "operational_db_identity",
+        "prepare_local_database_directory",
+        "probe_directory",
+        "probe_directory_identity",
+        "readonly_write_refusal",
+        "remove_probe_files",
+        "replayed_hot_journal",
+        "require_operational_open_arguments",
+        "require_probe_component",
+        "require_probe_root_chain",
+        "require_replayed_journal",
+        "require_same_probe_directory",
+        "run_lock_probe",
+        "second_writer_is_blocked",
+        "sqlite_directory_lock_probe",
+        "sqlite_lock_probe",
+        "streamed_rows",
+        "validate_database_directory",
+        "validate_state_root"
+      ],
+      "contract_sha256": "9cf7ff2d5905c2c0eca3d677febb5e6f0b5da21c88f8271e4080159c2774fdbd",
+      "integration_tests": [
+        "tests/modules/coordinator_validation/test_database.py",
+        "tests/modules/sqlite_io/test_connections.py",
+        "tests/modules/sqlite_io/test_probe.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/sqlite_migrations.py",
+      "names": [
+        "apply_one_migration_statement",
+        "migration_incomplete",
+        "require_final_invariant",
+        "require_unique_statement_names",
+        "run_resumable_migration"
+      ],
+      "contract_sha256": "1970c8995e439516907e472a39a5bd68f1a9096b16fdcf9f0f114beb4b437271",
+      "integration_tests": [
+        "tests/modules/sqlite_migrations/test_migrations.py",
+        "tests/test_a_check_is_judged_when_it_ends.py",
+        "tests/test_a_check_names_its_cause.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/sqlite_pragmas.py",
+      "names": [
+        "apply_operational_pragmas",
+        "apply_readonly_operational_pragmas",
+        "initialized_contract_identity",
+        "pragma_integer",
+        "require_pragma",
+        "validate_or_initialize_operational_contract"
+      ],
+      "contract_sha256": "1738d3b676b1b8b5ed5ae45b40dcebd19055eaa24f86d687a0c3f4747d84cc58",
+      "integration_tests": [
+        "tests/modules/coordinator_validation/test_database.py",
+        "tests/modules/queue_database_contract/test_contract.py",
+        "tests/modules/sqlite_io/test_connections.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/sqlite_transactions.py",
+      "names": [
+        "begin_immediate"
+      ],
+      "contract_sha256": "fb9ecde177ce133dd8e6e34a67214ca0c051a02d758e8611dac84b568d955373",
+      "integration_tests": [
+        "tests/modules/queue_attempts/test_attempts.py",
+        "tests/modules/queue_schema_operations/test_operations.py",
+        "tests/modules/sqlite_migrations/test_migrations.py"
       ]
     },
     {
@@ -230,20 +780,6 @@
       ]
     },
     {
-      "provider": "scripts/reliable_memory.py",
-      "names": [
-        "fsync_directory",
-        "validate_state_root"
-      ],
-      "contract_sha256": "4ca423e580b75523a9541bd503c48d108f01ee833d9a736ae136467148fd77e5",
-      "integration_tests": [
-        "tests/test_claude_provider_projection_round_trips.py",
-        "tests/test_codex_installed_provider_bundle_reaches_launch.py",
-        "tests/test_codex_provider_bootstrap_preserves_runtime_choice.py",
-        "tests/test_the_installed_choice_of_provider_travels_whole.py"
-      ]
-    },
-    {
       "provider": "scripts/repository_scope.py",
       "names": [
         "sanitized_git_environment"
@@ -254,6 +790,18 @@
         "tests/test_codex_installed_provider_bundle_reaches_launch.py",
         "tests/test_codex_provider_bootstrap_preserves_runtime_choice.py",
         "tests/test_the_installed_choice_of_provider_travels_whole.py"
+      ]
+    },
+    {
+      "provider": "scripts/settings.py",
+      "names": [
+        "setting_value"
+      ],
+      "contract_sha256": "ec6d2a43d91dba48c174aad5e9505790a05fd66f1bf1e5292264857f320a9881",
+      "integration_tests": [
+        "tests/test_a_block_opens_one_entry.py",
+        "tests/test_a_blocked_task_has_a_way_back.py",
+        "tests/test_a_build_in_flight_is_not_an_orphan.py"
       ]
     }
   ]

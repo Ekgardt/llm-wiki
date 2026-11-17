@@ -30,7 +30,7 @@ def test_ordinal_authority_does_not_scan_unrelated_transactions(vault):
     assert all("SCAN transaction" not in row[3] for row in plan), plan
 
 
-@pytest.mark.parametrize("identity", ("proof", "proof_%\\", "\u0434\u043e\u043a\u0430\u0437\u0430\u0442\u0435\u043b\u044c\u0441\u0442\u0432\u043e"))
+@pytest.mark.parametrize("identity", ("proof", "proof_%\\", "证据"))
 def test_ordinal_authority_matches_literal_identity_and_latest_commit(vault, identity):
     root, state = vault
     coordinator = MarkdownCoordinator(root, state)

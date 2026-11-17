@@ -219,7 +219,7 @@ def test_the_manifest_carries_a_bounded_sample_not_a_row_per_record(tmp_path):
 def test_the_read_bound_is_the_size_the_sealed_manifest_declares(tmp_path):
     """Not a constant: a constant is what a real corpus outgrew.
 
-    `generation_catalog.validate_generation` has already hashed the artifact
+    `generation_validation.validate_generation` has already hashed the artifact
     against `manifest.json`, so the declared size is verified fact by the time
     the reuse path reads it.
     """

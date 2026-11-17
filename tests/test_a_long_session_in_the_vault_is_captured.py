@@ -20,7 +20,7 @@ FIELDS = {"session": "abc-session", "captured_at": "2026-09-24T10:00:00+00:00"}
 
 
 def test_only_an_empty_prompt_is_skipped() -> None:
-    assert (user_prompt_capture.should_skip("\u0434\u0430"), user_prompt_capture.should_skip("  ")) == (False, True)
+    assert (user_prompt_capture.should_skip("是"), user_prompt_capture.should_skip("  ")) == (False, True)
 
 
 def test_a_second_window_of_a_session_is_kept_beside_the_first(tmp_path: Path) -> None:

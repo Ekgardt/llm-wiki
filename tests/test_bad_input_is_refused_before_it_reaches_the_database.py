@@ -23,7 +23,7 @@ from queue_core import (  # noqa: E402
 )
 
 _TOO_LONG = "e" * 65
-_CYRILLIC = "\u043e\u0448\u0438\u0431\u043a\u0430" * 8  # 48 characters, 96 bytes.
+_MULTI_BYTE = "错误" * 12  # 24 characters, 72 bytes.
 
 
 def _v3_queue(tmp_path: Path):
@@ -46,7 +46,7 @@ def _refused(queue, error_code: str) -> str:
 def test_a_code_the_schema_cannot_store_is_refused_by_name(tmp_path: Path) -> None:
     queue = _v3_queue(tmp_path)
 
-    assert (_refused(queue, _TOO_LONG), _refused(queue, _CYRILLIC)) == (
+    assert (_refused(queue, _TOO_LONG), _refused(queue, _MULTI_BYTE)) == (
         "source failure fields are invalid",
         "source failure fields are invalid",
     )

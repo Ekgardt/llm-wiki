@@ -42,6 +42,18 @@
   },
   "qualified_dependencies": [
     {
+      "provider": "scripts/compile_cache.py",
+      "names": [
+        "is_owner_only"
+      ],
+      "contract_sha256": "743fcc13617c462d8c9bfb2766df924d69104d1f353d1f8167f1bd7fe5dc99a9",
+      "integration_tests": [
+        "tests/test_a_blocked_task_has_a_way_back.py",
+        "tests/test_a_check_is_judged_when_it_ends.py",
+        "tests/test_a_claude_prompt_takes_the_ingest_path.py"
+      ]
+    },
+    {
       "provider": "scripts/llm_wiki/generation_catalog_store.py",
       "names": [
         "GenerationCatalog"

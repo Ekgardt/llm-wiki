@@ -1,7 +1,7 @@
 # The next module: managing the queue's child execution
 
-2026-11-02. Based on f44e5a6b. The user explicitly approved the boundary with the answer
-"Yes, implement this boundary". The decision and STRUCTURE were recorded before the implementation.
+2026-11-02. Based on f44e5a6b. The working session of that branch records the user's answer
+"Yes, implement this boundary" (translated from Russian; the repository holds no copy). The decision and STRUCTURE were recorded before the implementation.
 
 ## The concrete boundary
 

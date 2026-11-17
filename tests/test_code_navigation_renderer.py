@@ -407,7 +407,7 @@ def test_signature_strips_source_body() -> None:
 
 
 def test_multibyte_signature_stays_on_utf8_boundary_and_reports_original_size() -> None:
-    original = "def \u043f\u0440\u0438\u043c\u0435\u0440(" + "😀" * 400 + "):\n    return 1"
+    original = "def 示例(" + "😀" * 400 + "):\n    return 1"
     rendered = render_navigation(
         replace(_result(1), locations=(_location(signature=original),)),
         offset=0,
@@ -418,7 +418,7 @@ def test_multibyte_signature_stays_on_utf8_boundary_and_reports_original_size() 
     one_line = "\n" not in signature
     within_bytes = len(signature.encode("utf-8")) <= 1_024
     assert (
-        signature.startswith("def \u043f\u0440\u0438\u043c\u0435\u0440("),
+        signature.startswith("def 示例("),
         one_line,
         within_bytes,
         _warns(

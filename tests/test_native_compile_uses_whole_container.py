@@ -26,8 +26,14 @@ from tests.native_compile_uses_whole_container_helpers import (
 )
 
 
+# Six non-ASCII letters, a full stop and a space: a multi-byte prompt long
+# enough to span several dailies once it is encoded.
+OPENING = "开始一个段落. "
+TAIL_SENTENCE = "我的自行车是蓝色的."
+
+
 def test_long_native_frame_is_one_semantic_unit_with_all_original_parts(tmp_path, monkeypatch):
-    prompt = "\u041d\u0430\u0447\u0430\u043b\u043e. " * 2500 + "\n\u041c\u043e\u0439 \u0432\u0435\u043b\u043e\u0441\u0438\u043f\u0435\u0434 \u0441\u0438\u043d\u0438\u0439."
+    prompt = OPENING * 2500 + "\n" + TAIL_SENTENCE
     inputs, _ = _native_inputs(tmp_path, monkeypatch, prompt)
     assert len(inputs.dailies) >= 2
     groups = compile_pipeline_batches.group_dailies(inputs, type("Budget", (), {"available_input_tokens": 10**6})(),
@@ -38,8 +44,8 @@ def test_long_native_frame_is_one_semantic_unit_with_all_original_parts(tmp_path
     assert native_groups == [covering]
     subset = compile_pipeline_sources.subset_compile_inputs(inputs, native_groups[0])
     assert len(subset.sources) == 1
-    assert "\u041c\u043e\u0439 \u0432\u0435\u043b\u043e\u0441\u0438\u043f\u0435\u0434 \u0441\u0438\u043d\u0438\u0439." in compile_pipeline_prompts.draft_prompt(subset)
-    operation = _native_operation(subset, "\u041c\u043e\u0439 \u0432\u0435\u043b\u043e\u0441\u0438\u043f\u0435\u0434 \u0441\u0438\u043d\u0438\u0439.")
+    assert TAIL_SENTENCE in compile_pipeline_prompts.draft_prompt(subset)
+    operation = _native_operation(subset, TAIL_SENTENCE)
     record = compile_pipeline_operations.derived_claim(operation, operation["claims"][0], subset)
     assert record["schema_version"] == "claim/v2"
     raw = (tmp_path / subset.dailies[0].logical_path).read_bytes()
@@ -68,7 +74,7 @@ def test_complete_native_line_can_bind_without_model_copying_raw_json(tmp_path, 
 
 
 def test_atomic_native_unit_is_not_rejected_by_ordinary_packing_target(tmp_path, monkeypatch):
-    inputs, _ = _native_inputs(tmp_path, monkeypatch, "\u041d\u0430\u0447\u0430\u043b\u043e. " * 2500 + "\nTail.")
+    inputs, _ = _native_inputs(tmp_path, monkeypatch, OPENING * 2500 + "\nTail.")
     raw = inputs.dailies[0].original_content
     selected = compile_pipeline_sources.subset_compile_inputs(inputs, _frame_covering_keys(inputs, raw))
     target = compile_pipeline_base.compile_budget(None)
@@ -97,12 +103,12 @@ def test_native_publication_commits_every_covering_part_and_exact_v2_ledger(vaul
     from markdown_transaction import MarkdownCoordinator
 
     root, state_root = vault
-    inputs, _ = _native_inputs(root, monkeypatch, "A" * 18000 + "\n\u041c\u043e\u0439 \u0432\u0435\u043b\u043e\u0441\u0438\u043f\u0435\u0434 \u0441\u0438\u043d\u0438\u0439.")
+    inputs, _ = _native_inputs(root, monkeypatch, "A" * 18000 + "\n" + TAIL_SENTENCE)
     raw = (root / inputs.dailies[0].logical_path).read_bytes()
     covering = _frame_covering_keys(inputs, raw)
     selected = compile_pipeline_sources.subset_compile_inputs(inputs, covering)
     batch = compile_pipeline_batches.pack_compile_batches(selected, model=None)[0]
-    operation = _native_operation(batch.inputs, "\u041c\u043e\u0439 \u0432\u0435\u043b\u043e\u0441\u0438\u043f\u0435\u0434 \u0441\u0438\u043d\u0438\u0439.")
+    operation = _native_operation(batch.inputs, TAIL_SENTENCE)
     derived = compile_pipeline_operations.with_derived_claims([operation], batch.inputs)
     plan = compile_pipeline_prompts.normalize_plan(derived, batch.inputs)
     coordinator = MarkdownCoordinator(root, state_root)
@@ -182,7 +188,7 @@ def _native_with_committed_companion(vault, monkeypatch):
     from markdown_transaction import MarkdownCoordinator
 
     root, state_root = vault
-    inputs, _ = _native_inputs(root, monkeypatch, "A" * 18000 + "\n\u041c\u043e\u0439 \u0432\u0435\u043b\u043e\u0441\u0438\u043f\u0435\u0434 \u0441\u0438\u043d\u0438\u0439.")
+    inputs, _ = _native_inputs(root, monkeypatch, "A" * 18000 + "\n" + TAIL_SENTENCE)
     first = _part_with_key(inputs.dailies, _frame_covering_keys(inputs, inputs.dailies[0].original_content))
     historical = replace(inputs, dailies=(replace(first, native_frames=()),), sources=())
     old_batch = compile_pipeline_batches.pack_compile_batches(historical, model=None)[0]
@@ -197,7 +203,7 @@ def _native_with_committed_companion(vault, monkeypatch):
     current = compile_pipeline_sources.snapshot_compile_inputs([root / first.logical_path], compiled=selector)
     keys = _frame_covering_keys(current, first.original_content)
     batch = compile_pipeline_batches.pack_compile_batches(compile_pipeline_sources.subset_compile_inputs(current, keys), model=None)[0]
-    operation = _native_operation(batch.inputs, "\u041c\u043e\u0439 \u0432\u0435\u043b\u043e\u0441\u0438\u043f\u0435\u0434 \u0441\u0438\u043d\u0438\u0439.")
+    operation = _native_operation(batch.inputs, TAIL_SENTENCE)
     plan = compile_pipeline_prompts.normalize_plan(compile_pipeline_operations.with_derived_claims([operation], batch.inputs), batch.inputs)
     return coordinator, batch, plan, old_path, old_bytes
 

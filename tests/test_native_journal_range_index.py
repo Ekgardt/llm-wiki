@@ -58,7 +58,7 @@ def test_range_discovery_reads_bodies_only_when_requested():
 @pytest.mark.parametrize('transfer', [7, IO_CHUNK_BYTES])
 def test_native_discovery_accepts_verified_archive_ranges(monkeypatch, transfer):
     monkeypatch.setattr(controller_reader, 'IO_CHUNK_BYTES', transfer)
-    raw = _event() + _event(name='\u0441\u043e\u0431\u044b\u0442\u0438\u0435'.encode())
+    raw = _event() + _event(name='事件'.encode())
     with _original(raw) as content:
         assert dict(fact_keys.native_journal_index(content).items()) == _previous_index(raw)
 
@@ -79,7 +79,7 @@ def _outcome(content, previous=False):
     _event().replace(b'Captured event', b'Captured Event'),
     _event(name=b''), _event(name=b'a)b'), _event(name=b'a(b'), _event(name=b'a\rb'),
     _event(name=b'\xff'), _event(b'bad', name=b'\xff'),
-    _event(name='\u0438\u043c\u044f'.encode()), _event(b'{}'), _event(b'{not json}'),
+    _event(name='名字'.encode()), _event(b'{}'), _event(b'{not json}'),
     _event(b'{\r}'), _event(b'{\n}'), _event(b'{missing'), _event(b'not a container'),
     _event().replace(b'../archive/location', b''), _event().replace(b'../archive/location', b'a)b'),
     _event().replace(b'../archive/location', b'a\rb'), _event().replace(b'\n\n    ', b'\n    '),

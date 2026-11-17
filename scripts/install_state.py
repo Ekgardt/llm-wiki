@@ -296,11 +296,16 @@ def resource_snapshots(
 
 def _preimage_path(install_root: Path, origin: Mapping[str, object]) -> Path:
     relative = origin.get("preimage")
-    if not isinstance(relative, str):
-        raise InstallControlError("install_preimage_reference_invalid")
-    if not relative.startswith("preimages/"):
+    if not isinstance(relative, str) or not _names_one_preimage(relative):
         raise InstallControlError("install_preimage_reference_invalid")
     return install_root / relative
+
+
+def _names_one_preimage(relative: str) -> bool:
+    """`preimages/<name>`: one plain file name, never a step out of the directory."""
+    directory, _, name = relative.partition("/")
+    plain = name not in {"", ".", ".."} and not set(name) & {"/", "\\", ":"}
+    return directory == "preimages" and plain
 
 
 def _read_preimage(path: Path) -> bytes:

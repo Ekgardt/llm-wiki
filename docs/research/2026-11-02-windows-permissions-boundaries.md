@@ -1,6 +1,6 @@
 # Windows permissions: remove the dependency of basic IO on the queue and transactions
 
-Research date: 2026-11-02. Status: both sequential steps were explicitly approved by the user.
+Research date: 2026-11-02. Status: the working session of that branch records the user's approval of both sequential steps; the repository holds no copy.
 Original version: dd3ad044. This is the next boundary of the overall decomposition plan.
 
 ## The confirmed cause of the coupling

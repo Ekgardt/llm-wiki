@@ -83,7 +83,7 @@ def test_historical_part_reuses_parsing_only_after_reading_the_current_file(tmp_
 
 @pytest.mark.parametrize("content", [
     b"## [evt-1] first\nfirst evidence\n## [evt-1] second\nsecond evidence\n",
-    "## [evt-1] \u043f\u0435\u0440\u0432\u044b\u0439\r\nfirst evidence\r\n## [evt-2] \u0432\u0442\u043e\u0440\u043e\u0439\r\nsecond evidence\r\n".encode(),
+    "## [evt-1] 第一\r\nfirst evidence\r\n## [evt-2] 第二\r\nsecond evidence\r\n".encode(),
 ])
 def test_live_cached_result_preserves_every_uncached_evidence_field(tmp_path, content):
     path, _original = _source(tmp_path)

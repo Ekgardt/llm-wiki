@@ -6,10 +6,16 @@
     "AGENTS.md",
     "CLAUDE.md",
     "benchmark/__init__.py",
+    "benchmark/retrieval_v2_environment.py",
+    "benchmark/retrieval_v2_matrix.py",
+    "benchmark/retrieval_v2_transformers.py",
     "docs/AGENTS.md",
     "docs/STRUCTURE.md",
+    "docs/modules/benchmark-retrieval-v2-environment.md",
+    "docs/modules/benchmark-retrieval-v2-matrix.md",
     "docs/modules/benchmark-retrieval-v2-transformers-tests-transformer-loaders-refuse-bad-assets-and-score-pairs-context.json",
     "docs/modules/benchmark-retrieval-v2-transformers-tests-transformer-loaders-refuse-bad-assets-and-score-pairs.md",
+    "docs/modules/benchmark-retrieval-v2-transformers.md",
     "docs/modules/benchmark-run-benchmark.md",
     "docs/modules/context-bundle.md",
     "docs/modules/context-records.md",
@@ -48,13 +54,54 @@
     {
       "provider": "benchmark/retrieval_v2_contract.py",
       "names": [
-        "Candidate"
+        "Candidate",
+        "MAX_CORPUS_BYTES",
+        "ModelSelection",
+        "ROOT",
+        "SELECTION_ARTIFACT_FIELDS",
+        "ScoredCandidate"
       ],
-      "contract_sha256": "f27d7ed2d7b48b231b186a6298dcaabac8c5396da87b7ae8df2e5e402164a13c",
+      "contract_sha256": "7c0c3589202531c6403b8d7b2427b7a3a8706e3453f13c23c9f318b4583a3d6a",
       "integration_tests": [
         "tests/test_retrieval_v2_adapters.py",
         "tests/test_retrieval_v2_aggregation.py",
         "tests/test_retrieval_v2_benchmark.py"
+      ]
+    },
+    {
+      "provider": "benchmark/retrieval_v2_outputs.py",
+      "names": [
+        "is_reparse_point"
+      ],
+      "contract_sha256": "b7707720c2ddc615cc9657538a23d1a2b7525c7119dcaa74c08542d52c7d2f65",
+      "integration_tests": [
+        "tests/test_authoritative_selection_binds_each_worker_and_refuses_gaps.py",
+        "tests/test_retrieval_v2_aggregation.py",
+        "tests/test_retrieval_v2_benchmark.py"
+      ]
+    },
+    {
+      "provider": "benchmark/retrieval_v2_scoring.py",
+      "names": [
+        "reciprocal_rank_fusion"
+      ],
+      "contract_sha256": "ca987e5e2504412d8b699f2a98cea59e31970c86bbb9399b7fc9bac28b7b3e84",
+      "integration_tests": [
+        "tests/test_authoritative_selection_binds_each_worker_and_refuses_gaps.py",
+        "tests/test_retrieval_v2_adapters.py",
+        "tests/test_retrieval_v2_benchmark.py"
+      ]
+    },
+    {
+      "provider": "scripts/bounded_io.py",
+      "names": [
+        "read_stable_bytes"
+      ],
+      "contract_sha256": "e570dc41e0fd70556ec6a4e887a3da194bcc13122684e515651b13dd19d7d5c1",
+      "integration_tests": [
+        "tests/modules/breadcrumb_decision/test_wire.py",
+        "tests/modules/breadcrumb_documents/test_contract.py",
+        "tests/modules/breadcrumb_documents/test_rendering.py"
       ]
     },
     {
@@ -84,9 +131,10 @@
     {
       "provider": "scripts/reliable_memory.py",
       "names": [
+        "canonical_json_bytes",
         "validate_state_root"
       ],
-      "contract_sha256": "8680515cd873056a7c8a36e0057d91f2f83f23c48841263697676ff91f7ff964",
+      "contract_sha256": "7bba4b535d3f0a73445fece541c540939989b41456c9a79a67f82634748be36b",
       "integration_tests": [
         "tests/test_a_backup_image_carries_what_git_does_not.py",
         "tests/test_a_backup_snapshots_what_hooks_write.py",

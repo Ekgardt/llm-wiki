@@ -1,7 +1,7 @@
 # The next stage: reliability parameters and lease renewal
 
-2026-11-02. Based on add477d3. The user explicitly approved both steps with the answer
-"Yes, implement both steps". The decision and STRUCTURE were recorded before the production changes.
+2026-11-02. Based on add477d3. The working session of that branch records the user's answer
+"Yes, implement both steps" (translated from Russian; the repository holds no copy). The decision and STRUCTURE were recorded before the production changes.
 
 ## Two sequential moves
 
@@ -66,7 +66,7 @@ Starting a new daemon and changing the runtime, schema, env, CLI or installation
 
 Making copies of parameters in heartbeat, extracting methods by line count or introducing
 a universal lease service is not proposed. Keeping the whole reliable_memory import
-is technically possible, but it keeps the coupling the user asked to
+is technically possible, but it keeps the coupling this boundary exists to
 remove. Moving scheduling to asyncio or replacing the algorithm with a third-party system
 is not needed for this local module boundary.
 

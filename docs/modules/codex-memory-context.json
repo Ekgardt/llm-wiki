@@ -13,7 +13,9 @@
     "docs/modules/context-bundle.md",
     "docs/modules/context-records.md",
     "docs/modules/context-tooling.md",
+    "docs/modules/formats.md",
     "docs/modules/installer-checks.md",
+    "docs/modules/integration-hook-config.md",
     "docs/modules/model-choice.md",
     "docs/modules/product-structure.md",
     "docs/modules/project-governance.md",
@@ -21,8 +23,10 @@
     "rules/development-laws.md",
     "scripts/__init__.py",
     "scripts/codex_memory.py",
+    "scripts/integration_hook_config.py",
     "scripts/llm_wiki/__init__.py",
     "scripts/llm_wiki/context_bundle.py",
+    "scripts/llm_wiki/formats/__init__.py",
     "tests/__init__.py",
     "tests/an_earlier_codex_entry_is_rewritten_helpers.py",
     "tests/conftest.py",
@@ -85,9 +89,11 @@
     {
       "provider": "scripts/codex_hook_identity.py",
       "names": [
+        "OUR_CODEX_COMMANDS",
+        "OUR_CODEX_SCRIPTS",
         "is_llm_wiki_hook"
       ],
-      "contract_sha256": "26a1e85f5e4031f5791092f80327dbdeee8911bacd901843129f67b0cdeb493b",
+      "contract_sha256": "24c20e7d2108a45f477a380be9101d2335f1498d1855d9733fa4e9ef07845640",
       "integration_tests": [
         "tests/test_an_earlier_codex_entry_is_rewritten.py",
         "tests/test_codex_config_status_has_a_platform_independent_newline.py",
@@ -115,9 +121,11 @@
     {
       "provider": "scripts/install_state.py",
       "names": [
-        "InstallControlError"
+        "InstallControlError",
+        "ManagedResource",
+        "file_resource"
       ],
-      "contract_sha256": "a3f8e26bc2383cb5aeb82c361465122ee76199faebf8299067de7c63af981106",
+      "contract_sha256": "3efcb1743ba3175adc49c836114498f07395e3b1ebe6e3e58d287b1cf30ff203",
       "integration_tests": [
         "tests/test_codex_hooks_ownership.py"
       ]
@@ -160,6 +168,18 @@
       ]
     },
     {
+      "provider": "scripts/llm_wiki/formats/canonical.py",
+      "names": [
+        "canonical_json_bytes"
+      ],
+      "contract_sha256": "679597eaf19bb4eef12b405f35978a452a06007dd565b01d3f0d04a4f1116c49",
+      "integration_tests": [
+        "tests/modules/breadcrumb_decision/test_wire.py",
+        "tests/modules/breadcrumb_documents/test_contract.py",
+        "tests/modules/breadcrumb_documents/test_rendering.py"
+      ]
+    },
+    {
       "provider": "scripts/llm_wiki/generation_catalog_store.py",
       "names": [
         "GenerationCatalog"
@@ -169,6 +189,35 @@
         "tests/test_a_blocked_task_has_a_way_back.py",
         "tests/test_a_build_in_flight_is_not_an_orphan.py",
         "tests/test_a_capacity_refusal_does_not_corrupt_a_generation.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/integration_launch_values.py",
+      "names": [
+        "CODEX_BOOTSTRAP_BODY",
+        "PROVIDER_ENV_KEYS",
+        "UNPERSISTED_PROVIDERS",
+        "codex_command_launch",
+        "codex_command_words",
+        "codex_launch_bundle",
+        "codex_parsed_launch",
+        "codex_provider_bootstrap",
+        "codex_provider_from_payload",
+        "codex_provider_payload",
+        "codex_target_bundle",
+        "codex_windows_argument",
+        "codex_windows_command",
+        "codex_windows_word",
+        "codex_windows_words",
+        "require_codex_hook_tail",
+        "require_codex_provider_bundle",
+        "require_persistable_provider"
+      ],
+      "contract_sha256": "99ff39fcb5ddd26be4e299c0121844e538b074dad26d5da076e2241296cab1ba",
+      "integration_tests": [
+        "tests/modules/integration_launch_values/test_contract.py",
+        "tests/test_a_check_is_judged_when_it_ends.py",
+        "tests/test_a_claude_prompt_takes_the_ingest_path.py"
       ]
     },
     {
@@ -212,6 +261,32 @@
       ]
     },
     {
+      "provider": "scripts/merge_claude_settings.py",
+      "names": [
+        "OUR_SCRIPT_MARKERS",
+        "merged_permission_list"
+      ],
+      "contract_sha256": "1f41e25664a331e7575e112df8afa9cf163e2ec84dfeb2fc5dc8571c06dd3fee",
+      "integration_tests": [
+        "tests/test_a_rerun_may_ask_for_fewer_things.py",
+        "tests/test_an_uninstall_names_what_it_leaves.py",
+        "tests/test_an_update_replaces_what_it_owns.py"
+      ]
+    },
+    {
+      "provider": "scripts/model_selection.py",
+      "names": [
+        "MODEL_ENV_KEYS",
+        "current"
+      ],
+      "contract_sha256": "3aae6dc82c4b6ed24bde9a7e30dbbc360349e33fa0b01ff0eb715fbfa211694a",
+      "integration_tests": [
+        "tests/test_a_blocked_task_has_a_way_back.py",
+        "tests/test_a_changed_task_setting_reaches_an_installed_machine.py",
+        "tests/test_a_check_is_judged_when_it_ends.py"
+      ]
+    },
+    {
       "provider": "scripts/project_checkpoint.py",
       "names": [
         "observe_checkpoint_fail_open"
@@ -227,9 +302,10 @@
     {
       "provider": "scripts/reliable_memory.py",
       "names": [
+        "fsync_directory",
         "validate_state_root"
       ],
-      "contract_sha256": "8680515cd873056a7c8a36e0057d91f2f83f23c48841263697676ff91f7ff964",
+      "contract_sha256": "4ca423e580b75523a9541bd503c48d108f01ee833d9a736ae136467148fd77e5",
       "integration_tests": [
         "tests/test_an_earlier_codex_entry_is_rewritten.py",
         "tests/test_codex_config_status_has_a_platform_independent_newline.py",

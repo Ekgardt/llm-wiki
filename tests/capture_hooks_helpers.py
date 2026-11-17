@@ -26,7 +26,7 @@ def _run_capture_with_stdin(module_name: str, stdin_payload: dict | str) -> int:
         return mod.main()
 
 
-HOOKS = (("user_prompt_capture", {"prompt": "\u0434\u0430"}),
+HOOKS = (("user_prompt_capture", {"prompt": "yes"}),
          ("post_tool_capture", {"tool_name": "Bash", "tool_input": {"command": "pwd"}}))
 
 

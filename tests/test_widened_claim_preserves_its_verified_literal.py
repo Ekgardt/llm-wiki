@@ -14,8 +14,8 @@ from tests.compile_claims_producer_helpers import vault as vault
      'The maintenance lease expires after 30 seconds.'),
     ('- The maintenance lease expires after 30 seconds.', 'expires after 30',
      'The maintenance lease expires after 30 seconds.'),
-    ('    \u0410\u0440\u0435\u043d\u0434\u0430 \u0432\u043b\u0430\u0434\u0435\u043b\u044c\u0446\u0430 \u043e\u0431\u043d\u043e\u0432\u043b\u044f\u0435\u0442\u0441\u044f \u043a\u0430\u0436\u0434\u044b\u0435 30 \u0441\u0435\u043a\u0443\u043d\u0434.', '\u043e\u0431\u043d\u043e\u0432\u043b\u044f\u0435\u0442\u0441\u044f \u043a\u0430\u0436\u0434\u044b\u0435 30',
-     '\u0410\u0440\u0435\u043d\u0434\u0430 \u0432\u043b\u0430\u0434\u0435\u043b\u044c\u0446\u0430 \u043e\u0431\u043d\u043e\u0432\u043b\u044f\u0435\u0442\u0441\u044f \u043a\u0430\u0436\u0434\u044b\u0435 30 \u0441\u0435\u043a\u0443\u043d\u0434.'),
+    ('    租约 所有者 更新 每 30 秒.', '更新 每 30',
+     '租约 所有者 更新 每 30 秒.'),
 ))
 def test_widened_claim_text_matches_literal_hash_and_resolved_span(vault, line, partial, whole):
     root, _ = vault

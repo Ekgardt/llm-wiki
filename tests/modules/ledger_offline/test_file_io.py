@@ -16,7 +16,7 @@ from tests.the_offline_ledger_reads_the_question_not_the_label_helpers import QU
 
 def _judged(tmp_path):
     row = {
-        "question_id": "\u0432\u043e\u043f\u0440\u043e\u0441-自行车", "question": QUESTION["question"],
+        "question_id": "问题-自行车", "question": QUESTION["question"],
         "question_type": "unrelated-label", "gold": "2", "hypothesis": "1",
         "judge_correct": False,
     }

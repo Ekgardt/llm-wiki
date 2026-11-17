@@ -27,15 +27,15 @@ if str(SCRIPTS_DIR) not in sys.path:
 import corpus_snapshot  # noqa: E402
 
 
-def _unbroken_cyrillic(byte_length: int) -> bytes:
+def _unbroken_prose(byte_length: int) -> bytes:
     """Prose with no newline anywhere, so only the byte ceiling can cut it."""
-    word = "\u0442\u0435\u0441\u0442 "
+    word = "测试 "
     text = word * (byte_length // len(word.encode("utf-8")) + 2)
     return text.encode("utf-8")
 
 
 def test_every_piece_of_a_long_unbroken_paragraph_decodes() -> None:
-    content = _unbroken_cyrillic(corpus_snapshot.MAX_SPAN_BYTES * 3)
+    content = _unbroken_prose(corpus_snapshot.MAX_SPAN_BYTES * 3)
 
     pieces = corpus_snapshot.split_span(content, (0, len(content), ()))
 
@@ -45,7 +45,7 @@ def test_every_piece_of_a_long_unbroken_paragraph_decodes() -> None:
 
 def test_the_pieces_still_cover_the_whole_span_without_overlap() -> None:
     """Backing off a boundary must not drop or duplicate a byte."""
-    content = _unbroken_cyrillic(corpus_snapshot.MAX_SPAN_BYTES * 3)
+    content = _unbroken_prose(corpus_snapshot.MAX_SPAN_BYTES * 3)
 
     pieces = corpus_snapshot.split_span(content, (0, len(content), ()))
 
@@ -56,11 +56,12 @@ def test_the_pieces_still_cover_the_whole_span_without_overlap() -> None:
 
 
 def test_a_cut_inside_a_character_walks_back_to_its_start() -> None:
-    content = "\u0430\u0431".encode()  # two bytes each
+    content = "甲乙".encode()  # three bytes each
 
     assert corpus_snapshot.character_boundary(content, 1) == 0
-    assert corpus_snapshot.character_boundary(content, 2) == 2
-    assert corpus_snapshot.character_boundary(content, 3) == 2
+    assert corpus_snapshot.character_boundary(content, 2) == 0
+    assert corpus_snapshot.character_boundary(content, 3) == 3
+    assert corpus_snapshot.character_boundary(content, 4) == 3
 
 
 def test_the_end_of_the_content_is_a_boundary() -> None:

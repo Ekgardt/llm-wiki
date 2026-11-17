@@ -22,6 +22,7 @@
     "docs/modules/repository-policy-tests-2.md",
     "docs/modules/selective-forgetting-metrics.md",
     "docs/modules/test-support.md",
+    "docs/research/2026-11-17-where-each-removed-test-is-guarded.md",
     "rules/development-laws.md",
     "scripts/__init__.py",
     "scripts/llm_wiki/__init__.py",
@@ -46,7 +47,7 @@
     "tests/test_nothing_private_reaches_the_public_repository.py",
     "tests/test_readme_i18n.py",
     "tests/test_removed_tests_have_guards.py",
-    "docs/research/2026-11-17-where-each-removed-test-is-guarded.md"
+    "tests/test_tests_write_no_russian_text.py"
   ],
   "ownership": {
     "files": [
@@ -58,7 +59,8 @@
       "tests/test_module_registry_integration.py",
       "tests/test_nothing_private_reaches_the_public_repository.py",
       "tests/test_readme_i18n.py",
-      "tests/test_removed_tests_have_guards.py"
+      "tests/test_removed_tests_have_guards.py",
+      "tests/test_tests_write_no_russian_text.py"
     ]
   },
   "qualified_dependencies": [

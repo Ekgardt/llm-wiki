@@ -5,16 +5,27 @@
   "files": [
     "AGENTS.md",
     "CLAUDE.md",
+    "benchmark/__init__.py",
+    "benchmark/retrieval_v2_cli.py",
+    "benchmark/retrieval_v2_contract.py",
+    "benchmark/retrieval_v2_orchestration.py",
+    "benchmark/retrieval_v2_run.py",
     "docs/AGENTS.md",
     "docs/STRUCTURE.md",
     "docs/modules/benchmark-retrieval-v2-cli-tests-retrieval-cli-routes-each-adapter-and-guards-outputs-context.json",
     "docs/modules/benchmark-retrieval-v2-cli-tests-retrieval-cli-routes-each-adapter-and-guards-outputs.md",
+    "docs/modules/benchmark-retrieval-v2-cli.md",
+    "docs/modules/benchmark-retrieval-v2-contract.md",
+    "docs/modules/benchmark-retrieval-v2-orchestration.md",
+    "docs/modules/benchmark-retrieval-v2-run.md",
+    "docs/modules/benchmark-run-benchmark.md",
     "docs/modules/context-bundle.md",
     "docs/modules/context-records.md",
     "docs/modules/context-tooling.md",
     "docs/modules/model-choice.md",
     "docs/modules/product-structure.md",
     "docs/modules/project-governance.md",
+    "docs/modules/reliable-memory-tests-retrieval-v2-benchmark.md",
     "docs/modules/test-support.md",
     "rules/development-laws.md",
     "scripts/__init__.py",
@@ -29,6 +40,7 @@
     "tests/module_qualification.py",
     "tests/module_record_context.py",
     "tests/module_records.py",
+    "tests/retrieval_v2_helpers.py",
     "tests/shared_fixtures.py",
     "tests/slow_machine.py",
     "tests/test_retrieval_cli_routes_each_adapter_and_guards_outputs.py"
@@ -41,6 +53,228 @@
     ]
   },
   "qualified_dependencies": [
+    {
+      "provider": "benchmark/retrieval_v2_adapters.py",
+      "names": [
+        "FakeEmbeddingAdapter",
+        "FakeQAAdapter",
+        "FakeRerankerAdapter",
+        "ModelEmbeddingAdapter",
+        "ModelRerankerAdapter"
+      ],
+      "contract_sha256": "dd3ee088206c53468e1f9b37c284e49713043a44e158ec2eea5ed9a516bff08c",
+      "integration_tests": [
+        "tests/test_authoritative_selection_binds_each_worker_and_refuses_gaps.py",
+        "tests/test_retrieval_v2_adapters.py",
+        "tests/test_retrieval_v2_benchmark.py"
+      ]
+    },
+    {
+      "provider": "benchmark/retrieval_v2_aggregation.py",
+      "names": [
+        "aggregate_reports",
+        "aggregate_selection",
+        "checked_output_parent",
+        "payload_digest",
+        "publish_retained_and_output",
+        "retained_reports_root"
+      ],
+      "contract_sha256": "ce86886f78040c6f0dc572784d4e9ba5fbed8939b8e9a906391b61270213e280",
+      "integration_tests": [
+        "tests/test_authoritative_selection_binds_each_worker_and_refuses_gaps.py",
+        "tests/test_retrieval_v2_aggregation.py",
+        "tests/test_retrieval_v2_cli.py"
+      ]
+    },
+    {
+      "provider": "benchmark/retrieval_v2_corpus.py",
+      "names": [
+        "build_candidates",
+        "load_corpus"
+      ],
+      "contract_sha256": "e448007f0344f1ec3adc6d0a3458765f0cafe127ae059ae78e694f2479a3c04d",
+      "integration_tests": [
+        "tests/test_authoritative_selection_binds_each_worker_and_refuses_gaps.py",
+        "tests/test_retrieval_v2_adapters.py",
+        "tests/test_retrieval_v2_aggregation.py"
+      ]
+    },
+    {
+      "provider": "benchmark/retrieval_v2_environment.py",
+      "names": [
+        "environment_provenance",
+        "runner_sha256",
+        "sha256_file",
+        "sha256_json",
+        "verify_locked_environment"
+      ],
+      "contract_sha256": "9a26e5575235b0a50189f3ef2f8766c6da3f097a9a513e7a15f512931551e6a8",
+      "integration_tests": [
+        "tests/test_authoritative_selection_binds_each_worker_and_refuses_gaps.py",
+        "tests/test_retrieval_v2_adapters.py",
+        "tests/test_retrieval_v2_aggregation.py"
+      ]
+    },
+    {
+      "provider": "benchmark/retrieval_v2_matrix.py",
+      "names": [
+        "load_model_selection",
+        "matrix_target",
+        "require_exact_keys",
+        "required_candidate_specs"
+      ],
+      "contract_sha256": "a8907e6aa692e5bd887531327bb93f46ad3f1a809472abab532082bf6b2c7a22",
+      "integration_tests": [
+        "tests/test_authoritative_selection_binds_each_worker_and_refuses_gaps.py",
+        "tests/test_retrieval_v2_adapters.py",
+        "tests/test_retrieval_v2_aggregation.py"
+      ]
+    },
+    {
+      "provider": "benchmark/retrieval_v2_measurements.py",
+      "names": [
+        "gate_results",
+        "process_peak_rss",
+        "resource_measurements",
+        "run_process_tree"
+      ],
+      "contract_sha256": "346f22ad3cb8588c3f82d39652d77eec334fe94f97fb7daec701e7f9d053edc4",
+      "integration_tests": [
+        "tests/test_authoritative_selection_binds_each_worker_and_refuses_gaps.py",
+        "tests/test_retrieval_v2_aggregation.py",
+        "tests/test_retrieval_v2_benchmark.py"
+      ]
+    },
+    {
+      "provider": "benchmark/retrieval_v2_metrics.py",
+      "names": [
+        "SHIPPABLE_LICENSES",
+        "aggregate",
+        "evaluation_row",
+        "expand_parents",
+        "language_slices",
+        "macro_average",
+        "query_scope"
+      ],
+      "contract_sha256": "928e5e6f2e81078ecb495de7fb61e82017baeeddf529137efa2d6d71d473cd29",
+      "integration_tests": [
+        "tests/test_authoritative_selection_binds_each_worker_and_refuses_gaps.py",
+        "tests/test_retrieval_v2_adapters.py",
+        "tests/test_retrieval_v2_aggregation.py"
+      ]
+    },
+    {
+      "provider": "benchmark/retrieval_v2_outputs.py",
+      "names": [
+        "canonical_report_bytes",
+        "model_cache_environment",
+        "prepared_model_cache_root",
+        "require_outside_source_and_vault",
+        "validate_cache_root",
+        "write_fake_index",
+        "write_new_bytes",
+        "write_new_output"
+      ],
+      "contract_sha256": "98978d5f0549397d98ba2c489288990147ed3e7a201c195b0a2b985de241ab73",
+      "integration_tests": [
+        "tests/test_authoritative_selection_binds_each_worker_and_refuses_gaps.py",
+        "tests/test_retrieval_v2_aggregation.py",
+        "tests/test_retrieval_v2_benchmark.py"
+      ]
+    },
+    {
+      "provider": "benchmark/retrieval_v2_recompute.py",
+      "names": [
+        "candidate_key",
+        "recompute_report_metrics"
+      ],
+      "contract_sha256": "182c7af5343ead2103f7d440aec0ee132751742711958b34ea181b85c8456d23",
+      "integration_tests": [
+        "tests/test_authoritative_selection_binds_each_worker_and_refuses_gaps.py",
+        "tests/test_retrieval_v2_aggregation.py",
+        "tests/test_retrieval_v2_cli.py"
+      ]
+    },
+    {
+      "provider": "benchmark/retrieval_v2_scoring.py",
+      "names": [
+        "FakeLexicalAdapter"
+      ],
+      "contract_sha256": "7645b2640f70c0c37c39f3c6d2c1d24ef8001c2f1eb8ed0a2f0b02c11ea5daf3",
+      "integration_tests": [
+        "tests/test_authoritative_selection_binds_each_worker_and_refuses_gaps.py",
+        "tests/test_retrieval_v2_adapters.py",
+        "tests/test_retrieval_v2_benchmark.py"
+      ]
+    },
+    {
+      "provider": "benchmark/retrieval_v2_selection_gates.py",
+      "names": [
+        "fields_identical",
+        "recompute_reranker_depth_metrics",
+        "select_lexical_winner"
+      ],
+      "contract_sha256": "369f9b1f2837e7169c733ee79961ee8c0db698d7975614708988d95a110703dd",
+      "integration_tests": [
+        "tests/test_authoritative_selection_binds_each_worker_and_refuses_gaps.py",
+        "tests/test_retrieval_v2_aggregation.py",
+        "tests/test_retrieval_v2_cli.py"
+      ]
+    },
+    {
+      "provider": "benchmark/retrieval_v2_sqlite_lexical.py",
+      "names": [
+        "SQLiteLexicalAdapter"
+      ],
+      "contract_sha256": "2d052e08b74b90b745d8639ccc478d97a893cfaf80b44ed7d327fb5099f45b4f",
+      "integration_tests": [
+        "tests/test_authoritative_selection_binds_each_worker_and_refuses_gaps.py",
+        "tests/test_retrieval_v2_benchmark.py",
+        "tests/test_retrieval_v2_cli.py"
+      ]
+    },
+    {
+      "provider": "benchmark/retrieval_v2_transformers.py",
+      "names": [
+        "fuse_rankings",
+        "load_transformer_embedding",
+        "load_transformer_reranker"
+      ],
+      "contract_sha256": "70ddc078d9592076c7231813a1d253aadf70fc31b05d761639e58ae9dd19b10c",
+      "integration_tests": [
+        "tests/test_authoritative_selection_binds_each_worker_and_refuses_gaps.py",
+        "tests/test_retrieval_v2_adapters.py",
+        "tests/test_retrieval_v2_benchmark.py"
+      ]
+    },
+    {
+      "provider": "benchmark/retrieval_v2_workspace.py",
+      "names": [
+        "cleanup_run_workspace",
+        "create_run_workspace",
+        "decorate_lexical_fallback",
+        "prefetch_models",
+        "remove_semantic_artifacts"
+      ],
+      "contract_sha256": "e18e323553b76844756c3f3eb03afdc091a470ea3ab9446fcba972b051c8849f",
+      "integration_tests": [
+        "tests/test_authoritative_selection_binds_each_worker_and_refuses_gaps.py",
+        "tests/test_retrieval_v2_benchmark.py",
+        "tests/test_retrieval_v2_cli.py"
+      ]
+    },
+    {
+      "provider": "scripts/bounded_io.py",
+      "names": [
+        "read_stable_bytes"
+      ],
+      "contract_sha256": "e570dc41e0fd70556ec6a4e887a3da194bcc13122684e515651b13dd19d7d5c1",
+      "integration_tests": [
+        "tests/modules/breadcrumb_decision/test_wire.py",
+        "tests/modules/breadcrumb_documents/test_contract.py",
+        "tests/modules/breadcrumb_documents/test_rendering.py"
+      ]
+    },
     {
       "provider": "scripts/llm_wiki/generation_catalog_store.py",
       "names": [
@@ -68,9 +302,11 @@
     {
       "provider": "scripts/reliable_memory.py",
       "names": [
+        "SchemaValidationError",
+        "canonical_json_bytes",
         "validate_state_root"
       ],
-      "contract_sha256": "8680515cd873056a7c8a36e0057d91f2f83f23c48841263697676ff91f7ff964",
+      "contract_sha256": "b3e12c9b56ca0ba67bf7dbe59aec8d874428e12462df37ccc187af71df9a8246",
       "integration_tests": [
         "tests/test_a_backup_image_carries_what_git_does_not.py",
         "tests/test_a_backup_snapshots_what_hooks_write.py",

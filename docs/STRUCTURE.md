@@ -62,7 +62,7 @@ llm-wiki/                          ← vault root (= $LLM_WIKI_ROOT)
 │   ├── evidence_resolver.py          flat/archive evidence resolution
 │   ├── claims.py                     atomic claims + quarantine
 │   ├── contradiction_pipeline.py     claim contradiction policy
-│   ├── generation_catalog.py         immutable generation catalog + activation
+│   ├── llm_wiki/generation_catalog_store.py immutable generation catalog + activation
 │   ├── corpus_snapshot.py            source-hash corpus snapshots + chunks
 │   ├── lsp_paths.py                  pure managed Pyright/LSP path derivation
 │   ├── lsp_protocol.py               strict bounded single-writer LSP transport
@@ -456,7 +456,7 @@ Decision: `knowledge/notes/nightly-full-health-budget-decision-20261017.md`.
   gitignored and are read by nothing but the guardrail source manifest.
 
 ### RUNTIME zone (always gitignored, inside vault)
-- Complete corpus generation is implemented by `generation_catalog.py`,
+- Complete corpus generation is implemented by `llm_wiki/generation_catalog_store.py`,
   `corpus_snapshot.py`, `evidence_graph_builder.py`, `evidence_graph.py`,
   `search_memory.py`, `code_extractor.py`, and `repository_scope.py`. The bounded
   rollback-journal catalog provides repository-scoped active selection, CAS

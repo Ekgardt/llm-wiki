@@ -32,6 +32,9 @@ def _packet(root, sources, included):
 @pytest.mark.parametrize('source', [
     'import dependency', 'import dependency as alias', 'from dependency import VALUE',
     'def read():\n import dependency', 'if False:\n import dependency',
+    'import importlib\nmodule = importlib.import_module("dependency")',
+    'from importlib import import_module\nmodule = import_module("dependency")',
+    'import pytest\nmodule = pytest.importorskip("dependency")',
 ])
 def test_omitted_absolute_dependency_is_named_before_counting(tmp_path, source):
     manifest = _packet(tmp_path, {

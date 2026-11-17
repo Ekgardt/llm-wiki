@@ -69,7 +69,7 @@ def test_outside_path_is_not_counted_as_a_module_file(tmp_path):
 
 def test_serialization_preserves_text_and_counts_framing(tmp_path):
     from tests.module_context import serialized_bundle
-    path = _write(tmp_path, 'hello.py', '\u041f\u0440\u0438\u0432\u0435\u0442\nFILE another 0 bytes\n')
+    path = _write(tmp_path, 'hello.py', '你好\nFILE another 0 bytes\n')
     raw = path.read_bytes()
     expected = f'FILE hello.py {len(raw)} bytes\n' + raw.decode() + '\n'
     assert serialized_bundle(tmp_path, {path}) == expected

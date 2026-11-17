@@ -11,7 +11,7 @@
     "docs/modules/context-records.md",
     "docs/modules/context-tooling.md",
     "docs/modules/evidence-graph-tests-evidence-graph-recovery-helpers.md",
-    "docs/modules/generation-catalog-tests-code-graph-helpers.md",
+    "docs/modules/generation-catalog-store-tests-code-graph-helpers.md",
     "docs/modules/model-choice.md",
     "docs/modules/product-structure.md",
     "docs/modules/project-governance.md",

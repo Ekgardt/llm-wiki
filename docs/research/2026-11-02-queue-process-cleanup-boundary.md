@@ -1,7 +1,7 @@
 # The next queue slice: stopping the process tree
 
-2026-11-02. Approved by the user's answer "continue" after a concrete
-boundary was proposed. The decision was recorded before the code; the implementation results are below.
+2026-11-02. The working session of that branch records the user's answer "continue" after a concrete
+boundary was proposed (translated from Russian; the repository holds no copy). The decision was recorded before the code; the implementation results are below.
 Basis: 81d4c01c, index generation-18e454e27e69b91c-8bb023e5.
 
 ## What is proposed

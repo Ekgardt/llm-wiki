@@ -14,7 +14,7 @@
     "docs/modules/context-tooling.md",
     "docs/modules/corpus-snapshot.md",
     "docs/modules/formats.md",
-    "docs/modules/generation-catalog-tests-generation-catalog-helpers.md",
+    "docs/modules/generation-catalog-store-tests-generation-catalog-helpers.md",
     "docs/modules/generation-fts-validation-tests.md",
     "docs/modules/model-choice.md",
     "docs/modules/product-structure.md",

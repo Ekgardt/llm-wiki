@@ -1,9 +1,8 @@
 # Tests of `scripts/code_graph.py`
 
-`tests/test_architecture_depth_argument.py` exercise `scripts/code_graph.py` through its public names.
+`tests/test_architecture_depth_argument.py` exercise `scripts/code_graph.py`.
 
-`scripts/code_graph.py` itself is not part of this module: the packet carries its exact derived
-description, and these tests are the evidence that the description matches real use.
+`scripts/code_graph.py` itself belongs to another module: this packet carries its whole source, and these tests exercise it.
 
 The owned files and the complete maintenance context are listed in the `-context.json`
 manifest next to this guide.

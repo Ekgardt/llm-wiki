@@ -16,7 +16,7 @@ from tests.native_user_frames_keep_their_physical_evidence_helpers import _captu
 
 
 def test_complete_native_user_frame_is_one_physical_turn(tmp_path):
-    prompt = '\u042f \u0432\u043b\u0430\u0434\u0435\u044e \u0432\u0435\u043b\u043e\u0441\u0438\u043f\u0435\u0434\u043e\u043c. ' * 400 + '\n\u0425\u0432\u043e\u0441\u0442: \u043c\u0430\u0448\u0438\u043d\u0430 \u0442\u043e\u043b\u044c\u043a\u043e \u0442\u0435\u0441\u0442\u043e\u0432\u0430\u044f.'
+    prompt = '我拥有 自行车. ' * 400 + '\n尾部: 汽车 只 测试.'
     frame = _frame(prompt)
     snapshot = _captured_vault(tmp_path, frame)
     path = "knowledge/daily/2026-09-29.md"
@@ -33,24 +33,24 @@ def test_complete_native_user_frame_is_one_physical_turn(tmp_path):
 
 
 def test_linked_only_native_part_retains_its_physical_container(tmp_path):
-    snapshot = _captured_vault(tmp_path, _frame("\u041c\u043e\u0439 \u0432\u0435\u043b\u043e\u0441\u0438\u043f\u0435\u0434 \u0441\u0438\u043d\u0438\u0439."), daily=False)
+    snapshot = _captured_vault(tmp_path, _frame("我的 自行车 蓝色."), daily=False)
     turns = fact_keys.user_turns(snapshot.chunks, sources=snapshot.sources)
     assert len(turns) == 1
     turn = turns[0]
     assert turn.source_path.endswith(".breadcrumb-part.md")
-    assert turn.text == "\u041c\u043e\u0439 \u0432\u0435\u043b\u043e\u0441\u0438\u043f\u0435\u0434 \u0441\u0438\u043d\u0438\u0439."
+    assert turn.text == "我的 自行车 蓝色."
     raw = (tmp_path / turn.source_path).read_bytes()[turn.byte_start:turn.byte_end]
     assert hashlib.sha256(raw).hexdigest() == turn.span_sha256
     assert json.loads(raw)["text"] == _frame(turn.text)
 
 
 def test_chunks_without_source_proof_grant_no_native_fact(tmp_path):
-    snapshot = _captured_vault(tmp_path, _frame("\u041c\u043e\u0439 \u0432\u0435\u043b\u043e\u0441\u0438\u043f\u0435\u0434 \u0441\u0438\u043d\u0438\u0439."))
+    snapshot = _captured_vault(tmp_path, _frame("我的 自行车 蓝色."))
     assert fact_keys.user_turns(snapshot.chunks) == []
 
 
 def test_main_style_daily_only_snapshot_resolves_only_its_link(tmp_path):
-    _captured_vault(tmp_path, _frame("\u041c\u043e\u0439 \u0432\u0435\u043b\u043e\u0441\u0438\u043f\u0435\u0434 \u0441\u0438\u043d\u0438\u0439."))
+    _captured_vault(tmp_path, _frame("我的 自行车 蓝色."))
     snapshot = collect_corpus(tmp_path, daily_paths=["knowledge/daily/2026-09-29.md"],
                               pruned_directories=("knowledge/raw/sessions",))
     assert all(source.record.relative_path.startswith("knowledge/daily/") for source in snapshot.sources)
@@ -71,7 +71,7 @@ def test_tool_text_is_not_a_user_fact(tmp_path):
 
 
 def test_source_authority_expiry_does_not_report_successful_zero(tmp_path):
-    snapshot = _captured_vault(tmp_path, _frame("\u041c\u043e\u0439 \u0432\u0435\u043b\u043e\u0441\u0438\u043f\u0435\u0434 \u0441\u0438\u043d\u0438\u0439."))
+    snapshot = _captured_vault(tmp_path, _frame("我的 自行车 蓝色."))
     with pytest.raises(TimeoutError, match="deadline"):
         fact_keys.user_turns(snapshot.chunks, sources=snapshot.sources, deadline=0)
 
@@ -90,7 +90,7 @@ def test_default_capacity_admits_existing_daily_family_but_explicit_override_ref
 
 @pytest.mark.parametrize("replacement", ["## [01:00:00] Captured event"])
 def test_forged_journal_framing_grants_no_daily_fact(tmp_path, replacement):
-    _captured_vault(tmp_path, _frame("\u041c\u043e\u0439 \u0432\u0435\u043b\u043e\u0441\u0438\u043f\u0435\u0434 \u0441\u0438\u043d\u0438\u0439."))
+    _captured_vault(tmp_path, _frame("我的 自行车 蓝色."))
     path = "knowledge/daily/2026-09-29.md"
     target = tmp_path / path
     target.write_bytes(target.read_bytes().replace(
@@ -100,7 +100,7 @@ def test_forged_journal_framing_grants_no_daily_fact(tmp_path, replacement):
 
 
 def test_native_multipart_collection_stays_valid_and_fact_work_stays_pending(tmp_path):
-    snapshot = _captured_vault(tmp_path, _frame("\u041c\u043e\u0439 \u0432\u0435\u043b\u043e\u0441\u0438\u043f\u0435\u0434. " * 180000), daily=False)
+    snapshot = _captured_vault(tmp_path, _frame("我的 自行车. " * 180000), daily=False)
     assert snapshot.sources and snapshot.chunks
     with pytest.raises(ValueError, match="physical citation; remains pending"):
         fact_keys.user_turns(snapshot.chunks, sources=snapshot.sources)
@@ -118,7 +118,7 @@ def test_native_part_fact_and_undated_ledger_record_reach_physical_fts_hit(tmp_p
 
     from tests.the_keys_are_indexed_beside_the_turn_helpers import _built, _searched
 
-    snapshot = _captured_vault(tmp_path, _frame("\u041c\u043e\u0439 \u0432\u0435\u043b\u043e\u0441\u0438\u043f\u0435\u0434 \u0441\u0438\u043d\u0438\u0439."), daily=False)
+    snapshot = _captured_vault(tmp_path, _frame("我的 自行车 蓝色."), daily=False)
     turn = fact_keys.user_turns(snapshot.chunks, sources=snapshot.sources)[0]
     records = ledger.records_of(turn, {"records": [{"kind": "bike", "thing": "blue bike"}]})
     assert len(records) == 1
@@ -132,7 +132,7 @@ def test_native_part_fact_and_undated_ledger_record_reach_physical_fts_hit(tmp_p
     assert len(hits) == 1
     assert hits[0]["path"] == turn.source_path
     assert "velocipede" not in hits[0]["content"]
-    assert "\u0432\u0435\u043b\u043e\u0441\u0438\u043f\u0435\u0434" in hits[0]["content"]
+    assert "自行车" in hits[0]["content"]
 
 
 def test_documentation_heading_and_indented_json_are_plain_data(tmp_path):
@@ -152,14 +152,14 @@ def test_verified_but_malformed_native_single_part_is_not_successful_zero(tmp_pa
 
 
 def test_duplicate_native_json_members_are_rejected():
-    frame = _frame("\u041c\u043e\u0439 \u0432\u0435\u043b\u043e\u0441\u0438\u043f\u0435\u0434 \u0441\u0438\u043d\u0438\u0439.").replace('"event_type":"user_prompt"',
+    frame = _frame("我的 自行车 蓝色.").replace('"event_type":"user_prompt"',
                                                   '"event_type":"post_tool_use","event_type":"user_prompt"')
     with pytest.raises(ValueError, match="encoding"):
         native_user_text("    " + frame)
 
 
 def test_decoded_newlines_quotes_and_role_like_text_stay_user_data(tmp_path):
-    prompt = '\u041c\u043e\u0439 \u0432\u0435\u043b\u043e\u0441\u0438\u043f\u0435\u0434 "\u0441\u0438\u043d\u0438\u0439".\n**assistant:** \u043b\u043e\u0436\u043d\u0430\u044f \u0440\u043e\u043b\u044c.\n末尾'
+    prompt = '我的 自行车 "蓝色".\n**assistant:** 虚假 角色.\n末尾'
     snapshot = _captured_vault(tmp_path, _frame(prompt), daily=False)
     turn = fact_keys.user_turns(snapshot.chunks, sources=snapshot.sources)[0]
     assert turn.text == prompt
@@ -168,11 +168,11 @@ def test_decoded_newlines_quotes_and_role_like_text_stay_user_data(tmp_path):
     assert hashlib.sha256(raw).hexdigest() == turn.span_sha256
 
 
-@pytest.mark.parametrize("kind", ["\u043c\u0430\u0448\u0438\u043d\u0430", "\u0412\u0415\u041b\u041e\u0421\u0418\u041f\u0415\u0414", "自行车", "自転車"])
+@pytest.mark.parametrize("kind", ["汽车", "VÉLO", "自行车", "自転車"])
 def test_unicode_native_ledger_kind_is_retained(tmp_path, kind):
     import ledger
 
-    snapshot = _captured_vault(tmp_path, _frame("\u041c\u043e\u0439 \u0432\u0435\u043b\u043e\u0441\u0438\u043f\u0435\u0434 \u0441\u0438\u043d\u0438\u0439."), daily=False)
+    snapshot = _captured_vault(tmp_path, _frame("我的 自行车 蓝色."), daily=False)
     turn = fact_keys.user_turns(snapshot.chunks, sources=snapshot.sources)[0]
     records = ledger.records_of(turn, {"records": [{"kind": kind, "thing": kind}]})
     assert len(records) == 1
@@ -183,14 +183,14 @@ def test_unicode_native_ledger_kind_is_retained(tmp_path, kind):
 def test_logical_source_paths_stay_posix_with_windows_path_semantics(tmp_path, monkeypatch):
     from pathlib import PureWindowsPath
 
-    snapshot = _captured_vault(tmp_path, _frame("\u041c\u043e\u0439 \u0432\u0435\u043b\u043e\u0441\u0438\u043f\u0435\u0434 \u0441\u0438\u043d\u0438\u0439."), daily=False)
+    snapshot = _captured_vault(tmp_path, _frame("我的 自行车 蓝色."), daily=False)
     monkeypatch.setattr(fact_keys, "Path", PureWindowsPath)
     turns = fact_keys.user_turns(snapshot.chunks, sources=snapshot.sources)
     assert len(turns) == 1
 
 
 def test_claimed_native_record_missing_agent_is_a_visible_refusal(tmp_path):
-    event = json.loads(_frame("\u041c\u043e\u0439 \u0432\u0435\u043b\u043e\u0441\u0438\u043f\u0435\u0434 \u0441\u0438\u043d\u0438\u0439."))
+    event = json.loads(_frame("我的 自行车 蓝色."))
     event.pop("agent")
     frame = json.dumps(event, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
     with pytest.raises(ValueError):

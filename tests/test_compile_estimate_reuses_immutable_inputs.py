@@ -8,7 +8,7 @@ from tests.compile_paths import point_compile_path
 
 
 def _inputs():
-    day = compile_receipts.DailySnapshot('knowledge/daily/\u0434\u0435\u043d\u044c.md', '\u0444\u0430\u043a\u0442\n'.encode(), 'd')
+    day = compile_receipts.DailySnapshot('knowledge/daily/天.md', '事实\n'.encode(), 'd')
     note = compile_receipts.SourceSnapshot('knowledge/notes/頁.md', '知識\n'.encode(), 'n')
     return compile_pipeline_sources.CompileInputs((day,), (note,), ())
 

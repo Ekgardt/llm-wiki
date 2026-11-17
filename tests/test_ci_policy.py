@@ -422,3 +422,4 @@ def test_dependency_audit_covers_all_marker_variants():
     assert any('osv' not in args for args in audits)
     assert any({'--vulnerability-service', 'osv', '--strict', '--format', 'json'} <= set(args) for args in audits)
     assert _audit_commands_containing('scripts/check_dependency_audit.py uv.lock')
+    assert not any('--ignore-vuln' in args for args in audits)

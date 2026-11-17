@@ -152,7 +152,7 @@ def test_safe_append_without_newline_keeps_exact_bytes(tmp_path, monkeypatch):
 
 @pytest.mark.parametrize('before', [
     b'# History\nold entry  \n\n## Editorial note\nOperator-owned ending.\n',
-    '\u0418\u0441\u0442\u043e\u0440\u0438\u044f\r\n\r\n## Editorial note\r\n\u041d\u0435\u0438\u0437\u043c\u0435\u043d\u043d\u0430\u044f \u0437\u0430\u043f\u0438\u0441\u044c. \t\r\n'.encode(),
+    '历史\r\n\r\n## Editorial note\r\n不变的记录。 \t\r\n'.encode(),
     b'# History with no newline',
 ])
 def test_compile_log_preserves_entire_old_prefix_byte_exactly(before):

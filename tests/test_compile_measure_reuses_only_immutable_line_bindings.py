@@ -73,7 +73,7 @@ def _packing_result(inputs):
 def test_entire_packing_layout_and_schema_match_uncached_baseline(tmp_path, monkeypatch, record_property, rows):
     import time
 
-    inputs = _legacy_packet(tmp_path, monkeypatch, [f'\u0424\u0430\u043a\u0442 {index} is settled.' for index in range(rows)])
+    inputs = _legacy_packet(tmp_path, monkeypatch, [f'事实 {index} is settled.' for index in range(rows)])
     parts = tuple(compile_pipeline_sources.daily_parts(inputs.dailies[0].logical_path, inputs.dailies[0].content))
     inputs = replace(inputs, dailies=parts, sources=(*inputs.sources, *_context_pages()))
     current = compile_pipeline_prompts.measured_original_choice_binding

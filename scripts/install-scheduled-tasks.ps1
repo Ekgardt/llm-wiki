@@ -13,7 +13,9 @@
 #   . $env:LLM_WIKI_ROOT\scripts\install-scheduled-tasks.ps1 -Status         # check state
 #
 # Requires: Windows Task Scheduler service running (default on).
+# -WhatIf reports each registration, removal and start without making it.
 
+[CmdletBinding(SupportsShouldProcess = $true)]
 param(
     [Parameter(Mandatory = $true)][string]$VaultRoot,
     [Parameter(Mandatory = $true)][string]$StateRoot,
@@ -304,7 +306,9 @@ function Get-LLMWikiSpecMarker {
     return ""
 }
 
-function Register-LLMWikiTaskSet($Paths) {
+function Register-LLMWikiTaskSet {
+    [CmdletBinding(SupportsShouldProcess = $true)]
+    param($Paths)
     $specMarker = Get-LLMWikiSpecMarker
 
     # --- Nightly task: 03:00 every day ---
@@ -331,16 +335,18 @@ function Register-LLMWikiTaskSet($Paths) {
         -LogonType Interactive `
         -RunLevel Limited
 
-    Write-Information "Registering LLMWiki-Nightly (daily 03:00)..." -InformationAction Continue
-    Register-ScheduledTask `
-        -TaskName "LLMWiki-Nightly" `
-        -Action $nightlyAction `
-        -Trigger $nightlyTrigger `
-        -Settings $nightlySettings `
-        -Principal $nightlyPrincipal `
-        -Description "LLM-wiki: nightly queue drain + compile + lint. No user interaction required.$specMarker" |
-        Out-Null
-    Write-Information "  registered" -InformationAction Continue
+    if ($PSCmdlet.ShouldProcess("LLMWiki-Nightly", "Register scheduled task")) {
+        Write-Information "Registering LLMWiki-Nightly (daily 03:00)..." -InformationAction Continue
+        Register-ScheduledTask `
+            -TaskName "LLMWiki-Nightly" `
+            -Action $nightlyAction `
+            -Trigger $nightlyTrigger `
+            -Settings $nightlySettings `
+            -Principal $nightlyPrincipal `
+            -Description "LLM-wiki: nightly queue drain + compile + lint. No user interaction required.$specMarker" |
+            Out-Null
+        Write-Information "  registered" -InformationAction Continue
+    }
 
     # --- Weekly task: Sunday 04:00 ---
     $weeklyAction = ConvertTo-LLMWikiTaskAction -Kind weekly -Paths $Paths
@@ -359,16 +365,18 @@ function Register-LLMWikiTaskSet($Paths) {
         -RestartCount 2 `
         -RestartInterval (New-TimeSpan -Minutes 30)
 
-    Write-Information "Registering LLMWiki-Weekly (Sunday 04:00)..." -InformationAction Continue
-    Register-ScheduledTask `
-        -TaskName "LLMWiki-Weekly" `
-        -Action $weeklyAction `
-        -Trigger $weeklyTrigger `
-        -Settings $weeklySettings `
-        -Principal $nightlyPrincipal `
-        -Description "LLM-wiki: weekly deep maintenance + OKF conformance sweep + lint.$specMarker" |
-        Out-Null
-    Write-Information "  registered" -InformationAction Continue
+    if ($PSCmdlet.ShouldProcess("LLMWiki-Weekly", "Register scheduled task")) {
+        Write-Information "Registering LLMWiki-Weekly (Sunday 04:00)..." -InformationAction Continue
+        Register-ScheduledTask `
+            -TaskName "LLMWiki-Weekly" `
+            -Action $weeklyAction `
+            -Trigger $weeklyTrigger `
+            -Settings $weeklySettings `
+            -Principal $nightlyPrincipal `
+            -Description "LLM-wiki: weekly deep maintenance + OKF conformance sweep + lint.$specMarker" |
+            Out-Null
+        Write-Information "  registered" -InformationAction Continue
+    }
 }
 
 # --- Optional: run now to verify ---
@@ -410,6 +418,7 @@ function Install-LLMWikiScheduledTaskSet {
     }
     Register-LLMWikiTaskSet -Paths $paths
     Start-LLMWikiRequestedTask
+    if ($WhatIfPreference) { return ConvertTo-LLMWikiOutcome -Value @() -ExitCode 0 }
     Write-LLMWikiInstallSummary
     return ConvertTo-LLMWikiOutcome -Value @() -ExitCode 0
 }

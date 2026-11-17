@@ -1,6 +1,7 @@
 # One Python minor version for development, installation and CI
 
-Date: 2026-11-03. Approved by the owner: "Yes, move to Python 3.14 as planned" (translated from Russian).
+Date: 2026-11-03. The owner's request in the 2026-11 branch-audit task: "Yes, change the CI, including the move
+to Python 3.14, and do everything in this task" (translated from Russian).
 Implementation and native qualification are recorded below; no live installation.
 
 The owner asked why the project cannot use one recent Python version. It can:

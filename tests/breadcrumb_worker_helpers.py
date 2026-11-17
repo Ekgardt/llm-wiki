@@ -71,7 +71,7 @@ def ingress(tmp_path, monkeypatch):
 
 def _ingress_event(kind, **extra):
     payloads = {
-        "user_prompt": {"prompt": "\u0434\u0430"},
+        "user_prompt": {"prompt": "yes"},
         "post_tool_use": {"tool_name": "Bash", "tool_input": {"command": "pwd"}},
     }
     return integration_adapter.normalize_occurrence_event("claude", kind, {

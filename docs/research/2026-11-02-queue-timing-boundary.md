@@ -1,8 +1,15 @@
 # Queue timing: time normalization and retry calculation
 
-Date: 2026-11-02. Status: explicitly approved by the user. Research: 1a1f50b4; move: after the fix 2ea7fa24.
+Date: 2026-11-02. Status: recorded as approved by the user in the working session of that branch, which the repository does not hold. Research: 1a1f50b4; move: after the fix 2ea7fa24.
 
 ## The proposed move
+
+Names as of 2026-11-17: the split of the queue that followed this move made the
+functions public in `scripts/llm_wiki/queue_timing.py` (`as_utc`, `timestamp`,
+`parse_timestamp`, `retry_after_seconds`, `retry_available_at`, `RETRY_RANDOM`),
+`utc_now` lives in `scripts/llm_wiki/queue_store.py`, and the identity aliases and
+`MemoryQueue._retry_after_seconds` named below no longer exist. The text below
+records the move as it was proposed.
 
 The new scripts/llm_wiki/queue_timing.py owns the existing _as_utc,
 _timestamp, _parse_timestamp, eight functions that read Retry-After and

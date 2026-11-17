@@ -1,9 +1,8 @@
 # Tests of `scripts/reflection.py`
 
-`tests/test_automatic_writer_integration.py` exercise `scripts/reflection.py` through its public names.
+`tests/test_automatic_writer_integration.py` exercise `scripts/reflection.py`.
 
-`scripts/reflection.py` itself is not part of this module: the packet carries its exact derived
-description, and these tests are the evidence that the description matches real use.
+`scripts/reflection.py` itself belongs to another module: this packet carries its whole source, and these tests exercise it.
 
 The owned files and the complete maintenance context are listed in the `-context.json`
 manifest next to this guide.

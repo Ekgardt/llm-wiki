@@ -1,6 +1,6 @@
 # The next queue slice: types and errors of the public contract
 
-2026-11-02. The user approved it with the command "Continue without stopping" after this slice was proposed. The implementation and checks are described below.
+2026-11-02. The working session of that branch records the user's answer "Continue without stopping" after this slice was proposed (translated from Russian; the repository holds no copy). The implementation and checks are described below.
 Basis: fec3fbaf, the current built-in index and the AST of the sources.
 
 ## The concrete change
@@ -94,10 +94,12 @@ Primary sources checked 2026-11-02:
 [Bounded Context](https://martinfowler.com/bliki/BoundedContext.html): a consistent
 model and explicit relationships; [Import Linter](https://import-linter.readthedocs.io/en/stable/contract_types/):
 protection of import directions;
-[Python pickle](https://docs.python.org/3.10/library/pickle.html): the dependency of
-deserialization on an available module/name, and trust limitations. The API is checked
-on Python 3.10, which the project supports; its upstream EOL is not hidden and does not change
-the project version automatically. No new dependencies are installed.
+[Python pickle](https://docs.python.org/3.14/library/pickle.html): the dependency of
+deserialization on an available module/name, and trust limitations. The study checked the API
+on Python 3.10, the project's minimum at the time; since 2026-11-03 the project runs on
+Python 3.14 only (`requires-python = ">=3.14,<3.15"`). Unpickling still resolves a class by
+its module and name there; 3.14 raised the default protocol to 5 (checked on 3.14.7), which
+does not change that resolution. No new dependencies are installed.
 
 Evidence: `logs/queue-contracts-definitions.json`, `logs/queue-contracts-consumers.json`,
 `logs/queue-contracts-graph.json`, scripts/memory_queue.py.

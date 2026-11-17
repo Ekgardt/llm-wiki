@@ -12,7 +12,7 @@ active generation is the one thing anything reads — retrieval resolves the
 pointer, and the incremental rebuild names the active generation as its reuse
 parent — and one ancestor is kept behind it, because that ancestor is the first
 alternative `_fallback_order` offers when the active tree stops validating. The
-depth is `generation_catalog.RETAINED_ANCESTOR_GENERATIONS`, which carries the
+depth is `generation_limits.RETAINED_ANCESTOR_GENERATIONS`, which carries the
 reason. Everything else is dropped: registration, activation history and the
 directory together, inside the catalog's own write transaction.
 

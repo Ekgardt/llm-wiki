@@ -12,7 +12,7 @@ it loads.
 ## 0. Process rules (mandatory)
 
 ### Mandatory development laws
-Before starting work, read the [mandatory development laws](rules/development-laws.md) in full and follow all nine laws when researching, designing, developing, testing, deploying changes to and maintaining the system. The file holds the user's text of the laws with the changes the user explicitly approved; its revision details are stated in the file itself. Changing, weakening or circumventing these laws without the user's direct instruction is forbidden. If a requirement cannot be met, say so directly; do not present what was not done as done.
+Before starting work, read the [mandatory development laws](rules/development-laws.md) in full and follow all nine laws when researching, designing, developing, testing, deploying changes to and maintaining the system. The file holds the laws and its own revision note. Changing, weakening or circumventing these laws without the user's direct instruction is forbidden. If a requirement cannot be met, say so directly; do not present what was not done as done.
 
 ### How to talk to the user
 - Write in **plain human language**. Short sentences.

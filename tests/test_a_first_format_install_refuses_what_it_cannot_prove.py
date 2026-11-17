@@ -91,8 +91,10 @@ def _edit_transaction(tmp_path: Path, **changes: object) -> None:
 
 
 def _refused(code: str, action: Callable[[], object]) -> None:
-    with pytest.raises(InstallControlError, match=code):
+    """The refusal's code is the message up to its first colon, not text that contains it."""
+    with pytest.raises(InstallControlError) as raised:
         action()
+    assert str(raised.value).split(":", 1)[0] == code
 
 
 def test_a_request_without_resources_is_refused() -> None:

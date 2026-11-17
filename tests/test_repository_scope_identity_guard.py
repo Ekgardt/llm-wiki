@@ -206,7 +206,8 @@ def test_the_guard_still_sees_the_object_shape():
         "def f(registered: RepositoryScope, live: RepositoryScope) -> bool:\n"
         "    return registered != live\n"
     )
-    findings = _findings_in_file(ast.parse(source), SCRIPTS / "generation_catalog.py")
+    store = SCRIPTS / "llm_wiki" / "generation_catalog_store.py"
+    findings = _findings_in_file(ast.parse(source), store)
     assert len(findings) == 1, findings
 
 

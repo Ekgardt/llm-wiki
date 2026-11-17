@@ -26,7 +26,7 @@ def test_module_path_grows_until_complete_without_truncation(monkeypatch):
 
 
 def test_module_path_preserves_unicode(monkeypatch):
-    expected = 'C:\\\u041f\u0438\u0442\u043e\u043d\\python.dll'
+    expected = 'C:\\蟒蛇\\python.dll'
 
     def filename(handle, buffer, capacity):
         buffer.value = expected

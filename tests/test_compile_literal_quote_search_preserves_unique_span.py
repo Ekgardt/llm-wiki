@@ -48,7 +48,7 @@ def _actual(block, quote):
 @pytest.mark.parametrize('block,quote', [
     (b'', b''), (b'a', b''), (b'', b'a'), (b'aaa', b'aa'),
     (b'aaaa', b'aa'), (b'ababa', b'aba'), (b'\x00a\x00', b'\x00'),
-    (b'.*[x]?', b'.*[x]?'), ('\u0414\u043e: \u0444\u0430\u043a\u0442'.encode(), '\u0444\u0430\u043a\u0442'.encode()),
+    (b'.*[x]?', b'.*[x]?'), ('之前: 事实'.encode(), '事实'.encode()),
     (b'a\na', b'a'), (b'ab', b'abc'),
 ])
 def test_exact_literal_nonoverlap_and_empty_cases(block, quote):

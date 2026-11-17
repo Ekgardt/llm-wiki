@@ -17,7 +17,7 @@ def test_unreadable_or_non_object_state_is_rejected(raw):
 
 
 def test_encoding_preserves_unicode_order_and_exact_boundary():
-    state = {'z': '\u041f\u0440\u0438\u0432\u0435\u0442', 'a': [1, True, None]}
+    state = {'z': '你好', 'a': [1, True, None]}
     expected = json.dumps(state, indent=2, ensure_ascii=False)
     budget = len(expected.encode('utf-8'))
     assert state_bytes(state) == budget

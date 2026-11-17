@@ -8,7 +8,7 @@ Code, structure, env, runtime contracts and the installed version were not chang
 
 The fixed number 74 is withdrawn as a target result. There are
 measured files and boundary candidates, but no basis to declare this specific
-layout optimal. The user's requirement of ≤100,000 tokens stays.
+layout optimal. The user's requirement of ≤100,000 tokens, restated in the 2026-11 branch-audit task, stays.
 It does not allow hiding dependencies, tests or needed data.
 
 One product should be kept, and boundaries developed for confirmed reasons.

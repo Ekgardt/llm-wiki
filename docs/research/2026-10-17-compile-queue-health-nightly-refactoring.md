@@ -1,6 +1,7 @@
 # Refactoring of compilation, the queue, diagnostics and nightly maintenance
 
-Research date: 2026-10-17. Status: approved by the owner on 2026-10-17; implementation and installation are not yet complete.
+Research date: 2026-10-17. Status: recorded as approved by the owner on 2026-10-17 in the working session of that
+branch, which the repository does not hold; implementation and installation are not yet complete.
 
 The goal is to separate checking current work from checking the whole accumulated history, to make the nightly cycle's results unambiguous, and to stop blocking usable sources because of a neighbouring source that is too large. This is a change in the behaviour of diagnostics and execution. The owner gave explicit approval under section 0 of AGENTS.md; the decision is recorded in knowledge/notes/compile-queue-health-nightly-refactoring-decision-20261017.md. No new databases, daemon, dependencies or runtime roots are proposed.
 
@@ -151,8 +152,8 @@ CI also found the old value 4 in the expected result of a PowerShell test; the e
 
 ### Configurable full survey and limit review, October 17
 
-The owner instructed to continue after a specific settings proposal and separately
-required all limits to comply with law 9. The decision and STRUCTURE were recorded before
+The working session records that the owner said to continue after a specific settings
+proposal and separately required all limits to comply with law 9. The decision and STRUCTURE were recorded before
 the code change. The registry now contains `doctor.nightly_seconds` with the usual environment
 alias; the nightly doctor and the outer deadline calculation read one value of the selected
 vault. Invalid values are explicitly refused. The previous 60 seconds is a compatible original

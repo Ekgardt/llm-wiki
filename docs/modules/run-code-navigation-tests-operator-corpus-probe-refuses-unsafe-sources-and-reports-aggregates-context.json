@@ -19,6 +19,7 @@
     "docs/modules/model-choice.md",
     "docs/modules/product-structure.md",
     "docs/modules/project-governance.md",
+    "docs/modules/reliable-memory-tests-retrieval-v2-benchmark.md",
     "docs/modules/run-code-navigation-tests-operator-corpus-probe-refuses-unsafe-sources-and-reports-aggregates-context.json",
     "docs/modules/run-code-navigation-tests-operator-corpus-probe-refuses-unsafe-sources-and-reports-aggregates.md",
     "docs/modules/run-code-navigation.md",
@@ -36,6 +37,7 @@
     "tests/module_qualification.py",
     "tests/module_record_context.py",
     "tests/module_records.py",
+    "tests/retrieval_v2_helpers.py",
     "tests/shared_fixtures.py",
     "tests/slow_machine.py",
     "tests/test_operator_corpus_probe_refuses_unsafe_sources_and_reports_aggregates.py"
@@ -62,6 +64,18 @@
         "tests/test_an_ownership_failure_says_what_and_when.py",
         "tests/test_an_ownership_probe_says_why_it_measured_nothing.py",
         "tests/test_code_navigation_benchmark.py"
+      ]
+    },
+    {
+      "provider": "benchmark/retrieval_v2_contract.py",
+      "names": [
+        "Candidate"
+      ],
+      "contract_sha256": "f27d7ed2d7b48b231b186a6298dcaabac8c5396da87b7ae8df2e5e402164a13c",
+      "integration_tests": [
+        "tests/test_authoritative_selection_binds_each_worker_and_refuses_gaps.py",
+        "tests/test_retrieval_v2_adapters.py",
+        "tests/test_retrieval_v2_aggregation.py"
       ]
     },
     {

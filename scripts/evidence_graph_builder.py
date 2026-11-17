@@ -64,7 +64,7 @@ INCREMENTAL_MANIFEST_VERSION = "evidence-graph-incremental/v5"
 # ever be outgrown, so neither of these is that bound any more.
 #
 # Reading is bounded by the size the sealed `manifest.json` declares for this
-# artifact, which `generation_catalog.validate_generation` has already verified
+# artifact, which `generation_validation.validate_generation` has already verified
 # by hashing it — see `declared_manifest_bytes`. What is left here is the
 # absurdity ceiling the catalog itself applies to any one artifact: a manifest
 # past it could not be registered as a generation artifact at all.
@@ -1325,7 +1325,7 @@ def _require_extraction_shape(value: SourceExtraction) -> None:
 def declared_manifest_bytes(generation_manifest: Mapping[str, object]) -> int:
     """How many bytes to read: the number the sealed generation manifest names.
 
-    `generation_catalog.validate_generation` has already hashed every artifact
+    `generation_validation.validate_generation` has already hashed every artifact
     against `manifest.json` and refused a wrong size or digest, so by the time
     this is asked the declared size is verified fact, not a hint. Reading
     exactly that is a bound the corpus cannot outgrow — which a constant is not,

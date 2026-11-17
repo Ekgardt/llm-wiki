@@ -2,8 +2,7 @@
 
 - `tests/codex_counts_the_prepared_invocation_helpers.py`: Helpers shared by test_codex_counts_the_prepared_invocation.py and the test files importing them.
 
-`scripts/llm_client.py` itself belongs to another module: this packet carries its exact derived
-description, and these tests are the evidence that the description matches real use.
+`scripts/llm_client.py` itself belongs to another module: this packet carries its whole source, and these tests exercise it.
 
 The owned files and the complete maintenance context are listed in the `-context.json`
 manifest next to this guide.

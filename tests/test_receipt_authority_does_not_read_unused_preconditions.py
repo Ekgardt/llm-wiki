@@ -57,7 +57,7 @@ def _committed_ordinal(coordinator, identity, ordinal):
     return coordinator.apply(prepared.id)
 
 
-@pytest.mark.parametrize("identity", ("proof", "proof_%\\", "\u0434\u043e\u043a\u0430\u0437\u0430\u0442\u0435\u043b\u044c\u0441\u0442\u0432\u043e"))
+@pytest.mark.parametrize("identity", ("proof", "proof_%\\", "证据"))
 def test_projected_authority_retains_latest_literal_ordinal(vault, identity):
     root, state = vault
     coordinator = MarkdownCoordinator(root, state)

@@ -45,7 +45,7 @@ def test_consuming_one_loaded_array_has_no_remainder_copy_amplification():
     assert observed['sliced_characters'] <= len(text)
 
 
-@pytest.mark.parametrize('value', [1234567, '\u043a\u0438\u0440\u0438\u043b\u043b\u0438\u0446\u0430😀\\quote"', ''])
+@pytest.mark.parametrize('value', [1234567, '西里尔字母😀\\quote"', ''])
 @pytest.mark.parametrize('width', [1, 2, 7])
 def test_scalar_boundaries_keep_numbers_and_escaped_unicode_whole(value, width):
     reader = generation_search.VectorJSONReader(_TinyReads(json.dumps([value]), width), None)

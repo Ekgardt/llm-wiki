@@ -18,8 +18,8 @@ import pytest
 # An answer budget of the size a compile critique asks for; any positive value
 # exercises the same arithmetic, this one keeps the window sums readable.
 MAX_TOKENS = 500
-# ~20 KB of Cyrillic: far past Ollama's default 4 096-token window.
-LONG_PROMPT = "\u043a\u043e\u043d\u0442\u0435\u043a\u0441\u0442 " * 1200
+# ~20 KB of multi-byte text: far past Ollama's default 4 096-token window.
+LONG_PROMPT = "上下文 " * 2000
 
 
 class _StubOllama(BaseHTTPRequestHandler):

@@ -113,8 +113,8 @@ def test_opencode_node_injects_shared_bounded_legacy_handoff_for_unicode_slug(
 
     vault = tmp_path / "vault"
     state_root = tmp_path / "state"
-    project = tmp_path / "\u043f\u0440\u043e\u0435\u043a\u0442"
-    slug = "\u043f\u0440\u043e\u0435\u043a\u0442"
+    project = tmp_path / "项目"
+    slug = "项目"
     project.mkdir()
     project_state = vault / "knowledge/projects" / slug
     project_state.mkdir(parents=True)

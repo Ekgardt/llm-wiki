@@ -1,6 +1,6 @@
 # The declarative queue schema: the next module
 
-Status: approved by the user with the answer "continue" after the plan was discussed.
+Status: the working session of that branch records the user's answer "continue" after the plan was discussed (translated from Russian; the repository holds no copy).
 Research date: 2026-11-02. Original candidate version: ad59363f.
 
 ## Boundary and purpose
@@ -46,8 +46,9 @@ Three independent primary sources were checked:
   preserving the original contract.
 - [Python sqlite3, version 3.10](https://docs.python.org/3.10/library/sqlite3.html):
   the transaction context and the execute/executescript APIs differ. During the move,
-  do not change the execution mechanism or the connections. The project's minimum Python
-  is kept, although 3.10 is no longer supported upstream; a 3.10 run is mandatory.
+  do not change the execution mechanism or the connections. At the time the project's
+  minimum was Python 3.10 and a 3.10 run was mandatory; since 2026-11-03 the project
+  runs on Python 3.14 only.
 - [Redgate Flyway Validate](https://documentation.red-gate.com/fd/validate-277578898.html),
   updated 30 October 2026: reconciling applied migrations checks names/types/checksums.
   Here this confirms the need to keep both existing digests;

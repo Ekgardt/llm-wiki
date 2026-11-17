@@ -1,9 +1,8 @@
-# Tests of `scripts/integration_adapter.py`
+# Tests filed with `scripts/integration_adapter.py`
 
-`tests/test_a_publication_that_stopped_half_way_is_finished.py` exercise `scripts/integration_adapter.py` through its public names.
+These files do not import `scripts/integration_adapter.py`, the module they are filed with. The product code they import directly is carried in this packet as follows:
 
-`scripts/integration_adapter.py` itself is not part of this module: the packet carries its exact derived
-description, and these tests are the evidence that the description matches real use.
+- `scripts/reliable_memory.py`: its exact derived description.
 
 The owned files and the complete maintenance context are listed in the `-context.json`
 manifest next to this guide.

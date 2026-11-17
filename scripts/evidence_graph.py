@@ -80,7 +80,7 @@ MAX_WORK = 100_000
 # (sqlite3_progress_handler); 1 000 checks the deadline often enough to stop a build
 # within milliseconds while costing nothing measurable.
 PROGRESS_OPCODES = 1000
-# A generation's source manifest read back (also by generation_catalog and
+# A generation's source manifest read back (also by generation_validation and
 # mcp_server): the installed vault's was 446 809 bytes on 2026-09-27, so 256 MiB is a
 # guard; a larger one is refused.
 MAX_SOURCE_MANIFEST_BYTES = 256 * 1024 * 1024

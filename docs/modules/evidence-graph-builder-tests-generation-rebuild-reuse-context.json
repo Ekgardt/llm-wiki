@@ -64,7 +64,7 @@
         "build_incremental_generation",
         "declared_manifest_bytes"
       ],
-      "contract_sha256": "41fddf0a833fa9e7637dc3e8dd9f64522441e9cd1fb4ab7d791642ca6030b083",
+      "contract_sha256": "27f47a76bd91c2c61e71191f207adebe313296b015aca8d42b8b7d2f63048f6c",
       "integration_tests": [
         "tests/test_generation_rebuild_reuse.py"
       ]

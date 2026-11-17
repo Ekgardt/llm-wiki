@@ -20,7 +20,7 @@ def test_similar_bodies_are_never_merged():
 
 
 def test_empty_and_unicode_paths_and_embedded_headers_round_trip():
-    files = {'empty': b'', 'dir/\u0434\u0432\u0430 \u0441\u043b\u043e\u0432\u0430.md': 'FILE ["x",0]\nSAME ["a","b"]\n\u041f\u0440\u0438\u0432\u0435\u0442'.encode(),
+    files = {'empty': b'', 'dir/两个 词语.md': 'FILE ["x",0]\nSAME ["a","b"]\n你好'.encode(),
              'quote"name': b'no final newline'}
     assert unpack_files(pack_files(files)) == files
 

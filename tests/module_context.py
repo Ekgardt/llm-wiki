@@ -157,13 +157,37 @@ def _from_import_sources(root: Path, source: Path, node: ast.ImportFrom) -> set[
     return set().union(*(_local_source_files(root, base) for base in bases | children))
 
 
-def _import_sources(root: Path, source: Path, node: ast.AST) -> set[Path]:
+_IMPORT_MODULE_CALLS = frozenset({
+    'importlib.import_module', 'import_module', 'pytest.importorskip',
+})
+
+
+def _literal_string(node: ast.AST) -> str | None:
+    if isinstance(node, ast.Constant) and isinstance(node.value, str):
+        return node.value
+    return None
+
+
+def _call_imported_name(node: ast.AST) -> str | None:
+    """`import_module("name")` and `pytest.importorskip("name")` are imports written as calls."""
+    if not isinstance(node, ast.Call) or ast.unparse(node.func) not in _IMPORT_MODULE_CALLS:
+        return None
+    return _literal_string(node.args[0]) if node.args else None
+
+
+def _imported_names(node: ast.AST) -> list[str]:
     if isinstance(node, ast.Import):
-        bases = set().union(*(_absolute_import_bases(root, source, a.name) for a in node.names))
-        return set().union(*(_local_source_files(root, base) for base in bases))
+        return [alias.name for alias in node.names]
+    name = _call_imported_name(node)
+    return [] if name is None else [name]
+
+
+def _import_sources(root: Path, source: Path, node: ast.AST) -> set[Path]:
     if isinstance(node, ast.ImportFrom):
         return _from_import_sources(root, source, node)
-    return set()
+    names = _imported_names(node)
+    bases = set().union(*(_absolute_import_bases(root, source, name) for name in names))
+    return set().union(*(_local_source_files(root, base) for base in bases))
 
 
 def _source_dependencies(root: Path, source: Path) -> set[Path]:

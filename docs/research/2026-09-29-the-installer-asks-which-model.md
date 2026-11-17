@@ -10,7 +10,8 @@ an object holding `models`, with `slug`, `id`, `model` or `name`.
 ## The owner's requirement
 
 "make the user choose, during installation, a model from those available to them
-by subscription" (2026-09-29, translated from Russian). Today the memory pipeline's model is whatever
+by subscription" (2026-09-29, translated from Russian;
+the working session of that branch records it; the repository holds no copy of the conversation). Today the memory pipeline's model is whatever
 the provider CLI defaults to, unless `MEMORY_CLAUDE_MODEL` / `MEMORY_CODEX_MODEL` /
 `MEMORY_LLM_MODEL` happened to be set in the installing shell (then
 `integration_hook_config.provider_environment` persists it into the hooks' env and

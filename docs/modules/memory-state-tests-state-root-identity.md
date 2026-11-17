@@ -2,8 +2,7 @@
 
 - `tests/test_state_root_identity.py`: Every runtime actor must name the same state root.
 
-`scripts/memory_state.py` itself belongs to another module: this packet carries its exact derived
-description, and these tests are the evidence that the description matches real use.
+`scripts/memory_state.py` itself belongs to another module: this packet carries its whole source, and these tests exercise it.
 
 The owned files and the complete maintenance context are listed in the `-context.json`
 manifest next to this guide.

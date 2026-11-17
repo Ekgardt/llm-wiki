@@ -1268,7 +1268,6 @@
   "test_frontmatter_uses_optional_safe_yaml_acceleration.py": 0.02,
   "test_full_doctor_scenarios_request_their_completion_budget.py": 0.61,
   "test_generation_catalog.py": 91.24,
-  "test_generation_catalog_facade_names_the_owning_objects.py": 0.0,
   "test_generation_catalog_store_refuses_what_no_longer_matches.py": 0.31,
   "test_generation_descriptors_detect_changed_artifacts.py": 0.01,
   "test_generation_fields_refuse_unsafe_values.py": 0.0,

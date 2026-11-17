@@ -1,9 +1,12 @@
-# Tests of `scripts/install_control.py`
+# Tests filed with `scripts/install_control.py`
 
 - `tests/test_ci_and_scheduler_gaps.py`: Every PowerShell script parses, and a systemd pass is stopped above its own worst case.
 
-`scripts/install_control.py` itself belongs to another module: this packet carries its exact derived
-description, and these tests are the evidence that the description matches real use.
+These files do not import `scripts/install_control.py`, the module they are filed with. The product code they import directly is carried in this packet as follows:
+
+- `scripts/llm_wiki/install_scheduler_render.py`: its exact derived description.
+- `scripts/nightly_budget.py`: its exact derived description.
+- `scripts/weekly_budget.py`: its exact derived description.
 
 The owned files and the complete maintenance context are listed in the `-context.json`
 manifest next to this guide.

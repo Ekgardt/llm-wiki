@@ -1,6 +1,7 @@
 """Admit, launch, pace and retire language-server processes for one session."""
 
 import secrets
+import subprocess
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -28,11 +29,8 @@ STARTUP_SECONDS = 60.0
 
 
 def _permission_startup_code(error: PermissionError, prefix: str) -> str | None:
-    """A refused permission that is really a timeout in disguise."""
-    cause = error.__cause__
-    if cause is not None and cause.__class__.__name__ == "TimeoutExpired":
-        return f"{prefix}_startup_timeout"
-    if "deadline expired" in str(error):
+    """A refused permission whose cause is a process that ran out of time."""
+    if isinstance(error.__cause__, subprocess.TimeoutExpired):
         return f"{prefix}_startup_timeout"
     return None
 

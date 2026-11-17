@@ -1,9 +1,11 @@
-# Tests of `scripts/memory_state.py`
+# Tests filed with `scripts/memory_state.py`
 
-`tests/test_a_definition_and_a_service_walk_say_what_they_left_out.py` exercise `scripts/memory_state.py` through its public names.
+These files do not import `scripts/memory_state.py`, the module they are filed with. The product code they import directly is carried in this packet as follows:
 
-`scripts/memory_state.py` itself is not part of this module: the packet carries its exact derived
-description, and these tests are the evidence that the description matches real use.
+- `scripts/evidence_reader_cache.py`: its exact derived description.
+- `scripts/mcp_server.py`: its exact derived description.
+- `scripts/repository_indexing.py`: its exact derived description.
+- `scripts/symbol_snippet.py`: its exact derived description.
 
 The owned files and the complete maintenance context are listed in the `-context.json`
 manifest next to this guide.

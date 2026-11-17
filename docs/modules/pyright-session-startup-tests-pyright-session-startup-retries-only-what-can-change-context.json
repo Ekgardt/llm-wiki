@@ -100,6 +100,18 @@
       ]
     },
     {
+      "provider": "scripts/llm_wiki/lsp_process_owner.py",
+      "names": [
+        "OwnerAclDeadlineExpired"
+      ],
+      "contract_sha256": "e81c9bf3f344e86a9b12c427079b47317d7f30b70c0616b2de85ed0467d642b6",
+      "integration_tests": [
+        "tests/test_a_dead_owner_root_is_swept_when_the_next_server_starts.py",
+        "tests/test_a_document_is_opened_in_its_own_language.py",
+        "tests/test_a_failed_server_leaves_its_redacted_last_words.py"
+      ]
+    },
+    {
       "provider": "scripts/llm_wiki/model_choice.py",
       "names": [
         "using_root"

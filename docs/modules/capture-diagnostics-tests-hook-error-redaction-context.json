@@ -15,11 +15,13 @@
     "docs/modules/model-choice.md",
     "docs/modules/product-structure.md",
     "docs/modules/project-governance.md",
+    "docs/modules/session-start-project-state.md",
     "docs/modules/test-support.md",
     "rules/development-laws.md",
     "scripts/__init__.py",
     "scripts/llm_wiki/__init__.py",
     "scripts/llm_wiki/context_bundle.py",
+    "scripts/session_start_project_state.py",
     "tests/__init__.py",
     "tests/conftest.py",
     "tests/module_context.py",
@@ -52,6 +54,32 @@
       ]
     },
     {
+      "provider": "scripts/context_budget.py",
+      "names": [
+        "BudgetExceededError",
+        "ContextItem",
+        "DEFAULT_CONTEXT_BUDGET"
+      ],
+      "contract_sha256": "8d6d945b7aa33430fbc4f3f434536a390af63ef89c0c9356bc65a63ea9707579",
+      "integration_tests": [
+        "tests/modules/compile_answer_records/test_contract.py",
+        "tests/modules/compile_call_runtime/test_lifecycle.py",
+        "tests/modules/model_records/test_contract.py"
+      ]
+    },
+    {
+      "provider": "scripts/context_compiler.py",
+      "names": [
+        "compile_context_items"
+      ],
+      "contract_sha256": "23b1ffbfd102d5b171b6535f6c6997b12c598befccfd3dc0c9d8afaef214fe00",
+      "integration_tests": [
+        "tests/test_a_claude_prompt_takes_the_ingest_path.py",
+        "tests/test_a_context_answer_fits_the_budget_it_was_given.py",
+        "tests/test_a_context_answer_says_when_its_corpus_was_read.py"
+      ]
+    },
+    {
       "provider": "scripts/llm_wiki/generation_catalog_store.py",
       "names": [
         "GenerationCatalog"
@@ -74,6 +102,47 @@
       ]
     },
     {
+      "provider": "scripts/llm_wiki/runtime_roots.py",
+      "names": [
+        "configured_state_root",
+        "configured_vault_root"
+      ],
+      "contract_sha256": "7628ae4d706d824b2f5cb10af95aa26c33d7ba7436bc7fca395feb32389921df",
+      "integration_tests": [
+        "tests/test_a_backup_image_carries_what_git_does_not.py",
+        "tests/test_a_bad_model_file_is_fetched_again.py",
+        "tests/test_a_block_opens_one_entry.py"
+      ]
+    },
+    {
+      "provider": "scripts/markdown_transaction.py",
+      "names": [
+        "mutate_knowledge",
+        "stable_operation_id"
+      ],
+      "contract_sha256": "ec453a4a8ce23b6daa07f805e5ab35371975f95ac4139f9d4bb17a3919b403e6",
+      "integration_tests": [
+        "tests/test_a_backup_image_carries_what_git_does_not.py",
+        "tests/test_a_backup_snapshots_what_hooks_write.py",
+        "tests/test_a_backup_takes_what_any_installed_vault_holds.py"
+      ]
+    },
+    {
+      "provider": "scripts/project_journal.py",
+      "names": [
+        "ProjectStore",
+        "legacy_state_project_root",
+        "portable_slug",
+        "recover_project_handoff"
+      ],
+      "contract_sha256": "336dcd719e743b58c6d41c53a6ae3dfbe0bd8e7a533b2935296be821b5ba0387",
+      "integration_tests": [
+        "tests/test_a_capacity_refusal_does_not_corrupt_a_generation.py",
+        "tests/test_a_ceiling_is_a_named_refusal.py",
+        "tests/test_a_checkpoint_that_fails_at_the_commit_puts_its_files_back.py"
+      ]
+    },
+    {
       "provider": "scripts/reliable_memory.py",
       "names": [
         "validate_state_root"
@@ -93,6 +162,18 @@
         "tests/test_a_code_generation_is_not_abandoned.py",
         "tests/test_a_directory_link_inside_the_checkout_does_not_refuse_the_revision.py",
         "tests/test_a_document_is_opened_in_its_own_language.py"
+      ]
+    },
+    {
+      "provider": "scripts/secret_redact.py",
+      "names": [
+        "redact_secrets"
+      ],
+      "contract_sha256": "8b925f76433b0c3f5ab03f4b8b41a462551d5616843facdd2918813d103ad6f5",
+      "integration_tests": [
+        "tests/modules/event_envelope_values/test_baseline.py",
+        "tests/modules/secret_redact/test_pattern_prerequisites.py",
+        "tests/modules/secret_redact/test_security_invariants.py"
       ]
     }
   ]

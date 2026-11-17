@@ -10,7 +10,7 @@ from pathlib import Path
 import pytest
 from llm_wiki import lsp_process_owner
 from llm_wiki.lsp_process_limits import MAX_ACL_OUTPUT_BYTES
-from llm_wiki.lsp_process_owner import ObjectIdentity, OwnerDirectory
+from llm_wiki.lsp_process_owner import ObjectIdentity, OwnerAclDeadlineExpired, OwnerDirectory
 
 from tests.slow_machine import LONG_TIMEOUT
 
@@ -336,24 +336,33 @@ def test_an_owner_root_acl_past_its_deadline_runs_nothing(
 ) -> None:
     tool = AclTool(b"")
 
-    with pytest.raises(PermissionError, match="deadline expired"):
+    with pytest.raises(OwnerAclDeadlineExpired, match="deadline expired"):
         _secure(monkeypatch, tool, tmp_path, time.monotonic() - 1)
     assert tool.commands == []
 
 
 @pytest.mark.parametrize(
-    "failure",
-    [OSError(2, "icacls not found"), subprocess.TimeoutExpired(["icacls"], 1.0)],
+    ("failure", "refusal", "message"),
+    [
+        (OSError(2, "icacls not found"), PermissionError, "ACL command failed"),
+        (subprocess.TimeoutExpired(["icacls"], 1.0), OwnerAclDeadlineExpired, "timed out"),
+    ],
+    ids=["cannot-start", "ran-out-of-time"],
 )
 def test_an_acl_tool_that_cannot_run_is_a_permission_failure(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, failure: Exception
+    monkeypatch: pytest.MonkeyPatch,
+    failure: Exception,
+    refusal: type[PermissionError],
+    message: str,
 ) -> None:
+    """A timeout stays a permission failure and is also a `TimeoutError` a caller can retry."""
+
     def broken_run(command: Sequence[str], **options: object) -> object:
         raise failure
 
     monkeypatch.setattr(subprocess, "run", broken_run)
 
-    with pytest.raises(PermissionError, match="ACL command failed") as raised:
+    with pytest.raises(refusal, match=message) as raised:
         lsp_process_owner._run_windows_owner_acl(["icacls"], time.monotonic() + LONG_TIMEOUT)
     assert raised.value.__cause__ is failure
 

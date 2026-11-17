@@ -591,37 +591,13 @@ def test_windows_scheduler_payload_carries_exact_roots_and_uv(tmp_path):
     )
 
 
-def test_windows_scheduler_status_accepts_only_the_registered_contract(tmp_path):
-    if shutil.which("pwsh") is None:
-        pytest.skip("PowerShell 7 is unavailable")
-    script = ROOT / "scripts" / "install-scheduled-tasks.ps1"
-    root = str(tmp_path / "vault")
-    state = str(tmp_path / "state")
-    uv_path = str(tmp_path / "uv.exe")
-    runner = str(tmp_path / "vault/scripts/run-scheduled-task.ps1")
+def _registered_task_stubs(root: str, state: str, uv_path: str, runner: str) -> str:
+    """Scheduler cmdlets that answer with both tasks as the installer registers them.
 
-
-    command = textwrap.dedent(
+    Setting `$script:invalid` gives each task a service-account principal instead.
+    """
+    return textwrap.dedent(
         f"""
-        $ErrorActionPreference = 'Stop'
-        $tokens = $null
-        $errors = $null
-        $ast = [System.Management.Automation.Language.Parser]::ParseFile(
-            {ps_literal(str(script))}, [ref]$tokens, [ref]$errors)
-        if ($errors.Count) {{ throw ($errors | Out-String) }}
-        foreach ($name in @(
-            'Get-LLMWikiTimeLimit', 'Get-LLMWikiConfiguredTimeLimit', 'Get-LLMWikiContractLabel',
-            'New-LLMWikiScheduledAction', 'Test-LLMWikiTaskSpec',
-            'Test-LLMWikiScheduledTasks', 'Test-LLMWikiTaskAction', 'Test-LLMWikiTaskSchedule',
-            'Test-LLMWikiTaskIdentity', 'Write-LLMWikiTaskStatus', 'Test-LLMWikiTaskRegistration'
-        )) {{
-            $fn = $ast.Find({{ param($node)
-                $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
-                $node.Name -eq $name
-            }}, $true)
-            if ($null -eq $fn) {{ throw "$name missing" }}
-            Invoke-Expression $fn.Extent.Text
-        }}
         function New-ScheduledTaskAction {{
             param($Execute, $Argument)
             [pscustomobject]@{{ Execute = $Execute; Arguments = $Argument }}
@@ -661,16 +637,60 @@ def test_windows_scheduler_status_accepts_only_the_registered_contract(tmp_path)
                 NextRunTime = [datetime]::MaxValue
             }} }}
         }}
-        $valid = Test-LLMWikiScheduledTasks `
-            -VaultRoot {ps_literal(root)} `
-            -StateRoot {ps_literal(state)} `
-            -UvPath {ps_literal(uv_path)}
+        """
+    )
+
+
+def test_windows_scheduler_status_accepts_only_the_registered_contract(tmp_path):
+    if shutil.which("pwsh") is None:
+        pytest.skip("PowerShell 7 is unavailable")
+    script = ROOT / "scripts" / "install-scheduled-tasks.ps1"
+    root = str(tmp_path / "vault")
+    state = str(tmp_path / "state")
+    uv_path = str(tmp_path / "uv.exe")
+    runner = str(tmp_path / "vault/scripts/run-scheduled-task.ps1")
+
+
+    command = textwrap.dedent(
+        f"""
+        $ErrorActionPreference = 'Stop'
+        $tokens = $null
+        $errors = $null
+        $ast = [System.Management.Automation.Language.Parser]::ParseFile(
+            {ps_literal(str(script))}, [ref]$tokens, [ref]$errors)
+        if ($errors.Count) {{ throw ($errors | Out-String) }}
+        foreach ($name in @(
+            'Get-LLMWikiTimeLimit', 'Get-LLMWikiConfiguredTimeLimit', 'Get-LLMWikiContractLabel',
+            'New-LLMWikiScheduledAction', 'Test-LLMWikiTaskSpec',
+            'Test-LLMWikiScheduledTasks', 'Test-LLMWikiTaskAction', 'Test-LLMWikiTaskSchedule',
+            'Test-LLMWikiTaskIdentity', 'Write-LLMWikiTaskStatus', 'Test-LLMWikiTaskRegistration'
+        )) {{
+            $fn = $ast.Find({{ param($node)
+                $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
+                $node.Name -eq $name
+            }}, $true)
+            if ($null -eq $fn) {{ throw "$name missing" }}
+            Invoke-Expression $fn.Extent.Text
+        }}
+        {_registered_task_stubs(root, state, uv_path, runner)}
+        function Invoke-StatusCheck {{
+            $stream = @(Test-LLMWikiScheduledTasks `
+                -VaultRoot {ps_literal(root)} `
+                -StateRoot {ps_literal(state)} `
+                -UvPath {ps_literal(uv_path)} 6>&1)
+            $records = $stream | Where-Object {{
+                $_ -is [System.Management.Automation.InformationRecord]
+            }}
+            $lines = @($records |
+                ForEach-Object {{ [string]$_.MessageData }})
+            $verdict = @($stream | Where-Object {{ $_ -is [bool] }})[-1]
+            $contract = @($lines | Where-Object {{ $_ -match 'Contract:' }})
+            [pscustomobject]@{{ valid = $verdict; contract = $contract }}
+        }}
+        $valid = Invoke-StatusCheck
         $script:invalid = $true
-        $invalid = Test-LLMWikiScheduledTasks `
-            -VaultRoot {ps_literal(root)} `
-            -StateRoot {ps_literal(state)} `
-            -UvPath {ps_literal(uv_path)}
-        @([bool]$valid, [bool]$invalid) | ConvertTo-Json -Compress
+        $invalid = Invoke-StatusCheck
+        @($valid, $invalid) | ConvertTo-Json -Compress -Depth 4
         """
     )
 
@@ -684,4 +704,56 @@ def test_windows_scheduler_status_accepts_only_the_registered_contract(tmp_path)
     )
 
     assert result.returncode == 0, result.stderr
-    assert json.loads(result.stdout.splitlines()[-1]) == [True, False], result.stdout
+    interactive, service_account = json.loads(result.stdout.splitlines()[-1])
+    assert (interactive["valid"], service_account["valid"]) == (True, False), result.stdout
+    assert {line.split("Contract:", 1)[1].strip() for line in interactive["contract"]} == {
+        "matches the LLM-Wiki contract"
+    }
+    assert {line.split("Contract:", 1)[1].strip() for line in service_account["contract"]} == {
+        "does not match the LLM-Wiki contract"
+    }
+
+
+def test_a_windows_uninstall_under_whatif_unregisters_nothing(tmp_path):
+    """`-WhatIf` reaches every removal: the dry run leaves both tasks, the real run takes both."""
+    if shutil.which("pwsh") is None:
+        pytest.skip("PowerShell 7 is unavailable")
+    script = ps_literal(str(ROOT / "scripts" / "install-scheduled-tasks.ps1"))
+    root = str(tmp_path / "vault")
+    state = str(tmp_path / "state")
+    uv_path = str(tmp_path / "uv.exe")
+    runner = str(tmp_path / "vault/scripts/run-scheduled-task.ps1")
+    paths = " ".join(
+        f"-{name} {ps_literal(value)}"
+        for name, value in (("VaultRoot", root), ("StateRoot", state), ("UvPath", uv_path))
+    )
+
+    command = textwrap.dedent(
+        f"""
+        $ErrorActionPreference = 'Stop'
+        {_registered_task_stubs(root, state, uv_path, runner)}
+        $global:unregistered = [System.Collections.Generic.List[string]]::new()
+        function Unregister-ScheduledTask {{
+            param($TaskName, $Confirm, $ErrorAction)
+            $global:unregistered.Add($TaskName)
+        }}
+        & {script} {paths} -Uninstall -WhatIf 6>$null | Out-Null
+        $dryRun = @($global:unregistered)
+        & {script} {paths} -Uninstall 6>$null | Out-Null
+        @{{ dry_run = $dryRun; real_run = @($global:unregistered) }} | ConvertTo-Json -Compress
+        """
+    )
+
+    result = subprocess.run(
+        [require_tool("pwsh"), "-NoProfile", "-NonInteractive", "-Command", command],
+        capture_output=True,
+        text=True,
+        # pwsh startup alone can take ten seconds on a loaded hosted runner.
+        timeout=120,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    runs = json.loads(result.stdout.splitlines()[-1])
+    both = ["LLMWiki-Nightly", "LLMWiki-Weekly"]
+    assert (runs["dry_run"], sorted(runs["real_run"])) == ([], both)

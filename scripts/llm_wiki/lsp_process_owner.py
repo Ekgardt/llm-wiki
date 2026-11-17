@@ -1138,12 +1138,16 @@ def secure_windows_owner_root(path: Path, deadline: float) -> None:
     _require_owner_only_ace(path, owner_ace, identity)
 
 
+class OwnerAclDeadlineExpired(PermissionError, TimeoutError):
+    """The owner-only ACL could not be confirmed before the caller's deadline."""
+
+
 def _run_windows_owner_acl(
     command: Sequence[str], deadline: float
 ) -> _subprocess.CompletedProcess[bytes]:
     remaining = deadline - time.monotonic()
     if remaining <= 0:
-        raise PermissionError("owner-only LSP ACL deadline expired")
+        raise OwnerAclDeadlineExpired("owner-only LSP ACL deadline expired")
     try:
         result = _subprocess.run(
             list(command),
@@ -1152,7 +1156,9 @@ def _run_windows_owner_acl(
             capture_output=True,
             timeout=remaining,
         )
-    except (OSError, _subprocess.TimeoutExpired) as exc:
+    except _subprocess.TimeoutExpired as exc:
+        raise OwnerAclDeadlineExpired("owner-only LSP ACL command timed out") from exc
+    except OSError as exc:
         raise PermissionError("owner-only LSP ACL command failed") from exc
     _check_acl_output_bound(result)
     return result
