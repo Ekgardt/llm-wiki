@@ -266,10 +266,14 @@ report kept whole up to 8 000 characters. Retention never depends on
 a judgement made before the question exists; the classifier decides only whether
 a session also deserves a compiled page. That directory is private by default
 (`knowledge/raw/**` is denied in `.gitignore`), the record is bounded, and a
-failed write never breaks capture. Session evidence is not yet a member of the
-corpus generation, so it is on disk and greppable but not yet part of hybrid
-retrieval — adding it requires the corpus collector to carry a `session` source
-kind. See `knowledge/notes/session-evidence-retention-decision.md`.
+failed write never breaks capture. Session evidence is deliberately not a member
+of the corpus generation: it is on disk, greppable and read by the nightly
+consolidation, but not part of hybrid retrieval. Indexing 236 past sessions on
+2026-08-24 moved the vault stand from hit@5 0.7 to 0.0 because the transcripts
+crowded the compiled pages out of the candidate pool; a second tier consulted
+when the pages do not answer, or a per-source quota in the pool, would be needed
+first (`scripts/corpus_snapshot.py::_walk_knowledge`). See
+`knowledge/notes/session-evidence-retention-decision.md`.
 
 **Forbidden at vault root:** `wiki/`, `memory/`, `outputs/`, `state/`,
 `LLM-wiki-state/` (legacy sibling layout — removed). Runtime lives **inside**
