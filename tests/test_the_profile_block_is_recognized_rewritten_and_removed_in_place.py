@@ -130,10 +130,11 @@ def test_removing_from_a_profile_without_a_block_changes_nothing(profile: Path) 
     profile.parent.mkdir(parents=True)
     profile.write_bytes(b"untouched")
     profile.chmod(0o640)
+    before = profile.stat().st_mode & 0o777
     resource = _resource(profile)
     resource.write_owned(None)
     assert profile.read_bytes() == b"untouched"
-    assert profile.stat().st_mode & 0o777 == 0o640
+    assert profile.stat().st_mode & 0o777 == before
 
 
 def test_a_block_appended_after_an_unterminated_line_is_removed_with_its_separator(

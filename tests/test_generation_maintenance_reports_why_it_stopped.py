@@ -56,6 +56,7 @@ def test_a_path_that_cannot_be_resolved_is_not_within_a_root(tmp_path: Path) -> 
     assert not generation_maintenance.within(Path("bad\x00name"), tmp_path)
 
 
+@pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="a named pipe needs os.mkfifo")
 def test_each_kind_of_entry_is_named(tmp_path: Path) -> None:
     root = tmp_path / "root"
     root.mkdir()

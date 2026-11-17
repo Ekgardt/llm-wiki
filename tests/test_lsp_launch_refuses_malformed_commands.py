@@ -79,6 +79,7 @@ def test_a_command_with_a_non_string_argument_is_refused(tmp_path: Path) -> None
         lsp_process_launch.validated_command([RESOLVED_INTERPRETER, 3], tmp_path)  # type: ignore[list-item]
 
 
+@pytest.mark.skipif(not Path("/dev/fd").is_dir(), reason="no descriptor filesystem")
 def test_an_inherited_descriptor_path_is_kept_as_the_program(
     tmp_path: Path, interpreter_descriptor: int
 ) -> None:

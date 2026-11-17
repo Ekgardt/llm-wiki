@@ -61,6 +61,9 @@ def test_cron_is_built_with_its_recorded_ownership(recorded: _Recorded, tmp_path
     assert recorded["cron"]["uv_path"] == tmp_path / "uv"
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32", reason="launchd exists only on macOS-style POSIX paths"
+)
 def test_launchd_is_built_in_the_users_launch_agents(recorded: _Recorded, tmp_path: Path) -> None:
     assert _scheduler("launchd", tmp_path).kind == "launchd"
     launchd = recorded["launchd"]

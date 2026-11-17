@@ -103,7 +103,8 @@ def test_the_repair_commands_open_the_candidate_queue_before_adoption(
 def test_a_restore_requeues_the_work_a_purge_exported(roots: tuple[Path, Path]) -> None:
     _, state_root = roots
     exports = state_root / "exports"
-    exports.mkdir(mode=0o700)
+    exports.mkdir()
+    queue_core.harden_owner_only(exports, 0o700)
     task_id = queue_core.default_queue().enqueue("test", 1, {"page": "a"})
     assert queue_core.cancel(task_id) is True
     _age_task(state_root / "run/queue.sqlite3", task_id)

@@ -77,6 +77,7 @@ def _on_windows_with(monkeypatch: pytest.MonkeyPatch, ledger: _HandleLedger) -> 
     monkeypatch.setattr(markdown_targets, "close_windows_handle", ledger.close)
 
 
+@pytest.mark.skipif(os.name == "nt", reason="the refusal is the behaviour off Windows")
 def test_holding_a_windows_parent_is_refused_off_windows(
     coordinator: MarkdownCoordinator, vault: Path
 ) -> None:

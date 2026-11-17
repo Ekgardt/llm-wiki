@@ -1,10 +1,10 @@
 from __future__ import annotations
 
-import importlib
 import os
 import secrets
 import stat
 import subprocess
+import sys
 from collections.abc import Callable, Iterator
 from pathlib import Path
 
@@ -14,6 +14,11 @@ from llm_wiki import integration_transient_files as transient
 from llm_wiki.integration_settings import TRANSIENT_CREATE_ATTEMPTS
 
 IcaclsCall = list[str]
+
+posix_only = pytest.mark.skipif(
+    os.name != "posix",
+    reason="POSIX file modes, directory descriptors and renames of an open file",
+)
 
 
 @pytest.fixture
@@ -90,6 +95,7 @@ def _replace_with_stranger(target: Path) -> None:
     target.write_text("stranger", encoding="utf-8")
 
 
+@posix_only
 def test_a_written_transcript_is_owner_only_and_holds_the_text(
     state_root: Path, envelope: EventEnvelope
 ) -> None:
@@ -101,6 +107,7 @@ def test_a_written_transcript_is_owner_only_and_holds_the_text(
     assert stat.S_IMODE(created.parent.stat().st_mode) == 0o700
 
 
+@posix_only
 def test_a_group_readable_parent_is_tightened_before_writing(
     state_root: Path, envelope: EventEnvelope
 ) -> None:
@@ -112,6 +119,7 @@ def test_a_group_readable_parent_is_tightened_before_writing(
     assert created.read_text(encoding="utf-8") == "text"
 
 
+@posix_only
 def test_a_parent_whose_mode_does_not_hold_is_refused(
     state_root: Path, envelope: EventEnvelope, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -152,6 +160,7 @@ def test_a_directory_replaced_since_it_was_checked_is_refused(tmp_path: Path) ->
         transient._validate_transient_dir(tmp_path, second, first.lstat())
 
 
+@posix_only
 def test_a_parent_descriptor_that_is_not_a_directory_is_refused(tmp_path: Path) -> None:
     regular = tmp_path / "regular"
     regular.write_text("x", encoding="utf-8")
@@ -163,6 +172,7 @@ def test_a_parent_descriptor_that_is_not_a_directory_is_refused(tmp_path: Path) 
         os.close(descriptor)
 
 
+@posix_only
 def test_a_parent_descriptor_of_another_directory_is_refused(tmp_path: Path) -> None:
     opened = tmp_path / "opened"
     expected = tmp_path / "expected"
@@ -176,6 +186,7 @@ def test_a_parent_descriptor_of_another_directory_is_refused(tmp_path: Path) -> 
         os.close(descriptor)
 
 
+@posix_only
 def test_a_transcript_descriptor_that_is_not_a_regular_file_is_refused(tmp_path: Path) -> None:
     descriptor = os.open(tmp_path, os.O_RDONLY | os.O_DIRECTORY)
     info = tmp_path.lstat()
@@ -188,6 +199,7 @@ def test_a_transcript_descriptor_that_is_not_a_regular_file_is_refused(tmp_path:
         os.close(descriptor)
 
 
+@posix_only
 def test_a_write_that_makes_no_progress_leaves_no_transcript(
     state_root: Path, envelope: EventEnvelope, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -199,6 +211,7 @@ def test_a_write_that_makes_no_progress_leaves_no_transcript(
     assert not list(_transient_dir(state_root).iterdir())
 
 
+@posix_only
 def test_a_transcript_swapped_during_the_write_is_refused_and_the_stranger_kept(
     state_root: Path, envelope: EventEnvelope, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -220,6 +233,7 @@ def test_a_transcript_swapped_during_the_write_is_refused_and_the_stranger_kept(
     assert (_transient_dir(state_root) / name).read_text(encoding="utf-8") == "stranger"
 
 
+@posix_only
 def test_every_name_taken_ends_the_posix_attempts(
     state_root: Path, envelope: EventEnvelope, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -231,6 +245,7 @@ def test_every_name_taken_ends_the_posix_attempts(
         transient.write_transient_transcript(envelope, "text")
 
 
+@posix_only
 def test_an_unlink_of_an_unopened_transcript_does_nothing(tmp_path: Path) -> None:
     kept = tmp_path / "kept.txt"
     kept.write_text("kept", encoding="utf-8")
@@ -248,6 +263,7 @@ def test_a_missing_file_is_not_the_opened_one(tmp_path: Path) -> None:
     assert transient._same_file(tmp_path / "missing", tmp_path.lstat()) is False
 
 
+@posix_only
 def test_a_missing_name_under_a_directory_is_not_the_opened_one(tmp_path: Path) -> None:
     descriptor = os.open(tmp_path, os.O_RDONLY | os.O_DIRECTORY)
     try:
@@ -256,6 +272,7 @@ def test_a_missing_name_under_a_directory_is_not_the_opened_one(tmp_path: Path) 
         os.close(descriptor)
 
 
+@posix_only
 def test_posix_permissions_are_owner_read_and_write(tmp_path: Path) -> None:
     target = tmp_path / "file"
     target.write_text("x", encoding="utf-8")
@@ -406,12 +423,14 @@ def test_a_final_windows_path_loses_its_extended_prefix(raw: str, expected: str)
     assert str(transient._normalize_windows_path(raw)) == expected
 
 
-def test_no_final_path_is_read_off_windows() -> None:
+def test_no_final_path_is_read_off_windows(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(os, "name", "posix")
+
     assert transient._windows_path_from_fd(0) is None
 
 
 def test_no_final_path_without_the_windows_api(monkeypatch: pytest.MonkeyPatch) -> None:
-    importlib.import_module("ctypes")
+    monkeypatch.setitem(sys.modules, "msvcrt", None)
     monkeypatch.setattr(os, "name", "nt")
 
     assert transient._windows_path_from_fd(0) is None

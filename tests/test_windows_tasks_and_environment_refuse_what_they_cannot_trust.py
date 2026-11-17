@@ -57,7 +57,10 @@ def _task_resource(roots: _Roots, answers: list[_Answer]) -> ManagedResource:
     )
 
 
-def test_the_user_environment_is_unavailable_off_windows(roots: _Roots) -> None:
+def test_the_user_environment_is_unavailable_off_windows(
+    roots: _Roots, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(install_windows.sys, "platform", "linux")
     resource = install_windows.windows_environment_resources(roots.root, roots.state_root)[0]
     with pytest.raises(InstallControlError, match="install_windows_environment_unavailable"):
         resource.read_owned()

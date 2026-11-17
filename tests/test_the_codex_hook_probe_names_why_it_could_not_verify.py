@@ -171,7 +171,7 @@ def _stop_template(handler: object) -> dict[str, object]:
         {"hooks": []},
         {"hooks": {"Stop": {}}},
         _stop_template("not an object"),
-        _stop_template({"commandWindows": "cmd"}),
+        _stop_template({"type": "command"}),
     ],
     ids=["not-an-object", "hooks-not-a-table", "groups-not-a-list", "handler-text", "no-command"],
 )
@@ -187,7 +187,7 @@ def test_a_rendered_template_with_a_non_text_event_is_refused(
         return {"hooks": {1: []}}
 
     monkeypatch.setattr(integration_hook_config, "codex_rendered_template", rendered)
-    path = _template(tmp_path, _stop_template({"command": "cmd"}))
+    path = _template(tmp_path, _stop_template({"command": "cmd", "commandWindows": "cmd"}))
     with pytest.raises(ValueError, match="invalid Codex hook template"):
         integrations.expected_codex_runtime_hooks(path, {"provider": "fake"})
 
@@ -226,7 +226,7 @@ def test_hooks_without_their_template_are_refused(tmp_path: Path) -> None:
 
 
 def test_a_different_number_of_our_hooks_than_the_template_is_a_mismatch(tmp_path: Path) -> None:
-    _template(tmp_path, _stop_template({"command": "cmd"}))
+    _template(tmp_path, _stop_template({"command": "cmd", "commandWindows": "cmd"}))
     assert integrations.codex_hooks_verdict(tmp_path, []) == (False, "runtime_hooks_mismatch")
 
 

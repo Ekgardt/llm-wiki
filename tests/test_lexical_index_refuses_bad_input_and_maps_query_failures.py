@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib
+import os
 import sqlite3
 import time
 from collections.abc import Iterator
@@ -9,6 +10,11 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
+
+posix_files = pytest.mark.skipif(
+    os.name != "posix",
+    reason="descriptor filesystems and replacing an open file exist only on POSIX",
+)
 
 helpers = importlib.import_module("tests.retrieval_v2_helpers")
 lexical = importlib.import_module("retrieval_v2_sqlite_lexical")
@@ -111,6 +117,7 @@ def test_without_a_descriptor_filesystem_the_index_is_opened_by_its_verified_pat
     assert adapter.path.exists()
 
 
+@posix_files
 def test_a_descriptor_uri_sqlite_cannot_open_falls_back_to_a_clean_owned_file(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -134,6 +141,7 @@ def test_a_descriptor_uri_sqlite_cannot_open_falls_back_to_a_clean_owned_file(
     assert [item.evidence_id for item in ranked] == ["two"]
 
 
+@posix_files
 def test_a_replaced_index_file_is_detected_as_a_changed_path(tmp_path: Path) -> None:
     adapter = _adapter(tmp_path)
     adapter.path.unlink()
@@ -219,6 +227,7 @@ def test_a_build_that_starts_past_its_deadline_leaves_no_index(tmp_path: Path) -
     assert [path.name for path in tmp_path.iterdir()] == []
 
 
+@posix_files
 def test_a_descriptor_opened_read_only_is_closed_and_the_owned_file_is_reopened(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -254,6 +263,7 @@ def _hide_descriptor_filesystems(tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     monkeypatch.setattr(lexical, "Path", path_without_descriptor_filesystems)
 
 
+@posix_files
 def test_an_index_replaced_while_it_is_being_opened_is_refused_and_kept(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

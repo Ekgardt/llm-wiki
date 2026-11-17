@@ -63,6 +63,7 @@ def test_a_missing_path_never_has_the_expected_identity(tmp_path: Path) -> None:
     assert outputs.same_path_identity(tmp_path, identity) is True
 
 
+@pytest.mark.skipif(os.name == "nt", reason="Windows cannot open a directory as a descriptor")
 def test_a_descriptor_of_another_directory_is_refused(tmp_path: Path) -> None:
     (tmp_path / "other").mkdir()
     descriptor = os.open(tmp_path / "other", os.O_RDONLY)

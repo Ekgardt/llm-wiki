@@ -1,9 +1,9 @@
 from __future__ import annotations
 
-import stat
 import time
 from pathlib import Path
 
+import compile_cache
 import pytest
 from llm_wiki.pyright_session_paths import (
     ensure_lsp_parent,
@@ -69,7 +69,7 @@ def test_the_lsp_parent_is_created_owner_only_under_the_state_root(tmp_path: Pat
     parent = ensure_lsp_parent(tmp_path, deadline=_deadline())
 
     assert parent == tmp_path / "run" / "lsp"
-    assert stat.S_IMODE(parent.stat().st_mode) == 0o700
+    assert compile_cache.is_owner_only(parent, 0o700)
 
 
 def test_an_existing_lsp_parent_is_reused(tmp_path: Path) -> None:

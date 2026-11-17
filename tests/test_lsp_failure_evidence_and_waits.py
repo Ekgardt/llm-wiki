@@ -297,7 +297,10 @@ def test_windows_needs_an_existing_system_root(
         lsp_process_state.lsp_environment(inherited)
 
 
-def test_a_profile_environment_is_added_after_the_allowlist() -> None:
+def test_a_profile_environment_is_added_after_the_allowlist(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(os, "name", "posix")
     environment = lsp_process_state.lsp_environment(
         {"PATH": "/usr/bin", "SECRET_TOKEN": "x"}, {"GOFLAGS": "-mod=mod"}
     )
@@ -305,7 +308,8 @@ def test_a_profile_environment_is_added_after_the_allowlist() -> None:
     assert environment == {"PATH": "/usr/bin", "GOFLAGS": "-mod=mod"}
 
 
-def test_a_profile_environment_with_a_nul_is_refused() -> None:
+def test_a_profile_environment_with_a_nul_is_refused(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(os, "name", "posix")
     with pytest.raises(ValueError, match="must not contain NUL"):
         lsp_process_state.lsp_environment({"PATH": "/usr/bin"}, {"GOFLAGS": "bad\0"})
 

@@ -91,7 +91,10 @@ def test_a_target_without_its_before_image_is_left_applied(
     assert (vault / _NOTE).read_bytes() == b"after\n"
 
 
-@pytest.mark.skipif(os.geteuid() == 0, reason="root ignores directory permissions")
+@pytest.mark.skipif(
+    os.name != "posix" or os.geteuid() == 0,
+    reason="needs POSIX permissions that bind the caller; root ignores them",
+)
 def test_a_target_that_cannot_be_written_back_is_left_applied(
     coordinator: MarkdownCoordinator, vault: Path, applied: str, locked_notes: Path
 ) -> None:

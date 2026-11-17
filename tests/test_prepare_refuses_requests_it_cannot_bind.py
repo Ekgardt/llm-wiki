@@ -142,11 +142,12 @@ def test_stage_directories_are_not_hardened_on_windows(
     stage = tmp_path / "stage"
     stage.mkdir(mode=0o755)
     stage.chmod(0o755)
+    before = stat.S_IMODE(stage.stat().st_mode)
     monkeypatch.setattr(markdown_prepare, "os", _WindowsNamedOs())
 
     markdown_prepare._harden_stage_roots(stage)
 
-    assert stat.S_IMODE(stage.stat().st_mode) == 0o755
+    assert stat.S_IMODE(stage.stat().st_mode) == before
 
 
 def test_stage_roots_that_cannot_be_made_are_removed_whole(

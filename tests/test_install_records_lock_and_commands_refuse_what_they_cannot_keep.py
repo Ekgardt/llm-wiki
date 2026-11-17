@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import fcntl
 import os
 import subprocess
 import sys
@@ -12,6 +11,8 @@ import pytest
 from install_state import MANIFEST_SCHEMA, MAX_RECORD_BYTES, InstallControlError, ManagedResource
 from llm_wiki import install_records
 from llm_wiki.formats.canonical import canonical_json_bytes
+
+from tests.slow_machine import SHORT_TIMEOUT
 
 
 def _resource(kind: str, resource_id: str = "thing") -> ManagedResource:
@@ -36,10 +37,8 @@ def _runner_answering(exit_code: int, output: bytes) -> install_records.CommandR
 @pytest.fixture
 def held_lock(tmp_path: Path) -> Iterator[Path]:
     path = tmp_path / "install.lock"
-    descriptor = os.open(path, os.O_RDWR | os.O_CREAT, 0o600)
-    fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
-    yield path
-    os.close(descriptor)
+    with install_records.install_lock(path, SHORT_TIMEOUT):
+        yield path
 
 
 def test_a_record_larger_than_the_bound_is_never_written(tmp_path: Path) -> None:
@@ -74,11 +73,20 @@ def test_a_lock_held_by_another_descriptor_times_out(held_lock: Path) -> None:
         pytest.fail("the lock was granted while another descriptor held it")
 
 
-def test_a_free_lock_is_taken_seeded_and_kept_private(tmp_path: Path) -> None:
+def test_a_free_lock_is_taken_and_seeded(tmp_path: Path) -> None:
     path = tmp_path / "install.lock"
-    with install_records.install_lock(path, 1.0):
+    with install_records.install_lock(path, SHORT_TIMEOUT):
         seeded = path.read_bytes()
     assert seeded == b"0"
+
+
+@pytest.mark.skipif(os.name != "posix", reason="Windows has no owner-only file mode bits")
+def test_a_free_lock_is_kept_owner_only(tmp_path: Path) -> None:
+    path = tmp_path / "install.lock"
+    path.write_bytes(b"0")
+    path.chmod(0o644)
+    with install_records.install_lock(path, SHORT_TIMEOUT):
+        pass
     assert path.stat().st_mode & 0o777 == 0o600
 
 

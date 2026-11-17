@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import sqlite3
 import time
 from contextlib import closing
@@ -42,6 +43,10 @@ def test_an_unknown_scope_or_a_missing_tree_collects_nothing(tmp_path: Path) -> 
     assert generation_search.collect_pages("all", knowledge_dir=missing) == []
 
 
+@pytest.mark.skipif(
+    os.name != "posix" or os.geteuid() == 0,
+    reason="needs POSIX permissions that bind the caller; root ignores them",
+)
 def test_an_unreadable_subdirectory_is_skipped(vault: Path) -> None:
     _page(_notes(vault), "lantern.md")
     locked = _notes(vault) / "locked"

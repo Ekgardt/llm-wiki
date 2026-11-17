@@ -18,6 +18,11 @@ from markdown_transaction import MarkdownChange, MarkdownCoordinator
 
 _NOTE = "knowledge/notes/page.md"
 
+posix_directory_descriptors = pytest.mark.skipif(
+    not markdown_targets.use_posix_dir_fd(),
+    reason="operations at a parent descriptor exist only where directories open as descriptors",
+)
+
 
 class _MutationKernel32:
     def __init__(self, handle: object) -> None:
@@ -74,6 +79,7 @@ def _after_plan(coordinator: MarkdownCoordinator, row: sqlite3.Row) -> dict[str,
     return entry
 
 
+@posix_directory_descriptors
 def test_a_create_over_a_file_that_appeared_is_a_before_mismatch(
     directory: tuple[Path, int],
 ) -> None:
@@ -87,6 +93,7 @@ def test_a_create_over_a_file_that_appeared_is_a_before_mismatch(
     assert (folder / "page.md").read_bytes() == b"someone else"
 
 
+@posix_directory_descriptors
 def test_a_delete_of_a_file_that_vanished_is_a_before_mismatch(
     coordinator: MarkdownCoordinator, vault: Path, directory: tuple[Path, int]
 ) -> None:
@@ -97,6 +104,7 @@ def test_a_delete_of_a_file_that_vanished_is_a_before_mismatch(
         coordinator._unlink_at_parent(row, vault / "absent.md", descriptor)
 
 
+@posix_directory_descriptors
 def test_a_file_created_in_a_parent_that_vanished_is_a_boundary_failure(
     directory: tuple[Path, int],
 ) -> None:

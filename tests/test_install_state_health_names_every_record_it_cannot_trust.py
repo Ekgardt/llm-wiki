@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import json
+import os
 from collections.abc import Iterator
 from pathlib import Path
 
@@ -98,7 +99,7 @@ def v2(tmp_path: Path) -> Path:
 
 
 @pytest.fixture
-def unlocked_run(tmp_path: Path) -> Iterator[Path]:
+def uninspectable_state(tmp_path: Path) -> Iterator[Path]:
     run = tmp_path / "state" / "run"
     (run / "install").mkdir(parents=True)
     run.chmod(0o000)
@@ -123,8 +124,12 @@ def test_an_install_root_that_is_a_file_is_corrupt(tmp_path: Path) -> None:
     assert validate_install_state(tmp_path) == _CORRUPT
 
 
-def test_an_install_root_that_cannot_be_inspected_is_corrupt(unlocked_run: Path) -> None:
-    assert validate_install_state(unlocked_run) == _CORRUPT
+@pytest.mark.skipif(
+    os.name != "posix" or os.geteuid() == 0,
+    reason="needs POSIX permissions that bind the caller; root ignores them",
+)
+def test_an_install_root_that_cannot_be_inspected_is_corrupt(uninspectable_state: Path) -> None:
+    assert validate_install_state(uninspectable_state) == _CORRUPT
 
 
 def test_an_install_root_with_only_its_scaffolding_is_absent(tmp_path: Path) -> None:
