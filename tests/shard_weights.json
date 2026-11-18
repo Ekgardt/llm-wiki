@@ -478,6 +478,7 @@
   "test_graph_neighbors.py": 2.05,
   "test_graph_query.py": 0.03,
   "test_graph_retrieval.py": 0.33,
+  "test_graph_rows_obey_the_search_filters.py": 0.07,
   "test_grounded_qa.py": 0.67,
   "test_grounded_qa_errors.py": 0.01,
   "test_guardrails.py": 3.29,
