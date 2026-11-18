@@ -1026,14 +1026,13 @@ def _row_trace(row: Mapping[str, object]) -> dict[str, object]:
     return _reported_trace({**row, "corpus_generation": row.get("generation")})
 
 
-def _unreported_trace(query: str) -> dict[str, object]:
+def _unreported_trace() -> dict[str, object]:
     """Nothing reported a trace: say so, and never guess a generation."""
-    from retrieval import planned_profile
+    from retrieval import PLANNED_PROFILE
 
-    requested = planned_profile(query)
     return _reported_trace(
         {
-            "requested_mode": requested,
+            "requested_mode": PLANNED_PROFILE,
             "effective_mode": "BASE",
             "fallback_reason": "trace_unavailable",
             "partial": True,
@@ -1048,7 +1047,7 @@ def _carries_trace(mapping: object, *, generation_key: str) -> bool:
 
 
 def _retrieval_trace(
-    query: str, results: list[dict], reported: Mapping[str, object] | None = None
+    results: list[dict], reported: Mapping[str, object] | None = None
 ) -> dict[str, object]:
     """The planner trace: reported by the search itself, else recovered from rows.
 
@@ -1061,7 +1060,7 @@ def _retrieval_trace(
     elif results and _carries_trace(results[0], generation_key="generation"):
         trace = _row_trace(results[0])
     else:
-        trace = _unreported_trace(query)
+        trace = _unreported_trace()
     from reliable_memory import validate_schema
 
     validate_schema(trace, RETRIEVAL_TRACE_SCHEMA)
@@ -5605,8 +5604,8 @@ def _is_memory_path(relative: str) -> bool:
 def _requested_signals(trace: dict) -> tuple[str, ...]:
     """The signals the requested mode declares, and any that ran besides.
 
-    Graph is not 'missing' when never asked for; dense that a planned GRAPH run
-    added is reported, not dropped.
+    Graph is not 'missing' when never asked for; a signal a caller planned beside
+    its profile is reported, not dropped.
     """
     from retrieval import PROFILE_SIGNALS
 
@@ -5807,7 +5806,7 @@ def _tool_recall(arguments: dict, deadline: float):
         deadline=deadline,
         trace_sink=reported,
     )
-    trace = _retrieval_trace(arguments["query"], results, reported)
+    trace = _retrieval_trace(results, reported)
     data = {
         "results": [_agent_row(row) for row in results],
         "retrieval_trace": trace,
@@ -5867,7 +5866,7 @@ def _tool_get_decisions(arguments: dict, deadline: float):
     )
     data = {
         "results": results,
-        "retrieval_trace": _retrieval_trace(query or "decision", results, reported),
+        "retrieval_trace": _retrieval_trace(results, reported),
         "_meta": _call_with_deadline(_meta, deadline=deadline),
     }
     return data, limit_clamped

@@ -185,7 +185,7 @@ uv run python scripts/mcp_http.py --port 8931
 
 **会说明自己如何作答的搜索。** 以词法搜索（BM25）为基础；`hybrid` 扩展加入多语言
 向量（ONNX Runtime 上的 `intfloat/multilingual-e5-small`）和 cross-encoder reranker
-（`BAAI/bge-reranker-v2-m3`），关系类问题还会用到证据图。排序会考虑说法的来源（你、
+（`BAAI/bge-reranker-v2-m3`），每次搜索也会查询证据图。排序会考虑说法的来源（你、
 网络、模型、推测）以及它所在页面的类型。每个回答都报告请求的模式、实际使用的信号
 以及回退原因。在第一个索引建成之前，搜索直接读取 Markdown，并如实说明。
 

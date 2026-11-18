@@ -6,8 +6,8 @@ Measured on the live vault on 2026-08-26 and fixed in the same pass:
      one second, so no caller that passed a deadline could ever use it.
   2. `retrieve_via_search_memory` never resolved a query encoder, so the entry
      point the grounded answer uses got `generation_vectors_unavailable`.
-  3. A bare `после` / `after` routed a topic question to `TEMPORAL`, which
-     declares no dense signal at all.
+  3. A bare `after` routed a topic question to `TEMPORAL`, which declares no
+     dense signal at all. Since 2026-11-17 no wording picks a profile.
   4. The grounded answer passed its answer size as `max_candidates`, a resource
      cap on each backend's pool, collapsing the pool to the answer size.
 
@@ -22,30 +22,15 @@ import pytest
 from tests.slow_machine import LONG_TIMEOUT
 
 
-def test_a_bare_preposition_is_not_a_time_window() -> None:
-    """`после` in a topic name is sequence, not a date filter."""
-    from retrieval import analyze_query
-
-    analysis = analyze_query("как устроен повтор после карантина")
-
-    assert analysis.recommended_profile == "HYBRID"
-    assert "temporal" not in analysis.intents
-
-
 @pytest.mark.parametrize(
     "question",
-    [
-        "decisions since 2025-01-01",
-        "решения с 2025-01-01",
-        "自 2025-01-01 以来的决策",
-        "what changed after 2026-01-01",
-    ],
+    ["how retry works after quarantine", "what changed after 2026-01-01"],
 )
-def test_an_anchored_preposition_is_still_a_time_window(question: str) -> None:
-    """Every pinned temporal case names a real time expression, and still routes."""
-    from retrieval import analyze_query
+def test_a_preposition_never_takes_the_dense_leg_away(question: str) -> None:
+    """No wording plans a run without dense: every unnamed search runs every leg."""
+    from retrieval import planned_request
 
-    assert analyze_query(question).recommended_profile == "TEMPORAL"
+    assert "dense" in planned_request(None, semantic=True)[1]
 
 
 def test_an_optional_stage_may_outlast_a_warm_dense_leg() -> None:

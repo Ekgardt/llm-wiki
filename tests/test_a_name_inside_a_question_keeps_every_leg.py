@@ -31,13 +31,13 @@ QUESTIONS_WITH_A_NAME = (
 
 
 @pytest.mark.parametrize("question", QUESTIONS_WITH_A_NAME)
-def test_a_question_holding_a_name_runs_hybrid(question: str) -> None:
+def test_a_question_holding_a_name_is_not_a_lookup(question: str) -> None:
     from retrieval import analyze_query
 
-    analysis = analyze_query(question)
+    intents = analyze_query(question).intents
 
-    assert "exact_identifier" in analysis.intents
-    assert analysis.recommended_profile == "HYBRID"
+    assert "exact_identifier" in intents
+    assert "identifier_lookup" not in intents
 
 
 LOOKUPS = (
@@ -95,13 +95,15 @@ def _retrieved_with_a_reversing_reranker(
         _hit("c-named", "knowledge/notes/queue-notes.md"),
         _hit("c-other", "knowledge/notes/x.md"),
     ]
-    profile = retrieval.planned_profile(query)
+    profile, signals = retrieval.planned_request(None, semantic=True)
     result = retrieval.retrieve(
         query,
         requested_profile=profile,
+        signals=signals,
         limit=2,
         lexical_backend=lambda **_kwargs: hits,
         dense_backend=lambda **_kwargs: hits,
+        graph_backend=lambda **_kwargs: [],
         rerank_enabled=True,
         corpus_generation="gen-lookup",
     )
@@ -243,7 +245,7 @@ def test_a_benchmark_question_is_retrieved_unplanned_and_reported_as_planned(
     record = harness.run_question(QUESTION, tmp_path)
 
     assert [profile for _, profile in asked] == [None]
-    assert record["profile"] == "HYBRID"
+    assert record["profile"] == "GLOBAL"
 
 
 def test_retrieval_only_coverage_reads_the_dated_question_without_a_profile(
@@ -276,20 +278,11 @@ def test_a_consolidation_arm_lets_retrieval_plan_the_legs(
     record = consolidation_vault.run_arm(QUESTION, tmp_path, tmp_path)
 
     assert asked == [(QUESTION["question"], None)]
-    assert record["profile"] == "HYBRID"
+    assert record["profile"] == "GLOBAL"
 
 
-@pytest.mark.parametrize(
-    ("question", "profile"),
-    [
-        ("decisions since 2025-01-01", "HYBRID"),
-        ("what depends on search_memory", "GRAPH"),
-        ("How many shirts did I pack for my 5-day trip?", "HYBRID"),
-    ],
-)
-def test_the_reported_profile_is_the_one_that_runs(question: str, profile: str) -> None:
+def test_the_reported_profile_is_the_one_that_runs() -> None:
     import longmemeval_vault
-    from retrieval import planned_profile
+    from retrieval import planned_request
 
-    assert planned_profile(question) == profile
-    assert longmemeval_vault.profile_for(question) == profile
+    assert longmemeval_vault.planned_profile() == planned_request(None, semantic=True)[0]

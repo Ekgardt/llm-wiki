@@ -1025,7 +1025,7 @@ class TestHelperFunctions:
         _assert_degraded_search_budget(calls)
         _assert_degraded_result_row(results[0])
         _assert_degraded_trace(
-            results[0], mcp_server._retrieval_trace("test", results)
+            results[0], mcp_server._retrieval_trace(results)
         )
 
     def test_search_vault_reuses_caller_operation_deadline(self, monkeypatch):

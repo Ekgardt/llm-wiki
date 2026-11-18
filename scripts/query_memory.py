@@ -1737,7 +1737,7 @@ def grounded_qa(
     _require_bounded_question(question)
     selected_deadline = _resolved_deadline(deadline)
     _check_deadline(selected_deadline)
-    selected_profile = _resolved_profile(profile, question)
+    selected_profile = _resolved_profile(profile)
     fetch = _resolved_retriever(retrieve, candidates, question, profile, selected_deadline)
     seek = _resolved_search(
         search, candidates is not None or retrieve is not None, profile, selected_deadline
@@ -2414,18 +2414,17 @@ def _resolved_deadline(deadline: float | None) -> float:
     return time.monotonic() + QA_DEADLINE_SECONDS
 
 
-def _resolved_profile(profile: str | None, question: str) -> str:
+def _resolved_profile(profile: str | None) -> str:
     """The profile the answer is built and reported under.
 
     Retrieval is given the caller's own choice, which is usually none, so that
-    it plans the legs itself; see `retrieval.planned_profile`.
+    it plans the legs itself; see `retrieval.planned_request`.
     """
-    from retrieval import planned_profile
+    from retrieval import PLANNED_PROFILE
 
     if profile is not None:
         return profile.upper()
-    planned: str = planned_profile(question)
-    return planned
+    return PLANNED_PROFILE
 
 
 def _resolved_candidates(

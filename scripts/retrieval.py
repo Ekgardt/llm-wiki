@@ -392,6 +392,10 @@ PROFILE_SIGNALS: dict[str, tuple[str, ...]] = {
     "CACHED_FULL": ("lexical",),
 }
 
+# The profile a search runs when its caller names none: lexical, dense and
+# graph, then the cross-encoder. See `planned_request`.
+PLANNED_PROFILE = "GLOBAL"
+
 RRF_K = 60
 # A short answer needs a long candidate pool: several chunks of one page are
 # one answer repeated, and only a pool wider than the answer can hold the
@@ -495,81 +499,6 @@ _CAMEL_RE = re.compile(r"\b(?P<camel>[A-Z][a-z0-9]+(?:[A-Z][a-z0-9]+)+)\b")
 # other letter is a word of a sentence.
 _MEMBER_RE = re.compile(r"(?<!\w)(?:\.|::|->|#)\w+")
 _SENTENCE_WORD_RE = re.compile(r"[^\W\d_]")
-_QUESTION_RE = re.compile(
-    r"(?:"
-    r"^(?P<q_en>who|what|when|where|why|how|which|does|do|is|are|can|should)\b"
-    r"|^(?P<q_ru>кто|что|когда|где|почему|зачем|как|какой|какая|какие|какое)\b"
-    r"|^(?P<q_zh>谁|什么|何时|哪里|哪儿|为什么|怎么|如何|哪)"
-    r"|[?？]"
-    r")",
-    re.IGNORECASE,
-)
-# What may follow a relational preposition and make it about time.
-_WHEN = (
-    r"(?:\d{4}(?:-\d{2}(?:-\d{2})?)?"
-    r"|yesterday|today|tomorrow|now"
-    r"|вчера|сегодня|завтра|сейчас)"
-)
-# A relational preposition is temporal only when something temporal follows it.
-# `после` and `after` are ordinary sequence words, and reading them alone as a
-# time window costs the answer: measured on this vault, "как устроен повтор
-# после карантина" was routed to TEMPORAL, TEMPORAL declares no dense signal,
-# so the grounded answer never asked the vectors. Retrieval returned six lexical
-# rows — four of them the same status document, none of them the decision page
-# the vault holds — and the provider honestly reported insufficient evidence.
-# Every other alternative in this group was already anchored to a real time
-# expression; these prepositions were the ones that were not.
-_TEMPORAL_RE = re.compile(
-    r"(?:"
-    r"\b(?P<t_en_anchored>since|before|after|until|as of|from)\s+" + _WHEN + r"\b"
-    r"|\b(?P<t_en>yesterday|today|last week|last month|last year"
-    r"|in \d{4}|from \d{4}|between \d{4})\b"
-    r"|(?P<t_ru_anchored>(?:с|со|после|до|от)\s+" + _WHEN + r")"
-    r"|(?P<t_ru>вчера|сегодня|на этой неделе)"
-    r"|(?P<t_zh>自\s*\d{4}|以来|自从)"
-    r")",
-    re.IGNORECASE,
-)
-_GRAPH_RE = re.compile(
-    r"(?:"
-    r"\b(?P<g_en>depends on|depended on|dependency|dependencies|calls|callers|"
-    r"callees|related to|linked to|neighbors?|imports?|imported by)\b"
-    r"|(?P<g_ru>зависит|зависимости|связан)"
-    r"|(?P<g_zh>依赖|什么依赖|相关联)"
-    r")",
-    re.IGNORECASE,
-)
-_REPO_MAP_RE = re.compile(
-    r"(?:"
-    r"\b(?P<r_en>repo map|repository map|codebase map|architecture overview|"
-    r"project structure|directory structure)\b"
-    r"|(?P<r_ru>карт[ауи]\s+репозитори[яию]|структур[аыу]\s+проекта)"
-    r"|(?P<r_zh>仓库地图|显示仓库地图|项目结构)"
-    r")",
-    re.IGNORECASE,
-)
-_IMPACT_RE = re.compile(
-    r"(?:"
-    r"\b(?P<i_en>impact of|what breaks|affected by|blast radius|stale wiki|"
-    r"downstream impact)\b"
-    r"|(?P<i_ru>влияние|что сломается)"
-    r"|(?P<i_zh>影响|的影响)"
-    r")",
-    re.IGNORECASE,
-)
-_GLOBAL_RE = re.compile(
-    r"(?:"
-    r"\b(?P<s_en>synthesize|synthesis|across all projects|across projects|"
-    r"overall architecture|compare across|global overview)\b"
-    r"|(?P<s_ru>синтез|глобальный обзор)"
-    r"|(?P<s_zh>跨项目|综合架构|全局概览)"
-    r")",
-    re.IGNORECASE,
-)
-_CROSS_LANG_RE = re.compile(
-    r"(?:[\u0400-\u04FF].*[A-Za-z]|[A-Za-z].*[\u0400-\u04FF]|"
-    r"[\u4e00-\u9fff].*[A-Za-z]|[A-Za-z].*[\u4e00-\u9fff])"
-)
 
 
 @dataclass(frozen=True)
@@ -579,7 +508,6 @@ class QueryAnalysis:
     intents: tuple[str, ...]
     exact_identifiers: tuple[str, ...]
     quoted_phrases: tuple[str, ...]
-    recommended_profile: str
 
 
 @dataclass(frozen=True)
@@ -596,8 +524,8 @@ class RetrievalTrace:
     reranker_depth: int | None = None
     reranker_duration_ms: int | None = None
     reranker_fallback_reason: str | None = None
-    # The signals the run asked for. A planned GRAPH run adds dense to what its
-    # profile declares, so the profile alone cannot say a dense leg went missing
+    # The signals the run asked for: a caller may plan other signals than its
+    # profile declares, so the profile alone cannot say a leg went missing
     # (audit 2026-09-26 C-10).
     signals_requested: tuple[str, ...] = ()
 
@@ -653,27 +581,6 @@ def _normalize_profile(value: str | None) -> str | None:
     return normalized
 
 
-_INTENT_PATTERNS = (
-    ("temporal", _TEMPORAL_RE),
-    ("graph_relation", _GRAPH_RE),
-    ("repo_map", _REPO_MAP_RE),
-    ("impact", _IMPACT_RE),
-    ("global_synthesis", _GLOBAL_RE),
-)
-
-# First match wins; the order is the priority the planner promises.
-_PROFILE_BY_INTENT = (
-    ("global_synthesis", "GLOBAL"),
-    ("impact", "IMPACT"),
-    ("repo_map", "REPO_MAP"),
-    ("graph_relation", "GRAPH"),
-    ("temporal", "TEMPORAL"),
-    ("quoted_phrase", "EXACT"),
-    ("identifier_lookup", "EXACT"),
-    ("question", "HYBRID"),
-)
-
-
 def _quoted_phrases(stripped: str) -> tuple[str, ...]:
     return tuple(
         match.group(1).strip()
@@ -705,12 +612,6 @@ def _exact_identifiers(stripped: str) -> tuple[str, ...]:
     return tuple(dict.fromkeys(identifiers))
 
 
-def _is_question(stripped: str, normalized: str) -> bool:
-    if _QUESTION_RE.search(normalized):
-        return True
-    return stripped.endswith("?") or stripped.endswith("？")
-
-
 def _without_names(normalized: str, identifiers: tuple[str, ...]) -> str:
     """The query with every name taken out, longest first so a path goes whole."""
     rest = normalized
@@ -737,37 +638,21 @@ def _is_identifier_lookup(normalized: str, identifiers: tuple[str, ...]) -> bool
     return _SENTENCE_WORD_RE.search(rest) is None
 
 
-def _shape_intents(
-    stripped: str, normalized: str, phrases: tuple[str, ...], identifiers: tuple[str, ...]
-) -> list[str]:
-    """Intents that come from the query's shape rather than its wording."""
+def _query_intents(
+    normalized: str, phrases: tuple[str, ...], identifiers: tuple[str, ...]
+) -> tuple[str, ...]:
+    """What the query's shape says: a quoted phrase, a name, or nothing but names.
+
+    The wording never decides anything: every search runs every leg it has, and
+    the cross-encoder orders what they found
+    (docs/research/2026-11-17-every-search-runs-every-leg.md).
+    """
     present = (
         (bool(phrases), "quoted_phrase"),
         (bool(identifiers), "exact_identifier"),
         (_is_identifier_lookup(normalized, identifiers), "identifier_lookup"),
-        (_is_question(stripped, normalized), "question"),
     )
-    return [intent for found, intent in present if found]
-
-
-def _query_intents(
-    stripped: str, normalized: str, phrases: tuple[str, ...], identifiers: tuple[str, ...]
-) -> tuple[str, ...]:
-    intents = _shape_intents(stripped, normalized, phrases, identifiers)
-    intents.extend(
-        name for name, pattern in _INTENT_PATTERNS if pattern.search(normalized)
-    )
-    if _CROSS_LANG_RE.search(stripped):
-        intents.append("cross_language")
-    return tuple(intents)
-
-
-def _recommended_profile(intents: tuple[str, ...]) -> str:
-    intent_set = set(intents)
-    for intent, profile in _PROFILE_BY_INTENT:
-        if intent in intent_set:
-            return profile
-    return "BASE"
+    return tuple(intent for found, intent in present if found)
 
 
 def analyze_query(query: str) -> QueryAnalysis:
@@ -778,14 +663,12 @@ def analyze_query(query: str) -> QueryAnalysis:
     normalized = " ".join(stripped.split())
     phrases = _quoted_phrases(stripped)
     identifiers = _exact_identifiers(stripped)
-    intents = _query_intents(stripped, normalized, phrases, identifiers)
     return QueryAnalysis(
         query=stripped,
         normalized_query=normalized,
-        intents=intents,
+        intents=_query_intents(normalized, phrases, identifiers),
         exact_identifiers=identifiers,
         quoted_phrases=phrases,
-        recommended_profile=_recommended_profile(intents),
     )
 
 
@@ -1793,7 +1676,7 @@ def _effective_for_hybrid(signals: set[str], requested: str) -> str:
 
 
 def _effective_for_graph(signals: set[str], requested: str) -> str:
-    """A planned GRAPH run also asks for dense, so without the graph it is HYBRID."""
+    """A GRAPH run that also asked for dense is HYBRID without the graph."""
     if "graph" in signals:
         return "GRAPH"
     return _effective_for_hybrid(signals, requested)
@@ -3138,8 +3021,8 @@ def _generation_lexical_hits(
     return _filtered_hits(rows, filters)
 
 
-def _requested_or_recommended(requested_profile: object, analysis: QueryAnalysis) -> str:
-    return _normalize_profile(requested_profile) or analysis.recommended_profile
+def _requested_or_planned(requested_profile: str | None, graph_enabled: bool) -> str:
+    return planned_request(requested_profile, semantic=True, graph=graph_enabled)[0]
 
 
 def _exact_query(analysis: QueryAnalysis) -> str:
@@ -4102,7 +3985,7 @@ def retrieve(
     """
     _check_stopped(deadline_monotonic, cancelled)
     analysis = analyze_query(query)
-    requested = _requested_or_recommended(requested_profile, analysis)
+    requested = _requested_or_planned(requested_profile, graph_enabled)
     backend_limit = _backend_limit(limit, max_candidates)
     filters = {
         "query": analysis.normalized_query or analysis.query,
@@ -4387,40 +4270,22 @@ def _planned_signals(requested: str, signals: Sequence[str] | None) -> tuple[str
 
 
 def planned_request(
-    profile: str | None, analysis: QueryAnalysis, *, semantic: bool
+    profile: str | None, *, semantic: bool, graph: bool = True
 ) -> tuple[str, tuple[str, ...]]:
     """The profile a search runs and the signals it asks for.
 
-    `semantic=False` forces the lexical profile whatever the planner says, and an
-    explicit profile runs as declared. Otherwise a question the planner reads as
-    one about relations (a profile that declares the graph) keeps that profile
-    and adds dense; every other question runs HYBRID. Before 2026-09-25 every
-    semantic search ran HYBRID, so the evidence graph never answered `recall`
-    (audit C-22, docs/research/2026-09-25-recall-asks-the-graph-about-relations.md).
+    `semantic=False` forces the lexical profile, and an explicit profile runs as
+    declared. Otherwise the search runs `PLANNED_PROFILE`: every leg, whatever the
+    query says, except a graph its caller switched off. Until 2026-11-17 words of
+    the query picked the profile, and a reading that was wrong was never
+    recovered downstream (docs/research/2026-11-17-every-search-runs-every-leg.md).
     """
     if not semantic:
         return "BASE", ("lexical",)
     requested = _normalize_profile(profile)
-    if requested is not None:
-        return requested, PROFILE_SIGNALS[requested]
-    return _planned_semantic_request(analysis.recommended_profile)
-
-
-def planned_profile(query: str) -> str:
-    """The profile a semantic search of `query` runs when its caller names none.
-
-    A caller that only wants to label or report the profile asks this, and passes
-    no profile to retrieval: handing the planner's recommendation back as if the
-    caller had chosen it ran EXACT and TEMPORAL questions lexical only.
-    """
-    return planned_request(None, analyze_query(query), semantic=True)[0]
-
-
-def _planned_semantic_request(recommended: str) -> tuple[str, tuple[str, ...]]:
-    declared = PROFILE_SIGNALS[recommended]
-    if "graph" not in declared:
-        return "HYBRID", PROFILE_SIGNALS["HYBRID"]
-    return recommended, tuple(dict.fromkeys(("lexical", "dense", *declared)))
+    if requested is None:
+        requested = PLANNED_PROFILE if graph else "HYBRID"
+    return requested, PROFILE_SIGNALS[requested]
 
 
 def _selected_catalog(catalog: Any, search_memory: Any) -> Any:
@@ -4935,8 +4800,7 @@ def retrieve_via_search_memory(
         model_id=generation_model_id,
         model_revision=generation_model_revision,
     )
-    analysis = analyze_query(query)
-    requested, wanted = planned_request(profile, analysis, semantic=semantic)
+    requested, wanted = planned_request(profile, semantic=semantic, graph=graph)
     run = _SearchRun(
         search_memory,
         query,

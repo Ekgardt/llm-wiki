@@ -199,7 +199,7 @@ reach another project's sessions.
 
 **Search that says how it answered.** Lexical search (BM25) is the base; the `hybrid`
 extra adds multilingual vectors (`intfloat/multilingual-e5-small` on ONNX Runtime)
-and a cross-encoder reranker (`BAAI/bge-reranker-v2-m3`), and relation questions add
+and a cross-encoder reranker (`BAAI/bge-reranker-v2-m3`), and every search also asks
 the evidence graph. Ranking weighs where a claim came from (you, the web, a model, a
 guess) and what kind of page holds it. Every answer reports the mode it asked for, the
 signals it actually used, and why it fell back. Until the first index is built, search
