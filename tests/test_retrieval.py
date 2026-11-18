@@ -92,7 +92,7 @@ def test_profiles_are_closed_and_exported() -> None:
         ("search_memory_rebuild", ("exact_identifier", "identifier_lookup")),
     ],
 )
-def test_analyze_query_reads_only_the_shape(query: str, intents: tuple[str, ...]) -> None:
+def test_analyze_query_is_deterministic(query: str, intents: tuple[str, ...]) -> None:
     """Quotes and names are read; the words of a sentence are not."""
     import retrieval
 

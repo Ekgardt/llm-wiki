@@ -9,6 +9,7 @@ docs/research/2026-11-17-every-search-runs-every-leg.md.
 from __future__ import annotations
 
 import sys
+from collections.abc import Callable
 from pathlib import Path
 
 import pytest
@@ -19,7 +20,7 @@ if str(SCRIPTS_DIR) not in sys.path:
 
 import mcp_server  # noqa: E402
 import provenance  # noqa: E402
-from retrieval import analyze_query, planned_request, retrieve  # noqa: E402
+from retrieval import RetrievalResult, analyze_query, planned_request, retrieve  # noqa: E402
 
 RELATION = "what depends on the capture queue"
 EVERY_LEG = ("GLOBAL", ("lexical", "dense", "graph"))
@@ -33,6 +34,7 @@ ONCE_ROUTED = (
     "synthesize architecture across all projects",
     "how does retry work after 2025",
     "capture queue retry",
+    "\u4ec0\u4e48\u4f9d\u8d56\u4e8e\u6355\u83b7\u961f\u5217",
 )
 
 
@@ -71,7 +73,9 @@ def test_a_named_symbol_still_reads_as_a_code_question() -> None:
         (None, False, ("BASE", ("lexical",))),
     ],
 )
-def test_a_chosen_profile_runs_as_declared(profile, semantic, expected) -> None:
+def test_a_chosen_profile_runs_as_declared(
+    profile: str | None, semantic: bool, expected: tuple[str, tuple[str, ...]]
+) -> None:
     assert planned_request(profile, semantic=semantic) == expected
 
 
@@ -111,7 +115,7 @@ def _hit(candidate_id: str) -> dict[str, object]:
     }
 
 
-def _planned_run(query: str, graph):
+def _planned_run(query: str, graph: Callable[..., list[dict[str, object]]]) -> RetrievalResult:
     requested, signals = planned_request(None, semantic=True)
     return retrieve(
         query,
@@ -125,7 +129,7 @@ def _planned_run(query: str, graph):
 
 
 @pytest.mark.parametrize("query", [RELATION, "capture queue retry"])
-def test_a_planned_run_asks_dense_and_graph(query: str) -> None:
+def test_a_planned_graph_run_uses_dense_and_graph(query: str) -> None:
     called: list[str] = []
 
     def graph(**_options):
@@ -168,5 +172,5 @@ def test_recall_reports_the_dense_component_a_planned_graph_run_used() -> None:
     assert mcp_server._requested_signals(trace) == ("lexical", "graph", "dense")
 
 
-def test_an_unreported_trace_names_the_mode_every_search_runs() -> None:
+def test_an_unreported_trace_names_the_mode_the_search_would_run() -> None:
     assert mcp_server._unreported_trace()["requested_mode"] == "GLOBAL"

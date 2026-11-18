@@ -22,15 +22,19 @@ import pytest
 from tests.slow_machine import LONG_TIMEOUT
 
 
-@pytest.mark.parametrize(
-    "question",
-    ["how retry works after quarantine", "what changed after 2026-01-01"],
-)
-def test_a_preposition_never_takes_the_dense_leg_away(question: str) -> None:
-    """No wording plans a run without dense: every unnamed search runs every leg."""
-    from retrieval import planned_request
+def test_a_bare_preposition_is_not_a_time_window() -> None:
+    """`after` in a topic question is sequence, not a date filter: dense still runs."""
+    from retrieval import analyze_query, retrieve
 
-    assert "dense" in planned_request(None, semantic=True)[1]
+    question = "how retry works after quarantine"
+    trace = retrieve(
+        question,
+        lexical_backend=lambda **_filters: [],
+        rerank_enabled=False,
+    ).trace
+
+    assert "dense" in trace.signals_requested
+    assert analyze_query(question).intents == ()
 
 
 def test_an_optional_stage_may_outlast_a_warm_dense_leg() -> None:

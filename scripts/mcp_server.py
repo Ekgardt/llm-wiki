@@ -1047,7 +1047,7 @@ def _carries_trace(mapping: object, *, generation_key: str) -> bool:
 
 
 def _retrieval_trace(
-    results: list[dict], reported: Mapping[str, object] | None = None
+    results: list[dict[str, object]], reported: Mapping[str, object] | None = None
 ) -> dict[str, object]:
     """The planner trace: reported by the search itself, else recovered from rows.
 

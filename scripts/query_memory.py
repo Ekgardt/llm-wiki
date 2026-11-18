@@ -2424,7 +2424,8 @@ def _resolved_profile(profile: str | None) -> str:
 
     if profile is not None:
         return profile.upper()
-    return PLANNED_PROFILE
+    planned: str = PLANNED_PROFILE
+    return planned
 
 
 def _resolved_candidates(
