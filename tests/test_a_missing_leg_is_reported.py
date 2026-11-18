@@ -30,10 +30,13 @@ def _graph_run_without_dense():
     )
 
 
-def test_a_planned_run_says_what_it_asked_for() -> None:
+def test_a_planned_graph_run_says_what_it_asked_for() -> None:
     trace = _graph_run_without_dense().trace
 
-    assert (trace.requested_mode, trace.signals_requested) == ("GLOBAL", ("lexical", "dense", "graph"))
+    assert (trace.requested_mode, trace.signals_requested) == (
+        "GLOBAL",
+        ("lexical", "dense", "graph"),
+    )
 
 
 def test_a_graph_answer_without_its_dense_leg_reports_dense_missing() -> None:

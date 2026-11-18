@@ -362,7 +362,8 @@ def planned_profile() -> str:
     """The profile retrieval runs for a question, as the row reports it."""
     from retrieval import PLANNED_PROFILE
 
-    return PLANNED_PROFILE
+    planned: str = PLANNED_PROFILE
+    return planned
 
 
 def _searchable(question_text: str, question_date: str) -> str:
