@@ -15,6 +15,7 @@ import sys
 import time
 import tracemalloc
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -129,7 +130,7 @@ def test_a_deadline_that_expires_mid_walk_stops_the_walk(tmp_path, monkeypatch):
     with pytest.raises(TimeoutError, match="deadline"):
         import_resolver.build_python_symbol_registry(tmp_path, deadline=clock.now + 20.0)
 
-    assert 0 < counter.parsed < 400
+    assert counter.parsed == 21
 
 
 def test_the_registry_is_unchanged_when_no_stop_is_requested(tmp_path):
