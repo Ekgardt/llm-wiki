@@ -81,9 +81,11 @@ def test_profiles_are_closed_and_exported() -> None:
         ("knowledge/notes/auth-decision.md", ("exact_identifier", "identifier_lookup")),
         ("hook-scripts-defense-in-depth", ("exact_identifier", "identifier_lookup")),
         ("What is the auth decision?", ()),
+        ("decisions since 2025-01-01", ("exact_identifier",)),
         ("what depends on search_memory", ("exact_identifier",)),
         ("show repo map of scripts", ()),
         ("impact of changing search_memory.py", ("exact_identifier",)),
+        ("synthesize architecture across all projects", ()),
         ("auth decision", ()),
         ("\u4ec0\u4e48\u662f auth decision\uff1f", ()),
         ("auth decision\uff1f", ()),
@@ -100,6 +102,7 @@ def test_analyze_query_is_deterministic(query: str, intents: tuple[str, ...]) ->
     second = retrieval.analyze_query(query)
     assert first == second
     assert first.intents == intents
+    assert first.normalized_query == second.normalized_query
 
 
 def test_quoted_phrases_and_identifiers_are_extracted() -> None:

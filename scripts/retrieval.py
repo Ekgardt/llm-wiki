@@ -828,13 +828,17 @@ def _scored_graph_row(
     row: dict[str, Any],
     *,
     query: str,
-    direct_graph_query: bool,
     path: tuple[dict[str, Any], ...],
-) -> tuple[tuple[object, ...], dict[str, Any]] | None:
-    """Rank key and enriched row, or None when the text says it is unrelated."""
+) -> tuple[tuple[object, ...], dict[str, Any]]:
+    """Rank key and enriched row; text overlap orders the rows, it admits none.
+
+    A neighbour that shares no word with the question ranks after every one that
+    does, at the graph's fusion weight, and the cross-encoder reads it. Until
+    2026-11-17 only a question routed by its words to GRAPH kept it; with every
+    search planned the same way, the gate would have taken a relation question's
+    answer away (docs/research/2026-11-17-every-search-runs-every-leg.md).
+    """
     overlap, full_match = _graph_text_relevance(query, row)
-    if overlap == 0 and not direct_graph_query:
-        return None
     hop = _as_int(row.get("hop"), 0)
     decay = GRAPH_EDGE_DECAY[str(row.get("edge_type"))] ** hop
     row.update(
@@ -852,7 +856,6 @@ def _prepared_graph_row(
     backend_rank: int,
     *,
     query: str,
-    direct_graph_query: bool,
     seed_ids: set[str],
     allowed_directions: set[str],
     allowed_edges: set[str],
@@ -867,7 +870,6 @@ def _prepared_graph_row(
     return _validated_graph_row(
         row,
         query=query,
-        direct_graph_query=direct_graph_query,
         allowed_directions=allowed_directions,
         allowed_edges=allowed_edges,
     )
@@ -877,7 +879,6 @@ def _validated_graph_row(
     row: dict[str, Any],
     *,
     query: str,
-    direct_graph_query: bool,
     allowed_directions: set[str],
     allowed_edges: set[str],
 ) -> tuple[tuple[object, ...], dict[str, Any]] | None:
@@ -885,9 +886,7 @@ def _validated_graph_row(
     path = _assertion_path(row)
     if not _graph_row_is_valid(row, path, allowed_directions, allowed_edges):
         return None
-    return _scored_graph_row(
-        row, query=query, direct_graph_query=direct_graph_query, path=path
-    )
+    return _scored_graph_row(row, query=query, path=path)
 
 
 def _merged_assertion_path(
@@ -967,7 +966,6 @@ def _prepare_graph_hits(
     rows: Sequence[Mapping[str, Any]],
     *,
     query: str,
-    requested_profile: str,
     seeds: Sequence[Mapping[str, Any]],
     directions: Sequence[str],
     edge_types: Sequence[str],
@@ -981,7 +979,6 @@ def _prepare_graph_hits(
             raw,
             backend_rank,
             query=query,
-            direct_graph_query=requested_profile == "GRAPH",
             seed_ids={_candidate_key(seed) for seed in seeds},
             allowed_directions=set(directions),
             allowed_edges=set(edge_types),
@@ -1953,7 +1950,6 @@ def _run_graph_backend(
     return _prepared_graph_outcome(
         raw_hits,
         analysis=analysis,
-        requested=requested,
         seeds=seeds,
         directions=directions,
         edge_types=edge_types,
@@ -1966,7 +1962,6 @@ def _prepared_graph_outcome(
     raw_hits: Sequence[Mapping[str, Any]] | None,
     *,
     analysis: QueryAnalysis,
-    requested: str,
     seeds: Sequence[Mapping[str, Any]],
     directions: Sequence[str],
     edge_types: Sequence[str],
@@ -1978,7 +1973,6 @@ def _prepared_graph_outcome(
     hits = _prepare_graph_hits(
         raw_hits,
         query=analysis.normalized_query or analysis.query,
-        requested_profile=requested,
         seeds=seeds,
         directions=directions,
         edge_types=edge_types,
@@ -2655,35 +2649,67 @@ def _generation_graph_hits(
         deadline_monotonic=filters["deadline_monotonic"],
         cancelled=cancelled,
     )
+    admitted = _graph_rows_admitted(rows, filters, context["connection"])
     _require_seal(catalog, context, stop)
-    return rows
+    return admitted
 
 
-def _neighbour_boost_hits(
-    lexical_backend: BackendFn, filters: Mapping[str, Any]
-) -> Sequence[Mapping[str, Any]]:
-    """Legacy path: neighbours of the lexical hits, scored by their boost."""
+def _graph_rows_admitted(
+    rows: Sequence[Mapping[str, Any]], filters: Mapping[str, Any], connection: Any
+) -> list[Mapping[str, Any]]:
+    """Graph rows whose page passes the caller's hard filters, as a lexical hit must."""
+    import search_memory
+
+    eligible = search_memory.generation_eligible_paths(
+        connection,
+        {str(row["relative_path"]) for row in rows},
+        scope=filters.get("scope", "all"),
+        project=filters.get("project"),
+        since=filters.get("since"),
+        as_of=filters.get("as_of"),
+    )
+    return [row for row in rows if str(row["relative_path"]) in eligible]
+
+
+def _neighbour_boost_hits(filters: Mapping[str, Any]) -> Sequence[Mapping[str, Any]]:
+    """Legacy path: wikilink neighbours of the seeds already found, scored by their boost.
+
+    The seeds are the hits the run already holds, so the Markdown is not scanned
+    twice; the link graph is built under the run's deadline; a neighbour is kept
+    only when the Markdown leg would admit its page under the caller's filters.
+    """
     from graph_neighbors import boost_graph_neighbors
 
-    seed_filters = {
-        key: filters[key]
-        for key in ("query", "scope", "limit", "project", "since", "as_of")
-    }
-    seeds = list(lexical_backend(**seed_filters))
-    boosts = boost_graph_neighbors(
-        [{"path": hit["path"], "score": hit.get("score", 0)} for hit in seeds], None
-    )
-    return [
-        _backend_hit_from_legacy(
-            {
-                "path": item["path"],
-                "candidate_id": item["path"],
-                "score": item.get("graph_boost", 0.0),
-                "graph_boost": item.get("graph_boost", 0.0),
-            }
-        )
-        for item in boosts
+    seeds = [
+        {"path": _seed_path(seed), "score": seed.get("score", 0)}
+        for seed in filters["seeds"]
     ]
+    boosts = boost_graph_neighbors(
+        seeds, None, deadline=filters.get("deadline_monotonic")
+    )
+    rows = [_neighbour_page_row(item, filters) for item in boosts]
+    return _filtered_hits([row for row in rows if row is not None], filters)
+
+
+def _seed_path(seed: Mapping[str, Any]) -> str:
+    return str(_first_present(seed, ("path", "relative_path"), ""))
+
+
+def _neighbour_page_row(
+    item: Mapping[str, Any], filters: Mapping[str, Any]
+) -> dict[str, Any] | None:
+    import search_memory
+
+    page = search_memory.markdown_page_row(
+        str(item["path"]),
+        project=filters.get("project"),
+        since=filters.get("since"),
+        as_of=filters.get("as_of"),
+    )
+    if page is None:
+        return None
+    boost = item.get("graph_boost", 0.0)
+    return {**page, "score": boost, "graph_boost": boost}
 
 
 def _drop_generation_connection(context: dict[str, Any], connection: Any) -> None:
@@ -4456,11 +4482,10 @@ def _generation_graph_backend_hits(
 
 
 def _neighbour_boost_or_none(
-    lexical_backend: Callable[..., Sequence[Mapping[str, Any]]],
     filters: Mapping[str, Any],
 ) -> Sequence[Mapping[str, Any]] | None:
     try:
-        return _neighbour_boost_hits(lexical_backend, filters)
+        return _neighbour_boost_hits(filters)
     except TimeoutError:
         raise
     except Exception:  # noqa: BLE001 - the graph signal degrades on its own
@@ -4697,7 +4722,7 @@ class _SearchRun:
                 stop=self.generation_stop,
                 cancelled=self.cancelled,
             )
-        return _neighbour_boost_or_none(self.lexical_backend, filters)
+        return _neighbour_boost_or_none(filters)
 
     # --- the run ----------------------------------------------------------------
 

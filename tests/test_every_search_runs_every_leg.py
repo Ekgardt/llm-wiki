@@ -142,9 +142,10 @@ def test_a_planned_graph_run_uses_dense_and_graph(query: str) -> None:
     assert "dense" in trace.signals_used
 
 
-def test_retrieve_with_no_profile_plans_like_the_search() -> None:
+@pytest.mark.parametrize("query", ONCE_ROUTED)
+def test_retrieve_with_no_profile_plans_like_the_search(query: str) -> None:
     trace = retrieve(
-        "decisions since 2025-01-01",
+        query,
         lexical_backend=lambda **_filters: [_hit("seed")],
         rerank_enabled=False,
     ).trace
@@ -166,7 +167,8 @@ def test_unknown_signals_are_refused() -> None:
         retrieve("q", requested_profile="HYBRID", signals=("lexical", "telepathy"))
 
 
-def test_recall_reports_the_dense_component_a_planned_graph_run_used() -> None:
+def test_recall_reports_a_signal_that_ran_beside_its_profile() -> None:
+    """A run asked as GRAPH that also used dense reports dense, not only GRAPH's legs."""
     trace = {"requested_mode": "GRAPH", "signals_used": ["lexical", "dense", "graph"]}
 
     assert mcp_server._requested_signals(trace) == ("lexical", "graph", "dense")

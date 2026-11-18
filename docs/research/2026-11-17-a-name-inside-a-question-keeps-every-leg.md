@@ -3,6 +3,13 @@
 Date: 2026-11-17. Scope: `scripts/retrieval.py` (query routing), `scripts/reranker.py` (exact
 bypass), `scripts/query_memory.py` and `benchmark/longmemeval_vault.py` (the profile they pass).
 
+Status: superseded in part on 2026-11-18 by
+`docs/research/2026-11-17-every-search-runs-every-leg.md`. Words no longer choose a profile:
+every search that names none runs `GLOBAL` (lexical, dense and the graph), so the
+`HYBRID`/`EXACT`/`TEMPORAL` routing described under "What was wrong" is the state before both
+changes, and `planned_profile` now reports `GLOBAL`. The lookup rule and the reranker bypass
+below still hold.
+
 ## What was wrong
 
 Two defects made ordinary questions search by spelling only.
@@ -10,8 +17,8 @@ Two defects made ordinary questions search by spelling only.
 1. **A word with a hyphen or an underscore made the whole query a lookup.** `analyze_query`
    marks such a word as `exact_identifier`, and that intent mapped to the lexical-only `EXACT`
    profile. The search tools, which pass no profile, still ran lexical and dense search for
-   "How many shirts did I pack for my 5-day trip?", because `planned_request` turns a non-graph
-   recommendation into `HYBRID`; but the reranker skipped every query carrying the intent
+   "How many shirts did I pack for my 5-day trip?", because `planned_request` then turned a
+   non-graph recommendation into `HYBRID`; but the reranker skipped every query carrying the intent
    (`exact_match_bypass`). The answer path and the benchmark ran it BM25 alone (defect 2). On
    LongMemEval-S (500 questions) 40 questions were routed this way.
 2. **Two callers passed the planner's recommendation back as the caller's choice.** The answer
@@ -33,8 +40,9 @@ Two defects made ordinary questions search by spelling only.
   `exact_identifier`). Its result order and its latency do not change. A quoted phrase and an
   explicit `EXACT`/`DIRECT` profile skip the cross-encoder as before.
 - The answer path and the benchmark ask with no profile unless the caller chose one, so the
-  planner adds the dense leg. `planned_profile(query)` reports the profile that actually runs;
-  the benchmark, the answer path and the MCP trace record that one.
+  planner adds the dense leg. `planned_profile()` reports the profile that actually runs
+  (`GLOBAL` since 2026-11-18; it took the query and read its words before that); the
+  benchmark, the answer path and the MCP trace record that one.
 
 ## Alternatives considered
 

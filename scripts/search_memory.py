@@ -34,7 +34,7 @@ import threading
 import time
 import uuid
 from collections import OrderedDict
-from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
+from collections.abc import Callable, Collection, Iterable, Iterator, Mapping, Sequence
 from contextlib import AbstractContextManager, closing, contextmanager, nullcontext
 from pathlib import Path
 from typing import NamedTuple
@@ -3198,6 +3198,56 @@ def apply_hard_filters(
             authority=authority,
         )
     ]
+
+
+def generation_eligible_paths(
+    connection: sqlite3.Connection,
+    paths: Collection[str],
+    *,
+    scope: str = "all",
+    project: str | None = None,
+    since: str | None = None,
+    as_of: str | None = None,
+) -> set[str]:
+    """The pages among `paths` that the generation's lexical leg would admit.
+
+    A row the evidence graph reached carries no page metadata of its own; its
+    page answers to the same scope, project, date and current-status rule as a
+    lexical hit, in the same SQL.
+    """
+    if not paths:
+        return set()
+    filters, values = _generation_filters(scope=scope, since=since, as_of=as_of)
+    clauses: list[object] = [*values]
+    if project:
+        filters += " AND lower(project) = lower(?)"
+        clauses.append(project)
+    wanted = sorted(paths)
+    placeholders = ", ".join("?" for _ in wanted)
+    rows = connection.execute(
+        f"SELECT DISTINCT source_path FROM chunks WHERE source_path IN ({placeholders}){filters}",
+        [*wanted, *clauses],
+    ).fetchall()
+    return {str(row[0]) for row in rows}
+
+
+def markdown_page_row(
+    relative_path: str,
+    *,
+    project: str | None = None,
+    since: str | None = None,
+    as_of: str | None = None,
+) -> dict | None:
+    """A page reached another way, as the Markdown leg reports it, if that leg would admit it.
+
+    The Markdown walk never yields a superseded or archived page, so neither does this.
+    """
+    read = _read_page(ROOT / relative_path, "graph neighbour page")
+    if read is None or _is_retired_page(read.content):
+        return None
+    if not _page_read_eligible(read, project=project, since=since, as_of=as_of):
+        return None
+    return _page_hit(read, score=0.0, bm25_score=0.0)
 
 
 def _row_text(row: sqlite3.Row, key: str) -> str:

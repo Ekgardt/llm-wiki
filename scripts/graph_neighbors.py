@@ -308,6 +308,8 @@ def boost_graph_neighbors(
     bm25_results: list[dict],
     vector_results: list[dict] | None,
     boost_weight: float = 0.15,
+    *,
+    deadline: float | None = None,
 ) -> list[dict]:
     """Add graph-neighbor boost to existing results.
 
@@ -316,9 +318,9 @@ def boost_graph_neighbors(
     through the link graph even if their text doesn't match the query.
 
     The boost is added to the 'graph_score' field and combined
-    into the final fused_score via RRF.
+    into the final fused_score via RRF. A source scan stops at `deadline`.
     """
-    graph = get_link_graph()
+    graph = get_link_graph(deadline=deadline)
     boost_paths: dict[str, float] = {}
     # Only the top-10 of each list seed the boost, BM25 first, then vector.
     for r in [*bm25_results[:10], *(vector_results or [])[:10]]:

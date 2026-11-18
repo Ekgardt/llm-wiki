@@ -79,6 +79,19 @@ on this vault below.
   disabled: otherwise every such search would report `graph_disabled`.
 - With no generation, the Markdown fallback's graph is the wikilink-neighbour boost, so its
   rows may say `lexical` and `graph`; they never say `dense`.
+- Graph rows obey the caller's hard filters exactly as a lexical hit does (added 2026-11-18,
+  after review). Before, a graph-only neighbour from another project, outside the
+  `since`/`as_of` window, or superseded could enter the candidates; it was rare while only
+  relation-worded questions asked the graph, and every search asks it now. On a generation
+  the neighbour paths are checked against the same `chunks` filters the lexical leg uses
+  (`search_memory.generation_eligible_paths`); on the Markdown fallback each neighbour page
+  is read and filtered like a lexical page (`search_memory.markdown_page_row`), and the
+  wikilink walk is bounded by the search deadline.
+- Text overlap orders graph rows instead of admitting them (2026-11-18). The old rule
+  dropped a neighbour sharing no word with the query unless the profile was a declared
+  graph profile; with every search planned `GLOBAL`, that dropped exactly the neighbours a
+  relation question asks for. A neighbour with no shared word now ranks after every graph
+  row that shares one, and fusion still ranks a graph-only candidate below text hits.
 - Dates are no longer read from words. A dated window is the caller's explicit
   `since`/`until` filter; the grounded answer's own dated leg is unchanged.
 
