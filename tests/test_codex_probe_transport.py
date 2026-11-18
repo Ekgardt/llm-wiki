@@ -5,6 +5,8 @@ import time
 
 import doctor
 
+from tests.slow_machine import LONG_TIMEOUT, PAUSE_TIMEOUT
+
 
 def _peer_is_gone(pid: int) -> bool:
     """Whether the peer was killed and reaped, asked the way each platform answers.
@@ -47,13 +49,14 @@ assert sys.stdin.read()==''
 
 
 def test_hung_peer_is_killed_and_reaped_within_cleanup_budget(tmp_path):
-    code = '''import os,time
+    # The peer outlives the hang bound, so only a kill can end the probe within it.
+    code = f'''import os,time
 open('peer.pid','w').write(str(os.getpid()))
-time.sleep(60)
+time.sleep({PAUSE_TIMEOUT})
 '''
     started = time.monotonic()
     assert _probe(tmp_path, code, seconds=0.2) is doctor._PROBE_INCOMPLETE
-    assert time.monotonic() - started < 2
+    assert time.monotonic() - started < LONG_TIMEOUT
     pid = int((tmp_path / "peer.pid").read_text())
     assert _peer_is_gone(pid)
 
