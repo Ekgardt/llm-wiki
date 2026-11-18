@@ -3237,7 +3237,7 @@ def markdown_page_row(
     project: str | None = None,
     since: str | None = None,
     as_of: str | None = None,
-) -> dict | None:
+) -> dict[str, object] | None:
     """A page reached another way, as the Markdown leg reports it, if that leg would admit it.
 
     The Markdown walk never yields a superseded or archived page, so neither does this.

@@ -76,11 +76,19 @@ def _write_pages(root: Path) -> None:
         )
 
 
-def _legacy_neighbours(monkeypatch, tmp_path: Path, seen: dict[str, object]) -> list[str]:
+def _legacy_neighbours(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, seen: dict[str, object]
+) -> list[str]:
     _write_pages(tmp_path)
     monkeypatch.setattr(search_memory, "ROOT", tmp_path)
 
-    def boost(bm25_results, vector_results, boost_weight=0.15, *, deadline=None):
+    def boost(
+        bm25_results: list[dict[str, object]],
+        vector_results: list[dict[str, object]] | None,
+        boost_weight: float = 0.15,
+        *,
+        deadline: float | None = None,
+    ) -> list[dict[str, object]]:
         seen.update(seeds=bm25_results, deadline=deadline)
         return [{"path": path, "graph_boost": 0.15} for path in PAGES]
 
@@ -93,13 +101,17 @@ def _legacy_neighbours(monkeypatch, tmp_path: Path, seen: dict[str, object]) -> 
     return [str(row["relative_path"]) for row in retrieval._neighbour_boost_hits(filters)]
 
 
-def test_a_markdown_neighbour_obeys_project_dates_and_status(monkeypatch, tmp_path) -> None:
+def test_a_markdown_neighbour_obeys_project_dates_and_status(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
     neighbours = _legacy_neighbours(monkeypatch, tmp_path, {})
 
     assert neighbours == ["knowledge/notes/kept.md"]
 
 
-def test_the_markdown_walk_reuses_the_seeds_and_the_deadline(monkeypatch, tmp_path) -> None:
+def test_the_markdown_walk_reuses_the_seeds_and_the_deadline(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
     seen: dict[str, object] = {}
 
     _legacy_neighbours(monkeypatch, tmp_path, seen)
@@ -108,8 +120,8 @@ def test_the_markdown_walk_reuses_the_seeds_and_the_deadline(monkeypatch, tmp_pa
     assert seen["deadline"] == pytest.approx(123.0)
 
 
-def test_the_link_graph_build_stops_at_the_deadline(monkeypatch) -> None:
-    def walk(*_args, deadline=None, **_kwargs):
+def test_the_link_graph_build_stops_at_the_deadline(monkeypatch: pytest.MonkeyPatch) -> None:
+    def walk(*_args: object, deadline: float | None = None, **_kwargs: object) -> None:
         seen.append(deadline)
         raise TimeoutError("deadline")
 
@@ -128,11 +140,11 @@ class _Graph:
         return None
 
     @classmethod
-    def open_active_for_repository(cls, *_args, **_kwargs):
+    def open_active_for_repository(cls, *_args: object, **_kwargs: object) -> _Graph:
         return cls()
 
 
-def _catalog(tmp_path: Path):
+def _catalog(tmp_path: Path) -> object:
     from repository_scope import resolve_repository_scope
 
     manifest = {
@@ -149,7 +161,9 @@ def _catalog(tmp_path: Path):
         generations_path = tmp_path / "generations"
         state_root = tmp_path
 
-        def get_active_for_repository(self, _repository_scope, **_kwargs):
+        def get_active_for_repository(
+            self, _repository_scope: object, **_kwargs: object
+        ) -> dict[str, object]:
             return manifest
 
     return Catalog()
@@ -197,15 +211,21 @@ def _neighbour_rows(**_options: object) -> tuple[dict[str, object], ...]:
     return tuple(_neighbour_row(path) for path in PAGES)
 
 
-def test_a_search_for_one_project_gets_no_graph_page_of_another(monkeypatch, tmp_path) -> None:
+def test_a_search_for_one_project_gets_no_graph_page_of_another(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
     import evidence_graph
 
     monkeypatch.setattr(search_memory, "_generation_consumption_seal", lambda *_a: ("seal",))
     monkeypatch.setattr(search_memory, "_generation_consumption_unchanged", lambda *_a: True)
-    monkeypatch.setattr(search_memory, "_generation_connection", lambda *_a: _generation_connection())
+    monkeypatch.setattr(
+        search_memory, "_generation_connection", lambda *_a: _generation_connection()
+    )
     monkeypatch.setattr(search_memory, "_generation_fts_search", lambda *_a, **_k: [_seed_hit()])
     monkeypatch.setattr(evidence_graph, "EvidenceGraph", _Graph)
-    monkeypatch.setattr(retrieval, "expand_evidence_graph", lambda _graph, **options: _neighbour_rows())
+    monkeypatch.setattr(
+        retrieval, "expand_evidence_graph", lambda _graph, **_options: _neighbour_rows()
+    )
 
     rows = retrieval.retrieve_via_search_memory(
         "what depends on the capture queue",

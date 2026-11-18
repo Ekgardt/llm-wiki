@@ -520,7 +520,9 @@ def test_generation_connection_checks_cancel_after_open_before_validation(
 PLANNED_LEGACY_SIGNALS = ["lexical", "graph"]
 
 
-def _assert_orchestrated_legacy_fallback(results, expected_reasons, expected_signals):
+def _assert_orchestrated_legacy_fallback(
+    results: list[dict[str, object]], expected_reasons: set[str], expected_signals: list[str]
+) -> None:
     """Markdown has no vectors, so a planned search there reports the wikilink
     neighbours as its graph; a search that asked for no graph reports lexical only."""
     assert [result["candidate_id"] for result in results] == ["legacy"]
