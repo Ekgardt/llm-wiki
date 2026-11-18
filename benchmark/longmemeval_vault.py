@@ -358,12 +358,11 @@ def _key_the_haystack(
         store.close()
 
 
-def profile_for(question_text: str) -> str:
-    """The profile retrieval runs for this question, as the row reports it."""
-    from retrieval import planned_profile
+def planned_profile() -> str:
+    """The profile retrieval runs for a question, as the row reports it."""
+    from retrieval import PLANNED_PROFILE
 
-    planned: str = planned_profile(question_text)
-    return planned
+    return PLANNED_PROFILE
 
 
 def _searchable(question_text: str, question_date: str) -> str:
@@ -886,7 +885,7 @@ def run_question(question: dict, work: Path) -> dict:
     snapshot, build_info = build_generation(root, state, daily_files)
     _warm_reranker()
     plain = str(question["question"])
-    profile = profile_for(plain)
+    profile = planned_profile()
     retrieve_started = time.monotonic()
     searchable = _searchable(plain, str(question["question_date"]))
     rows = _retrieved_rows(searchable)

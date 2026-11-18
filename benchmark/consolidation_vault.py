@@ -230,7 +230,7 @@ def run_arm(question: dict, root: Path, state: Path) -> dict:
     build_started = time.monotonic()
     snapshot, build_info = build_generation(root, state, daily_relative_paths(root))
     plain = str(question["question"])
-    profile = vault_harness.profile_for(plain)
+    profile = vault_harness.planned_profile()
     retrieve_started = time.monotonic()
     rows = vault_harness._retrieved_rows(plain)
     answer_started = time.monotonic()

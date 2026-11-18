@@ -51,19 +51,6 @@ def test_semantic_false_forces_base_lexical_even_for_hybrid_profile(monkeypatch)
         return [_hit("d", "d.md", 0.9)]
 
     # Direct retrieve_via_search_memory path: semantic=False must force BASE.
-    analysis_profile = "HYBRID"
-    monkeypatch.setattr(
-        retrieval,
-        "analyze_query",
-        lambda q: retrieval.QueryAnalysis(
-            query=q,
-            normalized_query=q,
-            intents=("question",),
-            exact_identifiers=(),
-            quoted_phrases=(),
-            recommended_profile=analysis_profile,
-        ),
-    )
     monkeypatch.setattr(search_memory, "_active_generation_catalog", lambda: None)
     monkeypatch.setattr(
         search_memory,
@@ -918,30 +905,6 @@ def test_retrieve_raises_when_the_deadline_leaves_nothing_in_hand():
             corpus_generation="g",
             deadline_monotonic=time.monotonic() - 1,
         )
-
-
-@pytest.mark.parametrize(
-    ("query", "profile"),
-    [
-        ("Что такое auth?", "HYBRID"),
-        ("что зависит от search_memory", "GRAPH"),
-        ("покажи карту репозитория", "REPO_MAP"),
-        ("влияние search_memory.py", "IMPACT"),
-        ("синтез across all projects", "GLOBAL"),
-        ("решения с 2025-01-01", "TEMPORAL"),
-        ('открой "auth decision"', "EXACT"),
-        ("什么是 auth？", "HYBRID"),
-        ("什么依赖 search_memory", "GRAPH"),
-        ("显示仓库地图", "REPO_MAP"),
-        ("更改的影响 search_memory.py", "IMPACT"),
-        ("跨项目综合架构", "GLOBAL"),
-        ("自 2025-01-01 以来的决策", "TEMPORAL"),
-    ],
-)
-def test_ru_zh_profiles_behavioral(query, profile):
-    import retrieval
-
-    assert retrieval.analyze_query(query).recommended_profile == profile
 
 
 def test_resource_limit_caps_backend_limit():

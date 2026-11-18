@@ -2,6 +2,9 @@
 
 Date: 2026-09-25. Audit item C-22 (`docs/AUDIT-2026-09-25-full.md`).
 
+Superseded on 2026-11-17 by `docs/research/2026-11-17-every-search-runs-every-leg.md`:
+no wording picks the plan any more; every search runs every leg.
+
 ## Facts (checked in code)
 
 - `retrieval._requested_profile` returned `HYBRID` for every semantic search with no

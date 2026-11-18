@@ -523,7 +523,8 @@ def _assert_orchestrated_legacy_fallback(results, expected_reasons):
     assert [result["candidate_id"] for result in results] == ["legacy"]
     assert results[0]["generation"] == "legacy"
     assert results[0]["fallback_reason"] in expected_reasons
-    assert results[0]["signals_used"] == ["lexical"]
+    # Markdown has no vectors; the wikilink neighbours stand in for the graph.
+    assert results[0]["signals_used"] in (["lexical"], ["lexical", "graph"])
 
 
 def _column(rows, index: int) -> list:
@@ -1087,7 +1088,8 @@ def test_semantic_search_uses_complete_matching_generation_numpy_vectors(tmp_pat
     assert results[0]["path"] == "knowledge/notes/a.md"
     assert all(result["generation"] == "gen-search" for result in results)
     assert all(result["effective_mode"] == "HYBRID" for result in results)
-    assert all(result["fallback_reason"] is None for result in results)
+    # The generation was built without a graph, and the search says so.
+    assert all(result["fallback_reason"] == "graph_unavailable" for result in results)
 
 
 def test_semantic_generation_vectors_run_under_a_caller_deadline(tmp_path):

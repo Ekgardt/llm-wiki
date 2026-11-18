@@ -75,38 +75,31 @@ def test_profiles_are_closed_and_exported() -> None:
 
 
 @pytest.mark.parametrize(
-    ("query", "intent", "profile"),
+    ("query", "intents"),
     [
-        ('open "auth decision"', "quoted_phrase", "EXACT"),
-        ("knowledge/notes/auth-decision.md", "exact_identifier", "EXACT"),
-        ("hook-scripts-defense-in-depth", "exact_identifier", "EXACT"),
-        ("What is the auth decision?", "question", "HYBRID"),
-        ("decisions since 2025-01-01", "temporal", "TEMPORAL"),
-        ("what depends on search_memory", "graph_relation", "GRAPH"),
-        ("show repo map of scripts", "repo_map", "REPO_MAP"),
-        ("impact of changing search_memory.py", "impact", "IMPACT"),
-        ("synthesize architecture across all projects", "global_synthesis", "GLOBAL"),
-        ("auth decision", None, "BASE"),
-        # RU / ZH / fullwidth question mark
-        ("Что такое auth decision?", "question", "HYBRID"),
-        ("什么是 auth decision？", "question", "HYBRID"),
-        ("auth decision？", "question", "HYBRID"),
-        # filename, sqlite path, snake_case
-        ("auth-decision.md", "exact_identifier", "EXACT"),
-        ("cache/evidence-graph/catalog.sqlite3", "exact_identifier", "EXACT"),
-        ("search_memory_rebuild", "exact_identifier", "EXACT"),
+        ('open "auth decision"', ("quoted_phrase",)),
+        ("knowledge/notes/auth-decision.md", ("exact_identifier", "identifier_lookup")),
+        ("hook-scripts-defense-in-depth", ("exact_identifier", "identifier_lookup")),
+        ("What is the auth decision?", ()),
+        ("what depends on search_memory", ("exact_identifier",)),
+        ("show repo map of scripts", ()),
+        ("impact of changing search_memory.py", ("exact_identifier",)),
+        ("auth decision", ()),
+        ("\u4ec0\u4e48\u662f auth decision\uff1f", ()),
+        ("auth decision\uff1f", ()),
+        ("auth-decision.md", ("exact_identifier", "identifier_lookup")),
+        ("cache/evidence-graph/catalog.sqlite3", ("exact_identifier", "identifier_lookup")),
+        ("search_memory_rebuild", ("exact_identifier", "identifier_lookup")),
     ],
 )
-def test_analyze_query_is_deterministic(query: str, intent: str | None, profile: str) -> None:
+def test_analyze_query_reads_only_the_shape(query: str, intents: tuple[str, ...]) -> None:
+    """Quotes and names are read; the words of a sentence are not."""
     import retrieval
 
     first = retrieval.analyze_query(query)
     second = retrieval.analyze_query(query)
     assert first == second
-    assert first.recommended_profile == profile
-    if intent is not None:
-        assert intent in first.intents
-    assert first.normalized_query == second.normalized_query
+    assert first.intents == intents
 
 
 def test_quoted_phrases_and_identifiers_are_extracted() -> None:
