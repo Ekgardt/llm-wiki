@@ -10,6 +10,7 @@ from __future__ import annotations
 import sqlite3
 import sys
 from pathlib import Path
+from typing import cast
 
 import pytest
 
@@ -62,6 +63,16 @@ def test_a_generation_graph_row_keeps_every_page_without_filters() -> None:
     admitted = retrieval._graph_rows_admitted(rows, {}, _generation_connection())
 
     assert admitted == rows
+
+
+def test_no_graph_rows_ask_the_generation_nothing() -> None:
+    class Unasked:
+        def execute(self, *_args: object) -> None:
+            raise AssertionError("an empty set of graph rows needs no query")
+
+    unasked = cast(sqlite3.Connection, Unasked())
+
+    assert search_memory.generation_eligible_paths(unasked, set(), project="alpha") == set()
 
 
 def _write_pages(root: Path) -> None:
