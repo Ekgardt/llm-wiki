@@ -35,6 +35,7 @@ def test_resolve_wikilink_exact_match(fake_graph):
         fake_file.read_text.return_value = "# Some Page\n\nBody text."
         fake_file.relative_to.return_value.as_posix.return_value = "some-page.md"
         fake_file.resolve.return_value = fake_file
+        fake_file.stem = "some-page"
         knowledge.rglob.return_value = [fake_file]
         result = fake_graph._resolve_wikilink("some-page")
         assert result == "some-page.md"

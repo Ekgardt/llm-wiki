@@ -497,7 +497,8 @@ def _assert_degraded_search_budget(calls) -> None:
 
 
 def _assert_degraded_result_row(row) -> None:
-    assert row["requested_mode"] == "HYBRID"
+    # The semantic run that timed out planned every leg, so that is what was requested.
+    assert row["requested_mode"] == "GLOBAL"
     assert row["effective_mode"] == "BASE"
     assert row["signals_used"] == ["lexical"]
     assert row["fallback_reason"] == "retrieval_deadline_exceeded"
