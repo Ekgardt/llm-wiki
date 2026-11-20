@@ -379,12 +379,6 @@ def _await_probe_pid(pid_file: Path, timeout: float = 2.0) -> int:
     pytest.fail(f"probe child never recorded its PID in {pid_file}")
 
 
-# Long enough for a loaded interpreter to start and record its PID before the
-# probe gives up on it: at 0.2 s a busy checker killed the child first, and the
-# test failed waiting for a PID that was never written.
-_HUNG_PROBE_SECONDS = 1.0
-
-
 @pytest.mark.parametrize("mode", ["hung", "oversized"])
 def test_hung_or_oversized_debug_probe_is_bounded_and_cleans_child(
     tmp_path: Path, mode: str
@@ -407,7 +401,7 @@ def test_hung_or_oversized_debug_probe_is_bounded_and_cleans_child(
         cwd=tmp_path,
         environment={},
         expected=expected_opencode_entry(tmp_path),
-        timeout_seconds=_HUNG_PROBE_SECONDS if mode == "hung" else 5,
+        timeout_seconds=CHILD_START_TIMEOUT if mode == "hung" else 5,
         max_bytes=1024,
     )
 

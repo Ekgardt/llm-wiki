@@ -1,4 +1,4 @@
-"""The two waits a test may use, sized for the slowest supported machine.
+"""The waits a test may use, sized for the slowest supported machine.
 
 The names and the rule are CPython's (`test.support.SHORT_TIMEOUT` and
 `LONG_TIMEOUT`, https://docs.python.org/3/library/test.html): a wait that

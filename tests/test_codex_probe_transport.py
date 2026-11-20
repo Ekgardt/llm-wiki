@@ -5,7 +5,7 @@ import time
 
 import doctor
 
-from tests.slow_machine import LONG_TIMEOUT, PAUSE_TIMEOUT
+from tests.slow_machine import CHILD_START_TIMEOUT, LONG_TIMEOUT, PAUSE_TIMEOUT
 
 
 def _peer_is_gone(pid: int) -> bool:
