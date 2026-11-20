@@ -6,6 +6,7 @@ import sqlite3
 import sys
 import time
 from pathlib import Path
+from types import ModuleType
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -264,7 +265,7 @@ def _open_returns(monkeypatch: pytest.MonkeyPatch, graph: _ActiveGraph | None) -
     )
 
 
-def test_active_links_become_a_sorted_deduplicated_adjacency(fake_graph, monkeypatch):
+def test_active_links_become_a_sorted_deduplicated_adjacency(fake_graph: ModuleType, monkeypatch: pytest.MonkeyPatch) -> None:
     graph = _ActiveGraph(
         [
             {"source_path": "b.md", "target_path": "c.md"},
@@ -282,7 +283,7 @@ def test_active_links_become_a_sorted_deduplicated_adjacency(fake_graph, monkeyp
     assert graph.closed
 
 
-def test_no_active_generation_scans_the_sources(fake_graph, monkeypatch):
+def test_no_active_generation_scans_the_sources(fake_graph: ModuleType, monkeypatch: pytest.MonkeyPatch) -> None:
     _open_returns(monkeypatch, None)
     fallback = {"scanned.md": ["target.md"]}
     monkeypatch.setattr(fake_graph, "_build_link_graph", lambda **_kwargs: fallback)
@@ -290,7 +291,7 @@ def test_no_active_generation_scans_the_sources(fake_graph, monkeypatch):
     assert fake_graph.get_link_graph(catalog=object()) == fallback
 
 
-def test_an_unreadable_generation_scans_the_sources(fake_graph, monkeypatch):
+def test_an_unreadable_generation_scans_the_sources(fake_graph: ModuleType, monkeypatch: pytest.MonkeyPatch) -> None:
     def broken(*_args: object, **_kwargs: object) -> None:
         raise sqlite3.OperationalError("database disk image is malformed")
 
@@ -301,7 +302,7 @@ def test_an_unreadable_generation_scans_the_sources(fake_graph, monkeypatch):
     assert fake_graph.get_link_graph(catalog=object()) == fallback
 
 
-def test_a_generation_read_past_its_deadline_is_not_hidden(fake_graph, monkeypatch):
+def test_a_generation_read_past_its_deadline_is_not_hidden(fake_graph: ModuleType, monkeypatch: pytest.MonkeyPatch) -> None:
     def late(*_args: object, **_kwargs: object) -> None:
         raise TimeoutError("graph deadline reached")
 
@@ -311,13 +312,17 @@ def test_a_generation_read_past_its_deadline_is_not_hidden(fake_graph, monkeypat
         fake_graph.get_link_graph(catalog=object())
 
 
-def test_a_state_root_without_a_catalog_has_no_active_graph(fake_graph, tmp_path, monkeypatch):
+def test_a_state_root_without_a_catalog_has_no_active_graph(
+    fake_graph: ModuleType, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     monkeypatch.setattr(fake_graph, "STATE_ROOT", tmp_path)
 
     assert fake_graph._read_active_link_graph(None) is None
 
 
-def test_the_state_root_catalog_is_read_when_none_is_given(fake_graph, tmp_path, monkeypatch):
+def test_the_state_root_catalog_is_read_when_none_is_given(
+    fake_graph: ModuleType, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     from generation_catalog import GenerationCatalog
 
     catalog_path = tmp_path / "cache" / "evidence-graph" / "catalog.sqlite3"
@@ -328,8 +333,13 @@ def test_the_state_root_catalog_is_read_when_none_is_given(fake_graph, tmp_path,
     assert isinstance(fake_graph._catalog_or_default(None), GenerationCatalog)
 
 
-def _run_cli(fake_graph, monkeypatch, capsys, *arguments: str) -> str:
-    fake_graph._link_graph_cache = {"a.md": ["b.md", "c.md"], "d.md": ["a.md"]}
+def _run_cli(
+    fake_graph: ModuleType,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    *arguments: str,
+) -> str:
+    monkeypatch.setattr(fake_graph, "_link_graph_cache", {"a.md": ["b.md", "c.md"], "d.md": ["a.md"]})
     monkeypatch.setattr(fake_graph, "_read_active_link_graph", lambda *_a, **_k: None)
     monkeypatch.setattr(sys, "argv", ["graph_neighbors.py", *arguments])
 
@@ -337,7 +347,9 @@ def _run_cli(fake_graph, monkeypatch, capsys, *arguments: str) -> str:
     return capsys.readouterr().out
 
 
-def test_cli_stats_count_pages_and_edges(fake_graph, monkeypatch, capsys):
+def test_cli_stats_count_pages_and_edges(
+    fake_graph: ModuleType, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
     out = _run_cli(fake_graph, monkeypatch, capsys, "--stats")
 
     assert "Pages with outbound links: 2" in out
@@ -345,7 +357,9 @@ def test_cli_stats_count_pages_and_edges(fake_graph, monkeypatch, capsys):
     assert "a.md: 2 links" in out
 
 
-def test_cli_neighbors_name_both_directions(fake_graph, monkeypatch, capsys):
+def test_cli_neighbors_name_both_directions(
+    fake_graph: ModuleType, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
     out = _run_cli(fake_graph, monkeypatch, capsys, "--neighbors", "a.md")
 
     assert "→ b.md" in out
@@ -353,5 +367,7 @@ def test_cli_neighbors_name_both_directions(fake_graph, monkeypatch, capsys):
     assert "← d.md" in out
 
 
-def test_cli_without_a_request_prints_nothing(fake_graph, monkeypatch, capsys):
+def test_cli_without_a_request_prints_nothing(
+    fake_graph: ModuleType, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
     assert _run_cli(fake_graph, monkeypatch, capsys) == ""
