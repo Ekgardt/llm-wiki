@@ -3244,14 +3244,18 @@ def markdown_page_row(
     The Markdown walk never yields a superseded or archived page, nor a file outside
     the notes tree, a skipped name or directory, or a link; neither does this.
     """
-    if not _walk_reaches(_notes_parts(relative_path)):
-        return None
-    read = _read_page(ROOT / relative_path, "graph neighbour page")
+    read = _walked_page_read(relative_path)
     if read is None or _is_retired_page(read.content):
         return None
     if not _page_read_eligible(read, project=project, since=since, as_of=as_of):
         return None
     return _page_hit(read, score=0.0, bm25_score=0.0)
+
+
+def _walked_page_read(relative_path: str) -> _PageRead | None:
+    if not _walk_reaches(_notes_parts(relative_path)):
+        return None
+    return _read_page(ROOT / relative_path, "graph neighbour page")
 
 
 def _notes_parts(relative_path: str) -> tuple[str, ...]:

@@ -155,7 +155,7 @@ def _resolve_wikilink(
     deadline: float | None = None,
     names: dict[str, list[Path]] | None = None,
 ) -> str | None:
-    """Resolve a [[wikilink]] target to a relative file path."""
+    """None when the link names no page, or more than one."""
     known = _page_names(deadline) if names is None else names
     valid: list[str] = []
     for candidate in _wikilink_candidates(target.strip(), known):
