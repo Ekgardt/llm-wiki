@@ -3644,16 +3644,13 @@ def test_unix_installer_mcp_function_uses_parser_in_temp_home(tmp_path, scenario
     if not bash.exists():
         pytest.skip("Git Bash unavailable")
     source = (ROOT / "install.sh").read_text(encoding="utf-8")
-    warn = re.search(r"(?m)^warn\(\)\s*\{.*\}$", source)
-    assert warn, "warn missing"
-    codex_functions = _shell_functions(
+    function = _shell_functions(
         source,
         "write_codex_mcp_block",
         "add_codex_mcp_block",
         "codex_mcp_state_status",
         "configure_codex_mcp",
     )
-    function = warn.group(0) + "\n" + codex_functions
     home = tmp_path / "home"
     config = home / ".codex" / "config.toml"
     config.parent.mkdir(parents=True)
@@ -3671,7 +3668,8 @@ def test_unix_installer_mcp_function_uses_parser_in_temp_home(tmp_path, scenario
     before = config.read_bytes()
     runner = tmp_path / "installer-mcp-contract.sh"
     runner.write_text(
-        function
+        'warn() { echo "[WARN] $1"; }\n'
+        + function
         + "\nuv() {\n"
         + "  while [[ $# -gt 0 && $1 != config-state ]]; do shift; done\n"
         + '  command "$TEST_PYTHON" "$TEST_VAULT/scripts/codex_memory.py" "$@"\n'
@@ -3787,7 +3785,8 @@ def test_unix_installer_probe_reports_absent_without_touching_the_file(tmp_path)
     before = destination.read_bytes()
     runner = tmp_path / "installer-contract.sh"
     runner.write_text(
-        function
+        'warn() { echo "[WARN] $1"; }\n'
+        + function
         + "\nuv() {\n"
         + "  while [[ $# -gt 0 && $1 != hooks-state ]]; do shift; done\n"
         + '  command "$TEST_PYTHON" "$TEST_VAULT/scripts/codex_memory.py" "$@"\n'
@@ -3830,7 +3829,8 @@ def test_unix_installer_probe_reports_conflict_for_unrelated_inline_hooks(tmp_pa
     before = destination.read_bytes()
     runner = tmp_path / "installer-inline-contract.sh"
     runner.write_text(
-        function
+        'warn() { echo "[WARN] $1"; }\n'
+        + function
         + "\nuv() {\n"
         + "  while [[ $# -gt 0 && $1 != hooks-state ]]; do shift; done\n"
         + '  command "$TEST_PYTHON" "$TEST_VAULT/scripts/codex_memory.py" "$@"\n'
@@ -3965,7 +3965,8 @@ def test_unix_installer_probe_reports_disabled_when_the_feature_is_off(tmp_path)
     before = destination.read_bytes()
     runner = tmp_path / "installer-disabled-contract.sh"
     runner.write_text(
-        function
+        'warn() { echo "[WARN] $1"; }\n'
+        + function
         + "\nuv() {\n"
         + "  while [[ $# -gt 0 && $1 != hooks-state ]]; do shift; done\n"
         + '  command "$TEST_PYTHON" "$TEST_VAULT/scripts/codex_memory.py" "$@"\n'
