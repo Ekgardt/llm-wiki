@@ -85,17 +85,20 @@ def test_the_schema_takes_quotes_before_the_text_and_the_prompt_asks_for_them_fi
 
 
 SECOND_SPAN = "Congratulations on your silver necklace, it suits you!"
-TWO_SPANS = {**SUPPLIED, "E2": {"text": SECOND_SPAN, "relative_path": "knowledge/daily/2023-05-17.md"}}
+SECOND_SOURCE = {"text": SECOND_SPAN, "relative_path": "knowledge/daily/2023-05-17.md"}
+TWO_SPANS = {**SUPPLIED, "E2": SECOND_SOURCE}
 TWO_CITED = {**CITED, "E2": {"citation_id": "E2"}}
 
 
-def _two_span_claim(text: str, quotes: list[str]) -> dict:
+def _two_span_claim(text: str, quotes: list[str]) -> dict[str, object]:
     return {"text": text, "citation_ids": ["E1", "E2"], "quotes": quotes}
 
 
 def test_a_claim_quoting_each_of_its_two_spans_once_survives() -> None:
     """One quote per cited span is what the prompt asks for; no span must hold the other's quote."""
-    claim = _two_span_claim("The necklace was silver.", ["her silver necklace", "on your silver necklace"])
+    claim = _two_span_claim(
+        "The necklace was silver.", ["her silver necklace", "on your silver necklace"]
+    )
 
     assert _claim_survives(claim, TWO_CITED, TWO_SPANS) == {"E1", "E2"}
 

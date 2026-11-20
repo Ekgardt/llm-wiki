@@ -1355,7 +1355,7 @@ def _check_one_citation(
         raise EvidenceResolutionError("claim cites evidence not supplied to generation")
     quotes = _quotes_of(claim)
     if quotes:
-        _require_a_quote_from(quotes, str(supplied[citation_id]["text"]))
+        _require_a_quote_from(quotes, str(supplied[str(citation_id)]["text"]))
         return
     _require_citation_touches_claim(
         str(claim["text"]),
@@ -1406,7 +1406,6 @@ def _require_a_quote_from(quotes: Sequence[str], span_text: str) -> None:
 
 def _require_quoted_support(
     claim: Mapping[str, object],
-    ids: Sequence[object],
     supplied: Mapping[str, Mapping[str, object]],
     *,
     derived: bool,
@@ -1418,7 +1417,8 @@ def _require_quoted_support(
     of the cited spans, and the figures are compared against all the quotes.
     """
     quotes = _quotes_of(claim)
-    if not quotes:
+    ids = claim.get("citation_ids")
+    if not quotes or not isinstance(ids, list):
         return
     spans = _cited_spans(ids, supplied)
     _require_quotes_in_spans(quotes, [str(span["text"]) for span in spans])
@@ -1472,7 +1472,7 @@ def _cited_ids_of_claim(
         _check_one_citation(
             claim, citation_id, cited, supplied, derived=derivation is not None
         )
-    _require_quoted_support(claim, ids, supplied, derived=derivation is not None)
+    _require_quoted_support(claim, supplied, derived=derivation is not None)
     return {str(item) for item in ids}
 
 
