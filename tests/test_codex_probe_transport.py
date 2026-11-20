@@ -2,6 +2,7 @@
 import os
 import sys
 import time
+from pathlib import Path
 
 import doctor
 
@@ -25,7 +26,7 @@ def _peer_is_gone(pid: int) -> bool:
     return False
 
 
-def _probe(tmp_path, code, seconds=1):
+def _probe(tmp_path: Path, code: str, seconds: float = 1) -> bytes | object | None:
     script = tmp_path / "peer.py"
     script.write_text(code)
     return doctor._run_codex_probe(
@@ -45,6 +46,7 @@ print(json.dumps({'id':2,'result':{'peer':'confirmed'}}),flush=True)
 assert sys.stdin.read()==''
 '''
     raw = _probe(tmp_path, code)
+    assert isinstance(raw, bytes)
     assert doctor._codex_hooks_result(raw) == {"peer": "confirmed"}
 
 
