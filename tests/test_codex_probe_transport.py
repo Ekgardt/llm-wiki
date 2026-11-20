@@ -26,7 +26,7 @@ def _peer_is_gone(pid: int) -> bool:
     return False
 
 
-def _probe(tmp_path: Path, code: str, seconds: float = 1) -> bytes | object | None:
+def _probe(tmp_path: Path, code: str, seconds: float = 1) -> object:
     script = tmp_path / "peer.py"
     script.write_text(code)
     return doctor._run_codex_probe(
