@@ -2415,17 +2415,10 @@ def _resolved_deadline(deadline: float | None) -> float:
 
 
 def _resolved_profile(profile: str | None) -> str:
-    """The profile the answer is built and reported under.
+    """The profile retrieval plans for the caller's choice, which is usually none."""
+    from retrieval import planned_request
 
-    Retrieval is given the caller's own choice, which is usually none, so that
-    it plans the legs itself; see `retrieval.planned_request`.
-    """
-    from retrieval import PLANNED_PROFILE
-
-    if profile is not None:
-        return profile.upper()
-    planned: str = PLANNED_PROFILE
-    return planned
+    return str(planned_request(profile, semantic=True)[0])
 
 
 def _resolved_candidates(

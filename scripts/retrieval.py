@@ -408,7 +408,8 @@ DENSE_WEIGHT = 1.0
 GRAPH_WEIGHT = 0.5
 
 # The graph lane walks one hop from its seeds (docs/research/2026-09-22-the-walk-has-nothing-to-
-# walk.md): memory questions never route to it, so no measurement justifies more.
+# walk.md). Every search walks it since 2026-11-17 (docs/research/2026-11-17-every-search-runs-
+# every-leg.md); one hop stays until a rank evaluation measures recall at more.
 GRAPH_MAX_HOPS = 1
 # The graph lane's shape: the top-ranked hits a one-hop walk starts from, the
 # neighbours taken per seed and in all. Ranking parameters of the hybrid design, not
@@ -3449,7 +3450,6 @@ def _complete_from_pages(
 
 
 def _lane_best_ids(chunks: Sequence[RetrievalCandidate]) -> frozenset[str]:
-    """The first chunk of every source, in the order given."""
     first: dict[SourceKey, str] = {}
     for chunk in chunks:
         first.setdefault(_source_key(chunk), chunk.candidate_id)
@@ -4487,6 +4487,9 @@ def _neighbour_boost_or_none(
     try:
         return _neighbour_boost_hits(filters)
     except TimeoutError:
+        # The link scan stops at the run's own deadline: that is the run stopping,
+        # and the legs already finished stay in hand.
+        _check_stopped(filters.get("deadline_monotonic"), None)
         raise
     except Exception:  # noqa: BLE001 - the graph signal degrades on its own
         return None

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import sqlite3
 import sys
+import time
 from pathlib import Path
 from typing import cast
 
@@ -75,6 +76,22 @@ def test_no_graph_rows_ask_the_generation_nothing() -> None:
     assert search_memory.generation_eligible_paths(unasked, set(), project="alpha") == set()
 
 
+def test_a_generation_graph_row_matches_its_project_whatever_the_letter_case() -> None:
+    connection = sqlite3.connect(":memory:")
+    connection.executescript(search_memory._GENERATION_FTS_DDL)
+    path = "knowledge/notes/cafe.md"
+    connection.execute(
+        "INSERT INTO chunks(source_path, project, content) VALUES (?, 'CAFÉ Ωmega', 'x')",
+        (path,),
+    )
+
+    admitted = search_memory.generation_eligible_paths(
+        connection, {path}, project="café ωMEGA"
+    )
+
+    assert admitted == {path}
+
+
 def _write_pages(root: Path) -> None:
     for path, (project, valid_from, status) in PAGES.items():
         page = root / path
@@ -92,6 +109,7 @@ def _legacy_neighbours(
 ) -> list[str]:
     _write_pages(tmp_path)
     monkeypatch.setattr(search_memory, "ROOT", tmp_path)
+    monkeypatch.setattr(search_memory, "KNOWLEDGE_DIR", tmp_path / "knowledge" / "notes")
 
     def boost(
         bm25_results: list[dict[str, object]],
@@ -131,7 +149,9 @@ def test_the_markdown_walk_reuses_the_seeds_and_the_deadline(
     assert seen["deadline"] == pytest.approx(123.0)
 
 
-def test_the_link_graph_build_stops_at_the_deadline(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_the_neighbour_boost_hands_its_deadline_to_the_link_graph(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     def walk(*_args: object, deadline: float | None = None, **_kwargs: object) -> None:
         seen.append(deadline)
         raise TimeoutError("deadline")
@@ -251,3 +271,48 @@ def test_a_search_for_one_project_gets_no_graph_page_of_another(
 
     graph_pages = {row["candidate_id"] for row in rows} - {"seed"}
     assert graph_pages == {"knowledge/notes/kept.md"}
+
+
+@pytest.mark.parametrize(
+    "linked",
+    [".env", "deploy.sh", "knowledge/notes/index.md", "knowledge/notes/projects/x.md",
+     "knowledge/notes/../../.env", "knowledge/notes/link.md"],
+)
+def test_a_neighbour_the_markdown_walk_never_yields_is_not_read(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, linked: str
+) -> None:
+    notes = tmp_path / "knowledge" / "notes"
+    (notes / "projects").mkdir(parents=True)
+    for name in (".env", "deploy.sh", "knowledge/notes/index.md", "knowledge/notes/projects/x.md"):
+        (tmp_path / name).write_text("# secret heading\nTOKEN=x\n", encoding="utf-8")
+    (notes / "page.md").write_text("# Page\n", encoding="utf-8")
+    (notes / "link.md").symlink_to(tmp_path / ".env")
+    monkeypatch.setattr(search_memory, "ROOT", tmp_path)
+    monkeypatch.setattr(search_memory, "KNOWLEDGE_DIR", notes)
+
+    assert search_memory.markdown_page_row(linked) is None
+    assert search_memory.markdown_page_row("knowledge/notes/page.md") is not None
+
+
+def test_a_link_scan_past_the_deadline_keeps_the_lexical_hits(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def slow_scan(*, deadline: float | None = None, **_kwargs: object) -> None:
+        assert deadline is not None
+        time.sleep(max(0.0, deadline - time.monotonic()) + 0.01)
+        graph_neighbors._require_before(deadline, "graph neighbor source-scan deadline reached")
+
+    monkeypatch.setattr(graph_neighbors, "get_link_graph", slow_scan)
+    lexical = {"path": "knowledge/notes/a.md", "score": 1.0, "title": "A"}
+
+    result = retrieval.retrieve(
+        "a question",
+        requested_profile="GRAPH",
+        lexical_backend=lambda **_filters: [lexical],
+        graph_backend=lambda **filters: retrieval._neighbour_boost_or_none(filters),
+        rerank_enabled=False,
+        deadline_monotonic=time.monotonic() + 1.0,
+    )
+
+    assert result.trace.partial is True
+    assert [item.relative_path for item in result.candidates] == ["knowledge/notes/a.md"]

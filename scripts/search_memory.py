@@ -3212,23 +3212,24 @@ def generation_eligible_paths(
     """The pages among `paths` that the generation's lexical leg would admit.
 
     A row the evidence graph reached carries no page metadata of its own; its
-    page answers to the same scope, project, date and current-status rule as a
-    lexical hit, in the same SQL.
+    page answers to the same scope, date and current-status SQL as a lexical
+    hit, and to the same casefolded project rule (SQLite's lower() folds ASCII only).
     """
     if not paths:
         return set()
     filters, values = _generation_filters(scope=scope, since=since, as_of=as_of)
-    clauses: list[object] = [*values]
-    if project:
-        filters += " AND lower(project) = lower(?)"
-        clauses.append(project)
     wanted = sorted(paths)
     placeholders = ", ".join("?" for _ in wanted)
     rows = connection.execute(
-        f"SELECT DISTINCT source_path FROM chunks WHERE source_path IN ({placeholders}){filters}",
-        [*wanted, *clauses],
+        "SELECT DISTINCT source_path, project FROM chunks"
+        f" WHERE source_path IN ({placeholders}){filters}",
+        [*wanted, *values],
     ).fetchall()
-    return {str(row[0]) for row in rows}
+    return {
+        str(row[0])
+        for row in rows
+        if not _field_mismatch({"project": row[1]}, "project", project)
+    }
 
 
 def markdown_page_row(
@@ -3240,14 +3241,48 @@ def markdown_page_row(
 ) -> dict[str, object] | None:
     """A page reached another way, as the Markdown leg reports it, if that leg would admit it.
 
-    The Markdown walk never yields a superseded or archived page, so neither does this.
+    The Markdown walk never yields a superseded or archived page, nor a file outside
+    the notes tree, a skipped name or directory, or a link; neither does this.
     """
+    if not _walk_reaches(_notes_parts(relative_path)):
+        return None
     read = _read_page(ROOT / relative_path, "graph neighbour page")
     if read is None or _is_retired_page(read.content):
         return None
     if not _page_read_eligible(read, project=project, since=since, as_of=as_of):
         return None
     return _page_hit(read, score=0.0, bm25_score=0.0)
+
+
+def _notes_parts(relative_path: str) -> tuple[str, ...]:
+    """The path's parts below the notes tree; empty when it lies outside."""
+    path: Path = ROOT / relative_path
+    try:
+        return path.relative_to(KNOWLEDGE_DIR).parts
+    except ValueError:
+        return ()
+
+
+def _walk_reaches(parts: tuple[str, ...]) -> bool:
+    return _walk_admits_names(parts) and _walk_admits_entries(parts)
+
+
+def _walk_admits_names(parts: tuple[str, ...]) -> bool:
+    if not parts or ".." in parts:
+        return False
+    name = parts[-1]
+    skipped = name in SKIP_NAMES or SKIP_DIRS.intersection(parts[:-1])
+    return name.endswith(".md") and not skipped
+
+
+def _walk_admits_entries(parts: tuple[str, ...]) -> bool:
+    """Every directory on the way is a real directory and the page a regular file."""
+    path = KNOWLEDGE_DIR
+    for part in parts[:-1]:
+        path /= part
+        if not _is_safe_entry(path, directory=True):
+            return False
+    return _is_safe_entry(path / parts[-1], directory=False)
 
 
 def _row_text(row: sqlite3.Row, key: str) -> str:

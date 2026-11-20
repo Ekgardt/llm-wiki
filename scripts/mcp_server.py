@@ -989,10 +989,17 @@ def _run_vault_search(
     )
 
 
+def _semantic_plan() -> str:
+    """The profile the semantic run a fallback replaces had planned."""
+    from retrieval import planned_request
+
+    return str(planned_request(None, semantic=True)[0])
+
+
 def _lexical_fallback_row(row: dict) -> dict:
     return {
         **row,
-        "requested_mode": "HYBRID",
+        "requested_mode": _semantic_plan(),
         "fallback_reason": "retrieval_deadline_exceeded",
         "partial": True,
     }
@@ -1028,11 +1035,9 @@ def _row_trace(row: Mapping[str, object]) -> dict[str, object]:
 
 def _unreported_trace() -> dict[str, object]:
     """Nothing reported a trace: say so, and never guess a generation."""
-    from retrieval import PLANNED_PROFILE
-
     return _reported_trace(
         {
-            "requested_mode": PLANNED_PROFILE,
+            "requested_mode": _semantic_plan(),
             "effective_mode": "BASE",
             "fallback_reason": "trace_unavailable",
             "partial": True,
