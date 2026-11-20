@@ -1355,7 +1355,7 @@ def _check_one_citation(
         raise EvidenceResolutionError("claim cites evidence not supplied to generation")
     quotes = _quotes_of(claim)
     if quotes:
-        _require_quoted_support(claim, quotes, supplied[citation_id], derived=derived)
+        _require_a_quote_from(quotes, str(supplied[citation_id]["text"]))
         return
     _require_citation_touches_claim(
         str(claim["text"]),
@@ -1397,18 +1397,44 @@ def _require_quotes_in_spans(quotes: Sequence[str], span_texts: Sequence[str]) -
             raise GroundedQAError("a quote is not in the cited evidence")
 
 
+def _require_a_quote_from(quotes: Sequence[str], span_text: str) -> None:
+    """A cited span carries at least one of the claim's quotes, so every citation is touched."""
+    folded = _folded(span_text)
+    if not any(quote in folded for quote in quotes):
+        raise GroundedQAError("a quote is not in the cited evidence")
+
+
 def _require_quoted_support(
     claim: Mapping[str, object],
-    quotes: Sequence[str],
-    span: Mapping[str, object],
+    ids: Sequence[object],
+    supplied: Mapping[str, Mapping[str, object]],
     *,
     derived: bool,
 ) -> None:
-    """A quoting claim is checked by its quotes: verbatim in the span, and agreeing on figures."""
-    _require_quotes_in_spans(quotes, [str(span["text"])])
+    """A quoting claim is checked by its quotes as a whole, across all the spans it cites.
+
+    One quote per cited span is what the prompt asks for, so no single span
+    holds every quote of a claim that cites two: each quote has to occur in one
+    of the cited spans, and the figures are compared against all the quotes.
+    """
+    quotes = _quotes_of(claim)
+    if not quotes:
+        return
+    spans = _cited_spans(ids, supplied)
+    _require_quotes_in_spans(quotes, [str(span["text"]) for span in spans])
     if derived:
         return
-    _require_figures_agree(str(claim["text"]), " ".join(quotes), supplied_figures(span))
+    _require_figures_agree(str(claim["text"]), " ".join(quotes), _supplied_figures_of(spans))
+
+
+def _cited_spans(
+    ids: Sequence[object], supplied: Mapping[str, Mapping[str, object]]
+) -> list[Mapping[str, object]]:
+    return [supplied[str(item)] for item in ids]
+
+
+def _supplied_figures_of(spans: Sequence[Mapping[str, object]]) -> str:
+    return " ".join(supplied_figures(span) for span in spans)
 
 
 def _cited_ids_of_claim(
@@ -1446,6 +1472,7 @@ def _cited_ids_of_claim(
         _check_one_citation(
             claim, citation_id, cited, supplied, derived=derivation is not None
         )
+    _require_quoted_support(claim, ids, supplied, derived=derivation is not None)
     return {str(item) for item in ids}
 
 

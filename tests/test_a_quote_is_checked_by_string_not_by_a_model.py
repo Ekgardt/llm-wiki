@@ -82,3 +82,39 @@ def test_the_schema_takes_quotes_before_the_text_and_the_prompt_asks_for_them_fi
     validate_schema(document, ANSWER_SCHEMA)
     assert properties.index("quotes") < properties.index("text")
     assert "copy into its quotes the exact words" in _qa_system_prompt()
+
+
+SECOND_SPAN = "Congratulations on your silver necklace, it suits you!"
+TWO_SPANS = {**SUPPLIED, "E2": {"text": SECOND_SPAN, "relative_path": "knowledge/daily/2023-05-17.md"}}
+TWO_CITED = {**CITED, "E2": {"citation_id": "E2"}}
+
+
+def _two_span_claim(text: str, quotes: list[str]) -> dict:
+    return {"text": text, "citation_ids": ["E1", "E2"], "quotes": quotes}
+
+
+def test_a_claim_quoting_each_of_its_two_spans_once_survives() -> None:
+    """One quote per cited span is what the prompt asks for; no span must hold the other's quote."""
+    claim = _two_span_claim("The necklace was silver.", ["her silver necklace", "on your silver necklace"])
+
+    assert _claim_survives(claim, TWO_CITED, TWO_SPANS) == {"E1", "E2"}
+
+
+def test_a_cited_span_none_of_the_quotes_comes_from_drops_the_claim() -> None:
+    claim = _two_span_claim("The necklace was silver.", ["her silver necklace"])
+
+    assert _claim_survives(claim, TWO_CITED, TWO_SPANS) == "a quote is not in the cited evidence"
+
+
+def test_a_quote_from_no_cited_span_drops_a_two_span_claim() -> None:
+    claim = _two_span_claim(
+        "The necklace was silver.", ["her silver necklace", "on your silver necklace", "my aunt"]
+    )
+
+    assert _claim_survives(claim, TWO_CITED, TWO_SPANS) == "a quote is not in the cited evidence"
+
+
+def test_a_figure_one_span_quotes_carries_a_two_span_claim() -> None:
+    claim = _two_span_claim("The necklace cost $200.", ["it cost her $200", "your silver necklace"])
+
+    assert _claim_survives(claim, TWO_CITED, TWO_SPANS) == {"E1", "E2"}
