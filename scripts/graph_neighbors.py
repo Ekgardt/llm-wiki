@@ -89,7 +89,9 @@ def _source_page(source: str) -> Path | None:
     """The seed's file when the full scan would read it: a note inside the notes tree."""
     path: Path = ROOT / source
     inside = path.is_relative_to(KNOWLEDGE_DIR) and ".." not in Path(source).parts
-    return path if inside and path.suffix == ".md" else None
+    if not inside or path.suffix != ".md":
+        return None
+    return path
 
 
 def _page_links(
