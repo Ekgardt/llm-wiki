@@ -12,6 +12,7 @@ Feeds retrieval.py's fuse_rrf() as a third signal.
 """
 from __future__ import annotations
 
+import os
 import re
 import sqlite3
 import sys
@@ -73,7 +74,7 @@ def _page_names(deadline: float | None) -> dict[str, list[Path]]:
         return names
     for md in sorted(KNOWLEDGE_DIR.rglob("*.md")):
         _require_before(deadline, "graph neighbor source-scan deadline reached")
-        names.setdefault(md.stem, []).append(md)
+        names.setdefault(os.path.normcase(md.stem), []).append(md)
     return names
 
 
@@ -171,7 +172,8 @@ def _wikilink_candidates(target: str, names: dict[str, list[Path]]) -> list[Path
     if "/" in target:
         # Path-style: try as-is and with .md
         return [ROOT / (target + ".md"), ROOT / target]
-    return names.get(target, [])
+    # The platform's own case rule, as a glob for the name would apply it.
+    return names.get(os.path.normcase(target), [])
 
 
 def _active_vault_file(candidate: Path) -> str | None:
