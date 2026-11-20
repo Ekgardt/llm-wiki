@@ -6,7 +6,7 @@ from pathlib import Path
 
 import doctor
 
-from tests.slow_machine import CHILD_START_TIMEOUT, LONG_TIMEOUT, PAUSE_TIMEOUT
+from tests.slow_machine import LONG_TIMEOUT, PAUSE_TIMEOUT
 
 
 def _peer_is_gone(pid: int) -> bool:
@@ -48,6 +48,12 @@ assert sys.stdin.read()==''
     raw = _probe(tmp_path, code)
     assert isinstance(raw, bytes)
     assert doctor._codex_hooks_result(raw) == {"peer": "confirmed"}
+
+
+# Long enough for a loaded interpreter to start and record its PID before the
+# probe gives up on it: at 0.2 s a busy checker killed the peer first, and the
+# test failed reading a PID that was never written.
+_HUNG_PROBE_SECONDS = 1.0
 
 
 def test_hung_peer_is_killed_and_reaped_within_cleanup_budget(tmp_path):
