@@ -5,7 +5,7 @@ import time
 
 import doctor
 
-from tests.slow_machine import LONG_TIMEOUT, PAUSE_TIMEOUT
+from tests.slow_machine import CHILD_START_TIMEOUT, LONG_TIMEOUT, PAUSE_TIMEOUT
 
 
 def _peer_is_gone(pid: int) -> bool:
@@ -55,7 +55,7 @@ open('peer.pid','w').write(str(os.getpid()))
 time.sleep({PAUSE_TIMEOUT})
 '''
     started = time.monotonic()
-    assert _probe(tmp_path, code, seconds=0.2) is doctor._PROBE_INCOMPLETE
+    assert _probe(tmp_path, code, seconds=CHILD_START_TIMEOUT) is doctor._PROBE_INCOMPLETE
     assert time.monotonic() - started < LONG_TIMEOUT
     pid = int((tmp_path / "peer.pid").read_text())
     assert _peer_is_gone(pid)

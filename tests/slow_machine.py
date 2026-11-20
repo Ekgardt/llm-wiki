@@ -1,4 +1,4 @@
-"""The two waits a test may use, sized for the slowest supported machine.
+"""The waits a test may use, sized for the slowest supported machine.
 
 The names and the rule are CPython's (`test.support.SHORT_TIMEOUT` and
 `LONG_TIMEOUT`, https://docs.python.org/3/library/test.html): a wait that
@@ -56,3 +56,9 @@ LONG_TIMEOUT = 300.0 * _scale()
 # wait of the test, so the worker can never time out first and turn "the
 # test was slow" into "the worker failed".
 PAUSE_TIMEOUT = 2 * LONG_TIMEOUT
+
+# A bound the test expects to elapse on a child it starts: long enough for a
+# loaded interpreter to start and run its first line, so the test can find the
+# PID the child records before the code under test stops it. At 0.2 s a busy
+# checker stopped the child first and the test waited for a PID never written.
+CHILD_START_TIMEOUT = 1.0 * _scale()
