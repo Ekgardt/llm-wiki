@@ -2,14 +2,11 @@
 from __future__ import annotations
 
 import dataclasses
-import sys
 from pathlib import Path
 from unittest.mock import patch
 
 SCRIPTS = Path(__file__).resolve().parents[1] / "scripts"
 SCHEMAS = SCRIPTS / "schemas"
-if str(SCRIPTS) not in sys.path:
-    sys.path.insert(0, str(SCRIPTS))
 
 
 def _hit(candidate_id: str, path: str, score: float, **extra):

@@ -10,8 +10,6 @@ from reliable_memory import SchemaValidationError, validate_schema
 
 SCRIPTS = Path(__file__).resolve().parents[1] / "scripts"
 SCHEMAS = SCRIPTS / "schemas"
-if str(SCRIPTS) not in sys.path:
-    sys.path.insert(0, str(SCRIPTS))
 
 PROFILES = (
     "DIRECT",
@@ -445,7 +443,6 @@ def test_retrieve_conditional_rerank_blends_and_reports_signal(monkeypatch) -> N
         kwargs.setdefault("scorer", fake_scorer)
         return real_rerank(query, documents, limit=limit, **kwargs)
 
-    import sys
     from unittest.mock import patch
 
     with patch.object(sys.modules.setdefault("reranker", reranker), "rerank", wrapped):
