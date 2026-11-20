@@ -88,13 +88,8 @@ def _scanned_pages(sources: Iterable[str] | None) -> list[Path]:
 def _source_page(source: str) -> Path | None:
     """The seed's file when the full scan would read it: a note inside the notes tree."""
     path: Path = ROOT / source
-    if path.suffix != ".md" or ".." in Path(source).parts:
-        return None
-    try:
-        path.relative_to(KNOWLEDGE_DIR)
-    except ValueError:
-        return None
-    return path
+    inside = path.is_relative_to(KNOWLEDGE_DIR) and ".." not in Path(source).parts
+    return path if inside and path.suffix == ".md" else None
 
 
 def _page_links(
