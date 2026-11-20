@@ -265,7 +265,9 @@ def _open_returns(monkeypatch: pytest.MonkeyPatch, graph: _ActiveGraph | None) -
     )
 
 
-def test_active_links_become_a_sorted_deduplicated_adjacency(fake_graph: ModuleType, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_active_links_become_a_sorted_deduplicated_adjacency(
+    fake_graph: ModuleType, monkeypatch: pytest.MonkeyPatch
+) -> None:
     graph = _ActiveGraph(
         [
             {"source_path": "b.md", "target_path": "c.md"},
@@ -283,7 +285,9 @@ def test_active_links_become_a_sorted_deduplicated_adjacency(fake_graph: ModuleT
     assert graph.closed
 
 
-def test_no_active_generation_scans_the_sources(fake_graph: ModuleType, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_no_active_generation_scans_the_sources(
+    fake_graph: ModuleType, monkeypatch: pytest.MonkeyPatch
+) -> None:
     _open_returns(monkeypatch, None)
     fallback = {"scanned.md": ["target.md"]}
     monkeypatch.setattr(fake_graph, "_build_link_graph", lambda **_kwargs: fallback)
@@ -291,7 +295,9 @@ def test_no_active_generation_scans_the_sources(fake_graph: ModuleType, monkeypa
     assert fake_graph.get_link_graph(catalog=object()) == fallback
 
 
-def test_an_unreadable_generation_scans_the_sources(fake_graph: ModuleType, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_an_unreadable_generation_scans_the_sources(
+    fake_graph: ModuleType, monkeypatch: pytest.MonkeyPatch
+) -> None:
     def broken(*_args: object, **_kwargs: object) -> None:
         raise sqlite3.OperationalError("database disk image is malformed")
 
@@ -302,7 +308,9 @@ def test_an_unreadable_generation_scans_the_sources(fake_graph: ModuleType, monk
     assert fake_graph.get_link_graph(catalog=object()) == fallback
 
 
-def test_a_generation_read_past_its_deadline_is_not_hidden(fake_graph: ModuleType, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_a_generation_read_past_its_deadline_is_not_hidden(
+    fake_graph: ModuleType, monkeypatch: pytest.MonkeyPatch
+) -> None:
     def late(*_args: object, **_kwargs: object) -> None:
         raise TimeoutError("graph deadline reached")
 
@@ -339,7 +347,8 @@ def _run_cli(
     capsys: pytest.CaptureFixture[str],
     *arguments: str,
 ) -> str:
-    monkeypatch.setattr(fake_graph, "_link_graph_cache", {"a.md": ["b.md", "c.md"], "d.md": ["a.md"]})
+    links = {"a.md": ["b.md", "c.md"], "d.md": ["a.md"]}
+    monkeypatch.setattr(fake_graph, "_link_graph_cache", links)
     monkeypatch.setattr(fake_graph, "_read_active_link_graph", lambda *_a, **_k: None)
     monkeypatch.setattr(sys, "argv", ["graph_neighbors.py", *arguments])
 
