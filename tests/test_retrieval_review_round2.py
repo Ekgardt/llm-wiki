@@ -1,7 +1,6 @@
 """Second-pass review blockers for retrieval orchestration."""
 from __future__ import annotations
 
-import sys
 import threading
 import time
 from pathlib import Path
@@ -9,10 +8,6 @@ from pathlib import Path
 import pytest
 
 from tests.slow_machine import SHORT_TIMEOUT
-
-SCRIPTS = Path(__file__).resolve().parents[1] / "scripts"
-if str(SCRIPTS) not in sys.path:
-    sys.path.insert(0, str(SCRIPTS))
 
 
 def _hit(cid: str, path: str, score: float, **extra):
