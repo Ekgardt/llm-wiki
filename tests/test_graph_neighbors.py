@@ -381,3 +381,54 @@ def test_cli_without_a_request_prints_nothing(
     fake_graph: ModuleType, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     assert _run_cli(fake_graph, monkeypatch, capsys) == ""
+
+
+def _notes(tmp_path: Path) -> Path:
+    notes = tmp_path / "knowledge" / "notes"
+    (notes / "sub").mkdir(parents=True)
+    (notes / "seed.md").write_text("# Seed\n\nSee [[token-refresh]].\n", encoding="utf-8")
+    (notes / "other.md").write_text("# Other\n\nSee [[seed]].\n", encoding="utf-8")
+    (notes / "sub" / "token-refresh.md").write_text("# Refresh\n", encoding="utf-8")
+    return notes
+
+
+def test_a_bare_link_follows_the_platform_case_rule(
+    fake_graph: ModuleType, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    import ntpath
+
+    notes = _notes(tmp_path)
+    monkeypatch.setattr(fake_graph, "ROOT", tmp_path)
+    monkeypatch.setattr(fake_graph, "KNOWLEDGE_DIR", notes)
+    monkeypatch.setattr(fake_graph.os.path, "normcase", ntpath.normcase)
+
+    assert fake_graph._resolve_wikilink("Token-Refresh") == "knowledge/notes/sub/token-refresh.md"
+
+
+def test_the_source_scan_reads_only_the_seeds_and_walks_the_names_once(
+    fake_graph: ModuleType, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    notes = _notes(tmp_path)
+    monkeypatch.setattr(fake_graph, "ROOT", tmp_path)
+    monkeypatch.setattr(fake_graph, "KNOWLEDGE_DIR", notes)
+    monkeypatch.setattr(fake_graph, "_read_active_link_graph", lambda *_a, **_k: None)
+    walks: list[str] = []
+    read: list[str] = []
+    rglob, read_text = Path.rglob, Path.read_text
+
+    def counted_rglob(self: Path, pattern: str) -> object:
+        walks.append(pattern)
+        return rglob(self, pattern)
+
+    def counted_read(self: Path, *args: object, **kwargs: object) -> str:
+        read.append(self.name)
+        return read_text(self, *args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(Path, "rglob", counted_rglob)
+    monkeypatch.setattr(Path, "read_text", counted_read)
+
+    boosts = fake_graph.boost_graph_neighbors([{"path": "knowledge/notes/seed.md"}], None)
+
+    assert [item["path"] for item in boosts] == ["knowledge/notes/sub/token-refresh.md"]
+    assert walks == ["*.md"]
+    assert "other.md" not in read
