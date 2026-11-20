@@ -427,8 +427,11 @@ def test_the_source_scan_reads_only_the_seeds_and_walks_the_names_once(
     monkeypatch.setattr(Path, "rglob", counted_rglob)
     monkeypatch.setattr(Path, "read_text", counted_read)
 
-    boosts = fake_graph.boost_graph_neighbors([{"path": "knowledge/notes/seed.md"}], None)
+    (tmp_path / "outside.md").write_text("[[other]]\n", encoding="utf-8")
+    seeds = [{"path": "knowledge/notes/seed.md"}, {"path": "outside.md"}]
+    boosts = fake_graph.boost_graph_neighbors(seeds, None)
 
     assert [item["path"] for item in boosts] == ["knowledge/notes/sub/token-refresh.md"]
     assert walks == ["*.md"]
     assert "other.md" not in read
+    assert "outside.md" not in read

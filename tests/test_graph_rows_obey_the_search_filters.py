@@ -276,7 +276,7 @@ def test_a_search_for_one_project_gets_no_graph_page_of_another(
 @pytest.mark.parametrize(
     "linked",
     [".env", "deploy.sh", "knowledge/notes/index.md", "knowledge/notes/projects/x.md",
-     "knowledge/notes/../../.env", "knowledge/notes/link.md"],
+     "knowledge/notes/../../.env", "knowledge/notes/link.md", "knowledge/notes/linked/x.md"],
 )
 def test_a_neighbour_the_markdown_walk_never_yields_is_not_read(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, linked: str
@@ -287,11 +287,15 @@ def test_a_neighbour_the_markdown_walk_never_yields_is_not_read(
         (tmp_path / name).write_text("# secret heading\nTOKEN=x\n", encoding="utf-8")
     (notes / "page.md").write_text("# Page\n", encoding="utf-8")
     (notes / "link.md").symlink_to(tmp_path / ".env")
+    (notes / "linked").symlink_to(notes / "projects", target_is_directory=True)
+    (notes / "sub").mkdir()
+    (notes / "sub" / "deep.md").write_text("# Deep\n", encoding="utf-8")
     monkeypatch.setattr(search_memory, "ROOT", tmp_path)
     monkeypatch.setattr(search_memory, "KNOWLEDGE_DIR", notes)
 
     assert search_memory.markdown_page_row(linked) is None
     assert search_memory.markdown_page_row("knowledge/notes/page.md") is not None
+    assert search_memory.markdown_page_row("knowledge/notes/sub/deep.md") is not None
 
 
 def test_a_link_scan_past_the_deadline_keeps_the_lexical_hits(
