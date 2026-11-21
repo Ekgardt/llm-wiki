@@ -1,0 +1,5 @@
+{"tests": ["test_readmes_have_same_h2_section_count", "test_no_current_document_repeats_a_retired_claim"],
+ "kinds": ["removed", "cases"],
+ "reason": "The owner removed README.ru.md and README.zh-CN.md on 2026-11-21 (owner message 263016509/16422) because law 10 forbids Russian text in the repository, so the Russian README could not be kept in step. test_readmes_have_same_h2_section_count only compared the section counts of the three READMEs and has nothing to compare with one README left. test_no_current_document_repeats_a_retired_claim keeps every other document and still checks README.md; only its two cases for the deleted files are gone. Every README fact the i18n guard pinned is still asserted against README.md in tests/test_readme_i18n.py.",
+ "recorded": "2026-11-21",
+ "expires": "2027-02-19"}

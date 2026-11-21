@@ -138,9 +138,7 @@ llm-wiki/                          ← vault root (= $LLM_WIKI_ROOT)
 ├── CLAUDE.md                     ROOT — agent contract (byte-identical to AGENTS.md)
 ├── CHANGELOG.md                  ROOT — Keep-a-Changelog
 ├── CONTRIBUTING.md               ROOT — contribution guide
-├── README.md                     ROOT — English (primary)
-├── README.ru.md                  ROOT — Russian (faithful translation)
-├── README.zh-CN.md               ROOT — Chinese (faithful translation)
+├── README.md                     ROOT — the only README (English)
 ├── LICENSE                       ROOT — MIT
 ├── install.ps1                   ROOT — Windows installer
 ├── install.sh                    ROOT — Unix installer
