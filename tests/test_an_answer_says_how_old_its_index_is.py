@@ -157,7 +157,7 @@ def test_a_failed_or_dry_compile_does_not_refresh(monkeypatch):
     assert (failed, dry, calls) == (1, 0, [])
 
 
-def test_a_cli_hit_shows_the_passage_that_holds_the_query_words():
+def test_a_cli_hit_shows_the_passage_that_holds_the_query_words() -> None:
     filler = "Nothing relevant is said here. " * 20
     hit = {"content": f"## Shelf\n\n{filler}The bookshelf came from the flea market. {filler}"}
 
@@ -167,13 +167,22 @@ def test_a_cli_hit_shows_the_passage_that_holds_the_query_words():
     assert "The bookshelf came from the flea market." in snippet
 
 
-def test_a_passage_is_found_by_another_form_of_the_word():
-    hit = {"content": "## Notes\n\n" + "Filler. " * 60 + "Две заметки о поиске."}
+# Russian: "Two notes about search." and the query "search notes" with "notes"
+# in the genitive plural, which the passage spells in the nominative.
+TWO_NOTES_ABOUT_SEARCH = (
+    "\u0414\u0432\u0435 \u0437\u0430\u043c\u0435\u0442\u043a\u0438 "
+    "\u043e \u043f\u043e\u0438\u0441\u043a\u0435."
+)
+SEARCH_OF_NOTES = "\u043f\u043e\u0438\u0441\u043a \u0437\u0430\u043c\u0435\u0442\u043e\u043a"
 
-    assert "Две заметки о поиске." in search_memory.result_snippet(hit, "поиск заметок")
+
+def test_a_passage_is_found_by_another_form_of_the_word() -> None:
+    hit = {"content": "## Notes\n\n" + "Filler. " * 60 + TWO_NOTES_ABOUT_SEARCH}
+
+    assert TWO_NOTES_ABOUT_SEARCH in search_memory.result_snippet(hit, SEARCH_OF_NOTES)
 
 
-def test_a_hit_without_the_query_words_shows_its_first_lines():
+def test_a_hit_without_the_query_words_shows_its_first_lines() -> None:
     hit = {"content": "## H\n\nThe first line.\n"}
 
     assert search_memory.result_snippet(hit, "unrelated") == "The first line."

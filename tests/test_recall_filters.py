@@ -13,6 +13,8 @@ from pathlib import Path
 
 import pytest
 
+from tests.slow_machine import SHORT_TIMEOUT
+
 SCRIPTS_DIR = Path(__file__).resolve().parent.parent / "scripts"
 if str(SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_DIR))
@@ -28,8 +30,8 @@ def _artifact(*pages: tuple[str, str, str]) -> sqlite3.Connection:
     connection.executescript(search_memory._GENERATION_FTS_DDL)
     for order, (path, page_type, text) in enumerate(pages):
         connection.execute(
-            "INSERT INTO chunks(chunk_id, chunk_order, source_path, type, heading_ancestry, title, content, keys) "
-            "VALUES (?, ?, ?, ?, '[]', '', ?, '')",
+            "INSERT INTO chunks(chunk_id, chunk_order, source_path, type, heading_ancestry, "
+            "title, content, keys) VALUES (?, ?, ?, ?, '[]', '', ?, '')",
             [f"c{order}", order, path, page_type, text],
         )
     return connection
@@ -38,7 +40,8 @@ def _artifact(*pages: tuple[str, str, str]) -> sqlite3.Connection:
 def _crowded_artifact() -> sqlite3.Connection:
     """Ten debugging pages that say "cache" more often than the one decision page."""
     noise = [
-        (f"docs/research/cache-{n}.md", "debugging", "cache cache cache eviction") for n in range(10)
+        (f"docs/research/cache-{n}.md", "debugging", "cache cache cache eviction")
+        for n in range(10)
     ]
     return _artifact(*noise, ("knowledge/notes/cache-decision.md", "decision", "cache policy"))
 
@@ -59,7 +62,9 @@ def _paths(connection: sqlite3.Connection, **filters: str) -> list[str]:
 
 
 def test_a_page_type_filter_finds_the_page_others_outrank() -> None:
-    assert _paths(_crowded_artifact(), page_type="Decision") == ["knowledge/notes/cache-decision.md"]
+    assert _paths(_crowded_artifact(), page_type="Decision") == [
+        "knowledge/notes/cache-decision.md"
+    ]
 
 
 def test_a_path_prefix_filter_finds_the_page_others_outrank() -> None:
@@ -89,11 +94,18 @@ def test_every_leg_drops_a_hit_of_another_type_or_path() -> None:
     ]
     filters = {"scope": "all", "page_type": "decision", "path_prefix": "knowledge/"}
 
-    assert [hit["path"] for hit in retrieval._filtered_hits(rows, filters)] == ["knowledge/notes/a.md"]
+    hits = retrieval._filtered_hits(rows, filters)
+
+    assert [hit["path"] for hit in hits] == ["knowledge/notes/a.md"]
 
 
 def test_recall_names_its_filters_by_the_search_keywords() -> None:
-    arguments = {"query": "q", "type": "decision", "path_prefix": "knowledge/", "since": "2026-11-01"}
+    arguments = {
+        "query": "q",
+        "type": "decision",
+        "path_prefix": "knowledge/",
+        "since": "2026-11-01",
+    }
 
     assert mcp_server._recall_filters(arguments) == {
         "page_type": "decision",
@@ -109,13 +121,15 @@ def test_recall_refuses_a_date_that_is_not_a_day() -> None:
 
 def test_a_grounded_recall_refuses_filters_it_cannot_apply() -> None:
     with pytest.raises(ValueError, match="plain recall"):
-        mcp_server._tool_recall({"query": "q", "grounded": True, "type": "decision"}, time.monotonic() + 5)
+        mcp_server._tool_recall(
+            {"query": "q", "grounded": True, "type": "decision"}, time.monotonic() + SHORT_TIMEOUT
+        )
 
 
 def test_the_lexical_fallback_keeps_the_filters(monkeypatch: pytest.MonkeyPatch) -> None:
-    calls: list[dict] = []
+    calls: list[dict[str, object]] = []
 
-    def search(_query: str, **kwargs: object) -> list[dict]:
+    def search(_query: str, **kwargs: object) -> list[dict[str, object]]:
         calls.append(kwargs)
         if len(calls) == 1:
             raise TimeoutError("semantic timeout")
@@ -124,7 +138,9 @@ def test_the_lexical_fallback_keeps_the_filters(monkeypatch: pytest.MonkeyPatch)
     monkeypatch.setattr(search_memory, "search", search)
 
     mcp_server._search_vault(
-        "q", deadline=time.monotonic() + 5, filters={"project": "llm-wiki", "page_type": "qa"}
+        "q",
+        deadline=time.monotonic() + SHORT_TIMEOUT,
+        filters={"project": "llm-wiki", "page_type": "qa"},
     )
 
     assert [(call["project"], call["page_type"]) for call in calls] == [("llm-wiki", "qa")] * 2

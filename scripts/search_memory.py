@@ -40,7 +40,7 @@ from pathlib import Path
 from typing import NamedTuple
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-import query_spelling  # noqa: E402
+import query_spelling
 from bounded_io import (
     MAX_KNOWLEDGE_PAGE_BYTES,
     TIMESTAMP_SETTLE_NS,
@@ -3059,7 +3059,8 @@ def _spelled_fts_query(connection: sqlite3.Connection, query: str) -> str:
     """
     terms = _query_terms(query)
     corrections = query_spelling.corrections(connection, terms, GENERATION_TOKENIZER)
-    expressions = (_fts_query(query), _fts_expression(corrections), _fts_prefixes(query_spelling.cyrillic_stems(terms)))
+    stems = query_spelling.cyrillic_stems(terms)
+    expressions = (_fts_query(query), _fts_expression(corrections), _fts_prefixes(stems))
     return " OR ".join(filter(None, expressions))
 
 
@@ -4505,7 +4506,7 @@ def _print_search_results(query: str, results: list[dict], elapsed: float) -> No
 SNIPPET_CHARS = 240
 
 
-def result_snippet(result: dict, query: str = "") -> str:
+def result_snippet(result: Mapping[str, object], query: str = "") -> str:
     """The passage of the hit's text that holds the most query words; the summary otherwise.
 
     A chunk's summary is its heading, and a heading such as "Consequences" says
@@ -4525,12 +4526,14 @@ SNIPPET_LEAD_CHARS = 40
 
 
 def _snippet_stems(query: str) -> list[str]:
-    """Each evidence word cut to a light stem, so "notes" also marks "note" and "заметок" "заметки"."""
+    """Each evidence word cut to a light stem, so "notes" also marks "note"."""
     words = (word.strip(_SNIPPET_PUNCTUATION).casefold() for word in _query_terms(query))
-    return sorted({word[: max(4, len(word) - 2)] for word in words if len(word) >= 3 and word.isalpha()})
+    stems = {query_spelling.light_stem(word) for word in words if len(word) >= 3 and word.isalpha()}
+    return sorted(stems)
 
 
-_SNIPPET_PUNCTUATION = "\"'.,;:!?()[]{}<>«»“”‘’`*_"
+# ASCII marks, guillemets and curly quotes a query word may carry.
+_SNIPPET_PUNCTUATION = "\"'.,;:!?()[]{}<>`*_\u00ab\u00bb\u201c\u201d\u2018\u2019"
 
 
 def _matched_passage(text: str, query: str) -> str:

@@ -634,27 +634,27 @@ RECALL_FILTER_SCHEMA_FIELDS = {
     "project": {
         "type": "string",
         "maxLength": MAX_MCP_SLUG_LENGTH,
-        "description": "Only pages of this project (frontmatter `project`, case-insensitive)",
+        "description": "Only pages of this project, any case",
     },
     "since": {
         "type": "string",
-        "maxLength": 32,
-        "description": "Only pages dated on or after this day (YYYY-MM-DD)",
+        "maxLength": 10,
+        "description": "Only pages dated on or after this day, YYYY-MM-DD",
     },
     "as_of": {
         "type": "string",
-        "maxLength": 32,
-        "description": "Only pages valid on this day (YYYY-MM-DD), superseded ones included",
+        "maxLength": 10,
+        "description": "Only pages valid on this day, YYYY-MM-DD, superseded too",
     },
     "type": {
         "type": "string",
         "maxLength": MAX_MCP_SLUG_LENGTH,
-        "description": "Only pages of this frontmatter type, e.g. decision, debugging, qa",
+        "description": "Only pages of this frontmatter type, e.g. decision",
     },
     "path_prefix": {
         "type": "string",
         "maxLength": MAX_MCP_SLUG_LENGTH,
-        "description": "Only pages whose vault-relative path starts with this, e.g. knowledge/notes/",
+        "description": "Only paths under this prefix, e.g. knowledge/notes/",
     },
 }
 # The recall argument each filter is read from, by its search keyword.

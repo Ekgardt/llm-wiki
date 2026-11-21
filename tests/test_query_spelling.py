@@ -24,7 +24,8 @@ def _artifact(*texts: str) -> sqlite3.Connection:
     connection.executescript(search_memory._GENERATION_FTS_DDL)
     for order, text in enumerate(texts):
         connection.execute(
-            "INSERT INTO chunks(chunk_id, chunk_order, title, content, keys) VALUES (?, ?, '', ?, '')",
+            "INSERT INTO chunks(chunk_id, chunk_order, title, content, keys) "
+            "VALUES (?, ?, '', ?, '')",
             [f"c{order}", order, text],
         )
     return connection
@@ -64,7 +65,9 @@ def test_a_correctly_spelled_query_is_left_as_it_is() -> None:
 def test_short_words_and_numbers_are_never_corrected() -> None:
     connection = _artifact("cat 2023 report")
 
-    assert query_spelling.corrections(connection, ["cta", "2024", "x-ray"], search_memory.GENERATION_TOKENIZER) == []
+    words = ["cta", "2024", "x-ray"]
+
+    assert query_spelling.corrections(connection, words, search_memory.GENERATION_TOKENIZER) == []
 
 
 def test_one_transposition_is_one_edit() -> None:
@@ -76,4 +79,34 @@ def test_the_distance_stops_counting_past_its_bound() -> None:
 
 
 def test_longer_words_allow_more_edits() -> None:
-    assert [query_spelling.allowed_edits(word) for word in ("cat", "house", "ethnicity")] == [0, 1, 2]
+    edits = [query_spelling.allowed_edits(word) for word in ("cat", "house", "ethnicity")]
+
+    assert edits == [0, 1, 2]
+
+
+# Russian test words, written as escapes because the repository holds no Cyrillic
+# text. "Notes" in the nominative and in the genitive plural, "search" in the
+# genitive, "word", and the short "house" and "cat".
+NOTES = "\u0437\u0430\u043c\u0435\u0442\u043a\u0438"
+OF_NOTES = "\u0437\u0430\u043c\u0435\u0442\u043e\u043a"
+OF_SEARCH = "\u043f\u043e\u0438\u0441\u043a\u0430"
+WORD = "\u0441\u043b\u043e\u0432\u043e"
+HOUSE = "\u0434\u043e\u043c"
+CAT = "\u043a\u043e\u0442"
+
+
+def test_another_case_of_a_russian_word_finds_the_page() -> None:
+    """Porter stems English only; the Russian word is matched by its stem as a prefix."""
+    connection = _artifact(f"{NOTES} notes", "weather")
+
+    assert _found(connection, f"{OF_NOTES} vault") == [f"{NOTES} notes"]
+
+
+def test_a_russian_stem_keeps_its_root() -> None:
+    stems = query_spelling.cyrillic_stems([OF_NOTES.title() + ",", OF_SEARCH, WORD])
+
+    assert stems == [OF_NOTES[:5], OF_SEARCH[:4], WORD[:4]]
+
+
+def test_short_russian_words_and_latin_words_gain_no_stem() -> None:
+    assert query_spelling.cyrillic_stems([HOUSE, CAT, "bookshelf", "API-" + NOTES]) == []

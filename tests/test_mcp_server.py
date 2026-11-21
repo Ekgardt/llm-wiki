@@ -1677,14 +1677,15 @@ class TestHandleToolCall:
         import mcp_server
         import query_memory
 
-        searches = []
-        monkeypatch.setattr(
-            mcp_server,
-            "_search_vault",
-            lambda query, *, limit, trace_sink=None, filters=None: searches.append(
-                (query, limit, filters)
-            ) or [],
-        )
+        searches: list[tuple[str, int, object]] = []
+
+        def search(
+            query: str, *, limit: int, trace_sink: object = None, filters: object = None
+        ) -> list[dict[str, object]]:
+            searches.append((query, limit, filters))
+            return []
+
+        monkeypatch.setattr(mcp_server, "_search_vault", search)
         monkeypatch.setattr(
             query_memory,
             "grounded_qa",
@@ -2886,9 +2887,11 @@ class TestHandleToolCall:
     ):
         import mcp_server
 
-        received = []
+        received: list[int] = []
 
-        def search(query, *, limit, trace_sink=None, filters=None):
+        def search(
+            query: str, *, limit: int, trace_sink: object = None, filters: object = None
+        ) -> list[dict[str, object]]:
             received.append(limit)
             return [{"path": "page.md", "fused_score": 0.1}]
 
