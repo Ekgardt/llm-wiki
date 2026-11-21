@@ -479,30 +479,6 @@ def test_lsp_runtime_paths_and_navigation_are_canonical() -> None:
     assert "precise live navigation" in navigation
 
 
-# ---------------------------------------------------------------------------
-# README i18n structural parity (section count + claims).
-# ---------------------------------------------------------------------------
-
-
-def test_readmes_have_same_h2_section_count():
-    """All three READMEs must have the same number of top-level sections.
-    Drift here is the #1 cause of 'RU/ZH is a compressed digest, not a
-    translation'.
-    """
-    import re
-
-    counts = {}
-    for name in ("README.md", "README.ru.md", "README.zh-CN.md"):
-        text = (ROOT / name).read_text(encoding="utf-8")
-        h2s = re.findall(r"^## ", text, re.MULTILINE)
-        counts[name] = len(h2s)
-    vals = list(counts.values())
-    assert len(set(vals)) == 1, (
-        f"README H2 section count drift: {counts}. "
-        "All three must have the same number of top-level sections."
-    )
-
-
 STAGE_TWO_RUNTIME_PATHS = (
     "run/markdown-transactions.sqlite3",
     "run/transactions/",

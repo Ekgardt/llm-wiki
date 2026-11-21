@@ -18,8 +18,6 @@ OpenAI-compatible API by its address — a cloud one, or a local server such as 
 LM Studio or vLLM. Only a local server keeps prompts on the machine, so auto-detection
 is not a local-only guarantee. Current version: **5.0.0**.
 
-**Languages:** [English](README.md) | [Русский](README.ru.md) | [简体中文](README.zh-CN.md)
-
 ---
 
 ## How it works
@@ -334,7 +332,7 @@ different datasets.
 
 Contributions are welcome. The bar is "does this survive a real multi-agent
 workflow?". See [CONTRIBUTING.md](CONTRIBUTING.md) for setup, coding standards and the
-release checklist (the three READMEs, CHANGELOG and version change together).
+release checklist (the README, CHANGELOG and version change together).
 
 ---
 
