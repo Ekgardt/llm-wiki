@@ -60,6 +60,7 @@ def test_a_call_whose_isolation_is_unknown_is_not_made(monkeypatch) -> None:
         ("", list(llm_client.KNOWN_PROVIDERS)),
         ("openai", ["openai"]),
         ("ollma", []),
+        ("ollama", []),
     ],
 )
 def test_a_name_that_is_no_provider_yields_none(setting, order) -> None:

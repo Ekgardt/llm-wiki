@@ -16,7 +16,7 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 - A model connects in one of two ways: an agent CLI (OpenCode, Codex, Claude Code) or any OpenAI-compatible API at `MEMORY_LLM_BASE_URL`, cloud or local (Ollama, LM Studio, vLLM, DeepSeek). The `openai` provider needs no key for a local server, sends no `max_tokens` cap, and receives the grounded-answer JSON schema through `call_llm(..., schema=)` instead of inside the system prompt. Measured on 30 LongMemEval questions with DeepSeek V4.1 Flash, capped answers were cut off on every question; uncapped with the schema passed, 28 of 30 answered.
 
 ### Removed
-- The dedicated `ollama` provider and its `OLLAMA_NO_CLOUD` local-only mode. A local server is reached like any other API: `MEMORY_LLM_PROVIDER=openai` and its address in `MEMORY_LLM_BASE_URL`. Nothing needs editing on upgrade: a saved `MEMORY_LLM_PROVIDER=ollama` now means `openai`, and with neither an address nor a key the provider uses the local server at `http://localhost:11434/v1` (model `qwen3:0.6b` unless `MEMORY_LLM_MODEL` names one), which auto-detection finds when it answers.
+- The dedicated `ollama` provider and its `OLLAMA_NO_CLOUD` local-only mode. A local server is reached like any other API: `MEMORY_LLM_PROVIDER=openai` and its address in `MEMORY_LLM_BASE_URL`.
 - The Russian and Chinese READMEs, at the owner's request (2026-11-21): law 10 forbids Russian text in the repository, so neither could be kept in step with `README.md`, which is now the only README.
 
 ### Security

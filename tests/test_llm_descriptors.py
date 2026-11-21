@@ -3,12 +3,10 @@ from __future__ import annotations
 import hashlib
 import json
 import math
-import urllib.error
 import urllib.request
 from dataclasses import replace
 from pathlib import Path
 
-import doctor
 import llm_client
 import pytest
 from context_budget import TokenCount, TokenUsage
@@ -1223,76 +1221,6 @@ def _body(request: urllib.request.Request) -> dict[str, object]:
 def _without_address_or_key(monkeypatch: pytest.MonkeyPatch) -> None:
     for name in ("MEMORY_LLM_API_KEY", "OPENAI_API_KEY", "MEMORY_LLM_BASE_URL", "MEMORY_LLM_MODEL"):
         monkeypatch.delenv(name, raising=False)
-
-
-def test_a_saved_ollama_setting_reaches_the_local_server(monkeypatch: pytest.MonkeyPatch) -> None:
-    _without_address_or_key(monkeypatch)
-    monkeypatch.setenv("MEMORY_LLM_PROVIDER", "ollama")
-    requests = _record_requests(monkeypatch)
-
-    answer = llm_client.call_llm("prompt", "system")
-
-    sent = _body(requests[-1])
-    assert (answer, requests[-1].full_url, sent["model"]) == (
-        "answer",
-        "http://localhost:11434/v1/chat/completions",
-        "qwen3:0.6b",
-    )
-
-
-def test_a_saved_ollama_setting_stays_local_when_a_cloud_key_is_set(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    _without_address_or_key(monkeypatch)
-    monkeypatch.setenv("MEMORY_LLM_PROVIDER", "ollama")
-    monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
-    requests = _record_requests(monkeypatch)
-
-    llm_client.call_llm("prompt", "system")
-
-    assert (requests[-1].full_url, requests[-1].get_header("Authorization")) == (
-        "http://localhost:11434/v1/chat/completions",
-        None,
-    )
-
-
-def test_a_saved_ollama_setting_is_not_a_typo_for_doctor(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("MEMORY_LLM_PROVIDER", "ollama")
-
-    assert doctor._provider_setting()["known"] is True
-
-
-def test_an_unconfigured_local_server_is_found_automatically(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    _without_address_or_key(monkeypatch)
-    asked: list[str] = []
-
-    def urlopen(url: str, timeout: float) -> _JsonResponse:
-        asked.append(url)
-        return _JsonResponse({"data": []})
-
-    monkeypatch.setattr(urllib.request, "urlopen", urlopen)
-    descriptor = llm_client.provider_candidates("openai")[0]
-
-    assert (llm_client._probe_openai(descriptor), asked) == (
-        True,
-        ["http://localhost:11434/v1/models"],
-    )
-
-
-def test_no_address_no_key_and_no_local_server_is_no_provider(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    _without_address_or_key(monkeypatch)
-
-    def urlopen(url: str, timeout: float) -> _JsonResponse:
-        raise urllib.error.URLError("connection refused")
-
-    monkeypatch.setattr(urllib.request, "urlopen", urlopen)
-    descriptor = llm_client.provider_candidates("openai")[0]
-
-    assert llm_client._probe_openai(descriptor) is False
 
 
 def test_a_key_is_sent_as_a_bearer_token_to_the_cloud(monkeypatch: pytest.MonkeyPatch) -> None:
