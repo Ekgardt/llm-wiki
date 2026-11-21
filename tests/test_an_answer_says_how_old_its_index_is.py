@@ -155,3 +155,25 @@ def test_a_failed_or_dry_compile_does_not_refresh(monkeypatch):
     dry = compile_memory.main()
 
     assert (failed, dry, calls) == (1, 0, [])
+
+
+def test_a_cli_hit_shows_the_passage_that_holds_the_query_words():
+    filler = "Nothing relevant is said here. " * 20
+    hit = {"content": f"## Shelf\n\n{filler}The bookshelf came from the flea market. {filler}"}
+
+    snippet = search_memory.result_snippet(hit, "where did I buy my bookshelf")
+
+    assert snippet.startswith("…")
+    assert "The bookshelf came from the flea market." in snippet
+
+
+def test_a_passage_is_found_by_another_form_of_the_word():
+    hit = {"content": "## Notes\n\n" + "Filler. " * 60 + "Две заметки о поиске."}
+
+    assert "Две заметки о поиске." in search_memory.result_snippet(hit, "поиск заметок")
+
+
+def test_a_hit_without_the_query_words_shows_its_first_lines():
+    hit = {"content": "## H\n\nThe first line.\n"}
+
+    assert search_memory.result_snippet(hit, "unrelated") == "The first line."

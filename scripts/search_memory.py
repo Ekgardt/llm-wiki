@@ -4416,7 +4416,7 @@ def _print_search_results(query: str, results: list[dict], elapsed: float) -> No
         ts_tag = f" ({r['timestamp']})" if r["timestamp"] else ""
         print(f"{i}. [{r['score']}] {r['title']}{proj_tag}{ts_tag}")
         print(f"   {r['path']}")
-        snippet = result_snippet(r)
+        snippet = result_snippet(r, query)
         if snippet:
             print(f"   {snippet}")
         print()
@@ -4427,17 +4427,61 @@ def _print_search_results(query: str, results: list[dict], elapsed: float) -> No
 SNIPPET_CHARS = 240
 
 
-def result_snippet(result: dict) -> str:
-    """The first words of the hit's text after its heading; the summary otherwise.
+def result_snippet(result: dict, query: str = "") -> str:
+    """The passage of the hit's text that holds the most query words; the summary otherwise.
 
     A chunk's summary is its heading, and a heading such as "Consequences" says
     nothing on its own line. See
-    `docs/research/2026-09-24-an-answer-says-how-old-its-index-is.md`.
+    `docs/research/2026-09-24-an-answer-says-how-old-its-index-is.md`. The
+    passage is the one Obsidian Omnisearch shows: where the words are, not the
+    chunk's first line.
     """
     text = _body_text(str(result.get("content") or ""))
     if not text:
         return str(result.get("summary") or "")
-    return _clipped(text, SNIPPET_CHARS)
+    return _clipped(_matched_passage(text, query), SNIPPET_CHARS)
+
+
+# Characters of context kept before the first matched word of a passage.
+SNIPPET_LEAD_CHARS = 40
+
+
+def _snippet_stems(query: str) -> list[str]:
+    """Each evidence word cut to a light stem, so "notes" also marks "note" and "заметок" "заметки"."""
+    words = (word.strip(_SNIPPET_PUNCTUATION).casefold() for word in _query_terms(query))
+    return sorted({word[: max(4, len(word) - 2)] for word in words if len(word) >= 3 and word.isalpha()})
+
+
+_SNIPPET_PUNCTUATION = "\"'.,;:!?()[]{}<>«»“”‘’`*_"
+
+
+def _matched_passage(text: str, query: str) -> str:
+    stems = _snippet_stems(query)
+    if not stems:
+        return text
+    pattern = re.compile(r"\b(?:" + "|".join(map(re.escape, stems)) + ")", re.IGNORECASE)
+    hits = [(match.start(), match.group(0).casefold()) for match in pattern.finditer(text)]
+    if not hits:
+        return text
+    start = _densest_start(hits)
+    return _passage_from(text, max(0, start - SNIPPET_LEAD_CHARS))
+
+
+def _densest_start(hits: list[tuple[int, str]]) -> int:
+    """Where the window holding the most distinct query words begins; the earliest on a tie."""
+    def distinct_from(index: int) -> int:
+        start = hits[index][0]
+        return len({word for position, word in hits[index:] if position < start + SNIPPET_CHARS})
+
+    best = max(range(len(hits)), key=lambda index: (distinct_from(index), -index))
+    return hits[best][0]
+
+
+def _passage_from(text: str, start: int) -> str:
+    if start == 0:
+        return text
+    boundary = text.find(" ", start)
+    return "…" + text[boundary if boundary >= 0 else start:]
 
 
 def _body_text(content: str) -> str:
