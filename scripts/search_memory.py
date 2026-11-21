@@ -3069,14 +3069,38 @@ def _normalized_filename_stem(value: str) -> str:
 
 
 def _generation_filters(
-    *, scope: str, since: str | None, as_of: str | None
+    *,
+    scope: str,
+    since: str | None,
+    as_of: str | None,
+    page_type: str | None = None,
+    path_prefix: str | None = None,
 ) -> tuple[str, list[str]]:
     clauses = []
     values: list[str] = []
     if scope in {"wiki", "memory", "knowledge"}:
         clauses.append("source_path LIKE 'knowledge/notes/%'")
     _add_validity_clauses(clauses, values, as_of=as_of, since=since)
+    _add_page_clauses(clauses, values, page_type=page_type, path_prefix=path_prefix)
     return (" AND " + " AND ".join(clauses) if clauses else ""), values
+
+
+def normalized_path_prefix(path_prefix: str | None) -> str:
+    """A vault-relative prefix written the way `source_path` stores paths."""
+    return str(path_prefix or "").replace("\\", "/").removeprefix("./").lstrip("/")
+
+
+def _add_page_clauses(
+    clauses: list[str], values: list[str], *, page_type: str | None, path_prefix: str | None
+) -> None:
+    """The page's own type, and the vault-relative path it must start with (case-sensitive)."""
+    if page_type:
+        clauses.append("lower(coalesce(type, '')) = lower(?)")
+        values.append(page_type)
+    prefix = normalized_path_prefix(path_prefix)
+    if prefix:
+        clauses.append("substr(source_path, 1, length(?)) = ?")
+        values.extend((prefix, prefix))
 
 
 def _add_validity_clauses(
@@ -3171,13 +3195,23 @@ def _passes_hard_filters(
     as_of: str | None,
     scope: str,
     authority: str | None,
+    page_type: str | None = None,
+    path_prefix: str | None = None,
 ) -> bool:
-    return (
-        not _out_of_scope(row, scope)
-        and not _field_mismatch(row, "project", project)
-        and not _field_mismatch(row, "authority", authority)
-        and not _temporally_excluded(row, since, as_of)
+    exclusions = (
+        _out_of_scope(row, scope),
+        _field_mismatch(row, "project", project),
+        _field_mismatch(row, "authority", authority),
+        _field_mismatch(row, "type", page_type),
+        _outside_prefix(row, path_prefix),
+        _temporally_excluded(row, since, as_of),
     )
+    return not any(exclusions)
+
+
+def _outside_prefix(row: Mapping[str, object], path_prefix: str | None) -> bool:
+    prefix = normalized_path_prefix(path_prefix)
+    return not _row_path(row).replace("\\", "/").startswith(prefix)
 
 
 def _subset_or_empty(inner: set[str], outer: set[str]) -> bool:
@@ -3199,6 +3233,8 @@ def apply_hard_filters(
     as_of: str | None = None,
     scope: str = "all",
     authority: str | None = None,
+    page_type: str | None = None,
+    path_prefix: str | None = None,
     **_ignored: object,
 ) -> list[dict]:
     """Single hard-filter contract shared by the lexical and NumPy paths."""
@@ -3212,6 +3248,8 @@ def apply_hard_filters(
             as_of=as_of,
             scope=scope,
             authority=authority,
+            page_type=page_type,
+            path_prefix=path_prefix,
         )
     ]
 
@@ -3224,6 +3262,8 @@ def generation_eligible_paths(
     project: str | None = None,
     since: str | None = None,
     as_of: str | None = None,
+    page_type: str | None = None,
+    path_prefix: str | None = None,
 ) -> set[str]:
     """The pages among `paths` that the generation's lexical leg would admit.
 
@@ -3233,7 +3273,9 @@ def generation_eligible_paths(
     """
     if not paths:
         return set()
-    filters, values = _generation_filters(scope=scope, since=since, as_of=as_of)
+    filters, values = _generation_filters(
+        scope=scope, since=since, as_of=as_of, page_type=page_type, path_prefix=path_prefix
+    )
     wanted = sorted(paths)
     placeholders = ", ".join("?" for _ in wanted)
     rows = connection.execute(
@@ -3479,11 +3521,15 @@ def _generation_fts_search(
     as_of: str | None,
     deadline: float | None = None,
     cancelled: Callable[[], bool] | None = None,
+    page_type: str | None = None,
+    path_prefix: str | None = None,
 ) -> list[dict[str, object]]:
     """BM25 over one generation, with an exact filename match kept in front."""
     with _generation_sqlite_guard(connection, deadline, cancelled):
         connection.row_factory = sqlite3.Row
-        filters, values = _generation_filters(scope=scope, since=since, as_of=as_of)
+        filters, values = _generation_filters(
+            scope=scope, since=since, as_of=as_of, page_type=page_type, path_prefix=path_prefix
+        )
         _register_filename_stem_function(connection)
         exact_rows = _exact_filename_rows(
             connection, _normalized_filename_stem(query), filters, values, project
@@ -3512,7 +3558,13 @@ def _generation_fts_search(
         result["score"] = round(float(result["score"]), 4)
         result.pop("_chunk_order", None)
     filtered = apply_hard_filters(
-        results, project=project, since=since, as_of=as_of, scope=scope
+        results,
+        project=project,
+        since=since,
+        as_of=as_of,
+        scope=scope,
+        page_type=page_type,
+        path_prefix=path_prefix,
     )
     return filtered[:limit]
 
@@ -3646,6 +3698,8 @@ def _vector_scored_rows(
     project: str | None,
     deadline,
     cancelled,
+    page_type: str | None = None,
+    path_prefix: str | None = None,
 ) -> list[dict[str, object]]:
     """Cosine rows, ordered by the same trust-weighted score the lexical leg uses.
 
@@ -3665,7 +3719,9 @@ def _vector_scored_rows(
     120-row over-fetch, so no downstream weight could reach it. Weighting here
     puts those same pages at 1-14.
     """
-    filters, values = _generation_filters(scope=scope, since=since, as_of=as_of)
+    filters, values = _generation_filters(
+        scope=scope, since=since, as_of=as_of, page_type=page_type, path_prefix=path_prefix
+    )
     with _generation_sqlite_guard(connection, deadline, cancelled):
         rows = connection.execute(
             f"SELECT {_GENERATION_CHUNK_COLUMNS}, 0.0 AS rank FROM chunks "
@@ -3733,6 +3789,8 @@ def _generation_vector_rows(
     as_of: str | None,
     deadline: float | None,
     cancelled: Callable[[], bool] | None,
+    page_type: str | None = None,
+    path_prefix: str | None = None,
 ) -> list[dict[str, object]] | None:
     """The scored rows, or None when the stored vectors cannot be trusted."""
     import numpy as np
@@ -3772,6 +3830,8 @@ def _generation_vector_rows(
         project=project,
         deadline=deadline,
         cancelled=cancelled,
+        page_type=page_type,
+        path_prefix=path_prefix,
     )
     _check_generation_stop(deadline, cancelled)
     return results[: limit * 3]
@@ -3793,6 +3853,8 @@ def _generation_vectors_search(
     as_of: str | None,
     deadline: float | None = None,
     cancelled: Callable[[], bool] | None = None,
+    page_type: str | None = None,
+    path_prefix: str | None = None,
 ) -> list[dict[str, object]] | None:
     """Cosine search over one generation's vectors, or None when unusable."""
     _check_generation_stop(deadline, cancelled)
@@ -3817,6 +3879,8 @@ def _generation_vectors_search(
             as_of=as_of,
             deadline=deadline,
             cancelled=cancelled,
+            page_type=page_type,
+            path_prefix=path_prefix,
         )
     except TimeoutError:
         raise
@@ -3847,8 +3911,13 @@ def search(
     max_candidates: int | None = None,
     cancelled: Callable[[], bool] | None = None,
     trace_sink: dict[str, object] | None = None,
+    page_type: str | None = None,
+    path_prefix: str | None = None,
 ) -> list[dict]:
     """Public search API — always routes through retrieval.retrieve().
+
+    `page_type` keeps only pages of that frontmatter type; `path_prefix` only
+    pages whose vault-relative path starts with it. Both bind every leg.
 
     `trace_sink`, when given, receives the planner trace of the run — which
     generation was selected, which signals ran, what fell back — even when
@@ -3887,6 +3956,8 @@ def search(
         max_candidates=max_candidates,
         cancelled=cancelled,
         trace_sink=trace_sink,
+        page_type=page_type,
+        path_prefix=path_prefix,
     )
 
 
@@ -3972,6 +4043,7 @@ def _page_hit(read: _PageRead, *, score: float, bm25_score: float) -> dict:
         "score": score,
         "bm25_score": bm25_score,
         "project": read.project,
+        "type": read.page_type,
         "timestamp": read.timestamp,
         "candidate_id": legacy_candidate_id(read.relative_path),
         "source_sha256": hashlib.sha256(read.raw).hexdigest(),

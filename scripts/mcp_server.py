@@ -628,6 +628,45 @@ ANSWER_BUDGET_SCHEMA_FIELDS = {
     },
 }
 
+# Hard filters of a plain recall: every leg of the search obeys them, so the
+# answer is filled from matching pages instead of being cut down afterwards.
+RECALL_FILTER_SCHEMA_FIELDS = {
+    "project": {
+        "type": "string",
+        "maxLength": MAX_MCP_SLUG_LENGTH,
+        "description": "Only pages of this project (frontmatter `project`, case-insensitive)",
+    },
+    "since": {
+        "type": "string",
+        "maxLength": 32,
+        "description": "Only pages dated on or after this day (YYYY-MM-DD)",
+    },
+    "as_of": {
+        "type": "string",
+        "maxLength": 32,
+        "description": "Only pages valid on this day (YYYY-MM-DD), superseded ones included",
+    },
+    "type": {
+        "type": "string",
+        "maxLength": MAX_MCP_SLUG_LENGTH,
+        "description": "Only pages of this frontmatter type, e.g. decision, debugging, qa",
+    },
+    "path_prefix": {
+        "type": "string",
+        "maxLength": MAX_MCP_SLUG_LENGTH,
+        "description": "Only pages whose vault-relative path starts with this, e.g. knowledge/notes/",
+    },
+}
+# The recall argument each filter is read from, by its search keyword.
+RECALL_FILTER_ARGUMENTS = {
+    "project": "project",
+    "since": "since",
+    "as_of": "as_of",
+    "page_type": "type",
+    "path_prefix": "path_prefix",
+}
+RECALL_DATE_FILTERS = ("since", "as_of")
+
 TOOL_INPUT_SCHEMAS = {
     "recall": {
         "type": "object",
@@ -652,6 +691,7 @@ TOOL_INPUT_SCHEMAS = {
                 "enum": list(QA_PROFILES),
                 "description": "Grounded QA retrieval profile",
             },
+            **RECALL_FILTER_SCHEMA_FIELDS,
         },
         "required": ["query"],
         "allOf": [
@@ -904,6 +944,7 @@ def _search_vault(
     deadline: float | None = None,
     trace_sink: dict[str, object] | None = None,
     caller: SearchCaller = RECALL_CALLER,
+    filters: Mapping[str, str] | None = None,
 ) -> list[dict]:
     """Run hybrid search on the vault; the planner trace lands in `trace_sink`.
 
@@ -920,10 +961,18 @@ def _search_vault(
     try:
         _check_deadline(hybrid_deadline)
         return _run_vault_search(
-            query, limit, hybrid_deadline, semantic=True, trace_sink=trace_sink, caller=caller
+            query,
+            limit,
+            hybrid_deadline,
+            semantic=True,
+            trace_sink=trace_sink,
+            caller=caller,
+            filters=filters,
         )
     except TimeoutError:
-        return _lexical_after_deadline(query, limit, operation_deadline, trace_sink, caller)
+        return _lexical_after_deadline(
+            query, limit, operation_deadline, trace_sink, caller, filters
+        )
 
 
 def _lexical_after_deadline(
@@ -932,6 +981,7 @@ def _lexical_after_deadline(
     operation_deadline: float,
     trace_sink: dict[str, object] | None,
     caller: SearchCaller = RECALL_CALLER,
+    filters: Mapping[str, str] | None = None,
 ) -> list[dict]:
     """The hybrid run hit its deadline: one lexical pass, marked as the fallback it is."""
     lexical = _run_vault_search(
@@ -943,6 +993,7 @@ def _lexical_after_deadline(
         rerank=False,
         trace_sink=trace_sink,
         caller=caller,
+        filters=filters,
     )
     if trace_sink is not None:
         trace_sink.update(_lexical_fallback_row({}))
@@ -968,6 +1019,7 @@ def _run_vault_search(
     rerank: bool = True,
     trace_sink: dict[str, object] | None = None,
     caller: SearchCaller = RECALL_CALLER,
+    filters: Mapping[str, str] | None = None,
 ) -> list[dict]:
     from search_memory import search
 
@@ -986,6 +1038,7 @@ def _run_vault_search(
         emit_telemetry=caller.emit_telemetry,
         deadline_monotonic=operation_deadline,
         trace_sink=trace_sink,
+        **(filters or {}),
     )
 
 
@@ -5787,6 +5840,12 @@ def _components_for(name: str, data) -> dict[str, dict[str, object]]:
     return builder(data)
 
 
+def _require_no_grounded_filters(filters: Mapping[str, str]) -> None:
+    """The grounded answer plans its own retrieval and takes no filters."""
+    if filters:
+        raise ValueError("filters apply to a plain recall, not a grounded one")
+
+
 def _grounded_recall(arguments: dict, deadline: float):
     from memory_state import ROOT
     from query_memory import grounded_qa
@@ -5799,8 +5858,31 @@ def _grounded_recall(arguments: dict, deadline: float):
     )
 
 
+def _recall_filters(arguments: Mapping[str, object]) -> dict[str, str]:
+    """The hard filters a recall asked for, by their search keyword; dates must be days."""
+    filters = {
+        keyword: str(arguments[name])
+        for keyword, name in RECALL_FILTER_ARGUMENTS.items()
+        if arguments.get(name)
+    }
+    for keyword in RECALL_DATE_FILTERS:
+        _require_day(keyword, filters.get(keyword))
+    return filters
+
+
+def _require_day(name: str, value: str | None) -> None:
+    if value is None:
+        return
+    try:
+        dt.date.fromisoformat(value[:10])
+    except ValueError:
+        raise ValueError(f"argument '{name}' must be a day as YYYY-MM-DD") from None
+
+
 def _tool_recall(arguments: dict, deadline: float):
+    filters = _recall_filters(arguments)
     if arguments.get("grounded", False):
+        _require_no_grounded_filters(filters)
         return _grounded_recall(arguments, deadline), False
     effective_limit, limit_clamped = _clamped_limit(arguments.get("limit", 8))
     reported: dict[str, object] = {}
@@ -5810,6 +5892,7 @@ def _tool_recall(arguments: dict, deadline: float):
         limit=effective_limit,
         deadline=deadline,
         trace_sink=reported,
+        filters=filters,
     )
     trace = _retrieval_trace(results, reported)
     data = {

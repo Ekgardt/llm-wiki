@@ -175,7 +175,7 @@ integrated Tasks 1-29 branch, not the broader Task 17 target:
 
 | Tool | Current behavior |
 |---|---|
-| `recall` | Routes search through the retrieval planner. Result rows expose requested/effective mode, actual signals, generation, reranker fields, and fallback reason. The requested result limit is clamped to 1-20. |
+| `recall` | Routes search through the retrieval planner. Result rows expose requested/effective mode, actual signals, generation, reranker fields, and fallback reason. The requested result limit is clamped to 1-20. Optional `project`, `since`, `as_of` (days as YYYY-MM-DD), `type` (frontmatter type) and `path_prefix` (vault-relative) narrow a plain recall; every leg applies them before the candidate pool is cut, and a grounded recall refuses them. |
 | `read_page` | Reads one bounded slug-only Markdown page and resolves cited daily/archive evidence with source hashes. A cited reference that does not resolve fails the page read closed; a `daily:` mention that is not a reference is listed as `not_an_evidence_reference` and the page is still returned. |
 | `wiki_overview` | Reports page count, recommended retrieval tier, and vault root. It does not yet provide per-component generation health. |
 | `vault_status` | Reports compile timestamp/status and changed-daily backlog only. |

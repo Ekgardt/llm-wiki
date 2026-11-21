@@ -1681,7 +1681,9 @@ class TestHandleToolCall:
         monkeypatch.setattr(
             mcp_server,
             "_search_vault",
-            lambda query, *, limit, trace_sink=None: searches.append((query, limit)) or [],
+            lambda query, *, limit, trace_sink=None, filters=None: searches.append(
+                (query, limit, filters)
+            ) or [],
         )
         monkeypatch.setattr(
             query_memory,
@@ -1692,7 +1694,7 @@ class TestHandleToolCall:
 
         envelope = json.loads(self._run("recall", arguments))
 
-        assert searches == [("auth", 8)]
+        assert searches == [("auth", 8, {})]
         assert "results" in envelope["data"]
 
     def test_grounded_recall_calls_direct_api_with_root_profile_and_mcp_deadline(
@@ -2886,7 +2888,7 @@ class TestHandleToolCall:
 
         received = []
 
-        def search(query, *, limit, trace_sink=None):
+        def search(query, *, limit, trace_sink=None, filters=None):
             received.append(limit)
             return [{"path": "page.md", "fused_score": 0.1}]
 

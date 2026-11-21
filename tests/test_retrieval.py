@@ -248,6 +248,8 @@ def test_retrieve_uses_identical_hard_filters_for_lexical_and_dense() -> None:
         project="demo",
         since="2024-01-01",
         as_of="2025-06-01",
+        page_type="decision",
+        path_prefix="knowledge/notes/",
         lexical_backend=lexical,
         dense_backend=dense,
         corpus_generation="gen-filters",
@@ -263,6 +265,8 @@ def test_retrieve_uses_identical_hard_filters_for_lexical_and_dense() -> None:
         "project": "demo",
         "since": "2024-01-01",
         "as_of": "2025-06-01",
+        "page_type": "decision",
+        "path_prefix": "knowledge/notes/",
     }
 
 

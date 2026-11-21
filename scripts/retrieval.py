@@ -2560,6 +2560,8 @@ def _filtered_hits(
         since=filters.get("since"),
         as_of=filters.get("as_of"),
         scope=filters.get("scope", "all"),
+        page_type=filters.get("page_type"),
+        path_prefix=filters.get("path_prefix"),
     )
 
 
@@ -2668,6 +2670,8 @@ def _graph_rows_admitted(
         project=filters.get("project"),
         since=filters.get("since"),
         as_of=filters.get("as_of"),
+        page_type=filters.get("page_type"),
+        path_prefix=filters.get("path_prefix"),
     )
     return [row for row in rows if str(row["relative_path"]) in eligible]
 
@@ -3014,6 +3018,8 @@ def _dense_hits_or_none(
         project=filters["project"],
         since=filters["since"],
         as_of=filters["as_of"],
+        page_type=filters.get("page_type"),
+        path_prefix=filters.get("path_prefix"),
         **stop,
     )
     require_seal()
@@ -3042,6 +3048,8 @@ def _generation_lexical_hits(
         project=filters["project"],
         since=filters["since"],
         as_of=filters["as_of"],
+        page_type=filters.get("page_type"),
+        path_prefix=filters.get("path_prefix"),
         **stop,
     )
     _require_unchanged_generation(catalog, context, stop)
@@ -3993,6 +4001,8 @@ def retrieve(
     graph_global_limit: int = GRAPH_GLOBAL_LIMIT,
     graph_edge_families: Mapping[str, bool] | None = None,
     signals: Sequence[str] | None = None,
+    page_type: str | None = None,
+    path_prefix: str | None = None,
 ) -> RetrievalResult:
     """Plan and execute retrieval with truthful mode/signal reporting.
 
@@ -4020,6 +4030,8 @@ def retrieve(
         "project": project,
         "since": since,
         "as_of": as_of,
+        "page_type": page_type,
+        "path_prefix": path_prefix,
     }
 
     wanted = _planned_signals(requested, signals)
@@ -4548,6 +4560,8 @@ class _SearchRun:
     cancelled: Callable[[], bool] | None
     requested: Any
     wanted: tuple[str, ...]
+    page_type: str | None = None
+    path_prefix: str | None = None
     generation_ctx: dict[str, Any] = dataclass_field(
         default_factory=lambda: {
             "manifest": None,
@@ -4738,6 +4752,8 @@ class _SearchRun:
             project=self.project,
             since=self.since,
             as_of=self.as_of,
+            page_type=self.page_type,
+            path_prefix=self.path_prefix,
             lexical_backend=_wanted_backend(self.lexical_backend, "lexical" in self.wanted),
             dense_backend=_wanted_backend(
                 self.dense_backend, "dense" in self.wanted and self.semantic
@@ -4816,6 +4832,8 @@ def retrieve_via_search_memory(
     max_candidates: int | None = None,
     cancelled: Callable[[], bool] | None = None,
     trace_sink: dict[str, object] | None = None,
+    page_type: str | None = None,
+    path_prefix: str | None = None,
 ) -> list[dict[str, Any]]:
     """Public search path: independent backends → retrieve() → rows."""
     import search_memory
@@ -4850,6 +4868,8 @@ def retrieve_via_search_memory(
         cancelled,
         requested,
         wanted,
+        page_type=page_type,
+        path_prefix=path_prefix,
     )
     run.open()
     result = run.reported(run.run())
