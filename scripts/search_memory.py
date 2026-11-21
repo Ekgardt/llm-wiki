@@ -40,6 +40,7 @@ from pathlib import Path
 from typing import NamedTuple
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import query_spelling  # noqa: E402
 from bounded_io import (
     MAX_KNOWLEDGE_PAGE_BYTES,
     TIMESTAMP_SETTLE_NS,
@@ -3040,9 +3041,24 @@ def _fts_query(query: str) -> str:
     a chunk holding every term still outranks one holding a single term. What
     changes is that the one-term chunk is now reachable instead of discarded.
     """
-    words = _query_terms(query)
+    return _fts_expression(_query_terms(query))
+
+
+def _fts_expression(words: Sequence[str]) -> str:
     quoted = [f'"{word.replace(chr(34), chr(34) * 2)}"' for word in words]
     return " OR ".join(quoted)
+
+
+def _spelled_fts_query(connection: sqlite3.Connection, query: str) -> str:
+    """The query, plus the indexed words nearest to each word the index does not hold.
+
+    Measured 2026-11-21 on LongMemEval_S (470 answerable questions, lexical lane
+    alone): one transposed letter in the longest word took MRR@10 from 0.906 to
+    0.865; with the corrections it is 0.901, and a query without typos is
+    unchanged (0.906 to 0.907).
+    """
+    corrections = query_spelling.corrections(connection, _query_terms(query), GENERATION_TOKENIZER)
+    return " OR ".join(filter(None, (_fts_query(query), _fts_expression(corrections))))
 
 
 def _normalized_filename_stem(value: str) -> str:
@@ -3401,7 +3417,7 @@ def _generation_matched_rows(
     return connection.execute(
         f"SELECT {_GENERATION_CHUNK_COLUMNS}, bm25(chunks) AS rank FROM chunks "
         f"WHERE chunks MATCH ?{filters} ORDER BY rank, chunk_order LIMIT ?",
-        [_fts_query(query), *values, limit * 5],
+        [_spelled_fts_query(connection, query), *values, limit * 5],
     ).fetchall()
 
 
