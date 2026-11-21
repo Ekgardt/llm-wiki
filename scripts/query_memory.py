@@ -2586,7 +2586,8 @@ def _qa_system_prompt() -> str:
 def _sent_system(system_prompt: str, schema: dict[str, object]) -> str:
     from llm_client import system_with_schema
 
-    return system_with_schema(system_prompt, schema)
+    sent: str = system_with_schema(system_prompt, schema)
+    return sent
 
 
 def _answer_schema() -> dict[str, object]:
