@@ -247,10 +247,10 @@ def _provider_setting() -> dict[str, object]:
     A name that is no provider yields no provider at all (audit C-3); saying so
     here is the only way the operator learns of the typo.
     """
-    from llm_client import KNOWN_PROVIDERS, _candidate_order, forced_provider
+    from llm_client import KNOWN_PROVIDERS, forced_provider
 
     value = forced_provider()
-    known = not value or bool(_candidate_order(value))
+    known = value in {"", "fake", *KNOWN_PROVIDERS}
     return {"value": value or "auto", "known": known, "accepted": ["auto (unset)", *KNOWN_PROVIDERS]}
 
 

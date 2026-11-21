@@ -7,9 +7,8 @@ Backend priority (auto-detected, first alive wins):
   1. OpenCode server (HTTP API on localhost:4096)  ← new
   2. Codex CLI (`codex exec`)                       ← was default
   3. Claude CLI (`claude -p`)                       ← new
-  4. Any OpenAI-compatible API (if MEMORY_LLM_BASE_URL or an API key is set, or a
-     local server answers at http://localhost:11434/v1): OpenAI, DeepSeek, or a
-     local server such as Ollama, LM Studio or vLLM
+  4. Any OpenAI-compatible API (if MEMORY_LLM_BASE_URL or an API key is set):
+     OpenAI, DeepSeek, or a local server such as Ollama, LM Studio or vLLM
 
 If NONE available: returns None. Callers handle this gracefully (compile
 skips, flush treats as FLUSH_OK, query returns error string). The queue
@@ -677,21 +676,6 @@ def call_llm(
 
 KNOWN_PROVIDERS = ("opencode", "codex", "claude", "openai")
 
-# An install made before 2026-11-21 may have saved `MEMORY_LLM_PROVIDER=ollama`; that
-# server is reached through the OpenAI-compatible provider at the same address, so the
-# saved setting keeps working with no edit. Remove at the next major release, whose
-# upgrade notes ask for the setting to be changed.
-RETIRED_PROVIDER_NAMES = {"ollama": "openai"}
-
-# Where the OpenAI-compatible provider looks when neither an address nor a key is set:
-# the address and default model the retired Ollama provider used, so a machine that
-# ran on a local Ollama with nothing configured is still found automatically.
-LOCAL_SERVER_ENDPOINT = "http://localhost:11434/v1"
-LOCAL_SERVER_MODEL = "qwen3:0.6b"
-CLOUD_ENDPOINT = "https://api.openai.com/v1"
-CLOUD_MODEL = "gpt-4o-mini"
-LOCAL_PROBE_TIMEOUT_S = 1.0
-
 
 def _candidate_order(forced: str) -> list[str]:
     """Order in which to try backends.
@@ -704,7 +688,6 @@ def _candidate_order(forced: str) -> list[str]:
     """
     if forced == "fake":
         return ["fake"]
-    forced = RETIRED_PROVIDER_NAMES.get(forced, forced)
     if forced in KNOWN_PROVIDERS:
         return [forced]
     # A name that is no provider is a typo, not a request for the automatic chain
@@ -746,26 +729,18 @@ def _openai_configuration() -> ProviderConfiguration:
     No `max_tokens` is sent: a reasoning model spends part of that budget thinking
     and a cap cut its answers off mid-JSON on the LongMemEval stand (2026-11-21).
     """
-    default_endpoint, default_model = _openai_defaults()
     endpoint, endpoint_identity = _resolve_endpoint(
-        os.environ.get("MEMORY_LLM_BASE_URL", default_endpoint)
+        os.environ.get("MEMORY_LLM_BASE_URL", "https://api.openai.com/v1")
     )
     capabilities = _base_capabilities("openai")
     capabilities["endpoint_sha256"] = endpoint_identity
     capabilities["max_tokens_enforced"] = False
     return (
-        os.environ.get("MEMORY_LLM_MODEL", default_model),
+        os.environ.get("MEMORY_LLM_MODEL", "gpt-4o-mini"),
         capabilities,
         {"max_tokens": "backend_default", "temperature_milli": 200},
         endpoint,
     )
-
-
-def _openai_defaults() -> tuple[str, str]:
-    """A key names the cloud service; without one the default is the local server."""
-    if _openai_api_key():
-        return CLOUD_ENDPOINT, CLOUD_MODEL
-    return LOCAL_SERVER_ENDPOINT, LOCAL_SERVER_MODEL
 
 
 def _fake_configuration(max_tokens: int) -> ProviderConfiguration:
@@ -900,18 +875,8 @@ def _probe_claude(descriptor: ProviderDescriptor) -> bool:
 
 
 def _probe_openai(descriptor: ProviderDescriptor) -> bool:
-    """Configured is enough; unconfigured, the default local server must answer."""
-    if os.environ.get("MEMORY_LLM_BASE_URL") or _openai_api_key():
-        return True
-    return _local_server_answers(f"{descriptor._endpoint}/models")
-
-
-def _local_server_answers(url: str) -> bool:
-    try:
-        with urllib.request.urlopen(url, timeout=LOCAL_PROBE_TIMEOUT_S) as response:
-            return bool(response.status == 200)
-    except (OSError, ValueError):
-        return False
+    """Configured is enough: an address names a server, a key names the default one."""
+    return bool(os.environ.get("MEMORY_LLM_BASE_URL") or _openai_api_key())
 
 
 def _probe_fake(descriptor: ProviderDescriptor) -> bool:
@@ -1659,9 +1624,6 @@ def _openai_messages(system_prompt: str, prompt: str) -> list[dict[str, str]]:
 
 
 def _openai_api_key() -> str:
-    """No key for a retired local-server name, so its prompts never leave for the cloud."""
-    if forced_provider() in RETIRED_PROVIDER_NAMES:
-        return ""
     return os.environ.get("MEMORY_LLM_API_KEY") or os.environ.get("OPENAI_API_KEY") or ""
 
 

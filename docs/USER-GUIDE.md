@@ -30,7 +30,7 @@ Backend disclosure:
 |---------|---------------------|
 | OpenCode | LLM Wiki calls a loopback OpenCode server; the selected OpenCode model may use a remote service. |
 | Codex / Claude | LLM Wiki invokes a local CLI; the CLI may use its account's remote service. |
-| OpenAI-compatible API | Prompts are sent to `MEMORY_LLM_BASE_URL` (default `https://api.openai.com/v1` with a key, `http://localhost:11434/v1` without one). A local server keeps them on the machine; a cloud one does not. |
+| OpenAI-compatible API | Prompts are sent to `MEMORY_LLM_BASE_URL` (default `https://api.openai.com/v1`). A local server keeps them on the machine; a cloud one does not. |
 
 All first-party calls pass through the fail-closed model boundary. Built-in secret
 detectors are always active. `LLM_WIKI_DLP_POLICY`, when set, must name an absolute,
