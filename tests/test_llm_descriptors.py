@@ -1240,6 +1240,22 @@ def test_a_saved_ollama_setting_reaches_the_local_server(monkeypatch: pytest.Mon
     )
 
 
+def test_a_saved_ollama_setting_stays_local_when_a_cloud_key_is_set(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _without_address_or_key(monkeypatch)
+    monkeypatch.setenv("MEMORY_LLM_PROVIDER", "ollama")
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+    requests = _record_requests(monkeypatch)
+
+    llm_client.call_llm("prompt", "system")
+
+    assert (requests[-1].full_url, requests[-1].get_header("Authorization")) == (
+        "http://localhost:11434/v1/chat/completions",
+        None,
+    )
+
+
 def test_a_saved_ollama_setting_is_not_a_typo_for_doctor(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("MEMORY_LLM_PROVIDER", "ollama")
 
