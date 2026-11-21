@@ -56,6 +56,26 @@ def test_a_word_is_compared_in_the_form_the_index_stores_it() -> None:
     assert _found(connection, "trip famliy") == ["A trip with my family to Spain."]
 
 
+def test_the_tail_of_a_glued_identifier_finds_the_page() -> None:
+    connection = _artifact(
+        "Load it with AutoModelForSequenceClassification from transformers.", "We cooked pasta."
+    )
+
+    assert _found(connection, "SequenceClassification") == [
+        "Load it with AutoModelForSequenceClassification from transformers."
+    ]
+
+
+def test_a_word_the_index_holds_gains_no_glued_words() -> None:
+    connection = _artifact("A bookshelf and a bookshelfmaker.")
+
+    found = query_spelling.glued_words(
+        connection, ["bookshelf"], search_memory.GENERATION_TOKENIZER
+    )
+
+    assert found == []
+
+
 def test_a_correctly_spelled_query_is_left_as_it_is() -> None:
     connection = _artifact("I bought a new bookshelf.")
 

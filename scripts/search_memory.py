@@ -3059,8 +3059,13 @@ def _spelled_fts_query(connection: sqlite3.Connection, query: str) -> str:
     """
     terms = _query_terms(query)
     corrections = query_spelling.corrections(connection, terms, GENERATION_TOKENIZER)
+    glued = query_spelling.glued_words(connection, terms, GENERATION_TOKENIZER)
     stems = query_spelling.cyrillic_stems(terms)
-    expressions = (_fts_query(query), _fts_expression(corrections), _fts_prefixes(stems))
+    expressions = (
+        _fts_query(query),
+        _fts_expression([*corrections, *glued]),
+        _fts_prefixes(stems),
+    )
     return " OR ".join(filter(None, expressions))
 
 

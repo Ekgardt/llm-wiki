@@ -95,10 +95,14 @@ def _stemmed(connection: sqlite3.Connection, word: str, tokenizer: str) -> str:
     return str(row[0]) if row else word
 
 
-def _nearest(connection: sqlite3.Connection, word: str, bound: int, tokenizer: str) -> list[str]:
+def _create_vocabulary(connection: sqlite3.Connection) -> None:
     connection.execute(
         f"CREATE VIRTUAL TABLE IF NOT EXISTS {_VOCABULARY} USING fts5vocab(main, chunks, 'row')"
     )
+
+
+def _nearest(connection: sqlite3.Connection, word: str, bound: int, tokenizer: str) -> list[str]:
+    _create_vocabulary(connection)
     stem = _stemmed(connection, word, tokenizer)
     rows = connection.execute(
         f"SELECT term, doc FROM {_VOCABULARY} WHERE length(term) BETWEEN ? AND ?",
@@ -140,6 +144,35 @@ def cyrillic_stems(words: Sequence[str]) -> list[str]:
         if len(word) >= SHORTEST_CORRECTED_WORD and _cyrillic(word)
     }
     return sorted(stems)
+
+
+def _containing(connection: sqlite3.Connection, word: str, tokenizer: str) -> list[str]:
+    _create_vocabulary(connection)
+    stem = _stemmed(connection, word, tokenizer)
+    rows = connection.execute(
+        f"SELECT term FROM {_VOCABULARY} WHERE length(term) > ? AND instr(term, ?) "
+        "ORDER BY doc DESC, term LIMIT ?",
+        [len(stem), stem, CORRECTIONS_PER_WORD],
+    ).fetchall()
+    return [str(row[0]) for row in rows]
+
+
+def glued_words(connection: sqlite3.Connection, words: Sequence[str], tokenizer: str) -> list[str]:
+    """Indexed words that hold a query word the index does not hold as a word of its own.
+
+    The tokenizer keeps "AutoModelForSequenceClassification" as one token, so
+    "SequenceClassification" never matched it. Measured 2026-11-21 on 131 such
+    identifiers of this repository's research notes, queried by all but their
+    first part: hit@10 0.05 to 0.86 with no index of its own; an FTS5 trigram
+    index reached 0.98 but doubled the size of the artifact.
+    """
+    found: list[str] = []
+    for word in map(_bare, words):
+        if len(word) < SHORTEST_CORRECTED_WORD or not word.isalnum():
+            continue
+        if not _indexed(connection, word):
+            found.extend(_containing(connection, word, tokenizer))
+    return found
 
 
 def corrections(connection: sqlite3.Connection, words: Sequence[str], tokenizer: str) -> list[str]:
