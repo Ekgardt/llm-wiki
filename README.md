@@ -13,9 +13,10 @@ pages, and gives the next session — in any of those agents — the decisions, 
 and project state it needs. You stop explaining the same thing twice.
 
 Storage, capture, search and the MCP server run locally. Turning sessions into pages
-needs a language model: the one you configure, or the first one found among OpenCode,
-Codex, Claude, OpenAI and Ollama. Only Ollama is local; the others are cloud services,
-so auto-detection is not a local-only guarantee. Current version: **5.0.0**.
+needs a language model: an agent CLI you already have (OpenCode, Codex, Claude), or any
+OpenAI-compatible API by its address — a cloud one, or a local server such as Ollama,
+LM Studio or vLLM. Only a local server keeps prompts on the machine, so auto-detection
+is not a local-only guarantee. Current version: **5.0.0**.
 
 **Languages:** [English](README.md) | [Русский](README.ru.md) | [简体中文](README.zh-CN.md)
 

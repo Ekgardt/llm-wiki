@@ -189,7 +189,7 @@ class _Stand:
             return (self.chunks["alpha"], self.chunks["beta"], self.chunks["gamma"])
         return (self.chunks["alpha"], self.chunks["beta"])
 
-    def generate(self, prompt: str, system_prompt: str, max_tokens: int) -> str:
+    def generate(self, prompt: str, system_prompt: str, schema: dict | None) -> str:
         if system_prompt == aggregation_pass.CLUSTER_SYSTEM_PROMPT:
             self.cluster_prompts.append(prompt)
             return '{"groups": [[0, 1]]}'
@@ -275,7 +275,7 @@ def test_fixed_candidates_cannot_be_widened_but_are_still_clustered(vault: Path)
 def test_an_answer_that_counted_nothing_is_generated_once(vault: Path) -> None:
     stand = _Stand(vault)
 
-    def plain(prompt: str, system_prompt: str, max_tokens: int) -> str:
+    def plain(prompt: str, system_prompt: str, schema: dict | None) -> str:
         stand.answer_prompts.append(prompt)
         evidence = _manifest(prompt)[0]
         return json.dumps(

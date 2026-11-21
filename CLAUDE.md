@@ -72,7 +72,8 @@ run/       # state, transactions, queue results, locks, install ownership
   `cache/`, `logs/`, `run/` at vault root, all gitignored.
   Override for multi-disk setups or hermetic tests.
 - `$MEMORY_LLM_PROVIDER` → `fake` (tests), or one of
-  `opencode|codex|claude|openai|ollama` (runtime, auto-detected).
+  `opencode|codex|claude|openai` (runtime, auto-detected). `openai` is any
+  OpenAI-compatible API, cloud or local, at `$MEMORY_LLM_BASE_URL`.
 - `$LLM_WIKI_DLP_POLICY` → optional absolute external policy path. Invalid or
   digest-mismatched required policy blocks protected work.
 
@@ -85,8 +86,8 @@ for events MCP cannot observe. Automatic health context is injected only when
 **Approved audit-closure contract (2026-08-15):** Cognee is retired from the
 supported product; existing `cache/cognee/` is disposable legacy cache and is not
 deleted automatically. First-party model calls use one fail-closed DLP boundary.
-Verified local-only mode accepts only literal-loopback Ollama and requires
-verifiable Ollama cloud disablement. Coherent encrypted private-vault recovery uses
+Local processing means an OpenAI-compatible server on this machine; the dedicated
+Ollama provider and its local-only mode were removed on 2026-11-21. Coherent encrypted private-vault recovery uses
 Restic with the existing maintenance fence, SQLite online backup, manifests, and
 staged validation. `run/install/` is the only new runtime directory and owns
 resumable install state, exact-release/external-path manifests, verified preimages,
@@ -466,7 +467,8 @@ contradiction checks, and playbook crystallization. Backend is
 **auto-detected** via `scripts/llm_client.py` — no API keys required.
 
 Priority: OpenCode (only when `OPENCODE_SERVER_PASSWORD` protects its server) →
-Codex → Claude CLI → OpenAI → Ollama. If none answers, the call returns
+Codex → Claude CLI → any OpenAI-compatible API (`MEMORY_LLM_BASE_URL`, cloud or
+local: OpenAI, DeepSeek, Ollama, LM Studio, vLLM). If none answers, the call returns
 nothing: a capture already sits in `run/queue.sqlite3` and waits an hour before
 its next attempt, and every other caller skips or fails its step; nothing else is
 queued for later (2026-09-25). A `run/queue/` directory left by a release before
@@ -475,8 +477,8 @@ v4.0.0 is refused and named by `doctor`, never imported (2026-09-23).
 Override via `MEMORY_LLM_PROVIDER` env var. `fake` returns a canned response
 for tests/e2e. A value that names no provider calls none, and `doctor` names it.
 
-**Zero-cost path:** no paid API beyond existing agent subscriptions. Ollama remains
-an optional local backend; the retired Cognee bridge is not a supported feature.
+**Zero-cost path:** no paid API beyond existing agent subscriptions. A local server
+reached by its address remains an optional backend; the retired Cognee bridge is not a supported feature.
 
 ---
 

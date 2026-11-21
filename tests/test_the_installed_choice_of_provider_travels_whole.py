@@ -16,9 +16,8 @@ if str(ROOT / "scripts") not in sys.path:
 
 import integration_hook_config  # noqa: E402
 
-LOCAL_ONLY = {
-    "MEMORY_LLM_PROVIDER": "ollama",
-    "OLLAMA_NO_CLOUD": "1",
+LOCAL = {
+    "MEMORY_LLM_PROVIDER": "openai",
     "MEMORY_LLM_BASE_URL": "http://127.0.0.1:11434/v1",
     "MEMORY_LLM_MODEL": "qwen3:8b",
 }
@@ -32,11 +31,11 @@ def _install_environment(monkeypatch: pytest.MonkeyPatch, values: dict) -> dict:
     return integration_hook_config.provider_environment()
 
 
-def test_a_local_only_install_persists_what_makes_it_local_only(monkeypatch) -> None:
-    """Only the provider travelled, so scheduled runs left the loopback rule behind."""
-    persisted = _install_environment(monkeypatch, LOCAL_ONLY)
+def test_a_local_install_persists_the_address_and_the_model(monkeypatch) -> None:
+    """Only the provider travelled, so scheduled runs left the local server behind."""
+    persisted = _install_environment(monkeypatch, LOCAL)
 
-    assert persisted == LOCAL_ONLY
+    assert persisted == LOCAL
 
 
 def test_the_codex_model_and_reasoning_travel_too(monkeypatch) -> None:
@@ -70,14 +69,13 @@ def test_the_test_provider_still_persists_nothing(monkeypatch) -> None:
     assert persisted == {}
 
 
-def test_a_scheduler_unit_carries_the_local_only_switch(tmp_path, monkeypatch) -> None:
+def test_a_scheduler_unit_carries_the_local_address(tmp_path, monkeypatch) -> None:
     import install_control
 
-    _install_environment(monkeypatch, LOCAL_ONLY)
+    _install_environment(monkeypatch, LOCAL)
 
     unit = install_control._systemd_service(
         tmp_path, tmp_path / "state", tmp_path / "uv", "nightly"
     ).decode()
 
-    assert 'Environment="OLLAMA_NO_CLOUD=1"' in unit
     assert 'Environment="MEMORY_LLM_BASE_URL=http://127.0.0.1:11434/v1"' in unit

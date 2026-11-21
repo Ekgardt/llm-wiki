@@ -602,7 +602,7 @@ def _instrumented_generator(metrics: dict, gold: str = "", evidence: Sequence = 
     needle = " ".join(str(gold).split()).casefold()
     windows = list(evidence)
 
-    def generate(prompt: str, system_prompt: str, max_tokens: int) -> str | None:
+    def generate(prompt: str, system_prompt: str, schema: dict | None) -> str | None:
         _count_call(metrics, system_prompt)
         metrics["prompt_chars"] = len(prompt)
         metrics["prompt_bytes"] = len(prompt.encode("utf-8"))
@@ -624,7 +624,7 @@ def _instrumented_generator(metrics: dict, gold: str = "", evidence: Sequence = 
         _record_prompt_evidence(metrics, prompt, needle, windows)
         started = time.monotonic()
         try:
-            reply = call_llm(prompt, system_prompt, max_tokens)
+            reply = call_llm(prompt, system_prompt, schema=schema)
             # What the citation gates may be about to destroy. Measured
             # 2026-09-01: 28 of 200 answers were produced and then thrown away
             # by `verify_grounded_answer`, and the row kept only the gate's
@@ -744,7 +744,7 @@ def _compile_trace_metrics(context: object) -> dict[str, object]:
 def _measured_compile(root: Path, snapshot: object, rows: list[dict], profile: str) -> dict:
     """One extra compile, for its trace only. No provider call, no effect on the answer."""
     from context_budget import ContextBudget
-    from query_memory import QA_MAX_OUTPUT_TOKENS, build_grounded_context
+    from query_memory import QA_OUTPUT_RESERVE_BYTES, build_grounded_context
 
     try:
         context = build_grounded_context(
@@ -752,7 +752,7 @@ def _measured_compile(root: Path, snapshot: object, rows: list[dict], profile: s
             rows,
             vault=root,
             profile=profile,
-            budget=ContextBudget(None, _answer_budget(), QA_MAX_OUTPUT_TOKENS, 512),
+            budget=ContextBudget(None, _answer_budget(), QA_OUTPUT_RESERVE_BYTES, 512),
         )
     except Exception:  # noqa: BLE001 - a measurement never fails the question
         return {}
@@ -773,7 +773,7 @@ def _answer_outcome(
     chosen: str = "refuse",
 ) -> dict:
     from context_budget import ContextBudget
-    from query_memory import QA_MAX_OUTPUT_TOKENS, grounded_qa
+    from query_memory import QA_OUTPUT_RESERVE_BYTES, grounded_qa
 
     try:
         document = grounded_qa(
@@ -786,7 +786,7 @@ def _answer_outcome(
             keep_unverified=chosen == "answer",
             generator=_instrumented_generator(metrics, gold, evidence),
             profile=profile,
-            budget=ContextBudget(None, _answer_budget(), QA_MAX_OUTPUT_TOKENS, 512),
+            budget=ContextBudget(None, _answer_budget(), QA_OUTPUT_RESERVE_BYTES, 512),
             deadline=time.monotonic() + ANSWER_DEADLINE_SECONDS,
         )
     except Exception as exc:  # noqa: BLE001 - every failure is a scored outcome

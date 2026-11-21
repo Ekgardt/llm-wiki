@@ -7,8 +7,8 @@ Backend priority (auto-detected, first alive wins):
   1. OpenCode server (HTTP API on localhost:4096)  ← new
   2. Codex CLI (`codex exec`)                       ← was default
   3. Claude CLI (`claude -p`)                       ← new
-  4. OpenAI-compatible API (if OPENAI_API_KEY)
-  5. Ollama HTTP API (if localhost:11434 alive)
+  4. Any OpenAI-compatible API (if MEMORY_LLM_BASE_URL or an API key is set):
+     OpenAI, DeepSeek, or a local server such as Ollama, LM Studio or vLLM
 
 If NONE available: returns None. Callers handle this gracefully (compile
 skips, flush treats as FLUSH_OK, query returns error string). The queue
@@ -19,8 +19,7 @@ Override backend via MEMORY_LLM_PROVIDER env var:
     MEMORY_LLM_PROVIDER=opencode  (uses OpenCode HTTP API; only with OPENCODE_SERVER_PASSWORD)
     MEMORY_LLM_PROVIDER=codex     (uses codex exec)
     MEMORY_LLM_PROVIDER=claude    (uses claude CLI)
-    MEMORY_LLM_PROVIDER=openai    (uses OPENAI_API_KEY)
-    MEMORY_LLM_PROVIDER=ollama    (uses local Ollama server)
+    MEMORY_LLM_PROVIDER=openai    (uses MEMORY_LLM_BASE_URL, MEMORY_LLM_MODEL and an optional key)
     MEMORY_LLM_PROVIDER=fake      (tests/e2e — returns MEMORY_LLM_FAKE_RESPONSE)
 
 Design:
@@ -129,31 +128,10 @@ class BackendResponse:
     usage: TokenUsage = field(default_factory=TokenUsage)
 
 
-def _wants_local_only(provider: str, forced: str) -> bool:
-    if provider != "ollama" or forced != "ollama":
-        return False
-    return os.environ.get("OLLAMA_NO_CLOUD") == "1"
-
-
-def _local_only_capabilities(
-    capabilities: Mapping[str, object], endpoint: str | None
-) -> dict[str, object]:
-    if endpoint is None or not _is_literal_loopback_endpoint(endpoint):
-        raise ValueError("local-only Ollama requires a literal loopback endpoint")
-    updated = dict(capabilities)
-    updated["local_only_enforced"] = True
-    updated["local_only_status"] = "external_runtime_unverified"
-    return updated
-
-
-def _resolved_descriptor(
-    provider: str, index: int, forced: str, max_tokens: int
-) -> ProviderDescriptor:
+def _resolved_descriptor(provider: str, index: int, max_tokens: int) -> ProviderDescriptor:
     model, capabilities, settings, endpoint = _provider_configuration(
         provider, max_tokens
     )
-    if _wants_local_only(provider, forced):
-        capabilities = _local_only_capabilities(capabilities, endpoint)
     return ProviderDescriptor(
         provider=provider,
         model=model,
@@ -177,11 +155,9 @@ def _unresolved_descriptor(provider: str, index: int) -> ProviderDescriptor:
     )
 
 
-def _candidate_descriptor(
-    provider: str, index: int, forced: str, max_tokens: int
-) -> ProviderDescriptor:
+def _candidate_descriptor(provider: str, index: int, max_tokens: int) -> ProviderDescriptor:
     try:
-        return _resolved_descriptor(provider, index, forced, max_tokens)
+        return _resolved_descriptor(provider, index, max_tokens)
     except ValueError:
         return _unresolved_descriptor(provider, index)
 
@@ -206,7 +182,7 @@ def provider_candidates(
         raise ValueError("max_tokens must be a positive integer")
     forced = forced.lower().strip()
     return [
-        _candidate_descriptor(provider, index, forced, max_tokens)
+        _candidate_descriptor(provider, index, max_tokens)
         for index, provider in enumerate(_candidate_order(forced))
     ]
 
@@ -481,11 +457,6 @@ def _failed_result(
     mode: str,
     pre_call_count: TokenCount,
 ) -> LLMResult:
-    if isinstance(exc, ProviderContextOverflow):
-        print(f"llm_client: {exc}", file=sys.stderr)
-        return LLMResult(
-            descriptor, None, True, "context_overflow", mode, TokenUsage(), pre_call_count
-        )
     if _ran_out_of_time(exc):
         print(
             f"llm_client: {descriptor.provider} backend exceeded "
@@ -524,7 +495,7 @@ def _outcome_of(
 def _candidate_available(
     descriptor: ProviderDescriptor, available: bool | None
 ) -> bool:
-    if available is None or descriptor.capabilities.get("local_only_enforced") is True:
+    if available is None:
         return probe_candidate(descriptor)
     return available
 
@@ -636,15 +607,21 @@ def _stopped_chain(descriptor: object) -> None:
 
 
 def call_llm_result(
-    prompt: str, system_prompt: str = "", max_tokens: int = 2000
+    prompt: str,
+    system_prompt: str = "",
+    max_tokens: int = 2000,
+    *,
+    schema: Mapping[str, object] | None = None,
 ) -> LLMResult | None:
     """Return the successful provider outcome with its resolved identity."""
     if _llm_prompt_is_empty(prompt):
         return None
-    return _first_terminal_result(prompt, system_prompt, max_tokens)
+    return _first_terminal_result(prompt, system_prompt, max_tokens, schema)
 
 
-def _first_terminal_result(prompt: str, system_prompt: str, max_tokens: int) -> LLMResult | None:
+def _first_terminal_result(
+    prompt: str, system_prompt: str, max_tokens: int, schema: Mapping[str, object] | None
+) -> LLMResult | None:
     """Walk the provider chain until one answers, or one stops the chain."""
     forced = forced_provider()
     lineage: tuple[str, ...] = ()
@@ -655,6 +632,7 @@ def _first_terminal_result(prompt: str, system_prompt: str, max_tokens: int) -> 
             prompt,
             system_prompt,
             max_tokens=max_tokens,
+            schema=schema,
         )
         if _llm_result_is_terminal(result, forced):
             return result
@@ -666,18 +644,28 @@ def _first_terminal_result(prompt: str, system_prompt: str, max_tokens: int) -> 
     return None
 
 
-def call_llm(prompt: str, system_prompt: str = "", max_tokens: int = 2000) -> str | None:
-    """Synchronous LLM call. Returns text, empty soft failure, or no backend."""
+def call_llm(
+    prompt: str,
+    system_prompt: str = "",
+    max_tokens: int = 2000,
+    *,
+    schema: Mapping[str, object] | None = None,
+) -> str | None:
+    """Synchronous LLM call. Returns text, empty soft failure, or no backend.
+
+    A `schema` goes to an HTTP server as its response format and into the system
+    prompt of an agent CLI, so a caller states it once for every provider.
+    """
     if not prompt or not prompt.strip():
         return ""
-    result = call_llm_result(prompt, system_prompt, max_tokens)
+    result = call_llm_result(prompt, system_prompt, max_tokens, schema=schema)
     if result is None:
         return None
     return result.text or ""
 
 
 
-KNOWN_PROVIDERS = ("opencode", "codex", "claude", "openai", "ollama")
+KNOWN_PROVIDERS = ("opencode", "codex", "claude", "openai")
 
 
 def _candidate_order(forced: str) -> list[str]:
@@ -704,8 +692,7 @@ ProviderConfiguration = tuple[
 
 
 def _base_capabilities(provider: str) -> dict[str, object]:
-    native = provider in {"openai", "ollama"}
-    return {"structured_output": "native" if native else "prompt"}
+    return {"structured_output": "native" if provider == "openai" else "prompt"}
 
 
 def _cli_configuration(
@@ -727,19 +714,22 @@ def _cli_configuration(
     return os.environ.get(model_variable) or None, capabilities, settings, None
 
 
-def _http_configuration(
-    provider: str, default_endpoint: str, default_model: str, max_tokens: int
-) -> ProviderConfiguration:
+def _openai_configuration() -> ProviderConfiguration:
+    """Any OpenAI-compatible server; the server decides the answer's length.
+
+    No `max_tokens` is sent: a reasoning model spends part of that budget thinking
+    and a cap cut its answers off mid-JSON on the LongMemEval stand (2026-11-21).
+    """
     endpoint, endpoint_identity = _resolve_endpoint(
-        os.environ.get("MEMORY_LLM_BASE_URL", default_endpoint)
+        os.environ.get("MEMORY_LLM_BASE_URL", "https://api.openai.com/v1")
     )
-    capabilities = _base_capabilities(provider)
+    capabilities = _base_capabilities("openai")
     capabilities["endpoint_sha256"] = endpoint_identity
-    capabilities["max_tokens_enforced"] = True
+    capabilities["max_tokens_enforced"] = False
     return (
-        os.environ.get("MEMORY_LLM_MODEL", default_model),
+        os.environ.get("MEMORY_LLM_MODEL", "gpt-4o-mini"),
         capabilities,
-        {"max_tokens": max_tokens, "temperature_milli": 200},
+        {"max_tokens": "backend_default", "temperature_milli": 200},
         endpoint,
     )
 
@@ -765,26 +755,8 @@ _PROVIDER_CONFIGURATIONS = {
         {"reasoning": os.environ.get("MEMORY_CODEX_REASONING", "low")},
     ),
     "claude": lambda max_tokens: _cli_configuration("claude", "MEMORY_CLAUDE_MODEL"),
-    "openai": lambda max_tokens: _http_configuration(
-        "openai", "https://api.openai.com/v1", "gpt-4o-mini", max_tokens
-    ),
-    "ollama": lambda max_tokens: _ollama_configuration(max_tokens),
+    "openai": lambda max_tokens: _openai_configuration(),
 }
-
-
-def _ollama_configuration(max_tokens: int) -> ProviderConfiguration:
-    """The HTTP configuration, plus the operator's window ceiling when one is set.
-
-    Read here, with the endpoint, so a call uses the ceiling it was resolved with
-    and a malformed value fails the candidate as `invalid_configuration`.
-    """
-    model, capabilities, settings, endpoint = _http_configuration(
-        "ollama", "http://localhost:11434/v1", "qwen3:0.6b", max_tokens
-    )
-    ceiling = _operator_context_ceiling()
-    if ceiling is not None:
-        settings["max_context"] = ceiling
-    return model, capabilities, settings, endpoint
 
 
 def _provider_configuration(provider: str, max_tokens: int) -> ProviderConfiguration:
@@ -843,14 +815,6 @@ def _endpoint_port(parsed, scheme: str) -> int:
     return 80
 
 
-def _is_literal_loopback_endpoint(endpoint: str) -> bool:
-    try:
-        hostname = urllib.parse.urlsplit(endpoint).hostname
-    except ValueError:
-        return False
-    return hostname in {"127.0.0.1", "::1"}
-
-
 # ---------------------------------------------------------------------------
 # Liveness probes (cheap, before attempting real call)
 # ---------------------------------------------------------------------------
@@ -902,72 +866,8 @@ def _probe_claude(descriptor: ProviderDescriptor) -> bool:
 
 
 def _probe_openai(descriptor: ProviderDescriptor) -> bool:
-    return bool(
-        os.environ.get("MEMORY_LLM_API_KEY") or os.environ.get("OPENAI_API_KEY")
-    )
-
-
-def _ollama_lists_the_local_model(descriptor: ProviderDescriptor, response) -> bool:
-    raw = response.read(1024 * 1024 + 1)
-    if len(raw) > 1024 * 1024:
-        return False
-    return _ollama_has_local_model(json.loads(raw.decode("utf-8")), descriptor.model)
-
-
-def _ollama_tags_answer(descriptor: ProviderDescriptor, response) -> bool:
-    if response.status != 200:
-        return False
-    if descriptor.capabilities.get("local_only_enforced") is not True:
-        return True
-    return _ollama_lists_the_local_model(descriptor, response)
-
-
-def _probe_ollama(descriptor: ProviderDescriptor) -> bool:
-    if descriptor._endpoint is None:
-        return False
-    try:
-        request = urllib.request.Request(_ollama_api_url(descriptor._endpoint, "tags"))
-        with urllib.request.urlopen(request, timeout=1.0) as response:
-            return _ollama_tags_answer(descriptor, response)
-    except (
-        json.JSONDecodeError,
-        OSError,
-        UnicodeDecodeError,
-        ValueError,
-        urllib.error.URLError,
-    ):
-        return False
-
-
-def _is_local_ollama_entry(item: Mapping) -> bool:
-    """A model that lives on this machine: real bytes, a real digest, no remote."""
-    if item.get("remote_model") or item.get("remote_host"):
-        return False
-    return _has_local_size(item.get("size")) and _has_digest(item.get("digest"))
-
-
-def _has_local_size(size: object) -> bool:
-    return isinstance(size, int) and not isinstance(size, bool) and size > 0
-
-
-def _has_digest(digest: object) -> bool:
-    return isinstance(digest, str) and re.fullmatch(r"[0-9a-f]{64}", digest) is not None
-
-
-def _named_ollama_entry(models: object, model: str) -> Mapping | None:
-    for item in models if isinstance(models, list) else []:
-        if isinstance(item, Mapping) and model in {item.get("name"), item.get("model")}:
-            return item
-    return None
-
-
-def _ollama_has_local_model(payload: object, model: str | None) -> bool:
-    if not isinstance(payload, Mapping) or not isinstance(model, str) or not model:
-        return False
-    item = _named_ollama_entry(payload.get("models"), model)
-    if item is None:
-        return False
-    return _is_local_ollama_entry(item)
+    """Configured is enough: an address names a server, a key names the default one."""
+    return bool(os.environ.get("MEMORY_LLM_BASE_URL") or _openai_api_key())
 
 
 def _probe_fake(descriptor: ProviderDescriptor) -> bool:
@@ -980,7 +880,6 @@ _PROBES = {
     "codex": _probe_codex,
     "claude": _probe_claude,
     "openai": _probe_openai,
-    "ollama": _probe_ollama,
 }
 
 
@@ -1703,7 +1602,7 @@ def _call_claude(
 
 
 # ---------------------------------------------------------------------------
-# Backend 4: OpenAI-compatible HTTP API (optional, paid)
+# Backend 4: any OpenAI-compatible HTTP API, cloud or local
 # ---------------------------------------------------------------------------
 
 
@@ -1715,6 +1614,18 @@ def _openai_messages(system_prompt: str, prompt: str) -> list[dict[str, str]]:
     return messages
 
 
+def _openai_api_key() -> str:
+    return os.environ.get("MEMORY_LLM_API_KEY") or os.environ.get("OPENAI_API_KEY") or ""
+
+
+def _openai_headers() -> dict[str, str]:
+    """A local server needs no key, so the header is sent only when there is one."""
+    headers = {"Content-Type": "application/json"}
+    if _openai_api_key():
+        headers["Authorization"] = f"Bearer {_openai_api_key()}"
+    return headers
+
+
 def _openai_payload(
     descriptor: ProviderDescriptor,
     prompt: str,
@@ -1724,7 +1635,6 @@ def _openai_payload(
     payload: dict[str, object] = {
         "model": descriptor.model,
         "messages": _openai_messages(system_prompt, prompt),
-        "max_tokens": int(descriptor.inference_settings["max_tokens"]),
         "temperature": int(descriptor.inference_settings["temperature_milli"]) / 1000,
     }
     if schema is not None:
@@ -1732,7 +1642,6 @@ def _openai_payload(
             "type": "json_schema",
             "json_schema": {
                 "name": "memory_response",
-                "strict": True,
                 "schema": schema,
             },
         }
@@ -1745,9 +1654,6 @@ def _call_openai(
     system_prompt: str,
     schema: Mapping[str, object] | None = None,
 ) -> str | BackendResponse:
-    api_key = os.environ.get("MEMORY_LLM_API_KEY") or os.environ.get("OPENAI_API_KEY")
-    if not api_key:
-        return ""
     if descriptor._endpoint is None:
         raise ValueError("OpenAI endpoint was not resolved in the provider descriptor")
     body = json.dumps(
@@ -1756,10 +1662,7 @@ def _call_openai(
     request = urllib.request.Request(
         f"{descriptor._endpoint.rstrip('/')}/chat/completions",
         data=body,
-        headers={
-            "Authorization": f"Bearer {api_key}",
-            "Content-Type": "application/json",
-        },
+        headers=_openai_headers(),
         method="POST",
     )
     with urllib.request.urlopen(request, timeout=_timeout_s()) as response:
@@ -1767,181 +1670,6 @@ def _call_openai(
     return BackendResponse(
         data["choices"][0]["message"]["content"], _parse_http_usage(data)
     )
-
-
-# ---------------------------------------------------------------------------
-# Backend 5: Ollama HTTP API (optional, local, free, offline)
-# ---------------------------------------------------------------------------
-#
-# The native `/api/chat`, not the OpenAI-compatible `/v1`: "The OpenAI API does
-# not have a way of setting the context size for a model" (Ollama docs), and a
-# prompt longer than the loaded window is cut with only a server-side warning.
-# Research: docs/research/2026-09-27-an-ollama-prompt-gets-the-room-it-needs.md
-
-# The chat template's role markers, on top of the text itself. A Qwen-style
-# template adds a few dozen tokens; the post-call check catches a model whose
-# template needs more.
-OLLAMA_TEMPLATE_TOKENS = 256
-# Ollama's documented default window; a small call never shrinks the loaded one.
-OLLAMA_MIN_CONTEXT = 4096
-# The operator's ceiling for a machine with little memory (law 9: an operating
-# condition, so a setting, not a constant).
-OLLAMA_MAX_CONTEXT_ENV = "MEMORY_OLLAMA_MAX_CONTEXT"
-# `/api/show` is metadata, not a model call: the probe's bound applies to it.
-OLLAMA_SHOW_TIMEOUT_S = 5.0
-
-
-class ProviderContextOverflow(RuntimeError):
-    """The prompt filled the model's window, so the model did not read all of it.
-
-    Ollama truncates an oversized prompt and answers anyway; returning that
-    answer would present a reply to half a prompt as a reply to the whole one.
-    """
-
-
-def _ollama_api_url(endpoint: str, name: str) -> str:
-    """`<host>/api/<name>` for an endpoint configured as `<host>` or `<host>/v1`."""
-    parsed = urllib.parse.urlsplit(endpoint)
-    path = parsed.path.rstrip("/")
-    path = path[:-3] if path.endswith("/v1") else path
-    return urllib.parse.urlunsplit((parsed.scheme, parsed.netloc, f"{path}/api/{name}", "", ""))
-
-
-def _ollama_messages(system_prompt: str, prompt: str) -> list[dict[str, str]]:
-    messages = []
-    if system_prompt:
-        messages.append({"role": "system", "content": system_prompt})
-    messages.append({"role": "user", "content": prompt})
-    return messages
-
-
-def _ollama_context_bound(prompt: str, system_prompt: str, max_tokens: int) -> int:
-    """A window the call cannot overflow: a token covers at least one UTF-8 byte.
-
-    Rounded up to a power of two because every distinct `num_ctx` reloads the model.
-    """
-    text_bytes = len(prompt.encode("utf-8")) + len(system_prompt.encode("utf-8"))
-    needed = text_bytes + max_tokens + OLLAMA_TEMPLATE_TOKENS
-    return max(OLLAMA_MIN_CONTEXT, 1 << (needed - 1).bit_length())
-
-
-def _positive_int(value: object) -> int | None:
-    if isinstance(value, int) and not isinstance(value, bool) and value > 0:
-        return value
-    return None
-
-
-def _operator_context_ceiling() -> int | None:
-    raw = os.environ.get(OLLAMA_MAX_CONTEXT_ENV, "").strip()
-    if not raw:
-        return None
-    ceiling = _positive_int(int(raw)) if raw.isdigit() else None
-    if ceiling is None:
-        raise ValueError(f"{OLLAMA_MAX_CONTEXT_ENV} must be a positive integer")
-    return ceiling
-
-
-def _context_lengths(model_info: Mapping) -> list[object]:
-    return [value for key, value in model_info.items() if str(key).endswith(".context_length")]
-
-
-def _trained_context_length(model_info: object) -> int | None:
-    """`<architecture>.context_length` from `/api/show`'s `model_info`."""
-    if not isinstance(model_info, Mapping):
-        return None
-    lengths = [_positive_int(value) for value in _context_lengths(model_info)]
-    return min((length for length in lengths if length), default=None)
-
-
-def _ollama_model_context(descriptor: ProviderDescriptor) -> int | None:
-    """The model's trained window, or None when the server does not say."""
-    body = json.dumps({"model": descriptor.model}).encode("utf-8")
-    request = urllib.request.Request(
-        _ollama_api_url(str(descriptor._endpoint), "show"),
-        data=body,
-        headers={"Content-Type": "application/json"},
-        method="POST",
-    )
-    try:
-        with urllib.request.urlopen(request, timeout=OLLAMA_SHOW_TIMEOUT_S) as response:
-            data = json.loads(response.read(1024 * 1024).decode("utf-8"))
-    except (OSError, ValueError, urllib.error.URLError):
-        return None
-    return _trained_context_length(data.get("model_info") if isinstance(data, Mapping) else None)
-
-
-def _ollama_window(descriptor: ProviderDescriptor, prompt: str, system_prompt: str) -> int:
-    """The bound this call needs, capped by the model and the operator."""
-    max_tokens = int(descriptor.inference_settings["max_tokens"])
-    caps = [_ollama_model_context(descriptor), descriptor.inference_settings.get("max_context")]
-    ceiling = min((cap for cap in caps if cap is not None), default=None)
-    bound = _ollama_context_bound(prompt, system_prompt, max_tokens)
-    return bound if ceiling is None else min(bound, ceiling)
-
-
-def _ollama_payload(
-    descriptor: ProviderDescriptor,
-    messages: list[dict[str, str]],
-    schema: Mapping[str, object] | None,
-    num_ctx: int,
-) -> dict[str, object]:
-    options = {
-        "num_ctx": num_ctx,
-        "num_predict": int(descriptor.inference_settings["max_tokens"]),
-        "temperature": int(descriptor.inference_settings["temperature_milli"]) / 1000,
-    }
-    payload: dict[str, object] = {
-        "model": descriptor.model,
-        "messages": messages,
-        "options": options,
-        "stream": False,
-    }
-    if schema is not None:
-        payload["format"] = schema
-    return payload
-
-
-def _parse_ollama_usage(data: Mapping) -> TokenUsage:
-    duration = _reported_count(data.get("total_duration"))
-    return _usage_from_counts(
-        input_tokens=data.get("prompt_eval_count"),
-        output_tokens=data.get("eval_count"),
-        duration_ms=None if duration is None else duration // 1_000_000,
-    )
-
-
-def _require_unfilled_window(data: Mapping, num_ctx: int, max_tokens: int) -> None:
-    """A prompt that reached the answer's share of the window was cut to fit."""
-    evaluated = _reported_count(data.get("prompt_eval_count"))
-    if evaluated is not None and evaluated >= num_ctx - max_tokens:
-        raise ProviderContextOverflow(
-            f"ollama read {evaluated} prompt tokens in a {num_ctx}-token window "
-            f"that must also hold {max_tokens} answer tokens"
-        )
-
-
-def _call_ollama(
-    descriptor: ProviderDescriptor,
-    prompt: str,
-    system_prompt: str,
-    schema: Mapping[str, object] | None = None,
-) -> str | BackendResponse:
-    if descriptor._endpoint is None:
-        raise ValueError("Ollama endpoint was not resolved in the provider descriptor")
-    num_ctx = _ollama_window(descriptor, prompt, system_prompt)
-    body = json.dumps(
-        _ollama_payload(descriptor, _ollama_messages(system_prompt, prompt), schema, num_ctx)
-    ).encode("utf-8")
-    req = urllib.request.Request(
-        _ollama_api_url(descriptor._endpoint, "chat"),
-        data=body,
-        headers={"Content-Type": "application/json"},
-        method="POST",
-    )
-    with urllib.request.urlopen(req, timeout=_timeout_s()) as resp:
-        data = json.loads(resp.read().decode("utf-8"))
-    _require_unfilled_window(data, num_ctx, int(descriptor.inference_settings["max_tokens"]))
-    return BackendResponse(data["message"]["content"], _parse_ollama_usage(data))
 
 
 # Backend registry.
@@ -1964,7 +1692,6 @@ _BACKENDS = {
     "codex": _call_codex,
     "claude": _call_claude,
     "openai": _call_openai,
-    "ollama": _call_ollama,
 }
 
 

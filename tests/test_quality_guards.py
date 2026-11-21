@@ -519,7 +519,7 @@ _ARCHITECTURE_REQUIRED = (
     "NATIVE LIFECYCLE EVENTS",
     "MCP READS + ACTIONS",
     "LLM BACKEND (CLASSIFY + COMPILE ONLY)",
-    "5 backends including Ollama",
+    "any OpenAI-compatible API",
     "### Optional semantic tier",
     "### Hybrid tier",
 )
