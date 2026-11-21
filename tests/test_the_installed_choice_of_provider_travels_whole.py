@@ -31,7 +31,9 @@ def _install_environment(monkeypatch: pytest.MonkeyPatch, values: dict) -> dict:
     return integration_hook_config.provider_environment()
 
 
-def test_a_local_install_persists_the_address_and_the_model(monkeypatch) -> None:
+def test_a_local_install_persists_the_address_and_the_model(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Only the provider travelled, so scheduled runs left the local server behind."""
     persisted = _install_environment(monkeypatch, LOCAL)
 
@@ -69,7 +71,9 @@ def test_the_test_provider_still_persists_nothing(monkeypatch) -> None:
     assert persisted == {}
 
 
-def test_a_scheduler_unit_carries_the_local_address(tmp_path, monkeypatch) -> None:
+def test_a_scheduler_unit_carries_the_local_address(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     import install_control
 
     _install_environment(monkeypatch, LOCAL)

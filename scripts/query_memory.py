@@ -35,7 +35,7 @@ from secret_redact import redact_secrets  # noqa: E402
 from vault_log import LOG_NAME  # noqa: E402
 
 # A provider call: prompt, system prompt and the answer schema, or None for free text.
-Generator = Callable[[str, str, "Mapping[str, object] | None"], "str | None"]
+Generator = Callable[[str, str, "dict[str, object] | None"], "str | None"]
 
 MEMORY = ROOT / "knowledge"
 INDEX = MEMORY / "index.md"
@@ -185,7 +185,7 @@ def _detached_provider(
     generator: Generator,
     prompt: str,
     system_prompt: str,
-    schema: Mapping[str, object] | None,
+    schema: dict[str, object] | None,
     ceiling_seconds: int,
 ) -> queue.Queue[tuple[bool, object]]:
     """Start the provider on its own thread, bounded by the time the caller has left.
@@ -232,7 +232,7 @@ def _generate_before_deadline(
     generator: Generator,
     prompt: str,
     system_prompt: str,
-    schema: Mapping[str, object] | None,
+    schema: dict[str, object] | None,
     deadline: float,
 ) -> str | None:
     """Keep the caller's deadline even when a provider ignores cancellation."""
@@ -2585,7 +2585,8 @@ def _qa_system_prompt() -> str:
 
 def _answer_schema() -> dict[str, object]:
     """The closed answer schema, handed to the provider client once for every backend."""
-    return json.loads(ANSWER_SCHEMA.read_text(encoding="utf-8"))
+    schema: dict[str, object] = json.loads(ANSWER_SCHEMA.read_text(encoding="utf-8"))
+    return schema
 
 
 def _answer_schema_json() -> str:
@@ -2619,10 +2620,13 @@ def _require_prompt_fits(full_prompt: str, total_budget: object) -> None:
         raise GroundedQAError("generation input exceeds the shared context budget")
 
 
-def _shared_client(prompt: str, system_prompt: str, schema: Mapping[str, object] | None) -> str | None:
+def _shared_client(
+    prompt: str, system_prompt: str, schema: dict[str, object] | None
+) -> str | None:
     from llm_client import call_llm
 
-    return call_llm(prompt, system_prompt, schema=schema)
+    answer: str | None = call_llm(prompt, system_prompt, schema=schema)
+    return answer
 
 
 def _provider_response(
@@ -2630,7 +2634,7 @@ def _provider_response(
     prompt: str,
     system_prompt: str,
     deadline: float,
-    schema: Mapping[str, object] | None = None,
+    schema: dict[str, object] | None = None,
 ) -> str | None:
     """Call the provider inside the deadline, defaulting to the shared client."""
     _check_deadline(deadline)

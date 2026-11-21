@@ -20,6 +20,7 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 - The dedicated `ollama` provider and its `OLLAMA_NO_CLOUD` local-only mode. Point `MEMORY_LLM_PROVIDER=openai` and `MEMORY_LLM_BASE_URL` at the local server instead (`http://localhost:11434/v1` for Ollama, whose context window is set by its own `OLLAMA_CONTEXT_LENGTH`); `doctor` names a provider value that no longer exists.
 
 ### Known issues
+- `README.ru.md` still names OpenCode, Codex, Claude, OpenAI and Ollama as the model choices; `README.md` and `README.zh-CN.md` say the model is an agent CLI or any OpenAI-compatible API. Law 10 refuses new Russian text in the repository, so the Russian README waits for its owner.
 - `README.ru.md` still says that relation questions add the evidence graph; every search asks it now (`README.md` and `README.zh-CN.md` say so). This repository's language check refuses Russian text in an edited line, so the Russian README cannot be updated here; it needs the owner's decision on that check.
 
 ### Security

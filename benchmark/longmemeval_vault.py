@@ -602,7 +602,7 @@ def _instrumented_generator(metrics: dict, gold: str = "", evidence: Sequence = 
     needle = " ".join(str(gold).split()).casefold()
     windows = list(evidence)
 
-    def generate(prompt: str, system_prompt: str, schema: dict | None) -> str | None:
+    def generate(prompt: str, system_prompt: str, schema: dict[str, object] | None) -> str | None:
         _count_call(metrics, system_prompt)
         metrics["prompt_chars"] = len(prompt)
         metrics["prompt_bytes"] = len(prompt.encode("utf-8"))

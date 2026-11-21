@@ -54,7 +54,15 @@ def test_a_call_whose_isolation_is_unknown_is_not_made(monkeypatch) -> None:
     assert llm_client._call_claude(descriptor, "private text", "system") == ""
 
 
-@pytest.mark.parametrize(("setting", "order"), [("", list(llm_client.KNOWN_PROVIDERS)), ("openai", ["openai"]), ("ollama", [])])
+@pytest.mark.parametrize(
+    ("setting", "order"),
+    [
+        ("", list(llm_client.KNOWN_PROVIDERS)),
+        ("openai", ["openai"]),
+        ("ollma", []),
+        ("ollama", []),
+    ],
+)
 def test_a_name_that_is_no_provider_yields_none(setting, order) -> None:
     assert llm_client._candidate_order(setting) == order
 

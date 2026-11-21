@@ -97,13 +97,14 @@ def _instrumented_generator(metrics: dict):
     """The shared provider client, measuring the prompt one retrieval handed it."""
     from llm_client import call_llm
 
-    def generate(prompt: str, system_prompt: str, schema: dict | None) -> str | None:
+    def generate(prompt: str, system_prompt: str, schema: dict[str, object] | None) -> str | None:
         metrics["prompt_chars"] = len(prompt)
         metrics["est_prompt_tokens"] = round(len(prompt) / 4)
         metrics["prompt_consolidation_hits"] = marker_hits(prompt)
         started = time.monotonic()
         try:
-            return call_llm(prompt, system_prompt, schema=schema)
+            answer: str | None = call_llm(prompt, system_prompt, schema=schema)
+            return answer
         finally:
             metrics["provider_seconds"] = round(time.monotonic() - started, 2)
 

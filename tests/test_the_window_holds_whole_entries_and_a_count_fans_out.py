@@ -194,7 +194,7 @@ class _Stand:
         self.queries.append((query, limit))
         return (self.chunks["gamma"], self.chunks["alpha"])
 
-    def generate(self, prompt: str, system_prompt: str, schema: dict | None) -> str:
+    def generate(self, prompt: str, system_prompt: str, schema: dict[str, object] | None) -> str:
         if system_prompt == aggregation_pass.FANOUT_SYSTEM_PROMPT:
             self.fanout_prompts.append(prompt)
             return '{"queries": ["film festival attended", "documentary screenings", "film festival attended"]}'
@@ -324,7 +324,7 @@ def test_the_count_loop_stops_when_a_step_adds_no_instance(vault: Path) -> None:
 
 
 def _same_count_every_time(stand: _Stand):
-    def generate(prompt: str, system_prompt: str, schema: dict | None) -> str:
+    def generate(prompt: str, system_prompt: str, schema: dict[str, object] | None) -> str:
         if system_prompt == aggregation_pass.FANOUT_SYSTEM_PROMPT:
             stand.fanout_prompts.append(prompt)
             return '{"queries": ["film festival attended"]}'
