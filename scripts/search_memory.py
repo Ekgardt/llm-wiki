@@ -3057,8 +3057,14 @@ def _spelled_fts_query(connection: sqlite3.Connection, query: str) -> str:
     0.865; with the corrections it is 0.901, and a query without typos is
     unchanged (0.906 to 0.907).
     """
-    corrections = query_spelling.corrections(connection, _query_terms(query), GENERATION_TOKENIZER)
-    return " OR ".join(filter(None, (_fts_query(query), _fts_expression(corrections))))
+    terms = _query_terms(query)
+    corrections = query_spelling.corrections(connection, terms, GENERATION_TOKENIZER)
+    expressions = (_fts_query(query), _fts_expression(corrections), _fts_prefixes(query_spelling.cyrillic_stems(terms)))
+    return " OR ".join(filter(None, expressions))
+
+
+def _fts_prefixes(stems: Sequence[str]) -> str:
+    return " OR ".join(f'"{stem}"*' for stem in stems)
 
 
 def _normalized_filename_stem(value: str) -> str:
