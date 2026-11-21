@@ -157,7 +157,7 @@ llm-wiki/                          ← vault root (= $LLM_WIKI_ROOT)
 |----------|---------|---------|
 | `$LLM_WIKI_ROOT` | Resolved from `scripts/` location (worktree-aware via `git rev-parse --git-common-dir`) | Vault root — code + knowledge + runtime |
 | `$LLM_WIKI_STATE_ROOT` | **The vault root itself** | Runtime root → `cache/`, `logs/`, `run/` at vault root. Override for multi-disk or hermetic tests. |
-| `$MEMORY_LLM_PROVIDER` | Auto-detected (`opencode` → `codex` → `claude` → `openai`) | LLM backend for compile/flush/query. `openai` is any OpenAI-compatible API, cloud or local, at `$MEMORY_LLM_BASE_URL` with `$MEMORY_LLM_MODEL` and an optional `$MEMORY_LLM_API_KEY`; the server decides the answer length. `fake` for tests. |
+| `$MEMORY_LLM_PROVIDER` | Auto-detected (`opencode` → `codex` → `claude` → `openai`) | LLM backend for compile/flush/query. `openai` is any OpenAI-compatible API, cloud or local, at `$MEMORY_LLM_BASE_URL` with `$MEMORY_LLM_MODEL` and an optional `$MEMORY_LLM_API_KEY`; with neither an address nor a key it is the local server at `http://localhost:11434/v1`, and a saved `ollama` means `openai`. The server decides the answer length. `fake` for tests. |
 | `$LLM_WIKI_DLP_POLICY` | Unset | Optional absolute path to an external bounded-literal/fingerprint policy. Invalid or digest-mismatched required policy fails closed. |
 | `$LLM_WIKI_<SECTION>_<KEY>` | Unset | One run's override of a registered limit in `scripts/settings.py` (for example `LLM_WIKI_CORPUS_MAX_FILES`); beats `llm-wiki.toml`. An invalid value stops the caller with its name. |
 

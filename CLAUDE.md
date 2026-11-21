@@ -467,7 +467,8 @@ contradiction checks, and playbook crystallization. Backend is
 
 Priority: OpenCode (only when `OPENCODE_SERVER_PASSWORD` protects its server) →
 Codex → Claude CLI → any OpenAI-compatible API (`MEMORY_LLM_BASE_URL`, cloud or
-local: OpenAI, DeepSeek, Ollama, LM Studio, vLLM). If none answers, the call returns
+local: OpenAI, DeepSeek, Ollama, LM Studio, vLLM; with no address and no key, a local
+server at `http://localhost:11434/v1`). If none answers, the call returns
 nothing: a capture already sits in `run/queue.sqlite3` and waits an hour before
 its next attempt, and every other caller skips or fails its step; nothing else is
 queued for later (2026-09-25). A `run/queue/` directory left by a release before

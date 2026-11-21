@@ -597,16 +597,17 @@ def _instrumented_generator(metrics: dict, gold: str = "", evidence: Sequence = 
     for 2 of 50 questions, including 0 of the 17 the system answered, so it
     measured nothing. These read the prompt the model actually received.
     """
-    from llm_client import call_llm
+    from llm_client import call_llm, system_with_schema
 
     needle = " ".join(str(gold).split()).casefold()
     windows = list(evidence)
 
     def generate(prompt: str, system_prompt: str, schema: dict[str, object] | None) -> str | None:
         _count_call(metrics, system_prompt)
+        sent_system = system_with_schema(system_prompt, schema)
         metrics["prompt_chars"] = len(prompt)
         metrics["prompt_bytes"] = len(prompt.encode("utf-8"))
-        metrics["system_chars"] = len(system_prompt)
+        metrics["system_chars"] = len(sent_system)
         metrics["est_prompt_tokens"] = round(len(prompt) / 4)
         # What the model is actually charged for. `est_prompt_tokens` counts the
         # user prompt only, so every token-cost figure this stand has produced
@@ -619,7 +620,7 @@ def _instrumented_generator(metrics: dict, gold: str = "", evidence: Sequence = 
         # second look pays for its answer prompt again, and a per-call figure
         # would hide exactly the cost the second look must justify.
         metrics["est_total_prompt_tokens"] = metrics.get("est_total_prompt_tokens", 0) + round(
-            (len(prompt) + len(system_prompt)) / 4
+            (len(prompt) + len(sent_system)) / 4
         )
         _record_prompt_evidence(metrics, prompt, needle, windows)
         started = time.monotonic()
