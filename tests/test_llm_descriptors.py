@@ -255,10 +255,13 @@ def test_prompt_structured_mode_passes_schema_instruction_to_legacy_backend(monk
     assert '"type":"object"' in captured[0]
 
 
-def test_real_http_provider_descriptors_are_float_free(monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.parametrize("provider", ["openai"])
+def test_real_http_provider_descriptors_are_float_free(
+    provider: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
     monkeypatch.setenv("MEMORY_LLM_MODEL", "resolved-model")
 
-    descriptor = llm_client.provider_candidates("openai", max_tokens=321)[0]
+    descriptor = llm_client.provider_candidates(provider, max_tokens=321)[0]
 
     assert descriptor.model == "resolved-model"
     assert descriptor.capabilities["max_tokens_enforced"] is False
@@ -743,8 +746,8 @@ def test_a_local_server_without_a_key_gets_no_authorization_header(
         def __enter__(self) -> Response:
             return self
 
-        def __exit__(self, *args: object) -> bool:
-            return False
+        def __exit__(self, *args: object) -> None:
+            return None
 
         def read(self) -> bytes:
             return json.dumps({"choices": [{"message": {"content": "answer"}}]}).encode("utf-8")
@@ -763,7 +766,7 @@ def test_a_local_server_without_a_key_gets_no_authorization_header(
 
 
 @pytest.mark.parametrize("provider", ["openai"])
-def test_compatibility_usage_ignores_nonstandard_top_level_fields(
+def test_compatibility_usage_ignores_native_ollama_top_level_fields(
     provider: str, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     result, _, _ = _http_call(
