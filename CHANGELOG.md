@@ -14,6 +14,11 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 - A neighbour the evidence graph finds is kept even when it shares no word with the question, ranked after every graph row that does. Before, an ordinary search dropped it, which would have dropped exactly the neighbours a relation question asks for now that every search asks the graph.
 - The three READMEs are rewritten to match the code as it is: removed features (loop detector, agent timeline, feedback capture) and the unverifiable comparison table are gone; the agents, hooks, search, maintenance, backup and code navigation are described as they work today.
 
+- A model connects in one of two ways: an agent CLI (OpenCode, Codex, Claude Code) or any OpenAI-compatible API at `MEMORY_LLM_BASE_URL`, cloud or local (Ollama, LM Studio, vLLM, DeepSeek). The `openai` provider needs no key for a local server, sends no `max_tokens` cap, and receives the grounded-answer JSON schema through `call_llm(..., schema=)` instead of inside the system prompt. Measured on 30 LongMemEval questions with DeepSeek V4.1 Flash, capped answers were cut off on every question; uncapped with the schema passed, 28 of 30 answered.
+
+### Removed
+- The dedicated `ollama` provider and its `OLLAMA_NO_CLOUD` local-only mode. Point `MEMORY_LLM_PROVIDER=openai` and `MEMORY_LLM_BASE_URL` at the local server instead (`http://localhost:11434/v1` for Ollama, whose context window is set by its own `OLLAMA_CONTEXT_LENGTH`); `doctor` names a provider value that no longer exists.
+
 ### Known issues
 - `README.ru.md` still says that relation questions add the evidence graph; every search asks it now (`README.md` and `README.zh-CN.md` say so). This repository's language check refuses Russian text in an edited line, so the Russian README cannot be updated here; it needs the owner's decision on that check.
 

@@ -12,8 +12,9 @@ Claude Code、Codex 和 OpenCode 在会话结束时都会忘掉一切。LLM Wiki
 无论你用的是哪个代理。同样的事情不必再解释第二遍。
 
 存储、捕获、搜索和 MCP 服务器都在本地运行。把会话变成页面需要一个语言模型：你配置
-的那个，或在 OpenCode、Codex、Claude、OpenAI 和 Ollama 中找到的第一个。只有 Ollama 是
-本地的，其余都是云服务，因此自动检测并不保证一切留在本机。当前版本：**5.0.0**。
+的那个：你已有的代理 CLI（OpenCode、Codex、Claude），或按地址接入的任何兼容 OpenAI 的
+API——云端的，或 Ollama、LM Studio、vLLM 这样的本地服务器。只有本地服务器让提示留在本机，
+因此自动检测并不保证一切留在本机。当前版本：**5.0.0**。
 
 **语言：** [English](README.md) | [Русский](README.ru.md) | [简体中文](README.zh-CN.md)
 

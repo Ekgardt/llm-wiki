@@ -124,8 +124,8 @@ def test_ordinary_qa_sends_only_retrieved_parent_evidence_not_entire_index(vault
     alpha_chunk = _chunk_containing(snapshot, alpha, vault, "enabled")
     seen: dict[str, object] = {}
 
-    def generate(prompt: str, system_prompt: str, max_tokens: int) -> str:
-        seen.update(prompt=prompt, system=system_prompt, max_tokens=max_tokens)
+    def generate(prompt: str, system_prompt: str, schema: dict | None) -> str:
+        seen.update(prompt=prompt, system=system_prompt)
         return _answer_for_prompt(prompt)
 
     result = grounded_qa(
@@ -347,7 +347,7 @@ def test_deadline_is_checked_before_generation(vault: Path) -> None:
     snapshot = collect_corpus(vault)
     called = False
 
-    def generate(prompt: str, system_prompt: str, max_tokens: int) -> str:
+    def generate(prompt: str, system_prompt: str, schema: dict | None) -> str:
         nonlocal called
         called = True
         return "{}"
@@ -368,7 +368,7 @@ def test_generation_call_cannot_run_past_the_deadline(vault: Path) -> None:
     snapshot = collect_corpus(vault)
     entered: list[float] = []
 
-    def generate(prompt: str, system_prompt: str, max_tokens: int) -> str:
+    def generate(prompt: str, system_prompt: str, schema: dict | None) -> str:
         entered.append(time.monotonic())
         time.sleep(0.25)
         return "{}"
@@ -424,17 +424,18 @@ def test_verifier_rejects_source_changed_after_generation(vault: Path) -> None:
     assert verified["citations"] == []
 
 
-def test_generation_receives_the_closed_schema_inside_the_bounded_prompt(vault: Path) -> None:
+def test_generation_receives_the_closed_schema_within_the_bounded_prompt(vault: Path) -> None:
     page = _write_page(vault, "alpha.md", "Alpha is enabled.")
     snapshot = collect_corpus(vault)
     chunk = next(
         item for item in snapshot.chunks if item.source_path == page.relative_to(vault).as_posix()
     )
-    seen: dict[str, str] = {}
+    seen: dict[str, object] = {}
 
-    def generate(prompt: str, system_prompt: str, max_tokens: int) -> str:
+    def generate(prompt: str, system_prompt: str, schema: dict | None) -> str:
         seen["prompt"] = prompt
         seen["system"] = system_prompt
+        seen["schema"] = schema
         return _answer_for_prompt(prompt)
 
     grounded_qa(
@@ -445,8 +446,10 @@ def test_generation_receives_the_closed_schema_inside_the_bounded_prompt(vault: 
         generator=generate,
     )
 
-    assert '"additionalProperties":false' in seen["system"]
-    assert len((seen["prompt"] + seen["system"]).encode("utf-8")) <= 8192 - 1200 - 512
+    schema_json = json.dumps(seen["schema"], sort_keys=True, separators=(",", ":"))
+    assert seen["schema"] == json.loads(ANSWER_SCHEMA.read_text(encoding="utf-8"))
+    assert schema_json not in seen["system"]
+    assert len((seen["prompt"] + seen["system"] + schema_json).encode("utf-8")) <= 8192 - 1200 - 512
 
 
 def test_verified_line_span_handles_source_without_trailing_newline(vault: Path) -> None:

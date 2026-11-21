@@ -68,7 +68,7 @@ def test_a_piece_the_second_search_found_again_by_position_moves_ahead(vault: Pa
     chunk = {name: next(c for c in snapshot.chunks if c.source_path.endswith(name)) for name in NOTES}
     prompts: list[str] = []
 
-    def generate(prompt: str, system_prompt: str, max_tokens: int) -> str:
+    def generate(prompt: str, system_prompt: str, schema: dict | None) -> str:
         if system_prompt == refusal_pass.MISSING_SYSTEM_PROMPT:
             return '{"queries": ["tennis racket bought store"]}'
         prompts.append(prompt)

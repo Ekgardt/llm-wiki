@@ -19,11 +19,11 @@ def test_the_provider_call_runs_under_the_time_left(monkeypatch) -> None:
     monkeypatch.delenv("MEMORY_LLM_TIMEOUT_S", raising=False)
     seen: list[int] = []
 
-    def generator(prompt, system_prompt, max_tokens):
+    def generator(prompt, system_prompt, schema):
         seen.append(llm_client._timeout_s())
         return "answer"
 
-    answer = query_memory._generate_before_deadline(generator, "p", "s", time.monotonic() + 7.5)
+    answer = query_memory._generate_before_deadline(generator, "p", "s", None, time.monotonic() + 7.5)
 
     assert (answer, seen) == ("answer", [8])
 

@@ -254,15 +254,15 @@ def test_prompt_structured_mode_passes_schema_instruction_to_legacy_backend(monk
     assert '"type":"object"' in captured[0]
 
 
-@pytest.mark.parametrize("provider", ["openai", "ollama"])
-def test_real_http_provider_descriptors_are_float_free(provider, monkeypatch):
+def test_the_http_provider_descriptor_is_float_free_and_leaves_length_to_the_server(monkeypatch):
     monkeypatch.setenv("MEMORY_LLM_MODEL", "resolved-model")
 
-    descriptor = llm_client.provider_candidates(provider, max_tokens=321)[0]
+    descriptor = llm_client.provider_candidates("openai", max_tokens=321)[0]
 
     assert descriptor.model == "resolved-model"
+    assert descriptor.capabilities["max_tokens_enforced"] is False
     assert descriptor.inference_settings == {
-        "max_tokens": 321,
+        "max_tokens": "backend_default",
         "temperature_milli": 200,
     }
     assert not any(isinstance(value, float) for value in descriptor.inference_settings.values())
@@ -276,7 +276,7 @@ def test_provider_descriptor_has_restricted_canonical_representation(monkeypatch
 
     assert (canonical["provider"], canonical["model"]) == ("openai", "resolved-model")
     assert canonical["inference_settings"]["temperature_milli"] == 200
-    assert canonical["inference_settings"]["max_tokens"] == 321
+    assert canonical["inference_settings"]["max_tokens"] == "backend_default"
     assert canonical_json_bytes(canonical)
     with pytest.raises(TypeError, match="float"):
         replace(descriptor, inference_settings={"temperature": 0.2}).canonical()
@@ -300,7 +300,7 @@ def test_call_candidate_uses_resolved_model_and_settings_after_env_changes(monke
     assert result.text == "answer"
     assert captured == [descriptor]
     assert captured[0].model == "resolved-model"
-    assert captured[0].inference_settings["max_tokens"] == 321
+    assert captured[0].inference_settings["max_tokens"] == "backend_default"
 
 
 def test_http_endpoint_identity_is_normalized_hashed_and_secret_safe(monkeypatch):
@@ -349,12 +349,9 @@ def test_healthy_opencode_is_not_blocked_by_invalid_lower_http_candidates(monkey
     assert llm_client.call_llm("prompt") == "answer"
 
 
-@pytest.mark.parametrize("provider", ["openai", "ollama"])
-def test_forced_invalid_http_provider_returns_none_without_secret_log(
-    provider, monkeypatch, capsys
-):
+def test_forced_invalid_http_provider_returns_none_without_secret_log(monkeypatch, capsys):
     secret = "do-not-log-this-secret"
-    monkeypatch.setenv("MEMORY_LLM_PROVIDER", provider)
+    monkeypatch.setenv("MEMORY_LLM_PROVIDER", "openai")
     monkeypatch.setenv("MEMORY_LLM_BASE_URL", f"https://example.com/v1?token={secret}")
 
     assert llm_client.call_llm("prompt") is None
@@ -391,7 +388,7 @@ def test_invalid_candidate_failure_is_added_to_later_fallback_lineage(monkeypatc
     )
 
 
-@pytest.mark.parametrize("provider", ["codex", "claude"])
+@pytest.mark.parametrize("provider", ["codex", "claude", "openai"])
 def test_cli_descriptor_records_unenforced_backend_token_default(provider, monkeypatch):
     monkeypatch.setenv("MEMORY_CODEX_MODEL", "gpt-5")
     monkeypatch.setenv("MEMORY_CLAUDE_MODEL", "sonnet")
@@ -459,136 +456,27 @@ def test_http_backend_uses_captured_endpoint_after_env_drift(provider, monkeypat
     assert requests[0].full_url == "https://first.example:443/v1/chat/completions"
 
 
-def test_ollama_probe_uses_captured_remote_endpoint_after_env_drift(monkeypatch):
-    monkeypatch.setenv("MEMORY_LLM_BASE_URL", "http://remote.example:22123/v1")
-    descriptor = llm_client.provider_candidates("ollama", max_tokens=321)[0]
-    monkeypatch.setenv("MEMORY_LLM_BASE_URL", "http://localhost:11434/v1")
-    requests = []
-
-    class Response:
-        status = 200
-
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *args):
-            return False
-
-    def urlopen(request, timeout):
-        requests.append((request, timeout))
-        return Response()
-
-    monkeypatch.setattr(llm_client.urllib.request, "urlopen", urlopen)
-
-    assert llm_client.probe_candidate(descriptor) is True
-    assert requests[0][0].full_url == "http://remote.example:22123/api/tags"
-    assert requests[0][1] == 1.0
-
-
-def test_forced_ollama_local_only_rejects_nonliteral_loopback(monkeypatch):
-    monkeypatch.setenv("OLLAMA_NO_CLOUD", "1")
-    monkeypatch.setenv("MEMORY_LLM_BASE_URL", "http://remote.example:11434/v1")
-
-    descriptor = llm_client.provider_candidates("ollama", max_tokens=321)[0]
-
-    assert descriptor.resolution_failure == "invalid_configuration"
-
-
-def test_forced_ollama_local_only_accepts_only_local_model_metadata(monkeypatch):
-    monkeypatch.setenv("OLLAMA_NO_CLOUD", "1")
+def test_an_address_alone_makes_the_http_provider_available(monkeypatch):
+    monkeypatch.delenv("MEMORY_LLM_API_KEY", raising=False)
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
     monkeypatch.setenv("MEMORY_LLM_BASE_URL", "http://127.0.0.1:11434/v1")
-    monkeypatch.setenv("MEMORY_LLM_MODEL", "qwen3:0.6b")
-    descriptor = llm_client.provider_candidates("ollama", max_tokens=321)[0]
 
-    class Response:
-        status = 200
+    descriptor = llm_client.provider_candidates("openai")[0]
 
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *args):
-            return False
-
-        def read(self, limit):
-            assert limit == 1024 * 1024 + 1
-            return json.dumps(
-                {
-                    "models": [
-                        {
-                            "name": "qwen3:0.6b",
-                            "model": "qwen3:0.6b",
-                            "modified_at": "2026-08-15T00:00:00Z",
-                            "size": 523_000_000,
-                            "digest": "a" * 64,
-                            "details": {
-                                "format": "gguf",
-                                "family": "qwen3",
-                                "families": ["qwen3"],
-                                "parameter_size": "0.6B",
-                                "quantization_level": "Q4_K_M",
-                            },
-                        }
-                    ]
-                }
-            ).encode("utf-8")
-
-    monkeypatch.setattr(llm_client.urllib.request, "urlopen", lambda *args, **kwargs: Response())
-
-    assert descriptor.capabilities["local_only_status"] == "external_runtime_unverified"
     assert llm_client.probe_candidate(descriptor) is True
 
 
-def test_call_candidate_cannot_bypass_local_only_remote_model_check(monkeypatch):
-    monkeypatch.setenv("OLLAMA_NO_CLOUD", "1")
-    monkeypatch.setenv("MEMORY_LLM_BASE_URL", "http://127.0.0.1:11434/v1")
-    monkeypatch.setenv("MEMORY_LLM_MODEL", "qwen3:0.6b")
-    descriptor = llm_client.provider_candidates("ollama", max_tokens=321)[0]
-    backend_calls = []
+def test_neither_address_nor_key_leaves_the_http_provider_unavailable(monkeypatch):
+    for name in ("MEMORY_LLM_BASE_URL", "MEMORY_LLM_API_KEY", "OPENAI_API_KEY"):
+        monkeypatch.delenv(name, raising=False)
 
-    class Response:
-        status = 200
+    descriptor = llm_client.provider_candidates("openai")[0]
 
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *args):
-            return False
-
-        def read(self, limit):
-            return json.dumps(
-                {
-                    "models": [
-                        {
-                            "name": "qwen3:0.6b",
-                            "model": "qwen3:0.6b",
-                            "remote_model": "qwen3:0.6b-cloud",
-                            "remote_host": "https://ollama.com",
-                            "size": 0,
-                            "digest": "",
-                            "details": {},
-                        }
-                    ]
-                }
-            ).encode("utf-8")
-
-    monkeypatch.setattr(llm_client.urllib.request, "urlopen", lambda *args, **kwargs: Response())
-    monkeypatch.setitem(
-        llm_client._BACKENDS,
-        "ollama",
-        lambda *args: backend_calls.append(args) or "answer",
-    )
-
-    result = llm_client.call_candidate(
-        descriptor, "prompt", "system", max_tokens=321, available=True
-    )
-
-    assert result.text is None
-    assert result.failure_class == "unavailable"
-    assert backend_calls == []
+    assert llm_client.probe_candidate(descriptor) is False
 
 
 def test_call_candidate_rejects_max_tokens_different_from_descriptor(monkeypatch):
-    descriptor = llm_client.provider_candidates("openai", max_tokens=321)[0]
+    descriptor = llm_client.provider_candidates("fake", max_tokens=321)[0]
 
     with pytest.raises(ValueError, match="max_tokens"):
         llm_client.call_candidate(descriptor, "prompt", "system", max_tokens=999)
@@ -831,12 +719,40 @@ def test_openai_compatible_usage_and_request_limit(provider, monkeypatch):
         input_tokens=12, output_tokens=4, cache_read_tokens=3
     )
     assert result.input_token_count == TokenCount(12, "reported")
-    assert payload["max_tokens"] == 37
+    assert "max_tokens" not in payload
     assert url.endswith("/v1/chat/completions")
 
 
+def test_a_local_server_without_a_key_gets_no_authorization_header(monkeypatch):
+    for name in ("MEMORY_LLM_API_KEY", "OPENAI_API_KEY"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("MEMORY_LLM_BASE_URL", "http://127.0.0.1:1234/v1")
+    descriptor = llm_client.provider_candidates("openai")[0]
+    requests = []
+
+    class Response:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def read(self):
+            return json.dumps({"choices": [{"message": {"content": "answer"}}]}).encode("utf-8")
+
+    monkeypatch.setattr(
+        llm_client.urllib.request, "urlopen", lambda request, timeout: requests.append(request) or Response()
+    )
+
+    result = llm_client.call_candidate(descriptor, "prompt", "system")
+
+    assert result.text == "answer"
+    assert requests[0].get_header("Authorization") is None
+    assert requests[0].full_url == "http://127.0.0.1:1234/v1/chat/completions"
+
+
 @pytest.mark.parametrize("provider", ["openai"])
-def test_compatibility_usage_ignores_native_ollama_top_level_fields(provider, monkeypatch):
+def test_compatibility_usage_ignores_nonstandard_top_level_fields(provider, monkeypatch):
     result, _, _ = _http_call(
         monkeypatch,
         provider,
@@ -1234,3 +1150,18 @@ def test_the_command_names_no_model_when_none_was_configured():
     command = llm_client._claude_command("/bin/claude", None, "")
 
     assert "--model" not in command
+
+
+def test_call_llm_hands_the_schema_to_the_backend(monkeypatch):
+    monkeypatch.setenv("MEMORY_LLM_PROVIDER", "openai")
+    monkeypatch.setenv("MEMORY_LLM_BASE_URL", "http://127.0.0.1:1234/v1")
+    monkeypatch.setitem(llm_client._PROBES, "openai", lambda descriptor: True)
+    seen = []
+    monkeypatch.setitem(
+        llm_client._BACKENDS,
+        "openai",
+        lambda descriptor, prompt, system_prompt, schema: seen.append(schema) or "{}",
+    )
+
+    assert llm_client.call_llm("prompt", "system", schema={"type": "object"}) == "{}"
+    assert seen == [{"type": "object"}]

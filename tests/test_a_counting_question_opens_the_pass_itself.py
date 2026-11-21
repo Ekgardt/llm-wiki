@@ -227,7 +227,7 @@ class _Stand:
     def search(self, query: str, limit: int) -> tuple:
         return (self.chunks["gamma"], self.chunks["alpha"])
 
-    def generate(self, prompt: str, system_prompt: str, max_tokens: int) -> str:
+    def generate(self, prompt: str, system_prompt: str, schema: dict | None) -> str:
         canned = HELPER_REPLIES.get(system_prompt)
         if canned is not None:
             return canned
@@ -286,7 +286,7 @@ def test_a_date_question_stays_with_the_calendar(vault: Path) -> None:
     stand = _Stand(vault)
     seen: list[str] = []
 
-    def generate(prompt: str, system_prompt: str, max_tokens: int) -> str:
+    def generate(prompt: str, system_prompt: str, schema: dict | None) -> str:
         seen.append(system_prompt)
         return _difference_answer(prompt)
 

@@ -32,7 +32,7 @@ def test_one_call_is_every_candidate_in_turn(monkeypatch) -> None:
     monkeypatch.setenv("MEMORY_LLM_PROVIDER", "claude")
     forced = llm_client.worst_case_call_seconds()
 
-    assert (auto, forced) == (llm_client.DEFAULT_TIMEOUT_S * 5, llm_client.DEFAULT_TIMEOUT_S)
+    assert (auto, forced) == (llm_client.DEFAULT_TIMEOUT_S * len(llm_client.KNOWN_PROVIDERS), llm_client.DEFAULT_TIMEOUT_S)
 
 
 def test_an_operator_timeout_widens_the_margin_it_would_have_broken(monkeypatch) -> None:

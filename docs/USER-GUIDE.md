@@ -21,8 +21,8 @@ when healthy and injects only degraded/error findings.
 **The LLM part**: the system needs a "brain" to read transcripts and decide
 what to keep. That brain is **whichever agent you're already using** — the
 `llm_client.py` abstraction auto-detects the first alive backend
-(OpenCode → Codex → Claude CLI → OpenAI → Ollama). **No extra API keys
-required** beyond what you already have; Ollama is an optional local backend.
+(OpenCode → Codex → Claude CLI → any OpenAI-compatible API). **No extra API keys
+required** beyond what you already have; a local model server is optional.
 
 Backend disclosure:
 
@@ -30,8 +30,7 @@ Backend disclosure:
 |---------|---------------------|
 | OpenCode | LLM Wiki calls a loopback OpenCode server; the selected OpenCode model may use a remote service. |
 | Codex / Claude | LLM Wiki invokes a local CLI; the CLI may use its account's remote service. |
-| OpenAI | Prompts are sent to the configured HTTPS API. |
-| Ollama | The configured Ollama endpoint is used. A remote endpoint or cloud model is not local processing. |
+| OpenAI-compatible API | Prompts are sent to `MEMORY_LLM_BASE_URL` (default `https://api.openai.com/v1`). A local server keeps them on the machine; a cloud one does not. |
 
 All first-party calls pass through the fail-closed model boundary. Built-in secret
 detectors are always active. `LLM_WIKI_DLP_POLICY`, when set, must name an absolute,
@@ -41,34 +40,25 @@ first three fields. Literals are fixed strings, not regular expressions; fingerp
 allow only one exact payload. A missing, unreadable, invalid, oversized, or
 digest-mismatched required policy blocks model transport and publication.
 
-For the strict Ollama path, disable cloud in the Ollama server, restart it, and force
-the provider and a literal loopback IP:
+To use a model on this machine, run any server that speaks the OpenAI-compatible
+API — Ollama, LM Studio, vLLM, llama.cpp — and point LLM Wiki at it:
 
 ```bash
-export MEMORY_LLM_PROVIDER=ollama
-export OLLAMA_NO_CLOUD=1
+export MEMORY_LLM_PROVIDER=openai
 export MEMORY_LLM_BASE_URL=http://127.0.0.1:11434/v1
+export MEMORY_LLM_MODEL=qwen3:8b
 ```
 
 ```powershell
-$env:MEMORY_LLM_PROVIDER = "ollama"
-$env:OLLAMA_NO_CLOUD = "1"
+$env:MEMORY_LLM_PROVIDER = "openai"
 $env:MEMORY_LLM_BASE_URL = "http://127.0.0.1:11434/v1"
+$env:MEMORY_LLM_MODEL = "qwen3:8b"
 ```
 
-This disables provider fallback, rejects non-literal-loopback endpoints, and requires
-the selected model to appear in `/api/tags` with local size/digest metadata and no
-`remote_model` or `remote_host`. The descriptor still reports
-`external_runtime_unverified`: the client cannot prove that an independently managed
-Ollama process was restarted with cloud disabled. Do not describe this state as
-verified network isolation.
-
-Calls go to Ollama's native `/api/chat` (the `/v1` in the base URL is accepted and
-stripped), because only that endpoint can set a context window. Each call asks for a
-window that holds its prompt and answer, rounded up to a power of two, at least 4 096
-tokens and never above the model's trained length. On a machine with little memory,
-cap it with `MEMORY_OLLAMA_MAX_CONTEXT=<tokens>`; a prompt that then fills the window
-fails as `context_overflow` rather than being answered half-read.
+Naming the provider disables fallback, so no prompt reaches another backend. A key is
+sent only when `MEMORY_LLM_API_KEY` or `OPENAI_API_KEY` is set. No answer-length cap is
+sent: the server decides it. The context window and any cloud switch are the server's
+own settings — for Ollama, `OLLAMA_CONTEXT_LENGTH` and `OLLAMA_NO_CLOUD=1` on the server.
 
 ---
 
