@@ -56,9 +56,7 @@ $env:MEMORY_LLM_MODEL = "qwen3:8b"
 ```
 
 Naming the provider disables fallback, so no prompt reaches another backend. A key is
-sent only when `MEMORY_LLM_API_KEY` or `OPENAI_API_KEY` is set. No answer-length cap is
-sent: the server decides it. The context window and any cloud switch are the server's
-own settings — for Ollama, `OLLAMA_CONTEXT_LENGTH` and `OLLAMA_NO_CLOUD=1` on the server.
+sent only when `MEMORY_LLM_API_KEY` or `OPENAI_API_KEY` is set.
 
 ---
 
