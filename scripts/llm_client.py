@@ -1659,6 +1659,9 @@ def _openai_messages(system_prompt: str, prompt: str) -> list[dict[str, str]]:
 
 
 def _openai_api_key() -> str:
+    """No key for a retired local-server name, so its prompts never leave for the cloud."""
+    if forced_provider() in RETIRED_PROVIDER_NAMES:
+        return ""
     return os.environ.get("MEMORY_LLM_API_KEY") or os.environ.get("OPENAI_API_KEY") or ""
 
 
