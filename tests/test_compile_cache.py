@@ -192,13 +192,15 @@ def test_schema_hash_is_canonical_and_independent_of_checkout_line_endings():
     assert COMPILE_PLAN_SCHEMA_HASH == sha256_bytes(canonical_json_bytes(schema))
 
 
-def test_real_openai_and_claude_descriptors_produce_distinct_keys(tmp_path, monkeypatch):
+def test_real_openai_and_claude_descriptors_produce_distinct_keys(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     monkeypatch.setenv("MEMORY_LLM_MODEL", "resolved-model")
     monkeypatch.setenv("MEMORY_CLAUDE_MODEL", "resolved-model")
     openai = llm_client.provider_candidates("openai", max_tokens=321)[0]
     claude = llm_client.provider_candidates("claude", max_tokens=321)[0]
 
-    def call(provider):
+    def call(provider: llm_client.ProviderDescriptor) -> CompileCallDescriptor:
         return _call(
             provider=provider.provider,
             model=provider.model,

@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import urllib.request
 from dataclasses import replace
 from pathlib import Path
 
@@ -254,7 +255,7 @@ def test_prompt_structured_mode_passes_schema_instruction_to_legacy_backend(monk
     assert '"type":"object"' in captured[0]
 
 
-def test_the_http_provider_descriptor_is_float_free_and_leaves_length_to_the_server(monkeypatch):
+def test_real_http_provider_descriptors_are_float_free(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("MEMORY_LLM_MODEL", "resolved-model")
 
     descriptor = llm_client.provider_candidates("openai", max_tokens=321)[0]
@@ -349,7 +350,9 @@ def test_healthy_opencode_is_not_blocked_by_invalid_lower_http_candidates(monkey
     assert llm_client.call_llm("prompt") == "answer"
 
 
-def test_forced_invalid_http_provider_returns_none_without_secret_log(monkeypatch, capsys):
+def test_forced_invalid_http_provider_returns_none_without_secret_log(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
+) -> None:
     secret = "do-not-log-this-secret"
     monkeypatch.setenv("MEMORY_LLM_PROVIDER", "openai")
     monkeypatch.setenv("MEMORY_LLM_BASE_URL", f"https://example.com/v1?token={secret}")
@@ -439,7 +442,7 @@ def test_http_backend_uses_captured_endpoint_after_env_drift(provider, monkeypat
         def __exit__(self, *args):
             return False
 
-        def read(self):
+        def read(self) -> bytes:
             return json.dumps(
                 {"choices": [{"message": {"content": "answer"}}]}
             ).encode("utf-8")
@@ -456,7 +459,9 @@ def test_http_backend_uses_captured_endpoint_after_env_drift(provider, monkeypat
     assert requests[0].full_url == "https://first.example:443/v1/chat/completions"
 
 
-def test_an_address_alone_makes_the_http_provider_available(monkeypatch):
+def test_an_address_alone_makes_the_http_provider_available(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     monkeypatch.delenv("MEMORY_LLM_API_KEY", raising=False)
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
     monkeypatch.setenv("MEMORY_LLM_BASE_URL", "http://127.0.0.1:11434/v1")
@@ -466,7 +471,9 @@ def test_an_address_alone_makes_the_http_provider_available(monkeypatch):
     assert llm_client.probe_candidate(descriptor) is True
 
 
-def test_neither_address_nor_key_leaves_the_http_provider_unavailable(monkeypatch):
+def test_neither_address_nor_key_leaves_the_http_provider_unavailable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     for name in ("MEMORY_LLM_BASE_URL", "MEMORY_LLM_API_KEY", "OPENAI_API_KEY"):
         monkeypatch.delenv(name, raising=False)
 
@@ -686,7 +693,7 @@ def _http_call(monkeypatch, provider, response_data):
         def __exit__(self, *args):
             return False
 
-        def read(self):
+        def read(self) -> bytes:
             return json.dumps(response_data).encode("utf-8")
 
     def urlopen(request, timeout):
@@ -723,26 +730,30 @@ def test_openai_compatible_usage_and_request_limit(provider, monkeypatch):
     assert url.endswith("/v1/chat/completions")
 
 
-def test_a_local_server_without_a_key_gets_no_authorization_header(monkeypatch):
+def test_a_local_server_without_a_key_gets_no_authorization_header(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     for name in ("MEMORY_LLM_API_KEY", "OPENAI_API_KEY"):
         monkeypatch.delenv(name, raising=False)
     monkeypatch.setenv("MEMORY_LLM_BASE_URL", "http://127.0.0.1:1234/v1")
     descriptor = llm_client.provider_candidates("openai")[0]
-    requests = []
+    requests: list[urllib.request.Request] = []
 
     class Response:
-        def __enter__(self):
+        def __enter__(self) -> Response:
             return self
 
-        def __exit__(self, *args):
+        def __exit__(self, *args: object) -> bool:
             return False
 
-        def read(self):
+        def read(self) -> bytes:
             return json.dumps({"choices": [{"message": {"content": "answer"}}]}).encode("utf-8")
 
-    monkeypatch.setattr(
-        llm_client.urllib.request, "urlopen", lambda request, timeout: requests.append(request) or Response()
-    )
+    def urlopen(request: urllib.request.Request, timeout: float) -> Response:
+        requests.append(request)
+        return Response()
+
+    monkeypatch.setattr(llm_client.urllib.request, "urlopen", urlopen)
 
     result = llm_client.call_candidate(descriptor, "prompt", "system")
 
@@ -752,7 +763,9 @@ def test_a_local_server_without_a_key_gets_no_authorization_header(monkeypatch):
 
 
 @pytest.mark.parametrize("provider", ["openai"])
-def test_compatibility_usage_ignores_nonstandard_top_level_fields(provider, monkeypatch):
+def test_compatibility_usage_ignores_nonstandard_top_level_fields(
+    provider: str, monkeypatch: pytest.MonkeyPatch,
+) -> None:
     result, _, _ = _http_call(
         monkeypatch,
         provider,
@@ -831,7 +844,7 @@ def test_opencode_aggregate_usage_wins_over_part_usage(monkeypatch):
         def __exit__(self, *args):
             return False
 
-        def read(self):
+        def read(self) -> bytes:
             return json.dumps(self.data).encode("utf-8")
 
     def urlopen(request, timeout):
@@ -971,7 +984,7 @@ def test_opencode_only_invalid_text_returns_empty_with_reported_usage(monkeypatc
         def __exit__(self, *args):
             return False
 
-        def read(self):
+        def read(self) -> bytes:
             return json.dumps(self.data).encode("utf-8")
 
     def urlopen(request, timeout):
@@ -1152,16 +1165,17 @@ def test_the_command_names_no_model_when_none_was_configured():
     assert "--model" not in command
 
 
-def test_call_llm_hands_the_schema_to_the_backend(monkeypatch):
+def test_call_llm_hands_the_schema_to_the_backend(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("MEMORY_LLM_PROVIDER", "openai")
     monkeypatch.setenv("MEMORY_LLM_BASE_URL", "http://127.0.0.1:1234/v1")
     monkeypatch.setitem(llm_client._PROBES, "openai", lambda descriptor: True)
-    seen = []
-    monkeypatch.setitem(
-        llm_client._BACKENDS,
-        "openai",
-        lambda descriptor, prompt, system_prompt, schema: seen.append(schema) or "{}",
-    )
+    seen: list[object] = []
+
+    def backend(descriptor: object, prompt: str, system_prompt: str, schema: object) -> str:
+        seen.append(schema)
+        return "{}"
+
+    monkeypatch.setitem(llm_client._BACKENDS, "openai", backend)
 
     assert llm_client.call_llm("prompt", "system", schema={"type": "object"}) == "{}"
     assert seen == [{"type": "object"}]
