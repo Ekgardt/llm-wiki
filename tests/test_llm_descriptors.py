@@ -3,10 +3,12 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import urllib.error
 import urllib.request
 from dataclasses import replace
 from pathlib import Path
 
+import doctor
 import llm_client
 import pytest
 from context_budget import TokenCount, TokenUsage
@@ -1182,3 +1184,134 @@ def test_call_llm_hands_the_schema_to_the_backend(monkeypatch: pytest.MonkeyPatc
 
     assert llm_client.call_llm("prompt", "system", schema={"type": "object"}) == "{}"
     assert seen == [{"type": "object"}]
+
+
+class _JsonResponse:
+    status = 200
+
+    def __init__(self, payload: object) -> None:
+        self._body = json.dumps(payload).encode("utf-8")
+
+    def __enter__(self) -> _JsonResponse:
+        return self
+
+    def __exit__(self, *args: object) -> None:
+        return None
+
+    def read(self) -> bytes:
+        return self._body
+
+
+def _record_requests(monkeypatch: pytest.MonkeyPatch) -> list[urllib.request.Request]:
+    requests: list[urllib.request.Request] = []
+
+    def urlopen(request: urllib.request.Request, timeout: float) -> _JsonResponse:
+        requests.append(request)
+        return _JsonResponse({"choices": [{"message": {"content": "answer"}}]})
+
+    monkeypatch.setattr(urllib.request, "urlopen", urlopen)
+    return requests
+
+
+def _body(request: urllib.request.Request) -> dict[str, object]:
+    data = request.data
+    assert isinstance(data, bytes)
+    body: dict[str, object] = json.loads(data)
+    return body
+
+
+def _without_address_or_key(monkeypatch: pytest.MonkeyPatch) -> None:
+    for name in ("MEMORY_LLM_API_KEY", "OPENAI_API_KEY", "MEMORY_LLM_BASE_URL", "MEMORY_LLM_MODEL"):
+        monkeypatch.delenv(name, raising=False)
+
+
+def test_a_saved_ollama_setting_reaches_the_local_server(monkeypatch: pytest.MonkeyPatch) -> None:
+    _without_address_or_key(monkeypatch)
+    monkeypatch.setenv("MEMORY_LLM_PROVIDER", "ollama")
+    requests = _record_requests(monkeypatch)
+
+    answer = llm_client.call_llm("prompt", "system")
+
+    sent = _body(requests[-1])
+    assert (answer, requests[-1].full_url, sent["model"]) == (
+        "answer",
+        "http://localhost:11434/v1/chat/completions",
+        "qwen3:0.6b",
+    )
+
+
+def test_a_saved_ollama_setting_is_not_a_typo_for_doctor(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("MEMORY_LLM_PROVIDER", "ollama")
+
+    assert doctor._provider_setting()["known"] is True
+
+
+def test_an_unconfigured_local_server_is_found_automatically(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _without_address_or_key(monkeypatch)
+    asked: list[str] = []
+
+    def urlopen(url: str, timeout: float) -> _JsonResponse:
+        asked.append(url)
+        return _JsonResponse({"data": []})
+
+    monkeypatch.setattr(urllib.request, "urlopen", urlopen)
+    descriptor = llm_client.provider_candidates("openai")[0]
+
+    assert (llm_client._probe_openai(descriptor), asked) == (
+        True,
+        ["http://localhost:11434/v1/models"],
+    )
+
+
+def test_no_address_no_key_and_no_local_server_is_no_provider(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _without_address_or_key(monkeypatch)
+
+    def urlopen(url: str, timeout: float) -> _JsonResponse:
+        raise urllib.error.URLError("connection refused")
+
+    monkeypatch.setattr(urllib.request, "urlopen", urlopen)
+    descriptor = llm_client.provider_candidates("openai")[0]
+
+    assert llm_client._probe_openai(descriptor) is False
+
+
+def test_a_key_is_sent_as_a_bearer_token_to_the_cloud(monkeypatch: pytest.MonkeyPatch) -> None:
+    _without_address_or_key(monkeypatch)
+    monkeypatch.setenv("MEMORY_LLM_API_KEY", "secret-for-test")
+    requests = _record_requests(monkeypatch)
+    descriptor = llm_client.provider_candidates("openai")[0]
+
+    llm_client.call_candidate(descriptor, "prompt", "system")
+
+    assert requests[0].get_header("Authorization") == "Bearer secret-for-test"
+    assert requests[0].full_url == "https://api.openai.com:443/v1/chat/completions"
+
+
+def test_a_schema_goes_as_response_format_with_no_length_cap(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("MEMORY_LLM_BASE_URL", "http://127.0.0.1:1234/v1")
+    requests = _record_requests(monkeypatch)
+    descriptor = llm_client.provider_candidates("openai")[0]
+    schema: dict[str, object] = {"type": "object", "properties": {"a": {"type": "string"}}}
+
+    llm_client.call_candidate(descriptor, "prompt", "system", schema=schema)
+
+    sent = _body(requests[0])
+    assert sent["response_format"] == {
+        "type": "json_schema",
+        "json_schema": {"name": "memory_response", "schema": schema},
+    }
+    assert "max_tokens" not in sent
+
+
+def test_the_counted_system_prompt_carries_the_schema() -> None:
+    schema: dict[str, object] = {"type": "object"}
+
+    counted = llm_client.system_with_schema("system", schema)
+
+    assert counted == 'system\n\nOutput only JSON matching this schema: {"type":"object"}'

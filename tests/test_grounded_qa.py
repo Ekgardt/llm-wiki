@@ -424,6 +424,29 @@ def test_verifier_rejects_source_changed_after_generation(vault: Path) -> None:
     assert verified["citations"] == []
 
 
+def test_the_default_client_hands_the_schema_to_the_provider(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import llm_client
+
+    page = _write_page(vault, "alpha.md", "Alpha is enabled.")
+    snapshot = collect_corpus(vault)
+    chunk = next(
+        item for item in snapshot.chunks if item.source_path == page.relative_to(vault).as_posix()
+    )
+    seen: list[object] = []
+
+    def call_llm(prompt: str, system_prompt: str = "", **kwargs: object) -> str:
+        seen.append(kwargs.get("schema"))
+        return _answer_for_prompt(prompt)
+
+    monkeypatch.setattr(llm_client, "call_llm", call_llm)
+
+    grounded_qa("Is alpha enabled?", vault=vault, snapshot=snapshot, candidates=(chunk,))
+
+    assert seen == [json.loads(ANSWER_SCHEMA.read_text(encoding="utf-8"))]
+
+
 def test_generation_receives_the_closed_schema_inside_the_bounded_prompt(vault: Path) -> None:
     page = _write_page(vault, "alpha.md", "Alpha is enabled.")
     snapshot = collect_corpus(vault)

@@ -1727,8 +1727,10 @@ class _AnswerPass:
         _check_deadline(self.deadline)
         self.passes.append(note)
         system_prompt = _qa_system_prompt()
+        schema = _answer_schema()
+        sent_system = _sent_system(system_prompt, schema)
         question_block = "<question>\n" + self.question.strip() + "\n</question>\n" + note
-        fixed_tokens = len((system_prompt + _answer_schema_json() + question_block).encode("utf-8"))
+        fixed_tokens = len((sent_system + question_block).encode("utf-8"))
         context = build_grounded_context(
             self.captured,
             candidates,
@@ -1741,10 +1743,8 @@ class _AnswerPass:
             deadline=self.deadline,
         )
         prompt = question_block + context.prompt_context
-        _require_prompt_fits(system_prompt + _answer_schema_json() + prompt, self.budget)
-        raw = _provider_response(
-            self.generator, prompt, system_prompt, self.deadline, _answer_schema()
-        )
+        _require_prompt_fits(sent_system + prompt, self.budget)
+        raw = _provider_response(self.generator, prompt, system_prompt, self.deadline, schema)
         return verify_grounded_answer(_parsed_answer(raw), context, vault=self.vault), context
 
 
@@ -2583,15 +2583,16 @@ def _qa_system_prompt() -> str:
     )
 
 
+def _sent_system(system_prompt: str, schema: dict[str, object]) -> str:
+    from llm_client import system_with_schema
+
+    return system_with_schema(system_prompt, schema)
+
+
 def _answer_schema() -> dict[str, object]:
     """The closed answer schema, handed to the provider client once for every backend."""
     schema: dict[str, object] = json.loads(ANSWER_SCHEMA.read_text(encoding="utf-8"))
     return schema
-
-
-def _answer_schema_json() -> str:
-    """What the schema costs in the prompt of a backend that reads it as text."""
-    return json.dumps(_answer_schema(), sort_keys=True, separators=(",", ":"))
 
 
 def _question_for_pruning(question: str, prune: bool) -> str | None:

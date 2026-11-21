@@ -57,7 +57,7 @@ The principles below summarize the non-negotiable invariants.
 
 1. **Markdown-first.** The vault is plain `.md` files. No databases, no proprietary formats. If a feature requires a database to read your memory, it doesn't belong here.
 
-2. **LLM-agnostic.** No hard dependency on any provider. The `llm_client.py` abstraction with 5 backends is the canonical way to call an LLM. New backends go there, not in feature code.
+2. **LLM-agnostic.** No hard dependency on any provider. The `llm_client.py` abstraction (an agent CLI or any OpenAI-compatible API) is the canonical way to call an LLM. New backends go there, not in feature code.
 
 3. **OKF v0.1 conformant.** Every knowledge page has `type:` frontmatter. New page types extend `migrate_to_okf.py`'s `TYPE_INFERENCE` table.
 
