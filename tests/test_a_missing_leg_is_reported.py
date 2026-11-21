@@ -5,7 +5,7 @@ docs/research/2026-09-26-a-missing-leg-is-reported.md
 from __future__ import annotations
 
 import mcp_server
-from retrieval import analyze_query, planned_request, retrieve
+from retrieval import planned_request, retrieve
 
 RELATION = "what depends on the capture queue"
 
@@ -18,7 +18,7 @@ def _hit(candidate_id: str) -> dict[str, object]:
 
 
 def _graph_run_without_dense():
-    requested, signals = planned_request(None, analyze_query(RELATION), semantic=True)
+    requested, signals = planned_request(None, semantic=True)
     return retrieve(
         RELATION,
         requested_profile=requested,
@@ -33,7 +33,10 @@ def _graph_run_without_dense():
 def test_a_planned_graph_run_says_what_it_asked_for() -> None:
     trace = _graph_run_without_dense().trace
 
-    assert (trace.requested_mode, trace.signals_requested) == ("GRAPH", ("lexical", "dense", "graph"))
+    assert (trace.requested_mode, trace.signals_requested) == (
+        "GLOBAL",
+        ("lexical", "dense", "graph"),
+    )
 
 
 def test_a_graph_answer_without_its_dense_leg_reports_dense_missing() -> None:

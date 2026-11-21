@@ -21,9 +21,9 @@ DAILY = (
 )
 RECORD = "---\ntype: raw-source\nsession: abc123\n---\n\n# Session abc123\n\n**user:** why systemd?\n\n**assistant:** timers survive a reboot\n"
 
-# A provider that does not answer: a local Ollama on a closed loopback port,
+# A provider that does not answer: a local server on a closed loopback port,
 # refused at once; nothing leaves the host.
-SILENT = {"MEMORY_LLM_PROVIDER": "ollama", "MEMORY_LLM_BASE_URL": "http://127.0.0.1:9/v1"}
+SILENT = {"MEMORY_LLM_PROVIDER": "openai", "MEMORY_LLM_BASE_URL": "http://127.0.0.1:9/v1"}
 
 
 def _vault(tmp_path: Path) -> Path:

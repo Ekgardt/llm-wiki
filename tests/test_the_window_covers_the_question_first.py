@@ -142,6 +142,22 @@ def test_the_selection_stops_at_zero_gain() -> None:
     assert _window(pool, "needle", 2) == [pool[0][0].candidate_id, pool[1][0].candidate_id]
 
 
+def test_a_source_keeps_its_lane_best_chunk_when_a_later_one_is_admitted() -> None:
+    """The coverage admits a source's later chunk; its lane-best still keeps its place.
+
+    LongMemEval 3fe836c9: the admitted chunk of a session was its third, and the
+    displacement walked back over its first, the evidence turn, from place 2 to 49.
+    """
+    pool = [
+        _turn(DAY_ONE, 0, "alpha"), _turn(DAY_ONE, 100, "alpha beta"), _turn(DAY_ONE, 200, "zzz"),
+        _turn(DAY_TWO, 0, "gamma"), _turn(DAY_FAR, 0, "delta"),
+    ]
+
+    window = _window(pool, "alpha beta gamma delta", 3)
+
+    assert window == [pool[0][0].candidate_id, pool[1][0].candidate_id, pool[3][0].candidate_id]
+
+
 def test_more_admitted_than_can_be_displaced_leaves_the_lane_last_outside() -> None:
     """One displaceable repeat inside, two covering sources outside: the lane-first comes in."""
     pool = [

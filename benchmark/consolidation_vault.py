@@ -97,13 +97,14 @@ def _instrumented_generator(metrics: dict):
     """The shared provider client, measuring the prompt one retrieval handed it."""
     from llm_client import call_llm
 
-    def generate(prompt: str, system_prompt: str, max_tokens: int) -> str | None:
+    def generate(prompt: str, system_prompt: str, schema: dict[str, object] | None) -> str | None:
         metrics["prompt_chars"] = len(prompt)
         metrics["est_prompt_tokens"] = round(len(prompt) / 4)
         metrics["prompt_consolidation_hits"] = marker_hits(prompt)
         started = time.monotonic()
         try:
-            return call_llm(prompt, system_prompt, max_tokens)
+            answer: str | None = call_llm(prompt, system_prompt, schema=schema)
+            return answer
         finally:
             metrics["provider_seconds"] = round(time.monotonic() - started, 2)
 
@@ -113,7 +114,7 @@ def _instrumented_generator(metrics: dict):
 def _answered(question: dict, root: Path, snapshot: object, rows: list[dict], profile: str) -> dict:
     """The product's grounded answer, with the MEM-10 budget and deadlines."""
     from context_budget import ContextBudget
-    from query_memory import QA_MAX_OUTPUT_TOKENS, grounded_qa
+    from query_memory import QA_OUTPUT_RESERVE_BYTES, grounded_qa
 
     metrics: dict = {}
     try:
@@ -125,7 +126,7 @@ def _answered(question: dict, root: Path, snapshot: object, rows: list[dict], pr
             generator=_instrumented_generator(metrics),
             profile=profile,
             budget=ContextBudget(
-                None, vault_harness.ANSWER_INPUT_BUDGET, QA_MAX_OUTPUT_TOKENS, 512
+                None, vault_harness.ANSWER_INPUT_BUDGET, QA_OUTPUT_RESERVE_BYTES, 512
             ),
             deadline=time.monotonic() + vault_harness.ANSWER_DEADLINE_SECONDS,
         )
@@ -230,9 +231,9 @@ def run_arm(question: dict, root: Path, state: Path) -> dict:
     build_started = time.monotonic()
     snapshot, build_info = build_generation(root, state, daily_relative_paths(root))
     plain = str(question["question"])
-    profile = vault_harness.profile_for(plain)
+    profile = vault_harness.planned_profile()
     retrieve_started = time.monotonic()
-    rows = vault_harness._retrieved_rows(plain, profile)
+    rows = vault_harness._retrieved_rows(plain)
     answer_started = time.monotonic()
     outcome = _answered(question, root, snapshot, rows, profile)
     finished = time.monotonic()

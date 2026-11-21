@@ -138,9 +138,7 @@ llm-wiki/                          ← vault root (= $LLM_WIKI_ROOT)
 ├── CLAUDE.md                     ROOT — agent contract (byte-identical to AGENTS.md)
 ├── CHANGELOG.md                  ROOT — Keep-a-Changelog
 ├── CONTRIBUTING.md               ROOT — contribution guide
-├── README.md                     ROOT — English (primary)
-├── README.ru.md                  ROOT — Russian (faithful translation)
-├── README.zh-CN.md               ROOT — Chinese (faithful translation)
+├── README.md                     ROOT — the only README (English)
 ├── LICENSE                       ROOT — MIT
 ├── install.ps1                   ROOT — Windows installer
 ├── install.sh                    ROOT — Unix installer
@@ -159,7 +157,7 @@ llm-wiki/                          ← vault root (= $LLM_WIKI_ROOT)
 |----------|---------|---------|
 | `$LLM_WIKI_ROOT` | Resolved from `scripts/` location (worktree-aware via `git rev-parse --git-common-dir`) | Vault root — code + knowledge + runtime |
 | `$LLM_WIKI_STATE_ROOT` | **The vault root itself** | Runtime root → `cache/`, `logs/`, `run/` at vault root. Override for multi-disk or hermetic tests. |
-| `$MEMORY_LLM_PROVIDER` | Auto-detected (`opencode` → `codex` → `claude` → `openai` → `ollama`) | LLM backend for compile/flush/query. `fake` for tests. |
+| `$MEMORY_LLM_PROVIDER` | Auto-detected (`opencode` → `codex` → `claude` → `openai`) | LLM backend for compile/flush/query. `openai` is any OpenAI-compatible API, cloud or local, at `$MEMORY_LLM_BASE_URL` with `$MEMORY_LLM_MODEL` and an optional `$MEMORY_LLM_API_KEY`; the server decides the answer length. `fake` for tests. |
 | `$LLM_WIKI_DLP_POLICY` | Unset | Optional absolute path to an external bounded-literal/fingerprint policy. Invalid or digest-mismatched required policy fails closed. |
 | `$LLM_WIKI_<SECTION>_<KEY>` | Unset | One run's override of a registered limit in `scripts/settings.py` (for example `LLM_WIKI_CORPUS_MAX_FILES`); beats `llm-wiki.toml`. An invalid value stops the caller with its name. |
 
@@ -214,13 +212,13 @@ repair, or migration deletes it automatically.
 
 First-party model calls share one fail-closed DLP boundary. Optional custom literals
 and fingerprint allowlists are loaded only from the absolute external path named by
-`LLM_WIKI_DLP_POLICY`; the policy is not a fourth root zone. Verified local-only mode
-accepts only literal-loopback Ollama and requires verifiable Ollama cloud disablement.
-The implemented strict path uses the existing `MEMORY_LLM_PROVIDER=ollama` override,
-the official `OLLAMA_NO_CLOUD=1` server setting, and an explicit `127.0.0.1` or `::1`
-endpoint. It disables provider fallback and rejects remote model metadata, but reports
-`external_runtime_unverified` because LLM Wiki does not own or inspect the running
-Ollama process and therefore cannot prove that it restarted with cloud disabled.
+`LLM_WIKI_DLP_POLICY`; the policy is not a fourth root zone. A model is connected in
+one of two ways: a subscription agent CLI, or any OpenAI-compatible API at an address.
+Local processing means forcing `MEMORY_LLM_PROVIDER=openai` with `MEMORY_LLM_BASE_URL`
+on this machine, which also disables fallback; the dedicated Ollama provider and its
+local-only mode were removed on 2026-11-21 (owner message 263016509/16398), because
+every local server in use serves the OpenAI-compatible API and its context window and
+cloud switch are that server's own settings.
 
 Private-vault backup is a coherent application snapshot, not a direct copy of live
 SQLite files. The existing maintenance admission fence blocks cooperating writers;
@@ -548,7 +546,7 @@ or nonzero active state remains fail-closed.
   `memory_state.py` (path/lock/state), `compile_memory.py` (LLM compile +
   VERIFY-BEFORE-WRITE), `flush_memory.py` (3-tier classification),
   `maybe_compile.py` (PID-locked spawn), `search_memory.py` (entry point; fusion lives in `retrieval.py`),
-  `llm_client.py` (5 backends + fake), `integration_adapter.py` (thin host
+  `llm_client.py` (agent CLIs or any OpenAI-compatible API, + fake), `integration_adapter.py` (thin host
   lifecycle boundary), `mcp_server.py` (12 task-shaped tools; run as a program it is
   `mcp_supervisor.py`, which serves the tools from a child it restarts, with the client's
   initialisation replayed, when the code under `scripts/` changes), and `doctor.py`.

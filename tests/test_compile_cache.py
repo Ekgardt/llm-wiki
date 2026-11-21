@@ -192,12 +192,15 @@ def test_schema_hash_is_canonical_and_independent_of_checkout_line_endings():
     assert COMPILE_PLAN_SCHEMA_HASH == sha256_bytes(canonical_json_bytes(schema))
 
 
-def test_real_openai_and_ollama_descriptors_produce_distinct_keys(tmp_path, monkeypatch):
+def test_real_openai_and_claude_descriptors_produce_distinct_keys(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     monkeypatch.setenv("MEMORY_LLM_MODEL", "resolved-model")
+    monkeypatch.setenv("MEMORY_CLAUDE_MODEL", "resolved-model")
     openai = llm_client.provider_candidates("openai", max_tokens=321)[0]
-    ollama = llm_client.provider_candidates("ollama", max_tokens=321)[0]
+    claude = llm_client.provider_candidates("claude", max_tokens=321)[0]
 
-    def call(provider):
+    def call(provider: llm_client.ProviderDescriptor) -> CompileCallDescriptor:
         return _call(
             provider=provider.provider,
             model=provider.model,
@@ -208,11 +211,11 @@ def test_real_openai_and_ollama_descriptors_produce_distinct_keys(tmp_path, monk
 
     cache = CompileCache(tmp_path)
     openai_key = cache.key(_action(draft_calls=(call(openai),), critique_calls=()))
-    ollama_key = cache.key(_action(draft_calls=(call(ollama),), critique_calls=()))
+    claude_key = cache.key(_action(draft_calls=(call(claude),), critique_calls=()))
 
     assert openai_key is not None
-    assert ollama_key is not None
-    assert openai_key != ollama_key
+    assert claude_key is not None
+    assert openai_key != claude_key
 
 
 def test_same_provider_different_effective_endpoints_produce_distinct_keys(tmp_path, monkeypatch):
@@ -251,7 +254,7 @@ def test_restored_preferred_provider_does_not_hit_fallback_cache(tmp_path):
     fallback = _action(
         draft_calls=(
             _call(
-                provider="ollama",
+                provider="openai",
                 model="qwen3:0.6b",
                 fallback_from=("codex:gpt-5:provider_error",),
             ),

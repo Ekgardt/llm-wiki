@@ -16,8 +16,6 @@ import pytest
 ROOT = Path(__file__).resolve().parent.parent
 CURRENT_DOCUMENTS = (
     "README.md",
-    "README.ru.md",
-    "README.zh-CN.md",
     "docs/USER-GUIDE.md",
     "docs/ARCHITECTURE.md",
     "docs/STRUCTURE.md",

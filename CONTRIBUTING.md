@@ -57,7 +57,7 @@ The principles below summarize the non-negotiable invariants.
 
 1. **Markdown-first.** The vault is plain `.md` files. No databases, no proprietary formats. If a feature requires a database to read your memory, it doesn't belong here.
 
-2. **LLM-agnostic.** No hard dependency on any provider. The `llm_client.py` abstraction with 5 backends is the canonical way to call an LLM. New backends go there, not in feature code.
+2. **LLM-agnostic.** No hard dependency on any provider. The `llm_client.py` abstraction (an agent CLI or any OpenAI-compatible API) is the canonical way to call an LLM. New backends go there, not in feature code.
 
 3. **OKF v0.1 conformant.** Every knowledge page has `type:` frontmatter. New page types extend `migrate_to_okf.py`'s `TYPE_INFERENCE` table.
 
@@ -147,24 +147,16 @@ unit tests cover is not covered.
 
 Before tagging a release or updating public marketing numbers:
 
-1. **English README first** — `README.md` is the source of truth.
-2. **Sync i18n the same day** — update `README.ru.md` and `README.zh-CN.md` so they match:
-    - version string (e.g. v3.4.0)
-   - full-regression-suite wording and current test commands
-   - install URLs (`Ekgardt/llm-wiki`)
-    - architecture (three-zone / `knowledge/`)
-    - reliable operations commands and contracts
-   - benchmark headline numbers (MRR, latency) if changed
-3. **Run the i18n guard test** — `uv run --locked --no-sync pytest tests/test_readme_i18n.py -q` must pass.
-4. **CHANGELOG** — newest version at top (Keep a Changelog).
-5. **pyproject.toml version** + `uv.lock` package version must match the tag.
-6. If benchmark numbers changed, update `docs/ARCHITECTURE.md` search section + `benchmark/report.md` in the same change.
-7. Only then merge. The `release-tag` workflow tags `vX.Y.Z` on the first green
+1. **README** — `README.md` is the only README: update its version string, test
+   commands, install URLs, architecture, operations commands and benchmark numbers.
+2. **Run the README guard test** — `uv run --locked --no-sync pytest tests/test_readme_i18n.py -q` must pass.
+3. **CHANGELOG** — newest version at top (Keep a Changelog).
+4. **pyproject.toml version** + `uv.lock` package version must match the tag.
+5. If benchmark numbers changed, update `docs/ARCHITECTURE.md` search section + `benchmark/report.md` in the same change.
+6. Only then merge. The `release-tag` workflow tags `vX.Y.Z` on the first green
    `main` commit whose `pyproject.toml` version has its own `CHANGELOG.md` section,
    with that section and the release manifest as the tag message; nobody tags by
    hand, and an existing tag is never moved.
-
-**Never ship a release with EN updated and RU/ZH left stale.** That is a release blocker.
 
 ## Commit message style
 

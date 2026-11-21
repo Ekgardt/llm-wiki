@@ -39,12 +39,14 @@ ROOT = Path(__file__).resolve().parent.parent
 def test_the_temporary_and_job_directories_are_ephemeral(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "host"))
     job = tmp_path / "host" / "jobs" / "abc" / "tmp" / "clean"
+    # Not ROOT: a checker may check the repository out under the temporary directory.
+    vault = Path(tempfile.gettempdir()).resolve().parent / "a-vault-beside-the-temporary-directory"
 
     roots = ephemeral_paths.ephemeral_roots()
     verdicts = (
         ephemeral_paths.is_under(Path(tempfile.gettempdir()) / "x", roots),
         ephemeral_paths.is_under(job, roots),
-        ephemeral_paths.is_under(ROOT, roots),
+        ephemeral_paths.is_under(vault, roots),
     )
 
     assert verdicts == (True, True, False)

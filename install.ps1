@@ -221,6 +221,13 @@ function Install-CodexMcp(
         config-state --config $Config --vault-root $VaultRoot | Out-String).Trim()
     if ($LASTEXITCODE -ne 0) { return 1 }
     if ($state -eq "equivalent") { return 0 }
+    if ($state -eq "deferred") {
+        # config.toml is never rewritten in place. The entry may already list other surfaces,
+        # and TOML refuses a second omit_tools_from key, so the advice covers both cases.
+        Warn 'Codex hides the llm-wiki tools behind tool search. In [mcp_servers.llm-wiki], add "deferred" to its omit_tools_from list,'
+        Warn '  or, when the entry has no omit_tools_from, add the line: omit_tools_from = ["deferred"]'
+        return 0
+    }
     if ($state -in @("conflict", "invalid")) { return 2 }
     if ($state -ne "absent") { return 1 }
 
@@ -231,6 +238,7 @@ function Install-CodexMcp(
 [mcp_servers.llm-wiki]
 command = "uv"
 args = ["run", "--locked", "--no-sync", "--directory", "$tomlVault", "python", "scripts/mcp_server.py"]
+omit_tools_from = ["deferred"]
 "@
     $encoding = [System.Text.UTF8Encoding]::new($false)
     if (Test-Path $Config) {

@@ -989,10 +989,17 @@ def _run_vault_search(
     )
 
 
+def _semantic_plan() -> str:
+    """The profile the semantic run a fallback replaces had planned."""
+    from retrieval import planned_request
+
+    return str(planned_request(None, semantic=True)[0])
+
+
 def _lexical_fallback_row(row: dict) -> dict:
     return {
         **row,
-        "requested_mode": "HYBRID",
+        "requested_mode": _semantic_plan(),
         "fallback_reason": "retrieval_deadline_exceeded",
         "partial": True,
     }
@@ -1026,14 +1033,11 @@ def _row_trace(row: Mapping[str, object]) -> dict[str, object]:
     return _reported_trace({**row, "corpus_generation": row.get("generation")})
 
 
-def _unreported_trace(query: str) -> dict[str, object]:
+def _unreported_trace() -> dict[str, object]:
     """Nothing reported a trace: say so, and never guess a generation."""
-    from retrieval import analyze_query, planned_request
-
-    requested, _signals = planned_request(None, analyze_query(query), semantic=True)
     return _reported_trace(
         {
-            "requested_mode": requested,
+            "requested_mode": _semantic_plan(),
             "effective_mode": "BASE",
             "fallback_reason": "trace_unavailable",
             "partial": True,
@@ -1048,7 +1052,7 @@ def _carries_trace(mapping: object, *, generation_key: str) -> bool:
 
 
 def _retrieval_trace(
-    query: str, results: list[dict], reported: Mapping[str, object] | None = None
+    results: list[dict[str, object]], reported: Mapping[str, object] | None = None
 ) -> dict[str, object]:
     """The planner trace: reported by the search itself, else recovered from rows.
 
@@ -1061,7 +1065,7 @@ def _retrieval_trace(
     elif results and _carries_trace(results[0], generation_key="generation"):
         trace = _row_trace(results[0])
     else:
-        trace = _unreported_trace(query)
+        trace = _unreported_trace()
     from reliable_memory import validate_schema
 
     validate_schema(trace, RETRIEVAL_TRACE_SCHEMA)
@@ -4236,11 +4240,17 @@ def _build_tool_definitions() -> list:
     ]
 
 
+# Claude Code defers MCP tools behind its tool search by default; a tool that
+# carries this key is loaded with the session instead
+# (docs/research/2026-11-17-every-memory-tool-is-visible.md).
+ALWAYS_LOAD_META = {"anthropic/alwaysLoad": True}
+
+
 def _make_tool(**kwargs):
-    """Create a tool with structured output metadata when the SDK supports it."""
+    """Create a tool that loads with the session, with structured output when supported."""
     if MCP_STRUCTURED_OUTPUT_AVAILABLE:
         kwargs["outputSchema"] = envelope_schema()
-    return Tool(**kwargs)
+    return Tool(**kwargs, _meta=ALWAYS_LOAD_META)
 
 
 def _meta(*, deadline: float | None = None) -> dict:
@@ -5599,8 +5609,8 @@ def _is_memory_path(relative: str) -> bool:
 def _requested_signals(trace: dict) -> tuple[str, ...]:
     """The signals the requested mode declares, and any that ran besides.
 
-    Graph is not 'missing' when never asked for; dense that a planned GRAPH run
-    added is reported, not dropped.
+    Graph is not 'missing' when never asked for; a signal a caller planned beside
+    its profile is reported, not dropped.
     """
     from retrieval import PROFILE_SIGNALS
 
@@ -5801,7 +5811,7 @@ def _tool_recall(arguments: dict, deadline: float):
         deadline=deadline,
         trace_sink=reported,
     )
-    trace = _retrieval_trace(arguments["query"], results, reported)
+    trace = _retrieval_trace(results, reported)
     data = {
         "results": [_agent_row(row) for row in results],
         "retrieval_trace": trace,
@@ -5861,7 +5871,7 @@ def _tool_get_decisions(arguments: dict, deadline: float):
     )
     data = {
         "results": results,
-        "retrieval_trace": _retrieval_trace(query or "decision", results, reported),
+        "retrieval_trace": _retrieval_trace(results, reported),
         "_meta": _call_with_deadline(_meta, deadline=deadline),
     }
     return data, limit_clamped

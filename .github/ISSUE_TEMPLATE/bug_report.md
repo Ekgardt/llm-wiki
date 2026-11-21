@@ -21,7 +21,7 @@ assignees: ''
 - OS: [e.g. Windows 11, macOS 14, Ubuntu 22.04]
 - Python version: [e.g. 3.12]
 - LLM Wiki version: [git commit SHA or tag]
-- LLM backend in use: [OpenCode / Codex / Claude / OpenAI / Ollama]
+- LLM backend in use: [OpenCode / Codex / Claude / OpenAI-compatible API (which server)]
 - Coding agent: [OpenCode / Codex CLI / Claude Code]
 
 **Relevant logs**

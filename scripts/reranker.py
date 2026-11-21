@@ -277,7 +277,13 @@ def _libraries_importable() -> bool:
 
 
 def _exact_bypass_reason(profile: str, intents: set[str]) -> str | None:
-    if intents & {"quoted_phrase", "exact_identifier"}:
+    """A quoted phrase or a bare name asks for that spelling; a name in a question does not.
+
+    A lookup such as `QueueWorker` keeps the fused order its lexical match earned:
+    the cross-encoder scores a passage against a sentence, and a name alone is
+    not one. A question that holds a name is reranked like any other question.
+    """
+    if intents & {"quoted_phrase", "identifier_lookup"}:
         return "exact_match_bypass"
     if profile in {"EXACT", "DIRECT"}:
         return "exact_match_bypass"

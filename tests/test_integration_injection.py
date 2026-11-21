@@ -2382,11 +2382,33 @@ def test_codex_mcp_config_state_accepts_exact_enabled_table(tmp_path, quoted):
     config.write_text(
         f'{table}\ncommand = "uv"\n'
         f'args = ["run", "--locked", "--no-sync", "--directory", {json.dumps(str(ROOT))}, '
-        '"python", "scripts/mcp_server.py"]\nenabled = true\n',
+        '"python", "scripts/mcp_server.py"]\nenabled = true\n'
+        'omit_tools_from = ["deferred"]\n',
         encoding="utf-8",
     )
 
     assert codex_memory.codex_mcp_config_state(config, ROOT) == "equivalent"
+
+
+@pytest.mark.parametrize(
+    "omitted", ["", 'omit_tools_from = []\n', 'omit_tools_from = ["code_mode"]\n']
+)
+def test_codex_mcp_config_state_names_an_entry_whose_tools_wait_for_tool_search(
+    tmp_path: Path, omitted: str
+) -> None:
+    """Our entry without `omit_tools_from = ["deferred"]` is ours, but Codex hides its tools."""
+    _ensure_scripts_on_path()
+    import codex_memory
+
+    config = tmp_path / "config.toml"
+    config.write_text(
+        '[mcp_servers.llm-wiki]\ncommand = "uv"\n'
+        f'args = ["run", "--locked", "--no-sync", "--directory", {json.dumps(str(ROOT))}, '
+        f'"python", "scripts/mcp_server.py"]\n{omitted}',
+        encoding="utf-8",
+    )
+
+    assert codex_memory.codex_mcp_config_state(config, ROOT) == "deferred"
 
 
 @pytest.mark.parametrize(
@@ -3566,15 +3588,34 @@ def test_windows_installer_error_stops_native_child_and_later_steps(
 
 
 def _mcp_config_kept(config: Path, scenario: str, original: str, before: bytes) -> bool:
-    """An absent entry is appended after the original text; any other config is untouched."""
+    """An absent entry is appended after the original text and then reads as equivalent;
+    any other config is untouched."""
     if scenario == "absent":
-        return config.read_text(encoding="utf-8").startswith(original) and (
-            config.read_bytes() != before
-        )
+        return _appended_an_equivalent_entry(config, original, before)
     return config.read_bytes() == before
 
 
-def _codex_mcp_toml(vault: Path, *, quoted: bool, conflicting: bool = False) -> str:
+def _appended_an_equivalent_entry(config: Path, original: str, before: bytes) -> bool:
+    _ensure_scripts_on_path()
+    import codex_memory
+
+    text = config.read_text(encoding="utf-8")
+    appended = text.startswith(original) and config.read_bytes() != before
+    return appended and codex_memory.codex_mcp_config_state(config, ROOT) == "equivalent"
+
+
+_EXTEND_THE_LIST = 'add "deferred" to its omit_tools_from list'
+
+
+def _advice_fits(scenario: str, output: str) -> bool:
+    """A deferred entry is told to extend its list, never to add a second key."""
+    return (scenario == "deferred") == (_EXTEND_THE_LIST in output)
+
+
+def _codex_mcp_toml(
+    vault: Path, *, quoted: bool, conflicting: bool = False, deferred: bool = False
+) -> str:
+    """An entry as the installer writes it; `deferred` leaves out the line that shows its tools."""
     table = '[mcp_servers."llm-wiki"]' if quoted else "[mcp_servers.llm-wiki]"
     args = (
         ["python", "other.py"]
@@ -3589,33 +3630,46 @@ def _codex_mcp_toml(vault: Path, *, quoted: bool, conflicting: bool = False) -> 
             "scripts/mcp_server.py",
         ]
     )
-    return f'{table}\ncommand = "uv"\nargs = {json.dumps(args)}\n'
+    shown = "" if deferred else 'omit_tools_from = ["deferred"]\n'
+    return f'{table}\ncommand = "uv"\nargs = {json.dumps(args)}\n{shown}'
 
 
 @pytest.mark.parametrize(
     ("scenario", "expected_exit"),
-    [("equivalent", 0), ("conflicting", 2), ("absent", 0)],
-    ids=["quoted-equivalent", "conflicting", "absent"],
+    [("equivalent", 0), ("deferred", 0), ("conflicting", 2), ("absent", 0)],
+    ids=["quoted-equivalent", "deferred", "conflicting", "absent"],
 )
 def test_unix_installer_mcp_function_uses_parser_in_temp_home(tmp_path, scenario, expected_exit):
     bash = Path(r"C:\Program Files\Git\bin\bash.exe")
     if not bash.exists():
         pytest.skip("Git Bash unavailable")
     source = (ROOT / "install.sh").read_text(encoding="utf-8")
-    function = _shell_functions(source, "write_codex_mcp_block", "add_codex_mcp_block", "codex_mcp_state_status", "configure_codex_mcp")
+    function = _shell_functions(
+        source,
+        "write_codex_mcp_block",
+        "add_codex_mcp_block",
+        "codex_mcp_state_status",
+        "configure_codex_mcp",
+    )
     home = tmp_path / "home"
     config = home / ".codex" / "config.toml"
     config.parent.mkdir(parents=True)
     original = (
         'model = "gpt-5.6"\n'
         if scenario == "absent"
-        else _codex_mcp_toml(ROOT, quoted=True, conflicting=scenario == "conflicting")
+        else _codex_mcp_toml(
+            ROOT,
+            quoted=True,
+            conflicting=scenario == "conflicting",
+            deferred=scenario == "deferred",
+        )
     )
     config.write_text(original, encoding="utf-8")
     before = config.read_bytes()
     runner = tmp_path / "installer-mcp-contract.sh"
     runner.write_text(
-        function
+        'warn() { echo "[WARN] $1"; }\n'
+        + function
         + "\nuv() {\n"
         + "  while [[ $# -gt 0 && $1 != config-state ]]; do shift; done\n"
         + '  command "$TEST_PYTHON" "$TEST_VAULT/scripts/codex_memory.py" "$@"\n'
@@ -3640,13 +3694,14 @@ def test_unix_installer_mcp_function_uses_parser_in_temp_home(tmp_path, scenario
     assert (
         _mcp_config_kept(config, scenario, original, before),
         config.read_text(encoding="utf-8").count("[mcp_servers."),
-    ) == (True, 1)
+        _advice_fits(scenario, result.stdout + result.stderr),
+    ) == (True, 1, True)
 
 
 @pytest.mark.parametrize(
     ("scenario", "expected_exit"),
-    [("equivalent", 0), ("conflicting", 2), ("absent", 0)],
-    ids=["quoted-equivalent", "conflicting", "absent"],
+    [("equivalent", 0), ("deferred", 0), ("conflicting", 2), ("absent", 0)],
+    ids=["quoted-equivalent", "deferred", "conflicting", "absent"],
 )
 def test_windows_installer_mcp_function_uses_parser_in_temp_home(tmp_path, scenario, expected_exit):
     source = ROOT / "install.ps1"
@@ -3656,7 +3711,12 @@ def test_windows_installer_mcp_function_uses_parser_in_temp_home(tmp_path, scena
     original = (
         'model = "gpt-5.6"\n'
         if scenario == "absent"
-        else _codex_mcp_toml(ROOT, quoted=True, conflicting=scenario == "conflicting")
+        else _codex_mcp_toml(
+            ROOT,
+            quoted=True,
+            conflicting=scenario == "conflicting",
+            deferred=scenario == "deferred",
+        )
     )
     config.write_text(original, encoding="utf-8")
     before = config.read_bytes()
@@ -3667,12 +3727,14 @@ def test_windows_installer_mcp_function_uses_parser_in_temp_home(tmp_path, scena
         $ast = [System.Management.Automation.Language.Parser]::ParseFile(
             {ps_literal(str(source))}, [ref]$tokens, [ref]$errors)
         if ($errors.Count) {{ throw ($errors | Out-String) }}
-        $fn = $ast.Find({{ param($node)
-            $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
-            $node.Name -eq 'Install-CodexMcp'
-        }}, $true)
-        if ($null -eq $fn) {{ throw 'Install-CodexMcp missing' }}
-        Invoke-Expression $fn.Extent.Text
+        foreach ($name in @('Warn', 'Install-CodexMcp')) {{
+            $fn = $ast.Find({{ param($node)
+                $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
+                $node.Name -eq $name
+            }}, $true)
+            if ($null -eq $fn) {{ throw "$name missing" }}
+            Invoke-Expression $fn.Extent.Text
+        }}
         function uv {{
             $all = @($args)
             $index = [Array]::IndexOf($all, 'config-state')
@@ -3696,7 +3758,8 @@ def test_windows_installer_mcp_function_uses_parser_in_temp_home(tmp_path, scena
     assert (
         _mcp_config_kept(config, scenario, original, before),
         config.read_text(encoding="utf-8").count("[mcp_servers."),
-    ) == (True, 1)
+        _advice_fits(scenario, result.stdout + result.stderr),
+    ) == (True, 1, True)
 
 
 def test_unix_installer_probe_reports_absent_without_touching_the_file(tmp_path):
@@ -3722,7 +3785,8 @@ def test_unix_installer_probe_reports_absent_without_touching_the_file(tmp_path)
     before = destination.read_bytes()
     runner = tmp_path / "installer-contract.sh"
     runner.write_text(
-        function
+        'warn() { echo "[WARN] $1"; }\n'
+        + function
         + "\nuv() {\n"
         + "  while [[ $# -gt 0 && $1 != hooks-state ]]; do shift; done\n"
         + '  command "$TEST_PYTHON" "$TEST_VAULT/scripts/codex_memory.py" "$@"\n'
@@ -3765,7 +3829,8 @@ def test_unix_installer_probe_reports_conflict_for_unrelated_inline_hooks(tmp_pa
     before = destination.read_bytes()
     runner = tmp_path / "installer-inline-contract.sh"
     runner.write_text(
-        function
+        'warn() { echo "[WARN] $1"; }\n'
+        + function
         + "\nuv() {\n"
         + "  while [[ $# -gt 0 && $1 != hooks-state ]]; do shift; done\n"
         + '  command "$TEST_PYTHON" "$TEST_VAULT/scripts/codex_memory.py" "$@"\n'
@@ -3900,7 +3965,8 @@ def test_unix_installer_probe_reports_disabled_when_the_feature_is_off(tmp_path)
     before = destination.read_bytes()
     runner = tmp_path / "installer-disabled-contract.sh"
     runner.write_text(
-        function
+        'warn() { echo "[WARN] $1"; }\n'
+        + function
         + "\nuv() {\n"
         + "  while [[ $# -gt 0 && $1 != hooks-state ]]; do shift; done\n"
         + '  command "$TEST_PYTHON" "$TEST_VAULT/scripts/codex_memory.py" "$@"\n'

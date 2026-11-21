@@ -27,13 +27,13 @@ The vault is plain markdown. No databases, no proprietary formats, no daemons re
 Every knowledge page has YAML frontmatter with at least `type:`. This guarantees future interoperability with any OKF-compatible tool.
 
 ### 3. LLM-agnostic
-No hard dependency on OpenAI / Anthropic / anyone. The `llm_client.py` abstraction supports 5 backends and auto-detects the first alive one.
+No hard dependency on OpenAI / Anthropic / anyone. The `llm_client.py` abstraction connects a model in one of two ways — a subscription agent CLI (OpenCode, Codex, Claude) or any OpenAI-compatible API by its address — and auto-detects the first one available.
 
 Local-first describes the authoritative storage and product runtime, not every model
-transport. OpenCode, Codex, Claude, and OpenAI may process prompts remotely. Ollama is
-local only when explicitly forced to a literal loopback IP and the selected model has
-local metadata. An external Ollama process prevents the client from proving that cloud
-disablement was applied after restart, so that state remains explicitly unverified.
+transport. The agent CLIs and a cloud API process prompts remotely. A model runs locally
+when `MEMORY_LLM_BASE_URL` names a server on this machine (Ollama, LM Studio, vLLM and
+llama.cpp all serve the OpenAI-compatible API); what that server does with the prompt
+is the server's own configuration.
 
 ### 4. Smallest set of high-signal tokens
 Anthropic's context-engineering principle: every byte of context injected into a prompt costs attention budget. SessionStart context is capped at ~2KB.
@@ -71,7 +71,7 @@ The slug system (5-step collision resolution) lets a single vault track unlimite
 │                               │                                      │
 │                               ↓                                      │
 │  LLM BACKEND (CLASSIFY + COMPILE ONLY)                               │
-│  llm_client.py: 5 backends including Ollama + fail-closed DLP        │
+│  llm_client.py: agent CLIs or any OpenAI-compatible API + DLP        │
 └──────────────────────────────┬───────────────────────────────────────┘
                                ↓
 ┌──────────────────────────────────────────────────────────────────────┐

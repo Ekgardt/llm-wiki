@@ -500,7 +500,8 @@ def _assert_degraded_search_budget(calls) -> None:
 
 
 def _assert_degraded_result_row(row) -> None:
-    assert row["requested_mode"] == "HYBRID"
+    # The semantic run that timed out planned every leg, so that is what was requested.
+    assert row["requested_mode"] == "GLOBAL"
     assert row["effective_mode"] == "BASE"
     assert row["signals_used"] == ["lexical"]
     assert row["fallback_reason"] == "retrieval_deadline_exceeded"
@@ -1025,7 +1026,7 @@ class TestHelperFunctions:
         _assert_degraded_search_budget(calls)
         _assert_degraded_result_row(results[0])
         _assert_degraded_trace(
-            results[0], mcp_server._retrieval_trace("test", results)
+            results[0], mcp_server._retrieval_trace(results)
         )
 
     def test_search_vault_reuses_caller_operation_deadline(self, monkeypatch):

@@ -46,7 +46,8 @@ def test_the_prompt_asks_for_the_working_first() -> None:
 
     asked = "Write the working field first, inside the JSON document"
 
-    assert prompt.index(asked) < prompt.index("Output only JSON")
+    assert asked in prompt
+    assert prompt.index(asked) < prompt.index("Write nothing outside the JSON document")
 
 
 def _answer_with_working(prompt: str) -> str:
