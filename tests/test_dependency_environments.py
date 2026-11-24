@@ -29,20 +29,16 @@ def _project() -> dict:
     return tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
 
 
-def test_reranker_extra_owns_every_direct_import() -> None:
-    reranker = _project()["project"]["optional-dependencies"]["reranker"]
-    names = {re.split(r"[<>=!~;\s\[]", value, maxsplit=1)[0].casefold() for value in reranker}
-
-    assert names == {"tokenizers", "torch", "transformers"}
+def test_the_reranker_extra_is_the_runtime_both_models_share() -> None:
+    assert _project()["project"]["optional-dependencies"]["reranker"] == ["llm-wiki[semantic]"]
 
 
-def test_semantic_extra_owns_every_import_of_the_encoder() -> None:
-    """The encoder runs through ONNX Runtime; torch belongs to the reranker alone."""
+def test_semantic_extra_owns_every_import_of_both_models() -> None:
+    """Both models run through OpenVINO; nothing in the search extras pulls torch."""
     semantic = _project()["project"]["optional-dependencies"]["semantic"]
     names = {re.split(r"[<>=!~;\s\[]", value, maxsplit=1)[0].casefold() for value in semantic}
 
-    assert names == {"huggingface-hub", "numpy", "onnxruntime", "tokenizers"}
-    assert sum(value.startswith("onnxruntime") for value in semantic) == 2
+    assert names == {"huggingface-hub", "numpy", "openvino", "tokenizers"}
 
 
 @pytest.mark.parametrize("override", [None, "relative environment"])

@@ -43,10 +43,8 @@ def _about_drums(text: str) -> float:
     return float("drum" in lowered or "pearl" in lowered)
 
 
-def _encode(texts, is_query):
-    """A fake dual encoder: a sentence about drums points the way the question does."""
-    if is_query:
-        return np.asarray([[1.0, 1.0] for _ in texts], dtype=float)
+def _encode(texts):
+    """A fake encoder: a sentence about drums points the way the question does."""
     return np.asarray([[_about_drums(text), 1.0] for text in texts], dtype=float)
 
 

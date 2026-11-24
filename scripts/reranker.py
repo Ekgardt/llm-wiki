@@ -1,12 +1,13 @@
 """Cross-encoder reranker for precision search.
 
 Re-ranks fused candidates using a cross-encoder that scores each
-(query, document) pair jointly. Runs on CPU via ONNX Runtime when available.
+(query, document) pair jointly, on the CPU through OpenVINO.
 
 Install: uv sync --locked --no-default-groups --inexact --extra reranker
-The default is the approved `BAAI/bge-reranker-v2-m3` at its pinned revision;
+The default is `Horizon-Labs/multilingual-reranker-base` at its pinned revision;
 the environment may name another model ID with an immutable 40-hex revision,
-or `LLMWIKI_RERANKER_MODEL=off` to run without one.
+installed under `cache/models/` with the same files, or
+`LLMWIKI_RERANKER_MODEL=off` to run without one.
 """
 from __future__ import annotations
 
@@ -29,31 +30,37 @@ _reranker_bundle: dict[str, Any] | None = None
 _reranker_unavailable_reason: str | None = None
 
 IMMUTABLE_REVISION = re.compile(r"^[0-9a-f]{40}$")
-# The product default (owner's decision 2026-09-10): the matrix-approved
-# multilingual cross-encoder at its pinned revision. Measured on the
-# cross-lingual corpus, it takes a Russian question over English pages from
-# MRR 0.60 to 0.98 on top of the shipped encoder, where swapping the encoder
-# gained at most 0.04. See
-# `docs/research/2026-09-10-cross-lingual-memory-world-practice.md`.
-DEFAULT_RERANKER_MODEL = "BAAI/bge-reranker-v2-m3"
-DEFAULT_RERANKER_REVISION = "953dc6f6f85a1b2dbfca4c34a2796e7dde08d41e"
-# The weights file at that revision, verified by `scripts/install_models.py`.
+# The product default (owner message 17933): the reranker that, with bge-m3 and
+# fusion 1:2, put the answer first on 52.8 % of 996 questions across the four
+# language crossings, against 37.9 % for the shipped pair. Its own int8 ONNX
+# export is the file read: on OpenVINO it scored ten passages in 0.53 s at the
+# median on eight threads, against 1.8 s for the same file on ONNX Runtime.
+DEFAULT_RERANKER_MODEL = "Horizon-Labs/multilingual-reranker-base"
+DEFAULT_RERANKER_REVISION = "7330f6d0b3f560af0c2b9a63820ea299a45fd91b"
+RERANKER_WEIGHTS_FILE = "onnx/model_quantized.onnx"
+RERANKER_TOKENIZER_FILE = "tokenizer.json"
+# The weights file at that revision, verified by `scripts/install_models.py`; the
+# digest is the one the repository's own SHA256SUMS lists.
 DEFAULT_RERANKER_WEIGHTS_SHA256 = (
-    "d9e3e081faff1eefb84019509b2f5558fd74c1a05a2c7db22f74174fcedb5286"
+    "f0a31b9217137538addc8a911869cb775c964a61bcd4ecc138f2473ccbe20d8b"
 )
-DEFAULT_RERANKER_WEIGHTS_BYTES = 2271071852
+DEFAULT_RERANKER_WEIGHTS_BYTES = 641122836
+RERANKER_READ_FILES = (RERANKER_WEIGHTS_FILE, RERANKER_TOKENIZER_FILE)
 RERANKER_OFF = "off"
-# Ten passages of up to 512 tokens are about 3.5 s at int8 on four loaded
-# cores; twenty were 4.2 s and overran the optional stage's share on the MCP
-# path. Depths 10, 20 and 50 ranked the cross-lingual corpus identically.
+# Depths 10, 20 and 50 ranked the cross-lingual corpus identically, and ten
+# passages fit the optional stage's share on the MCP path.
 DEFAULT_RERANK_DEPTH = 10
-# The approved matrix entry for BAAI/bge-reranker-v2-m3 declares 512 tokens.
+# The window for a model whose tokenizer names none. The default's own tokenizer
+# names 384 tokens, the query kept whole and the passage cut (`only_second`): the
+# setting it was measured with, and 512 ranked the same questions identically.
 RERANK_MAX_TOKENS = 512
+PAD_TOKEN = "<pad>"
 # Pairs scored together. Small enough that a short passage does not pay for
 # a long one, large enough to keep the four cores of the slowest supported
 # machine busy. See `_cross_encoder_scores`.
 RERANK_BATCH_PAIRS = 2
 RERANK_BLEND_RERANK = 0.6
+RERANKER_PACKAGES = ("openvino", "tokenizers", "numpy")
 RERANK_BLEND_RRF = 0.4
 
 # Profiles that may invoke the reranker when conditions match.
@@ -85,103 +92,32 @@ def _explicit_identity(model: str, revision: str) -> tuple[str, str] | None:
     return model, revision
 
 
-def _have_reranker_deps() -> bool:
-    try:
-        import torch  # noqa: F401
-        import transformers  # noqa: F401
+def _pair_tokenizer(path: Any) -> Any:
+    """The model's own truncation and padding, or a window and padding when it names none."""
+    from tokenizers import Tokenizer
 
-        return True
-    except ImportError:
-        return False
+    tokenizer = Tokenizer.from_file(str(path))
+    if tokenizer.truncation is None:
+        tokenizer.enable_truncation(max_length=RERANK_MAX_TOKENS, strategy="longest_first")
+    if tokenizer.padding is None:
+        tokenizer.enable_padding(pad_id=tokenizer.token_to_id(PAD_TOKEN) or 0, pad_token=PAD_TOKEN)
+    return tokenizer
 
 
 def _loaded_bundle(model_name: str, revision: str) -> dict[str, Any]:
-    """The pinned cross-encoder, loaded from local files only.
+    """The pinned cross-encoder from `cache/models/`, compiled for the CPU."""
+    from model_files import installed_file
+    from openvino_runtime import compiled_model, precision_name
 
-    Loaded through `transformers`, the library the approved model matrix names
-    for this architecture and the one the benchmark already uses. The previous
-    loader asked optimum for `onnx/model.onnx`, and the approved revision of
-    `BAAI/bge-reranker-v2-m3` ships no ONNX at all — so the runtime reranker
-    could never load the only reranker the product approves.
-    """
-    import torch
-    from transformers import AutoModelForSequenceClassification, AutoTokenizer
-
-    common = {
-        "revision": revision,
-        "local_files_only": True,
-        "trust_remote_code": False,
-    }
-    tokenizer = AutoTokenizer.from_pretrained(model_name, **common)
-    model = AutoModelForSequenceClassification.from_pretrained(
-        model_name, dtype=torch.float32, **common
-    )
-    model.eval()
-    model, precision = _cpu_precision(model)
+    tokenizer = _pair_tokenizer(installed_file(model_name, revision, RERANKER_TOKENIZER_FILE))
+    model = compiled_model(installed_file(model_name, revision, RERANKER_WEIGHTS_FILE))
     return {
         "model": model,
         "tokenizer": tokenizer,
         "model_id": model_name,
         "model_revision": revision,
-        "precision": precision,
+        "precision": precision_name(),
     }
-
-
-# The reranker's Linear layers at int8, decided at load time. Measured
-# 2026-09-07 on four cores: twelve pairs at 512 tokens took 10.0 s in fp32
-# with the machine quiet and 18–21 s beside other work, against a 12 s stage
-# bound — so on 483 of 600 benchmark questions the stage was abandoned and
-# the reranker scored nothing. Int8 takes 4.2 s and keeps Spearman 0.81–0.95
-# with the fp32 order. Same weights, same revision, no new files.
-# See `docs/research/2026-09-07-a-reranker-that-never-finished.md`.
-PRECISION_ENV = "LLMWIKI_RERANKER_PRECISION"
-FP32 = "fp32"
-INT8_DYNAMIC = "int8-dynamic"
-
-
-def requested_precision() -> str:
-    """What the operator asked for: int8 unless told fp32 by name."""
-    if os.environ.get(PRECISION_ENV, "").strip().lower() == FP32:
-        return FP32
-    return INT8_DYNAMIC
-
-
-def _cpu_precision(model: Any) -> tuple[Any, str]:
-    """The model at the requested precision, and the name of what it got."""
-    import torch
-
-    # A stand-in `torch` in tests has no `nn`; nothing that is not a real
-    # module is quantised, and nothing about it is assumed.
-    module_type = getattr(getattr(torch, "nn", None), "Module", ())
-    if requested_precision() == FP32 or not isinstance(model, module_type):
-        return model, FP32
-    # In place, or the model is deep-copied and the copy owns every weight —
-    # measured 2026-09-08: the copy took the process to 3.6 GB of anonymous
-    # memory and the kernel killed a stand worker at 3.8 GB, while in place
-    # it is 1.07 GB anonymous against 0.8 GB for fp32, the rest file-backed
-    # and evictable. The freed heap is handed back to the OS afterwards.
-    # Deprecated in torch 2.13 in favour of torchao, which is not installed;
-    # the call still works and the replacement is one line when it is.
-    quantized = torch.ao.quantization.quantize_dynamic(
-        model, {torch.nn.Linear}, dtype=torch.qint8, inplace=True
-    )
-    _release_heap()
-    return quantized, INT8_DYNAMIC
-
-
-def _release_heap() -> None:
-    """Return what quantisation freed to the OS; glibc keeps it otherwise."""
-    import ctypes
-    import gc
-    import sys
-
-    gc.collect()
-    if not sys.platform.startswith("linux"):
-        return
-    try:
-        ctypes.CDLL("libc.so.6").malloc_trim(0)
-    except (OSError, AttributeError):
-        return
 
 
 def _get_reranker_bundle() -> dict[str, Any] | None:
@@ -208,7 +144,7 @@ def _load_reranker_bundle() -> dict[str, Any] | None:
 def _loadable_identity() -> tuple[str, str] | None:
     """The configured identity when the libraries that load it are present."""
     identity = configured_reranker_identity()
-    if identity is None or not _have_reranker_deps():
+    if identity is None or not _libraries_importable():
         return None
     return identity
 
@@ -273,7 +209,7 @@ def reranker_installed() -> bool:
 
 @functools.lru_cache(maxsize=1)
 def _libraries_importable() -> bool:
-    return all(importlib.util.find_spec(name) is not None for name in ("torch", "transformers"))
+    return all(importlib.util.find_spec(name) is not None for name in RERANKER_PACKAGES)
 
 
 def _exact_bypass_reason(profile: str, intents: set[str]) -> str | None:
@@ -378,24 +314,16 @@ def _require_time(deadline: float | None) -> None:
 
 
 def _batch_logits(bundle: Mapping[str, Any], pairs: list) -> list[float]:
-    """Raw logits for one batch, padded to the longest passage it contains."""
-    import torch
+    """Raw logits for one batch, padded to the longest pair it contains."""
+    import numpy as np
 
-    queries = [pair[0] for pair in pairs]
-    documents = [pair[1] for pair in pairs]
-    inputs = bundle["tokenizer"](
-        queries,
-        documents,
-        padding=True,
-        truncation="longest_first",
-        max_length=RERANK_MAX_TOKENS,
-        return_tensors="pt",
-    )
-    with torch.inference_mode():
-        logits = bundle["model"](**inputs).logits.float().reshape(-1).tolist()
-    if isinstance(logits, float):
-        return [float(logits)]
-    return [float(value) for value in logits]
+    encoded = bundle["tokenizer"].encode_batch([tuple(pair) for pair in pairs])
+    feeds = {
+        "input_ids": np.array([item.ids for item in encoded], dtype=np.int64),
+        "attention_mask": np.array([item.attention_mask for item in encoded], dtype=np.int64),
+    }
+    logits = bundle["model"](feeds)[0]
+    return [float(value) for value in np.asarray(logits).reshape(-1)]
 
 
 def _batches_by_length(pairs: list) -> list[list[int]]:
@@ -618,7 +546,7 @@ if __name__ == "__main__":
     identity = configured_reranker_identity()
     if identity is None:
         print("Reranker not configured.")
-    elif not _have_reranker_deps():
+    elif not _libraries_importable():
         print("Reranker dependencies not installed.")
     elif reranker_available():
         print("Reranker loaded locally.")

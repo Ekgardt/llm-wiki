@@ -39,7 +39,7 @@ _BOUNDARY = re.compile(rb"(?<=[.!?])[ \t]+|\n+")
 
 # numpy (the hybrid profile) is imported only where sentences are scored: an encoder
 # exists only with that profile. See `docs/research/2026-09-14-a-base-install-can-search.md`.
-Encoder = Callable[[Sequence[str], bool], "np.ndarray"]
+Encoder = Callable[[Sequence[str]], "np.ndarray"]
 
 
 def sentence_spans(content: bytes, start: int, end: int) -> list[tuple[int, int]]:
@@ -78,8 +78,8 @@ def prunes(content: bytes, start: int, end: int) -> bool:
 def _scores(question: str, sentences: Sequence[str], encode: Encoder) -> np.ndarray:
     import numpy as np
 
-    query = np.asarray(encode([question], True), dtype=float)[0]
-    passages = np.asarray(encode(sentences, False), dtype=float)
+    query = np.asarray(encode([question]), dtype=float)[0]
+    passages = np.asarray(encode(sentences), dtype=float)
     norms = np.linalg.norm(passages, axis=1) * (np.linalg.norm(query) or 1.0)
     return passages @ query / np.where(norms == 0, 1.0, norms)
 

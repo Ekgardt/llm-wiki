@@ -38,7 +38,11 @@ llm-wiki/                          ← vault root (= $LLM_WIKI_ROOT)
 │   ├── code_navigation_renderer.py   deterministic compact result windows
 │   ├── windows_workspace.py          Windows handle-relative filesystem boundary
 │   ├── schemas/                      transaction/queue/compile/archive/claim schemas
-│   ├── reranker.py                  cross-encoder reranker: bge-reranker-v2-m3, int8, on by default (2026-09-10)
+│   ├── reranker.py                  cross-encoder reranker: multilingual-reranker-base, int8 ONNX, on by default
+│   ├── embedding_model.py           the one name of the encoder: bge-m3, its pinned files and digest
+│   ├── onnx_encoder.py              bge-m3 dense vectors: first token, L2-normalised, through OpenVINO
+│   ├── openvino_runtime.py          compile a model on the CPU; declines OpenVINO telemetry before the first import
+│   ├── model_files.py               where a pinned model's files live: cache/models/<repo>/<revision>/
 │   ├── install_models.py            fetch and verify the two pinned models (the one network step for weights)
 │   ├── access_tracking.py           explicit telemetry promotion + decay stats
 │   ├── retrieval_telemetry.py       private bounded retrieval event cache
@@ -92,7 +96,7 @@ llm-wiki/                          ← vault root (= $LLM_WIKI_ROOT)
 │   │       ├── vectors.npy             optional
 │   │       └── vectors.json            optional
 │   ├── fact-keys/keys.sqlite3       nightly fact keys and ledger records, copied into the next build
-│   ├── models/                      v4.0: ML model cache (reranker, embeddings)
+│   ├── models/<repo>/<revision>/    the pinned encoder and reranker as ordinary files (2026-11-24)
 │   ├── compile/                     validated content-addressed compile plans
 │   ├── claims.sqlite3               derived claim candidate index
 │   ├── code-tools/                  managed code-tool artifacts

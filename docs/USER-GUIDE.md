@@ -777,12 +777,18 @@ don't match:
 uv sync --locked --inexact --extra semantic
 ```
 
-This installs ONNX Runtime and `tokenizers`, not `torch`; the encoder is `intfloat/multilingual-e5-small`
-— 384 dimensions over 100 languages, so a question in one language reaches a page
-written in another. The English-only model it replaces scored every candidate alike
-on non-English questions. The weights themselves (0.5 GB, plus 2.2 GB for the
-reranker below) are fetched by one explicit, verified step that the installer and
-the nightly pass run for you and that you can run by hand:
+This installs OpenVINO and `tokenizers`, not `torch`, and brings both models
+search reads: the encoder `BAAI/bge-m3` (1 024 dimensions, over 100 languages)
+and the reranker below. A question in one language reaches a page written in
+another: on 996 questions across the four crossings of Russian and English, a
+Russian question over English pages found its answer first on 46 % of them,
+where the previous encoder, `intfloat/multilingual-e5-small`, managed 4 %.
+OpenVINO publishes no wheel for Intel macOS; there the extra installs without it
+and search answers by words alone.
+
+The weights themselves (2.3 GB for the encoder, 0.6 GB for the reranker) are
+fetched by one explicit, verified step that the installer and the nightly pass
+run for you and that you can run by hand:
 
 ```bash
 uv run python scripts/install_models.py          # fetch what is missing, verify
@@ -790,16 +796,25 @@ uv run python scripts/install_models.py --check  # report only
 ```
 
 Each model is fetched at its pinned commit, only the files the loaders read,
-and its weights file (`onnx/model.onnx` for the encoder, `model.safetensors`
-for the reranker) is checked against the size and SHA-256 recorded beside the
-revision; a file that does not match is removed and the command fails. Once the
-encoder's ONNX weights are verified, the PyTorch weights it read before are
-removed from the cache.
+as ordinary files under `cache/models/<repo>/<revision>/`, and its weights file
+(`onnx/model.onnx_data` for the encoder, `onnx/model_quantized.onnx` for the
+reranker) is checked against the size and SHA-256 recorded beside the revision;
+a file that does not match is removed and the command fails. Once a model is
+verified, the revision it replaced is deleted from the Hugging Face cache
+(`~/.cache/huggingface/hub`): the old encoder and reranker, about 2.8 GB.
 Present files are never fetched again. Until the weights are there, `doctor`
 reports `models: degraded` with that command and search stays lexical.
-A first query in a fresh process loads the model: measured on this vault on
-2026-09-25, a cold CLI query takes 2.3 s (it was 8.2 s when the encoder ran on
-`torch`), while the MCP server loads it once and answers warm afterwards.
+
+OpenVINO sends Intel a usage event on import unless its consent file declines.
+`scripts/install_models.py` and every model load write `0` to
+`~/intel/openvino_telemetry` (`%LOCALAPPDATA%\Intel Corporation\openvino_telemetry`
+on Windows) when no choice is recorded there, keep a choice that is, and
+do not load a model when it cannot write the file. `doctor` names the file
+when it holds anything but `0`.
+
+Both models run at the precision OpenVINO picks for the CPU (bf16 where the CPU
+has it); `LLMWIKI_INFERENCE_PRECISION=f32` keeps full precision. `OMP_NUM_THREADS`
+sets how many threads each model uses.
 Vectors live inside the active evidence generation
 (`cache/evidence-graph/generations/<id>/`, beside its search index), and
 are built by a generation refresh — the nightly maintenance pass, or
@@ -810,28 +825,28 @@ reports `vector_state: absent` and search stays lexical. (Issue #29.)
 ## Reranker (on by default)
 
 After the lexical and dense legs are fused, a multilingual cross-encoder,
-`BAAI/bge-reranker-v2-m3` at a pinned revision, reads the question together
-with each of the ten best candidates and reorders them. It is on by default
-since 2026-09-10: on the cross-lingual corpus it takes a Russian question over
-English pages from MRR 0.60 to 0.98, where swapping the embedding model gained
-at most 0.04 (`docs/research/2026-09-10-cross-lingual-memory-world-practice.md`).
+`Horizon-Labs/multilingual-reranker-base` at a pinned revision in its int8 ONNX
+export, reads the question together with each of the ten best candidates and
+reorders them. With the encoder above, it put the answer first on 52.8 % of the
+996 questions, against 37.9 % for the previous pair of models.
 
-- The MCP server loads it once at start-up (about 2 s, quantised to int8 on the
-  CPU) and keeps it resident; a question then pays only the scoring, about 2 s
-  for ten passages on four quiet cores and up to 3.5 s on loaded ones. The
-  trace reports `reranker_applied`, `reranker_depth` and `reranker_duration_ms`.
+- The MCP server loads it once and keeps it resident; on eight threads a
+  question then paid a median 0.47 s for the scoring and about 1 s for the
+  whole search. The trace reports `reranker_applied`, `reranker_depth` and
+  `reranker_duration_ms`.
 - The CLI reranks only when asked with `--rerank`: a one-shot process cannot
   amortise the load.
-- Weights are read from the local Hugging Face cache only, like the embedding
-  model's; `scripts/install_models.py` puts them there (see above). Without
-  them the trace says `reranker_unavailable` and the fused order stands.
+- Weights are read from `cache/models/` only, like the encoder's;
+  `scripts/install_models.py` puts them there (see above). Without them the
+  trace says `reranker_unavailable` and the fused order stands.
 - When the rerank's measured cost does not fit the time a question has left, it
   is not waited for: the trace says `optional_stage_not_admitted`, the fused
   order stands and the answer is not marked partial. `optional_stage_timeout`
   means a stage was waited for and ran out of time.
 - `LLMWIKI_RERANKER_MODEL=off` switches it off; `LLMWIKI_RERANKER_MODEL` plus a
-  40-hex `LLMWIKI_RERANKER_REVISION` name another model.
-  `LLMWIKI_RERANKER_PRECISION=fp32` restores full precision at twice the time.
+  40-hex `LLMWIKI_RERANKER_REVISION` name another model, whose
+  `onnx/model_quantized.onnx` and `tokenizer.json` you place under
+  `cache/models/<repo with / as -->/<revision>/` yourself.
 
 ---
 

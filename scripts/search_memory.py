@@ -1,15 +1,14 @@
 """Hybrid search over the vault's knowledge.
 
 Uses Python's built-in sqlite3 + FTS5 for BM25 full-text search over the active
-generation. When the `semantic` extra is installed, the pinned E5 encoder runs
-through ONNX Runtime (`scripts/onnx_encoder.py`) for the dense leg. Results are
+generation. When the `semantic` extra is installed, the pinned bge-m3 encoder
+runs through OpenVINO (`scripts/onnx_encoder.py`) for the dense leg. Results are
 fused via Reciprocal Rank Fusion (RRF) for hybrid ranking.
 
-Costs measured on this vault:
+Costs on this vault:
 - lexical only: tens of milliseconds, zero optional dependencies
-- with vectors: loading the encoder costs about 1.5 s once per process
-  (2026-09-25; it was 6.5 s through `sentence-transformers` and `torch`), and
-  finds semantically related pages ("database performance" → "N+1 query fix")
+- with vectors: loading the encoder once per process, and the dense leg finds
+  related pages in either language ("database performance" → "N+1 query fix")
 
 Usage:
     uv run python scripts/search_memory.py "auth decision"
@@ -162,7 +161,6 @@ from embedding_model import (  # noqa: E402
     EMBEDDING_DIM,
     EMBEDDING_MODEL,
     EMBEDDING_MODEL_REVISION,
-    prefixed_texts,
 )
 
 # Why there is no dense signal, in three words a reader can act on:
@@ -236,7 +234,7 @@ def _note_embedder_unavailable(kind: str, detail: str) -> None:
     )
 
 
-ENCODER_PACKAGES = ("onnxruntime", "tokenizers", "huggingface_hub", "numpy")
+ENCODER_PACKAGES = ("openvino", "tokenizers", "numpy")
 
 
 def _have_encoder_runtime() -> bool:
@@ -252,16 +250,16 @@ def _have_encoder_runtime() -> bool:
 def _get_embedder():
     """Lazily load the embedding model. Returns None if unavailable.
 
-    The model is cached at module level: the 470 MB session is built once per
-    process, not per query.
+    The model is cached at module level: it is compiled once per process, not
+    per query.
 
     Unavailable still means None, never an exception: the generation reader
     treats an unusable query vector as "no dense signal" by contract and that
     is exactly what an unavailable model means. What changed is that the
     reason is recorded and named — see `embedder_unavailable_reason`.
 
-    The load is local-only: the files come from the Hugging Face cache and
-    never the network (`scripts/install_models.py` fetches them). A vault that
+    The load is local-only: the files come from `cache/models/` and never the
+    network (`scripts/install_models.py` fetches them). A vault that
     does not have the weights says `model_unavailable` and degrades to lexical,
     which is the same answer it gives for weights it cannot read.
     """
@@ -955,17 +953,9 @@ def _built_generation_vectors(
     ], reused
 
 
-def _generation_embedder(embedder, *, is_query: bool):
-    """The generation paths want a callable, and E5 wants each side told apart.
-
-    A page is a passage and a question is a query; encoding either with the
-    other's prefix costs accuracy the model was trained to give.
-    """
-
-    def encode(texts) -> list[list[float]]:
-        return embedder.encode(prefixed_texts(list(texts), is_query)).tolist()
-
-    return encode
+def _encoded_rows(embedder, texts) -> list[list[float]]:
+    """The generation paths want plain rows; bge-m3 encodes questions and pages alike."""
+    return embedder.encode(list(texts)).tolist()
 
 
 def _lazy_generation_query_encoder():
@@ -994,7 +984,7 @@ def _lazy_generation_query_encoder():
         loaded = _get_embedder()
         if loaded is None:
             return []
-        return _generation_embedder(loaded, is_query=True)(texts)
+        return _encoded_rows(loaded, texts)
 
     return encode
 
@@ -1014,7 +1004,7 @@ def _lazy_passage_encoder():
         loaded = _get_embedder()
         if loaded is None:
             raise _EmbedderUnavailable(str(_embedder_unavailable_reason))
-        return _generation_embedder(loaded, is_query=False)(texts)
+        return _encoded_rows(loaded, texts)
 
     return encode
 

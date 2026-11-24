@@ -403,8 +403,11 @@ RRF_K = 60
 CANDIDATE_FANOUT = 8
 MIN_CANDIDATE_POOL = 40
 MAX_CANDIDATE_POOL = 200
-BM25_WEIGHT = 2.0
-DENSE_WEIGHT = 1.0
+# Dense counts twice the lexical rank: with bge-m3, 1:2 put the answer first on
+# 52.8 % of 996 questions across the four language crossings, against 42.7 %
+# at 2:1; words do not cross languages, the vectors do (owner message 17933).
+BM25_WEIGHT = 1.0
+DENSE_WEIGHT = 2.0
 GRAPH_WEIGHT = 0.5
 
 # The graph lane walks one hop from its seeds (docs/research/2026-09-22-the-walk-has-nothing-to-

@@ -133,11 +133,12 @@ def test_rrf_is_rank_only_and_keeps_raw_backend_fields_separate() -> None:
         _hit(candidate_id="c-a", path="a.md", score=0.40, vector_score=0.40),
     ]
     fused, _meta = retrieval.fuse_rrf(lexical=lexical, dense=dense, graph=None)
-    assert fused[0].candidate_id == "c-a"
-    assert fused[0].bm25_rank == 1
-    assert fused[0].bm25_score == 12.5
-    assert fused[0].vector_rank == 2
-    assert fused[0].vector_score == 0.40
+    # The dense rank counts twice the lexical one (retrieval.DENSE_WEIGHT).
+    assert fused[0].candidate_id == "c-b"
+    assert fused[0].bm25_rank == 2
+    assert fused[0].bm25_score == 4.0
+    assert fused[0].vector_rank == 1
+    assert fused[0].vector_score == 0.91
     assert fused[0].rrf_score > fused[1].rrf_score
     assert fused[0].final_score == fused[0].rrf_score
     assert not hasattr(fused[0], "vector_distance")

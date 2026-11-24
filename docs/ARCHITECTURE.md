@@ -182,33 +182,31 @@ consumers fall back honestly to legacy retrieval or bounded live extraction.
 Three local tiers share the same Markdown corpus:
 
 ### Base retrieval tier (no optional search extras)
-1. **BM25 (weight=2.0)**: SQLite FTS5 over the active evidence generation; without one, a bounded direct read of Markdown marked `no_active_generation`. Title boost (5x exact), filename boost (10x match short-circuit).
+1. **BM25 (weight=1.0)**: SQLite FTS5 over the active evidence generation; without one, a bounded direct read of Markdown marked `no_active_generation`. Title boost (5x exact), filename boost (10x match short-circuit).
 2. **Graph-neighbor (weight=0.5)**: wikilink adjacency boost.
 
 No embedding model, vector cache, or optional package is required in this tier.
 
 ### Optional semantic tier (`uv sync --locked --inexact --extra semantic`)
-1. **BM25 (weight=2.0)**: SQLite FTS5 over the generation.
-2. **Vector (weight=1.0)**: numpy brute-force cosine similarity using intfloat/multilingual-e5-small over the generation's `vectors.npy` (with `vectors.json` beside it).
+1. **BM25 (weight=1.0)**: SQLite FTS5 over the generation.
+2. **Vector (weight=2.0)**: numpy brute-force cosine similarity over the generation's
+   `vectors.npy` (with `vectors.json` beside it), encoded by `BAAI/bge-m3` through
+   OpenVINO on the CPU, without `torch` (embedded, no daemon). Words do not cross
+   languages and the vectors do, so the dense rank counts twice.
 3. **Graph-neighbor (weight=0.5)**: wikilink adjacency boost.
 
 ### Hybrid tier (`uv sync --locked --inexact --extra hybrid`)
-1. **BM25 (weight=2.0)**: SQLite FTS5 (same as base — 25 years battle-tested).
-2. **Vector (weight=1.0)**: numpy cosine over the generation's vectors, the same
-   `intfloat/multilingual-e5-small` embedding as the semantic tier, run through ONNX
-   Runtime without `torch` (embedded, no daemon).
-3. **Graph-neighbor (weight=0.5)**: wikilink adjacency boost.
-4. **Cross-encoder reranker**: `BAAI/bge-reranker-v2-m3` (optional, `transformers` on `torch`,
-   int8 dynamic quantisation on the CPU), re-scores the head of the list.
+The semantic tier plus a cross-encoder reranker: `Horizon-Labs/multilingual-reranker-base`,
+its int8 ONNX export through OpenVINO, re-scores the head of the list. `hybrid` and
+`reranker` name the same runtime as `semantic`; both models are read from
+`cache/models/<repo>/<revision>/`, which `scripts/install_models.py` fills and verifies.
 
-**RRF formula**: `score = 2.0/(60+bm25_rank) + 1.0/(60+vector_rank) + 0.5/(60+graph_rank)` for signals that actually return a ranked candidate.
+**RRF formula**: `score = 1.0/(60+bm25_rank) + 2.0/(60+vector_rank) + 0.5/(60+graph_rank)` for signals that actually return a ranked candidate.
 
-The encoder is pinned to `intfloat/multilingual-e5-small`; the legacy vector cache it once
-fed was retired on 2026-09-23. `benchmark/model-matrix-v1.json` defines pinned multilingual embedding
-and reranker candidates, but its default embedding and reranker are both `null` and
-its status is `awaiting_raw_benchmark`. No new default or superiority claim is
-allowed until raw EN/RU/ZH quality, latency, RAM, license, regression, and Pareto
-evidence passes the selection contract. **Evidence pending.**
+The encoder is pinned to `BAAI/bge-m3` and the reranker to
+`Horizon-Labs/multilingual-reranker-base`, chosen on 996 questions across the four
+EN/RU crossings (owner message 17933); the legacy vector cache was retired on
+2026-09-23.
 
 **Why no PostgreSQL?** PostgreSQL requires a daemon, which violates Axiom #1.
 SQLite plus the optional in-process vectors preserves a local, zero-daemon deployment shape. This is
@@ -327,7 +325,7 @@ no environment variables.
 ## What v4.0 adds (optional, all behind `--extra` flags)
 
 - **Hybrid vectors** (`--extra hybrid`): in-process numpy vector search, embedded, zero-daemon.
-- **Cross-encoder reranker** (`--extra reranker`): `BAAI/bge-reranker-v2-m3` on `torch`, re-ranks the head of the list.
+- **Cross-encoder reranker** (`--extra reranker`): `Horizon-Labs/multilingual-reranker-base` on OpenVINO, re-ranks the head of the list.
 - **Code graph** (`--extra code-graph`): lazy tree-sitter parsing of Python,
   JavaScript, TypeScript, Go, Rust, Java, C, C++, Ruby, PHP, C#, and Bash;
   materialized `.scm` queries, call graph, and impact analysis.

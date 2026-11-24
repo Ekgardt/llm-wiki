@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import errno
 import hashlib
-import importlib
 import io
 import json
 import os
@@ -289,32 +288,24 @@ def _check(report: dict, check_id: str) -> dict:
     return next(item for item in report["checks"] if item["id"] == check_id)
 
 
-def _cache_pinned_models(tmp_path: Path, monkeypatch) -> None:
-    """The pinned model files present in a Hub cache of the test's own, as an install leaves them.
+def _install_pinned_models(tmp_path: Path, home: Path, monkeypatch) -> None:
+    """The pinned model files and the declined telemetry, as `install_models.py` leaves them.
 
-    The report used to read this machine's real cache, so a healthy-vault test
-    passed or failed with whatever the machine had downloaded. See
-    `docs/research/2026-09-25-the-encoder-runs-without-torch.md`.
+    The report used to read this machine's real cache and home, so a healthy-vault
+    test passed or failed with whatever the machine held.
     """
     import install_models
+    import model_files
+    import openvino_runtime
 
-    hub = install_models.hub_library()
-    if hub is None:
-        return
-    cache = tmp_path / "hub-cache"
-    # The package loads `constants` lazily; import it by name to set the cache.
-    constants = importlib.import_module(f"{hub.__name__}.constants")
-    monkeypatch.setattr(constants, "HF_HUB_CACHE", str(cache))
+    monkeypatch.setattr(model_files, "models_root", lambda: tmp_path / "models")
+    for variable in ("HOME", "USERPROFILE", "LOCALAPPDATA"):
+        monkeypatch.setenv(variable, str(home))
     for model in install_models.pinned_models():
-        _write_pinned_files(cache, model)
-
-
-def _write_pinned_files(cache: Path, model) -> None:
-    snapshot = cache / f"models--{model.repo_id.replace('/', '--')}" / "snapshots" / model.revision
-    named = [pattern for pattern in model.allow_patterns if "*" not in pattern]
-    for name in {model.weights_file, *named}:
-        (snapshot / name).parent.mkdir(parents=True, exist_ok=True)
-        (snapshot / name).write_bytes(b"pinned")
+        for name in {model.weights_file, *model.read_files}:
+            (model.directory / name).parent.mkdir(parents=True, exist_ok=True)
+            (model.directory / name).write_bytes(b"pinned")
+    openvino_runtime.decline_telemetry()
 
 
 def _take_snapshot(root: Path, home: Path) -> None:
@@ -379,7 +370,7 @@ def test_report_schema_and_all_check_classes_are_json_safe(tmp_path, monkeypatch
     )
     _create_claim_index(root, state_root)
     _create_generation(root, state_root)
-    _cache_pinned_models(tmp_path, monkeypatch)
+    _install_pinned_models(tmp_path, home, monkeypatch)
     _take_snapshot(root, home)
 
     report = doctor.run_doctor(root=root, state_root=state_root, home=home, now=now)
@@ -1458,7 +1449,7 @@ def test_cli_returns_zero_for_healthy_report(tmp_path, monkeypatch, capsys):
     _create_index(state_root / "cache" / "index.sqlite")
     _create_claim_index(root, state_root)
     _create_generation(root, state_root)
-    _cache_pinned_models(tmp_path, monkeypatch)
+    _install_pinned_models(tmp_path, home, monkeypatch)
     _take_snapshot(root, home)
     monkeypatch.setenv("LLM_WIKI_ROOT", str(root))
     monkeypatch.setenv("LLM_WIKI_STATE_ROOT", str(state_root))

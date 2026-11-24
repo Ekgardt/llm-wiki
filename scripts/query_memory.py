@@ -871,16 +871,11 @@ def _sentence_encoder():
     one-shot command-line answer delivers turns whole.
     """
     import search_memory
-    from embedding_model import prefixed_texts
 
     embedder = search_memory._embedder_cache
     if embedder is None:
         return None
-
-    def encode(texts, is_query):
-        return embedder.encode(prefixed_texts(list(texts), is_query))
-
-    return encode
+    return embedder.encode
 
 
 def _pruner(question: str | None):
