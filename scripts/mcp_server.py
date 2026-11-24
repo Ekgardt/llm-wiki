@@ -48,7 +48,7 @@ import sys
 import threading
 import time
 from collections import OrderedDict
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from contextvars import ContextVar
 from dataclasses import asdict
 from pathlib import Path, PureWindowsPath
@@ -628,8 +628,9 @@ ANSWER_BUDGET_SCHEMA_FIELDS = {
     },
 }
 
-# Hard filters of a plain recall: every leg of the search obeys them, so the
-# answer is filled from matching pages instead of being cut down afterwards.
+# Filters of a plain recall: every leg of the search obeys them, so the answer
+# is filled from matching pages instead of being cut down afterwards. The dates
+# order the answer rather than cut it: pages outside them follow the ones inside.
 RECALL_FILTER_SCHEMA_FIELDS = {
     "project": {
         "type": "string",
@@ -639,12 +640,14 @@ RECALL_FILTER_SCHEMA_FIELDS = {
     "since": {
         "type": "string",
         "maxLength": 10,
-        "description": "Only pages dated on or after this day, YYYY-MM-DD",
+        "description": "Pages dated on or after this day come first, YYYY-MM-DD",
     },
     "as_of": {
         "type": "string",
         "maxLength": 10,
-        "description": "Only pages valid on this day, YYYY-MM-DD, superseded too",
+        "description": (
+            "Pages valid on this day, superseded too, come first, YYYY-MM-DD"
+        ),
     },
     "type": {
         "type": "string",
@@ -5859,7 +5862,7 @@ def _grounded_recall(arguments: dict, deadline: float):
 
 
 def _recall_filters(arguments: Mapping[str, object]) -> dict[str, str]:
-    """The hard filters a recall asked for, by their search keyword; dates must be days."""
+    """The filters a recall asked for, by their search keyword; dates must be days."""
     filters = {
         keyword: str(arguments[name])
         for keyword, name in RECALL_FILTER_ARGUMENTS.items()
@@ -5892,14 +5895,8 @@ def _tool_recall(arguments: dict, deadline: float):
         return _grounded_recall(arguments, deadline), False
     effective_limit, limit_clamped = _clamped_limit(arguments.get("limit", 8))
     reported: dict[str, object] = {}
-    results = _call_with_deadline(
-        _search_vault,
-        arguments["query"],
-        limit=effective_limit,
-        deadline=deadline,
-        trace_sink=reported,
-        filters=filters,
-    )
+    search = functools.partial(_recall_search, arguments["query"], effective_limit, deadline)
+    results = _dated_first(search(filters, reported), search, filters, effective_limit)
     trace = _retrieval_trace(results, reported)
     data = {
         "results": [_agent_row(row) for row in results],
@@ -5907,6 +5904,48 @@ def _tool_recall(arguments: dict, deadline: float):
         "_meta": _call_with_deadline(_meta, deadline=deadline),
     }
     return data, limit_clamped
+
+
+Rows = list[dict[str, object]]
+
+
+def _recall_search(
+    query: str,
+    limit: int,
+    deadline: float,
+    filters: Mapping[str, str],
+    reported: dict[str, object],
+) -> Rows:
+    rows: Rows = _call_with_deadline(
+        _search_vault, query, limit=limit, deadline=deadline, trace_sink=reported, filters=filters
+    )
+    return rows
+
+
+def _dated_first(
+    dated: Rows,
+    search: Callable[[Mapping[str, str], dict[str, object]], Rows],
+    filters: Mapping[str, str],
+    limit: int,
+) -> Rows:
+    """The pages inside the asked dates, then the best pages outside them up to the limit."""
+    undated = _without_dates(filters)
+    if len(undated) == len(filters) or len(dated) >= limit:
+        return dated
+    return [*dated, *_rows_not_in(search(undated, {}), dated)][:limit]
+
+
+def _without_dates(filters: Mapping[str, str]) -> dict[str, str]:
+    return {key: value for key, value in filters.items() if key not in RECALL_DATE_FILTERS}
+
+
+def _rows_not_in(rows: Rows, kept: Rows) -> Rows:
+    seen = {_row_identity(row) for row in kept}
+    return [row for row in rows if _row_identity(row) not in seen]
+
+
+def _row_identity(row: Mapping[str, object]) -> object:
+    return row.get("candidate_id") or row.get("path")
 
 
 # What an agent reads from a recall row: the page and its score. The trace is

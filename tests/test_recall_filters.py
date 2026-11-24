@@ -175,6 +175,35 @@ def test_a_grounded_recall_refuses_filters_it_cannot_apply() -> None:
         )
 
 
+def _recall_paths(monkeypatch: pytest.MonkeyPatch, arguments: dict[str, object]) -> list[str]:
+    """Recall over two pages: an old one that matches best and a new one inside the window."""
+    pages = {"old": "knowledge/notes/old.md", "new": "knowledge/notes/new.md"}
+
+    def search(_query: str, **kwargs: object) -> list[dict[str, object]]:
+        filters = kwargs.get("filters")
+        if isinstance(filters, dict) and "since" in filters:
+            return [{"path": pages["new"]}]
+        return [{"path": pages["old"]}, {"path": pages["new"]}]
+
+    monkeypatch.setattr(mcp_server, "_search_vault", search)
+    data, _clamped = mcp_server._tool_recall(arguments, time.monotonic() + SHORT_TIMEOUT)
+    return [str(row["path"]) for row in data["results"]]
+
+
+def test_a_recall_date_puts_pages_inside_it_first_and_keeps_the_rest(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    paths = _recall_paths(monkeypatch, {"query": "nightly", "since": "2026-11-01", "limit": 5})
+
+    assert paths == ["knowledge/notes/new.md", "knowledge/notes/old.md"]
+
+
+def test_a_recall_date_never_pushes_out_a_full_window(monkeypatch: pytest.MonkeyPatch) -> None:
+    paths = _recall_paths(monkeypatch, {"query": "nightly", "since": "2026-11-01", "limit": 1})
+
+    assert paths == ["knowledge/notes/new.md"]
+
+
 def test_the_lexical_fallback_keeps_the_filters(monkeypatch: pytest.MonkeyPatch) -> None:
     calls: list[dict[str, object]] = []
 
