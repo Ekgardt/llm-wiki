@@ -1083,7 +1083,9 @@ def _assert_codex_probe_requests(observed, root):
     assert "bypass" not in observed["input"].casefold()
 
 
-def test_codex_probe_wait_never_exceeds_its_budget_when_the_deadline_rounds_up(monkeypatch):
+def test_codex_probe_wait_never_exceeds_its_budget_when_the_deadline_rounds_up(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     import doctor
 
     # At this reading `(reading + 2.0) - reading` is 2.000000000000057.
@@ -1095,7 +1097,9 @@ def test_codex_probe_wait_never_exceeds_its_budget_when_the_deadline_rounds_up(m
     assert doctor._codex_wait_seconds(deadline) == doctor.CODEX_HOOK_PROBE_SECONDS
 
 
-def test_codex_probe_wait_is_the_time_left_to_an_earlier_deadline(monkeypatch):
+def test_codex_probe_wait_is_the_time_left_to_an_earlier_deadline(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     import doctor
 
     monkeypatch.setattr(doctor.time, "monotonic", lambda: 100.0)
