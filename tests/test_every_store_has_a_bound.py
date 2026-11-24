@@ -37,14 +37,18 @@ ROOT = Path(__file__).resolve().parent.parent
 
 
 def test_the_temporary_and_job_directories_are_ephemeral(tmp_path: Path, monkeypatch) -> None:
+    # The test owns both roots: a checkout that itself lives in the system temporary
+    # directory is rightly ephemeral, so the real checkout cannot stand for a kept one.
+    monkeypatch.setattr(tempfile, "tempdir", str(tmp_path / "temp"))
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "host"))
     job = tmp_path / "host" / "jobs" / "abc" / "tmp" / "clean"
+    kept_checkout = tmp_path / "projects" / "kept"
 
     roots = ephemeral_paths.ephemeral_roots()
     verdicts = (
-        ephemeral_paths.is_under(Path(tempfile.gettempdir()) / "x", roots),
+        ephemeral_paths.is_under(tmp_path / "temp" / "x", roots),
         ephemeral_paths.is_under(job, roots),
-        ephemeral_paths.is_under(ROOT, roots),
+        ephemeral_paths.is_under(kept_checkout, roots),
     )
 
     assert verdicts == (True, True, False)

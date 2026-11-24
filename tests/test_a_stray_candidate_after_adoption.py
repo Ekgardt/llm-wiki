@@ -176,6 +176,20 @@ def test_the_harness_refuses_a_state_root_that_is_the_vault_or_inside_it(tmp_pat
     assert verdicts == (True, True, None)
 
 
+def test_parallel_workers_each_get_their_own_external_state_root(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("LLM_WIKI_STATE_ROOT", str(tmp_path / "state"))
+    roots = []
+    for worker in ("gw0", "gw1"):
+        monkeypatch.setenv("PYTEST_XDIST_WORKER", worker)
+        roots.append(conftest._external_state_root())
+    monkeypatch.delenv("PYTEST_XDIST_WORKER")
+    roots.append(conftest._external_state_root())
+
+    assert roots == [tmp_path / "state" / "gw0", tmp_path / "state" / "gw1", tmp_path / "state"]
+
+
 def test_the_progress_file_gets_its_directory_before_the_first_test(tmp_path: Path) -> None:
     path = tmp_path / "pytest-timings" / "progress.txt"
 
