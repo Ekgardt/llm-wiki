@@ -640,14 +640,12 @@ RECALL_FILTER_SCHEMA_FIELDS = {
     "since": {
         "type": "string",
         "maxLength": 10,
-        "description": "Pages dated on or after this day come first, YYYY-MM-DD",
+        "description": "Rank pages dated from this day first, YYYY-MM-DD",
     },
     "as_of": {
         "type": "string",
         "maxLength": 10,
-        "description": (
-            "Pages valid on this day, superseded too, come first, YYYY-MM-DD"
-        ),
+        "description": "Rank pages valid this day first, YYYY-MM-DD",
     },
     "type": {
         "type": "string",
