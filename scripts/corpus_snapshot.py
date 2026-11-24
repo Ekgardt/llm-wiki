@@ -2751,9 +2751,8 @@ def collect_corpus(
     selected_deadline = _deadline_value(deadline, deadline_seconds)
     if coordinator is not None:
         _check_deadline(selected_deadline)
-        gate = coordinator.writer_gate(
-            wait_seconds=_writer_wait_seconds(selected_deadline, deadline, deadline_seconds)
-        )
+        remaining = _writer_wait_seconds(selected_deadline, deadline, deadline_seconds)
+        gate = coordinator.writer_gate(wait_seconds=remaining)
     else:
         gate = contextlib.nullcontext()
     with gate:

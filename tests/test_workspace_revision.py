@@ -14,6 +14,7 @@ import time
 import unicodedata
 from dataclasses import fields
 from pathlib import Path, PurePosixPath, PureWindowsPath
+from typing import Any
 
 import pytest
 import workspace_revision
@@ -2772,47 +2773,91 @@ def test_private_index_blocked_status_is_bounded_and_leak_free(
     assert not (repository / ".git/index.lock").exists()
 
 
+_DESCENDANT_RECORDING_GIT = (
+    "#!/bin/sh\n"
+    '"$REVISION_REAL_GIT" "$@"\n'
+    "status=$?\n"
+    "sleep 30 </dev/null >/dev/null 2>&1 &\n"
+    'case "$GIT_INDEX_FILE" in /proc/self/fd/*) kind=private ;; *) kind=ordinary ;; esac\n'
+    'printf "%s %s\\n" "$kind" "$!" >> "$REVISION_DESCENDANT_PIDS"\n'
+    'exit "$status"\n'
+)
+
+
+def _install_descendant_recording_git(
+    monkeypatch: pytest.MonkeyPatch, wrapper_root: Path, real_git: str
+) -> Path:
+    """A git that leaves one `sleep` behind per run and records which kind of run left it."""
+    wrapper_root.mkdir()
+    wrapper = wrapper_root / "git"
+    wrapper.write_text(_DESCENDANT_RECORDING_GIT, encoding="ascii")
+    wrapper.chmod(0o755)
+    _qualify_private_git_wrapper(monkeypatch, wrapper)
+    pids_path = wrapper_root / "descendant-pids"
+    monkeypatch.setenv("REVISION_REAL_GIT", real_git)
+    monkeypatch.setenv("REVISION_DESCENDANT_PIDS", str(pids_path))
+    monkeypatch.setenv("PATH", f"{wrapper_root}{os.pathsep}{os.environ.get('PATH', '')}")
+    return pids_path
+
+
+def _recorded_descendants(pids_path: Path, kind: str | None = None) -> list[int]:
+    if not pids_path.exists():
+        return []
+    records = [line.split() for line in pids_path.read_text(encoding="ascii").splitlines()]
+    return [int(pid) for recorded, pid in records if kind in (None, recorded)]
+
+
+def _kill_recorded_descendants(pids_path: Path) -> None:
+    for pid in _recorded_descendants(pids_path):
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+
+
+def _fail_first_private_proof(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Make the first private pass restart without its fast path, as a changed directory would."""
+    real_validate = workspace_revision._validate_private_git_proof
+    calls: list[None] = []
+
+    def validate_after_first(*args: Any, **kwargs: Any) -> bool:
+        calls.append(None)
+        return len(calls) > 1 and real_validate(*args, **kwargs)
+
+    monkeypatch.setattr(workspace_revision, "_validate_private_git_proof", validate_after_first)
+
+
 @pytest.mark.skipif(not _linux_memfd_available(), reason="Linux process groups")
+@pytest.mark.parametrize("private_pass_restarts", [False, True])
 def test_private_index_success_cleans_descendants_before_reaping_group_leader(
     repository: Path,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    private_pass_restarts: bool,
 ) -> None:
+    """Every private-index run's descendants are gone, even when an ordinary pass follows it.
+
+    The ordinary reader does not kill its group on success, so a restart used to
+    leave the last recorded descendant alive and fail this test under load.
+    """
     real_git = shutil.which("git")
     if real_git is None:
         pytest.skip("Git executable is unavailable")
     scope = resolve_repository_scope(repository)
     expected = compute_workspace_revision(scope)
-    wrapper_root = tmp_path / "successful-git-wrapper"
-    wrapper_root.mkdir()
-    descendant_pid_path = wrapper_root / "descendant-pid"
-    wrapper = wrapper_root / "git"
-    wrapper.write_text(
-        "#!/bin/sh\n"
-        '"$REVISION_REAL_GIT" "$@"\n'
-        "status=$?\n"
-        "sleep 30 </dev/null >/dev/null 2>&1 &\n"
-        'printf "%s" "$!" > "$REVISION_DESCENDANT_PID"\n'
-        'exit "$status"\n',
-        encoding="ascii",
+    pids_path = _install_descendant_recording_git(
+        monkeypatch, tmp_path / "successful-git-wrapper", real_git
     )
-    wrapper.chmod(0o755)
-    _qualify_private_git_wrapper(monkeypatch, wrapper)
-    monkeypatch.setenv("REVISION_REAL_GIT", real_git)
-    monkeypatch.setenv("REVISION_DESCENDANT_PID", str(descendant_pid_path))
-    monkeypatch.setenv("PATH", f"{wrapper_root}{os.pathsep}{os.environ.get('PATH', '')}")
-
-    descendant_pid = None
+    if private_pass_restarts:
+        _fail_first_private_proof(monkeypatch)
     try:
         assert workspace_revision.verify_workspace_revision_unchanged(scope, expected) is True
-        descendant_pid = int(descendant_pid_path.read_text(encoding="ascii"))
-        _await_descendant_reaped(descendant_pid)
+        private_descendants = _recorded_descendants(pids_path, "private")
+        assert private_descendants
+        for pid in private_descendants:
+            _await_descendant_reaped(pid)
     finally:
-        if descendant_pid is not None:
-            try:
-                os.kill(descendant_pid, signal.SIGKILL)
-            except ProcessLookupError:
-                pass
+        _kill_recorded_descendants(pids_path)
 
 
 @pytest.mark.skipif(not _linux_memfd_available(), reason="Linux memfd optimization")

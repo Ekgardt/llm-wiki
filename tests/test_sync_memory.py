@@ -8,7 +8,7 @@ import sqlite3
 import subprocess
 import time
 from pathlib import Path
-from types import SimpleNamespace
+from types import ModuleType, SimpleNamespace
 
 import pytest
 
@@ -25,7 +25,7 @@ EXPECTED_ACTIONS = (
 )
 
 
-def _load_sync_memory():
+def _load_sync_memory() -> ModuleType:
     spec = importlib.util.spec_from_file_location("sync_memory_under_test", SYNC_SCRIPT)
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
