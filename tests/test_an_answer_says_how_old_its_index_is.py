@@ -169,7 +169,8 @@ def test_a_cli_hit_shows_the_passage_that_holds_the_query_words() -> None:
 
 def test_a_passage_without_a_space_before_the_word_still_holds_the_word() -> None:
     filler = "Nothing relevant is said here. " * 20
-    hit = {"content": f"## Shelf\n\n{filler}https://example.org/catalogue/furniture/living-room/oak-bookshelf sold out."}
+    link = "https://example.org/catalogue/furniture/living-room/oak-bookshelf"
+    hit = {"content": f"## Shelf\n\n{filler}{link} sold out."}
 
     snippet = search_memory.result_snippet(hit, "bookshelf")
 

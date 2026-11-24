@@ -381,7 +381,8 @@ def test_the_tokenizer_keeps_the_window_the_model_ships_with(tmp_path: Path) -> 
 
     shipped = reranker._pair_tokenizer(_word_tokenizer_file(tmp_path, shipped_window=3))
 
-    assert (shipped.truncation["max_length"], shipped.truncation["strategy"]) == (3, "longest_first")
+    truncation = shipped.truncation
+    assert (truncation["max_length"], truncation["strategy"]) == (3, "longest_first")
     assert shipped.padding is not None
 
 
