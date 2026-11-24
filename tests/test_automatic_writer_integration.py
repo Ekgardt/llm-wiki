@@ -1353,6 +1353,9 @@ def test_mutation_recovers_after_crash_during_apply(tmp_path, monkeypatch, relat
     monkeypatch.setenv("LLM_WIKI_ROOT", str(vault))
     monkeypatch.setenv("LLM_WIKI_STATE_ROOT", str(state))
     target = vault / relative
+    # The writer wait is the test's hang bound here: on a loaded Windows worker the
+    # first mutation of a process measured 28-35 s (run 45439505286, 2026-11-24).
+    monkeypatch.setattr(markdown_transaction, "_WRITER_WAIT_SECONDS", LONG_TIMEOUT)
     original = markdown_transaction.MarkdownCoordinator._killpoint
 
     def crash(self, name, parent_transaction_id=None):

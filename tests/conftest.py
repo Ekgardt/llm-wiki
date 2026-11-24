@@ -16,6 +16,7 @@ uses its own `<LLM_WIKI_STATE_ROOT>/gwN` below that location.
 """
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import sys
@@ -42,9 +43,11 @@ def _host_vault(environ: MutableMapping[str, str]) -> str | None:
     """The vault the host's own hooks write to, as the first pytest process received it.
 
     The line below pins `LLM_WIKI_ROOT` to this checkout, and xdist workers inherit
-    the pinned value; the first process records the host's value for them.
+    the pinned value; the first process records the host's value for them, JSON-encoded
+    so that "no vault" survives Windows, which drops an empty environment variable.
     """
-    return environ.setdefault(HOST_VAULT_VARIABLE, environ.get("LLM_WIKI_ROOT", "")) or None
+    recorded = environ.setdefault(HOST_VAULT_VARIABLE, json.dumps(environ.get("LLM_WIKI_ROOT")))
+    return json.loads(recorded) or None
 
 
 _HOST_VAULT = _host_vault(os.environ)

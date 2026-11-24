@@ -4714,7 +4714,7 @@ def test_owner_json_is_canonical_redacted_restricted_and_has_only_schema(
     environment_secret = "allowlisted-environment-secret-7f31"
     monkeypatch.setenv("TMP", environment_secret)
     process = _start(
-        tmp_path, "--ignored-secret", secret_argument, "--sleep-seconds", "2"
+        tmp_path, "--ignored-secret", secret_argument, "--sleep-seconds", "30"
     )
     owner_file = process.owner_root / "owner.json"
     raw = owner_file.read_bytes()

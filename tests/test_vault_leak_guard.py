@@ -89,12 +89,20 @@ def test_the_host_vault_is_read_before_the_checkout_pins_it() -> None:
     environ = {"LLM_WIKI_ROOT": "/live-vault"}
 
     assert conftest._host_vault(environ) == "/live-vault"
-    assert environ[conftest.HOST_VAULT_VARIABLE] == "/live-vault"
+    assert environ[conftest.HOST_VAULT_VARIABLE] == '"/live-vault"'
+
+
+def test_no_host_vault_is_recorded_as_a_value_windows_keeps() -> None:
+    """Windows drops an empty environment variable, so "no vault" must not be empty."""
+    environ: dict[str, str] = {}
+
+    assert conftest._host_vault(environ) is None
+    assert environ[conftest.HOST_VAULT_VARIABLE]
 
 
 def test_a_worker_inherits_the_host_vault_not_the_pinned_checkout() -> None:
     """xdist workers inherit the pinned `LLM_WIKI_ROOT`; the recorded host value wins."""
-    environ = {"LLM_WIKI_ROOT": str(conftest.VAULT_ROOT), conftest.HOST_VAULT_VARIABLE: ""}
+    environ = {"LLM_WIKI_ROOT": str(conftest.VAULT_ROOT), conftest.HOST_VAULT_VARIABLE: "null"}
 
     assert conftest._host_vault(environ) is None
 
