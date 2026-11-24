@@ -142,6 +142,11 @@ def _crashing_grandchild_processor(task: dict) -> bool:
     raise RuntimeError("processor crash")
 
 
+def _is_gone(pid: int) -> bool:
+    """Exited, as the queue judges it: a zombie its reaper has not collected yet is gone."""
+    return not memory_queue._descendant_alive({pid}, platform_name=os.name)
+
+
 def _kill_test_process(pid: int) -> None:
     if not memory_queue._pid_is_alive(pid):
         return
@@ -357,7 +362,7 @@ def test_worker_timeout_kills_spawned_grandchild_tree(tmp_path: Path) -> None:
         )
     pid = read_pid(pid_path, SHORT_TIMEOUT)
     try:
-        assert not memory_queue._pid_is_alive(pid)
+        assert _is_gone(pid)
     finally:
         _kill_test_process(pid)
 
@@ -373,7 +378,7 @@ def test_worker_cleans_grandchild_before_returning_normal_result(tmp_path: Path)
         )
         pid = read_pid(pid_path, SHORT_TIMEOUT)
         assert result is True
-        assert not memory_queue._pid_is_alive(pid)
+        assert _is_gone(pid)
     finally:
         if pid_path.exists():
             _kill_test_process(int(pid_path.read_text(encoding="ascii")))
@@ -393,7 +398,7 @@ def test_worker_cleans_grandchild_before_reporting_malformed_result(
             )
         pid = read_pid(pid_path, SHORT_TIMEOUT)
         assert raised.value.code == "processor_result_malformed"
-        assert not memory_queue._pid_is_alive(pid)
+        assert _is_gone(pid)
     finally:
         if pid_path.exists():
             _kill_test_process(int(pid_path.read_text(encoding="ascii")))
@@ -413,7 +418,7 @@ def test_worker_cleans_grandchild_before_reporting_processor_crash(
             )
         pid = read_pid(pid_path, SHORT_TIMEOUT)
         assert raised.value.code == "processor_exception"
-        assert not memory_queue._pid_is_alive(pid)
+        assert _is_gone(pid)
     finally:
         if pid_path.exists():
             _kill_test_process(int(pid_path.read_text(encoding="ascii")))
@@ -454,7 +459,7 @@ def test_deferred_compile_completes_before_queue_ack(
     assert summary.succeeded == 1
     assert queue.get(task_id).state == "succeeded"
     assert done_path.read_text(encoding="ascii") == "done"
-    assert not memory_queue._pid_is_alive(compiler_pid)
+    assert _is_gone(compiler_pid)
 
 
 def test_deferred_compile_timeout_kills_compiler_tree(
@@ -490,7 +495,7 @@ def test_deferred_compile_timeout_kills_compiler_tree(
     compiler_pid = read_pid(pid_path, SHORT_TIMEOUT)
     task = queue.get(task_id)
     # The subject is the kill, so it is asserted first and unconditionally.
-    assert not memory_queue._pid_is_alive(compiler_pid)
+    assert _is_gone(compiler_pid)
     assert summary.failed == 1
     _assert_timed_out_task(task)
 
