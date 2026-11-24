@@ -15,6 +15,8 @@ import pytest
 from code_languages import CODE_LANGUAGE_BY_SUFFIX, language_for_path
 from corpus_snapshot import CorpusChanged, collect_corpus, validate_live_snapshot
 
+from tests.clock_bounds import within_budget
+
 EXPECTED_CODE_LANGUAGE_BY_SUFFIX = {
     ".bash": "bash",
     ".c": "c",
@@ -672,7 +674,8 @@ def test_writer_gate_receives_remaining_deadline_and_releases_on_error(
     with pytest.raises(ValueError, match="total byte limit"):
         collect_corpus(vault, coordinator=coordinator, deadline_seconds=5, max_total_bytes=16)
     assert coordinator.wait_seconds is not None
-    assert 0 <= coordinator.wait_seconds <= 5
+    assert coordinator.wait_seconds >= 0
+    assert within_budget(coordinator.wait_seconds, 5)
     assert coordinator.released is True
 
 

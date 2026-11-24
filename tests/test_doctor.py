@@ -18,6 +18,7 @@ from pathlib import Path
 
 import pytest
 
+from tests.clock_bounds import ROUNDING_CLOCK_READING, within_budget
 from tests.slow_machine import LONG_TIMEOUT, SHORT_TIMEOUT
 
 SCRIPTS = Path(__file__).resolve().parent.parent / "scripts"
@@ -1049,10 +1050,13 @@ def test_codex_hooks_probe_is_bounded_and_uses_exact_cwd(tmp_path, monkeypatch):
         lambda: ["codex", "app-server", "--listen", "stdio://"],
     )
 
+    # The clock stands at a reading whose deadline rounds the budget up by one
+    # spacing, as a Windows runner's did (run 45482419969); see tests/clock_bounds.py.
+    monkeypatch.setattr(doctor.time, "monotonic", lambda: ROUNDING_CLOCK_READING)
     response = doctor._probe_codex_hooks_list(
         root,
         home,
-        deadline=time.monotonic() + doctor.CODEX_HOOK_PROBE_SECONDS,
+        deadline=ROUNDING_CLOCK_READING + doctor.CODEX_HOOK_PROBE_SECONDS,
     )
 
     _assert_codex_probe_identity(observed, root, home)
@@ -1072,7 +1076,7 @@ def _assert_codex_probe_limits(observed):
 
     assert observed["kwargs"]["stdout"] is subprocess.PIPE
     assert observed["kwargs"]["stderr"] is subprocess.PIPE
-    assert observed["timeout"] <= doctor.CODEX_HOOK_PROBE_SECONDS
+    assert within_budget(observed["timeout"], doctor.CODEX_HOOK_PROBE_SECONDS)
 
 
 def _assert_codex_probe_requests(observed, root):

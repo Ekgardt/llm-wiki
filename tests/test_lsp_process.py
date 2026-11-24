@@ -36,6 +36,7 @@ from lsp_protocol import (
     RequestCancelled,
 )
 
+from tests.clock_bounds import within_budget
 from tests.slow_machine import LONG_TIMEOUT, SHORT_TIMEOUT
 
 FAKE_SERVER = Path(__file__).with_name("fake_lsp_server.py").resolve()
@@ -7164,9 +7165,8 @@ def test_windows_owner_acl_uses_one_bounded_change_and_one_verification(
         assert kwargs["shell"] is False
         assert kwargs["check"] is False
         assert kwargs["capture_output"] is True
-        # The budget is a deadline minus a later clock read, so rounding can
-        # leave it an ulp above the constant it was derived from.
-        assert 0 < float(kwargs["timeout"]) <= lsp_process._STARTUP_WAIT_SECONDS + 1e-6
+        assert float(kwargs["timeout"]) > 0
+        assert within_budget(float(kwargs["timeout"]), lsp_process._STARTUP_WAIT_SECONDS)
     assert set(path.name for path in owner.iterdir()) == {
         "cancellation",
         "failure.json",

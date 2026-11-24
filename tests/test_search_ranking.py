@@ -22,6 +22,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from tests.clock_bounds import within_budget
 from tests.slow_machine import SHORT_TIMEOUT
 
 SCRIPTS_DIR = Path(__file__).resolve().parent.parent / "scripts"
@@ -468,7 +469,8 @@ def test_generation_connection_uses_remaining_deadline_as_busy_timeout(
 
     assert connection is not None
     assert captured[0]["uri"] is True
-    assert 0 <= captured[0]["timeout"] <= 0.25
+    assert captured[0]["timeout"] >= 0
+    assert within_budget(captured[0]["timeout"], 0.25)
 
 
 def test_generation_connection_checks_cancel_after_open_before_validation(
