@@ -66,6 +66,19 @@ def test_the_tail_of_a_glued_identifier_finds_the_page() -> None:
     ]
 
 
+def test_a_correction_the_stemmer_would_cut_again_still_finds_the_page() -> None:
+    """Porter stores "advertise" as "advertis", and stems "advertis" on to "adverti"."""
+    connection = _artifact("We advertise the release.", "We cooked pasta.")
+
+    assert _found(connection, "advertsie") == ["We advertise the release."]
+
+
+def test_a_glued_term_the_stemmer_would_cut_again_still_finds_the_page() -> None:
+    connection = _artifact("Messages go to AWSSimpleQueueService.", "We cooked pasta.")
+
+    assert _found(connection, "SimpleQueueService") == ["Messages go to AWSSimpleQueueService."]
+
+
 def test_a_word_the_index_holds_gains_no_glued_words() -> None:
     connection = _artifact("A bookshelf and a bookshelfmaker.")
 

@@ -450,6 +450,9 @@ def test_generation_connection_uses_remaining_deadline_as_busy_timeout(
         def close(self):
             pass
 
+        def create_function(self, *_args, **_kwargs):
+            pass
+
     def connect(*_args, **kwargs):
         captured.append(kwargs)
         return Connection()

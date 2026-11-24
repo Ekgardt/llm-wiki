@@ -27,6 +27,7 @@ import search_memory  # noqa: E402
 def _artifact(*pages: tuple[str, str, str]) -> sqlite3.Connection:
     """One chunk per (path, type, text)."""
     connection = sqlite3.connect(":memory:")
+    search_memory.register_casefold_function(connection)
     connection.executescript(search_memory._GENERATION_FTS_DDL)
     for order, (path, page_type, text) in enumerate(pages):
         connection.execute(
@@ -65,6 +66,42 @@ def test_a_page_type_filter_finds_the_page_others_outrank() -> None:
     assert _paths(_crowded_artifact(), page_type="Decision") == [
         "knowledge/notes/cache-decision.md"
     ]
+
+
+DECISION = "Решение"
+
+
+def test_a_page_type_in_another_script_matches_in_any_case() -> None:
+    connection = _artifact(
+        ("knowledge/notes/a.md", "debugging", "cache cache cache"),
+        ("knowledge/notes/b.md", DECISION, "cache"),
+    )
+
+    assert _paths(connection, page_type=DECISION.lower()) == ["knowledge/notes/b.md"]
+
+
+def _markdown_page(root: Path, name: str, page_type: str, body: str) -> Path:
+    path = root / "knowledge" / "notes" / f"{name}.md"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(f"---\ntype: {page_type}\n---\n# {name}\n\n{body}\n", encoding="utf-8")
+    return path
+
+
+def test_without_a_generation_a_page_type_filter_finds_the_page_others_outrank(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(search_memory, "ROOT", tmp_path)
+    noise = [
+        _markdown_page(tmp_path, f"cache-{n}", "debugging", "cache cache cache eviction")
+        for n in range(10)
+    ]
+    wanted = _markdown_page(tmp_path, "cache-decision", "decision", "cache policy")
+
+    hits = search_memory.markdown_hits(
+        "cache", limit=1, page_paths=[*noise, wanted], page_type="Decision"
+    )
+
+    assert [Path(hit["path"]).stem for hit in hits] == ["cache-decision"]
 
 
 def test_a_path_prefix_filter_finds_the_page_others_outrank() -> None:
@@ -114,9 +151,10 @@ def test_recall_names_its_filters_by_the_search_keywords() -> None:
     }
 
 
-def test_recall_refuses_a_date_that_is_not_a_day() -> None:
+@pytest.mark.parametrize("day", ["last week", "20261124", "2026-W47-2", "2026-11-1", "2026-02-30"])
+def test_recall_refuses_a_date_that_is_not_a_day(day: str) -> None:
     with pytest.raises(ValueError, match="'as_of' must be a day"):
-        mcp_server._recall_filters({"query": "q", "as_of": "last week"})
+        mcp_server._recall_filters({"query": "q", "as_of": day})
 
 
 def test_a_grounded_recall_refuses_filters_it_cannot_apply() -> None:

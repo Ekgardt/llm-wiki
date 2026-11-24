@@ -5873,10 +5873,16 @@ def _recall_filters(arguments: Mapping[str, object]) -> dict[str, str]:
 def _require_day(name: str, value: str | None) -> None:
     if value is None:
         return
+    if _parsed_day(value) != value:
+        raise ValueError(f"argument '{name}' must be a day as YYYY-MM-DD")
+
+
+def _parsed_day(value: str) -> str | None:
+    """The day `value` names in the exact YYYY-MM-DD form the search compares as text."""
     try:
-        dt.date.fromisoformat(value[:10])
+        return dt.datetime.strptime(value, "%Y-%m-%d").date().isoformat()
     except ValueError:
-        raise ValueError(f"argument '{name}' must be a day as YYYY-MM-DD") from None
+        return None
 
 
 def _tool_recall(arguments: dict, deadline: float):

@@ -381,8 +381,23 @@ def test_the_tokenizer_keeps_the_window_the_model_ships_with(tmp_path: Path) -> 
 
     shipped = reranker._pair_tokenizer(_word_tokenizer_file(tmp_path, shipped_window=3))
 
-    assert (shipped.truncation["max_length"], shipped.truncation["strategy"]) == (3, "only_second")
+    assert (shipped.truncation["max_length"], shipped.truncation["strategy"]) == (3, "longest_first")
     assert shipped.padding is not None
+
+
+def test_a_query_longer_than_the_window_is_still_scored(tmp_path: Path) -> None:
+    pytest.importorskip("tokenizers")
+    import numpy as np
+    import reranker
+
+    tokenizer = reranker._pair_tokenizer(_word_tokenizer_file(tmp_path, shipped_window=3))
+
+    def model(feeds: dict[str, Any]) -> list[Any]:
+        return [feeds["attention_mask"].sum(axis=1, keepdims=True).astype(np.float32)]
+
+    bundle = {"model": model, "tokenizer": tokenizer}
+
+    assert reranker._batch_logits(bundle, [("a b a b a", "b")]) == [3.0]
 
 
 def test_a_tokenizer_without_a_window_gets_the_product_one(tmp_path: Path) -> None:

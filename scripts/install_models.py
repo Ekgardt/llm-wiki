@@ -11,9 +11,11 @@ the weights file is checked against the size and SHA-256 recorded beside the
 revision. A file that does not match is removed and the run fails. Present and
 verified files are not fetched again, so the nightly can run this every night.
 
-Once a model is verified, the pinned revision it replaced is deleted from the
-Hugging Face cache (`intfloat/multilingual-e5-small` and
-`BAAI/bge-reranker-v2-m3`, about 2.8 GB), since nothing reads it any more.
+Once a model is verified, the pinned revision it replaced
+(`intfloat/multilingual-e5-small` and `BAAI/bge-reranker-v2-m3`, about 2.8 GB) is
+deleted from the Hugging Face cache, but only when this vault's verification
+record shows that this installer fetched it there: the cache is shared with
+other tools, and a revision they fetched is theirs.
 """
 from __future__ import annotations
 
@@ -70,6 +72,8 @@ class PinnedModel:
     weights_bytes: int
     read_files: tuple[str, ...]
     # The pinned (repository, revision) this model replaced in the Hugging Face cache.
+    # Kept while a vault may still hold a verification record of that revision; remove
+    # once no supported release fetches into the Hugging Face cache any more.
     replaces: tuple[str, str] | None = None
     # The modules that load this model; without them its weights are not wanted.
     runtime: tuple[str, ...] = RUNTIME
@@ -260,8 +264,15 @@ def ensure(model: PinnedModel, hub, *, download: bool) -> dict:
         return _outcome(model, STATE_PRESENT, path, None)
     if not download:
         return _outcome(model, STATE_MISSING, None, "not installed under cache/models")
-    (model.directory / model.weights_file).unlink(missing_ok=True)
+    _drop_mismatched_weights(model)
     return _verified_download(model, hub)
+
+
+def _drop_mismatched_weights(model: PinnedModel) -> None:
+    """Remove weights on disk that differ from the pin; verified ones stay for the fetch to keep."""
+    path = model.directory / model.weights_file
+    if path.is_file() and mismatch_reason(path, model) is not None:
+        path.unlink()
 
 
 def _holds(repo: Any, repo_id: str, revision: str) -> bool:
@@ -270,13 +281,21 @@ def _holds(repo: Any, repo_id: str, revision: str) -> bool:
     return any(entry.commit_hash == revision for entry in repo.revisions)
 
 
+def _fetched_here(repo: Any) -> bool:
+    """This vault's verification record names a file inside that cached repository."""
+    entry = _read_verifications().get(repo.repo_id)
+    if not isinstance(entry, list) or not entry or not isinstance(entry[0], str):
+        return False
+    return Path(entry[0]).is_relative_to(Path(repo.repo_path).resolve())
+
+
 def _cache_holding(hub: Any, repo_id: str, revision: str) -> Any:
-    """The Hugging Face cache when it holds that pinned revision, else None."""
+    """The Hugging Face cache when it holds that revision as this vault fetched it, else None."""
     try:
         cache = hub.scan_cache_dir()
     except hub.CacheNotFound:
         return None
-    if any(_holds(repo, repo_id, revision) for repo in cache.repos):
+    if any(_holds(repo, repo_id, revision) and _fetched_here(repo) for repo in cache.repos):
         return cache
     return None
 
@@ -290,7 +309,17 @@ def retire_replaced(model: PinnedModel, hub: Any) -> list[str]:
     if cache is None:
         return []
     cache.delete_revisions(revision).execute()
+    _forget_verification(repo_id)
     return [f"{repo_id}@{revision[:12]}"]
+
+
+def _forget_verification(repo_id: str) -> None:
+    """Drop the record of a deleted revision; a write that fails leaves a record of nothing."""
+    remaining = {key: entry for key, entry in _read_verifications().items() if key != repo_id}
+    try:
+        _verification_record().write_text(json.dumps(remaining, sort_keys=True), encoding="utf-8")
+    except OSError:
+        return
 
 
 def _settled_and_retired(model: PinnedModel, hub, *, download: bool) -> dict:

@@ -4702,6 +4702,8 @@ class _SearchRun:
             page_paths=self.page_paths,
             deadline=self.deadline,
             cancelled=self.cancelled,
+            page_type=filters.get("page_type"),
+            path_prefix=filters.get("path_prefix"),
         )
         self.legacy_fallback = _first_fallback_reason(rows, self.legacy_fallback)
         return _filtered_hits(rows, filters)

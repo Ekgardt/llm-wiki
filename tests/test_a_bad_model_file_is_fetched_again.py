@@ -87,6 +87,25 @@ def test_a_verified_unchanged_file_is_not_read_again(
     assert (outcome["state"], reads) == (install_models.STATE_PRESENT, [])
 
 
+def test_a_missing_companion_file_does_not_cost_the_verified_weights(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    contents = {"org/encoder": b"encoder weights"}
+    hub = _hub(tmp_path, monkeypatch, contents)
+    model = _pinned_to(contents)[0]
+    install_models.ensure(model, hub, download=True)
+    companion = next(name for name in model.read_files if name != model.weights_file)
+    (model.directory / companion).unlink()
+    hub.downloads.clear()
+
+    outcome = install_models.ensure(model, hub, download=True)
+
+    assert (outcome["state"], hub.downloads) == (
+        install_models.STATE_FETCHED,
+        [(model.repo_id, model.revision, [companion])],
+    )
+
+
 def test_an_unreachable_hub_fails_one_model_and_the_next_is_still_tried(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

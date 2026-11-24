@@ -2171,6 +2171,7 @@ def _validated_generation_connection(
         if not _fts_contents_hold(connection, manifest, deadline, cancelled):
             connection.close()
             return None
+        register_casefold_function(connection)
         return connection
     except BaseException:
         _close_quietly(connection)
@@ -3052,16 +3053,18 @@ def _spelled_fts_query(connection: sqlite3.Connection, query: str) -> str:
     corrections = query_spelling.corrections(connection, terms, GENERATION_TOKENIZER)
     glued = query_spelling.glued_words(connection, terms, GENERATION_TOKENIZER)
     stems = query_spelling.cyrillic_stems(terms)
-    expressions = (
-        _fts_query(query),
-        _fts_expression([*corrections, *glued]),
-        _fts_prefixes(stems),
-    )
+    expressions = (_fts_query(query), _fts_prefixes([*corrections, *glued, *stems]))
     return " OR ".join(filter(None, expressions))
 
 
-def _fts_prefixes(stems: Sequence[str]) -> str:
-    return " OR ".join(f'"{stem}"*' for stem in stems)
+def _fts_prefixes(terms: Sequence[str]) -> str:
+    """Prefix queries, which the tokenizer does not stem again.
+
+    Corrections and glued words are terms as the index stores them, already
+    stemmed; written as a phrase, Porter would stem them a second time and
+    "advertis" (from "advertise") would become "adverti", which matches nothing.
+    """
+    return " OR ".join(f'"{term.replace(chr(34), chr(34) * 2)}"*' for term in terms)
 
 
 def _normalized_filename_stem(value: str) -> str:
@@ -3096,10 +3099,14 @@ def normalized_path_prefix(path_prefix: str | None) -> str:
 def _add_page_clauses(
     clauses: list[str], values: list[str], *, page_type: str | None, path_prefix: str | None
 ) -> None:
-    """The page's own type, and the vault-relative path it must start with (case-sensitive)."""
+    """The page's own type in any case of any script, and the path it must start with.
+
+    SQLite's lower() folds ASCII only, so the type is folded by Python's casefold,
+    the rule `_field_mismatch` applies to the rows read back.
+    """
     if page_type:
-        clauses.append("lower(coalesce(type, '')) = lower(?)")
-        values.append(page_type)
+        clauses.append("llm_wiki_casefold(type) = ?")
+        values.append(page_type.casefold())
     prefix = normalized_path_prefix(path_prefix)
     if prefix:
         clauses.append("substr(source_path, 1, length(?)) = ?")
@@ -3413,6 +3420,15 @@ _GENERATION_CHUNK_COLUMNS = (
     "heading_ancestry, type, project, authority, confidence, status, valid_from, "
     "valid_to, language, title, content, span_sha256"
 )
+
+
+def register_casefold_function(connection: sqlite3.Connection) -> None:
+    connection.create_function(
+        "llm_wiki_casefold",
+        1,
+        lambda value: value.casefold() if isinstance(value, str) else "",
+        deterministic=True,
+    )
 
 
 def _register_filename_stem_function(connection: sqlite3.Connection) -> None:
@@ -4267,6 +4283,7 @@ def _direct_markdown_hits(
     as_of: str | None,
     deadline: float | None,
     cancelled: Callable[[], bool] | None,
+    page_filters: Mapping[str, str | None] | None = None,
 ) -> list[dict]:
     """Return bounded literal matches from authoritative Markdown only.
 
@@ -4288,10 +4305,20 @@ def _direct_markdown_hits(
             since=since,
             as_of=as_of,
         )
-        if hit is not None:
+        if hit is not None and _kept_by_page_filters(hit, page_filters):
             results.append(hit)
     results.sort(key=lambda item: (-float(item["score"]), str(item["path"])))
     return results[: max(limit * 3, limit)]
+
+
+def _kept_by_page_filters(
+    hit: Mapping[str, object], page_filters: Mapping[str, str | None] | None
+) -> bool:
+    """A hit of the type and under the path asked for, judged before the pool is cut."""
+    wanted = page_filters or {}
+    if _field_mismatch(hit, "type", wanted.get("page_type")):
+        return False
+    return not _outside_prefix(hit, wanted.get("path_prefix"))
 
 
 def markdown_hits(
@@ -4305,6 +4332,8 @@ def markdown_hits(
     page_paths: list[Path] | None = None,
     deadline: float | None = None,
     cancelled: Callable[[], bool] | None = None,
+    page_type: str | None = None,
+    path_prefix: str | None = None,
 ) -> list[dict]:
     """The lexical signal when no generation is active: Markdown, read directly.
 
@@ -4327,6 +4356,7 @@ def markdown_hits(
         as_of=as_of,
         deadline=deadline,
         cancelled=cancelled,
+        page_filters={"page_type": page_type, "path_prefix": path_prefix},
     )
     normalized_stem = _normalized_filename_stem(query)
     hits = _with_exact_page(hits, pages, normalized_stem, project=project, since=since, as_of=as_of)
@@ -4540,8 +4570,8 @@ def _matched_passage(text: str, query: str) -> str:
     hits = [(match.start(), match.group(0).casefold()) for match in pattern.finditer(text)]
     if not hits:
         return text
-    start = _densest_start(hits)
-    return _passage_from(text, max(0, start - SNIPPET_LEAD_CHARS))
+    match = _densest_start(hits)
+    return _passage_from(text, max(0, match - SNIPPET_LEAD_CHARS), match)
 
 
 def _densest_start(hits: list[tuple[int, str]]) -> int:
@@ -4554,10 +4584,11 @@ def _densest_start(hits: list[tuple[int, str]]) -> int:
     return hits[best][0]
 
 
-def _passage_from(text: str, start: int) -> str:
+def _passage_from(text: str, start: int, match: int) -> str:
+    """The text from the first word boundary of the lead, never from past the match."""
     if start == 0:
         return text
-    boundary = text.find(" ", start)
+    boundary = text.find(" ", start, match)
     return "…" + text[boundary if boundary >= 0 else start:]
 
 

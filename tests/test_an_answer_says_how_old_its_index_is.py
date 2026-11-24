@@ -167,6 +167,15 @@ def test_a_cli_hit_shows_the_passage_that_holds_the_query_words() -> None:
     assert "The bookshelf came from the flea market." in snippet
 
 
+def test_a_passage_without_a_space_before_the_word_still_holds_the_word() -> None:
+    filler = "Nothing relevant is said here. " * 20
+    hit = {"content": f"## Shelf\n\n{filler}https://example.org/catalogue/furniture/living-room/oak-bookshelf sold out."}
+
+    snippet = search_memory.result_snippet(hit, "bookshelf")
+
+    assert "bookshelf" in snippet
+
+
 # "Notes" in the query is in the genitive plural; the passage spells it in the nominative.
 TWO_NOTES_ABOUT_SEARCH = "Две заметки о поиске."
 SEARCH_OF_NOTES = "поиск заметок"

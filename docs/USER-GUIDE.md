@@ -526,9 +526,9 @@ deletion contract.
 The model matrix pins candidate revisions and forbids a predetermined winner. A new
 embedding or reranker default requires complete raw EN/RU/ZH quality and resource
 measurements, license checks, no parent-recall regression, material improvement, and
-Pareto efficiency. The pinned defaults are `intfloat/multilingual-e5-small` and
-`BAAI/bge-reranker-v2-m3`; evidence that any candidate should replace them is
-pending.
+Pareto efficiency. The pinned defaults are `BAAI/bge-m3` and
+`Horizon-Labs/multilingual-reranker-base`, run on OpenVINO; they replaced
+`intfloat/multilingual-e5-small` and `BAAI/bge-reranker-v2-m3` on 2026-11-24.
 
 Token fields must be read with their labels. `reported` comes from a provider;
 `tokenizer` from a model adapter; `estimated` currently uses UTF-8 byte length;

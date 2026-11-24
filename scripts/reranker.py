@@ -51,8 +51,8 @@ RERANKER_OFF = "off"
 # passages fit the optional stage's share on the MCP path.
 DEFAULT_RERANK_DEPTH = 10
 # The window for a model whose tokenizer names none. The default's own tokenizer
-# names 384 tokens, the query kept whole and the passage cut (`only_second`): the
-# setting it was measured with, and 512 ranked the same questions identically.
+# names 384 tokens, the window it was measured with; 512 ranked the same questions
+# identically.
 RERANK_MAX_TOKENS = 512
 PAD_TOKEN = "<pad>"
 # Pairs scored together. Small enough that a short passage does not pay for
@@ -93,12 +93,16 @@ def _explicit_identity(model: str, revision: str) -> tuple[str, str] | None:
 
 
 def _pair_tokenizer(path: Any) -> Any:
-    """The model's own truncation and padding, or a window and padding when it names none."""
+    """The model's own window, or ours when it names none, cut from the longer side.
+
+    The default ships `only_second`, which cuts the passage alone and raises once
+    the query by itself fills the window, so a long question was never reranked.
+    """
     from tokenizers import Tokenizer
 
     tokenizer = Tokenizer.from_file(str(path))
-    if tokenizer.truncation is None:
-        tokenizer.enable_truncation(max_length=RERANK_MAX_TOKENS, strategy="longest_first")
+    window = (tokenizer.truncation or {}).get("max_length", RERANK_MAX_TOKENS)
+    tokenizer.enable_truncation(max_length=window, strategy="longest_first")
     if tokenizer.padding is None:
         tokenizer.enable_padding(pad_id=tokenizer.token_to_id(PAD_TOKEN) or 0, pad_token=PAD_TOKEN)
     return tokenizer

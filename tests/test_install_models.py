@@ -5,6 +5,7 @@ See `docs/research/2026-09-10-the-weights-arrive-with-the-install.md`.
 from __future__ import annotations
 
 import hashlib
+import json
 import sys
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
@@ -36,11 +37,15 @@ class _FakeCache:
     def __init__(self, held: list[tuple[str, str]]) -> None:
         self.held = held
         self.deleted: list[str] = []
+        self.root = Path("hub")
+
+    def repo_path(self, repo: str) -> Path:
+        return self.root / ("models--" + repo.replace("/", "--"))
 
     @property
     def repos(self) -> list[SimpleNamespace]:
         return [
-            SimpleNamespace(repo_id=repo, repo_type="model",
+            SimpleNamespace(repo_id=repo, repo_type="model", repo_path=self.repo_path(repo),
                             revisions=[SimpleNamespace(commit_hash=revision)])
             for repo, revision in self.held
         ]
@@ -251,14 +256,33 @@ def test_weights_without_their_companion_file_are_fetched_again(two_models: _Fak
     assert [repo for repo, _, _ in two_models.downloads] == ["org/encoder"]
 
 
+def _fetched_by_this_vault(hub: _FakeHub, tmp_path: Path, repo: str) -> None:
+    """The record the earlier installer left when it verified a file it fetched there."""
+    hub.cache.root = tmp_path / "hub"
+    blob = str((hub.cache.repo_path(repo) / "blobs" / "00000000").resolve())
+    (tmp_path / "verified.json").write_text(json.dumps({repo: [blob, 1, 1, 1, "x", 1]}))
+
+
 def test_verified_weights_delete_the_revision_they_replace_from_the_hub_cache(
-    two_models: _FakeHub, capsys: pytest.CaptureFixture[str]
+    two_models: _FakeHub, tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     two_models.cache.held = [RETIRED, ("org/unrelated", "d" * 40)]
+    _fetched_by_this_vault(two_models, tmp_path, RETIRED[0])
 
     assert install_models.main(["--json"]) == 0
     assert two_models.cache.deleted == [RETIRED[1]]
     assert '"retired": ["org/old-encoder@eeeeeeeeeeee"]' in capsys.readouterr().out
+    assert RETIRED[0] not in json.loads((tmp_path / "verified.json").read_text())
+
+
+def test_a_replaced_revision_another_tool_fetched_stays_in_the_shared_cache(
+    two_models: _FakeHub, tmp_path: Path
+) -> None:
+    two_models.cache.held = [RETIRED]
+    two_models.cache.root = tmp_path / "hub"
+
+    assert install_models.main([]) == 0
+    assert two_models.cache.deleted == []
 
 
 def test_a_check_or_a_failed_fetch_retires_nothing(two_models: _FakeHub) -> None:
@@ -283,9 +307,10 @@ def test_no_hub_cache_at_all_retires_nothing_and_does_not_fail(
 
 
 def test_the_text_report_names_the_revision_it_removed(
-    two_models: _FakeHub, capsys: pytest.CaptureFixture[str]
+    two_models: _FakeHub, tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     two_models.cache.held = [RETIRED]
+    _fetched_by_this_vault(two_models, tmp_path, RETIRED[0])
 
     install_models.main([])
 
