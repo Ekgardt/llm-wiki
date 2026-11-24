@@ -1,5 +1,12 @@
-{"tests": ["test_readmes_have_same_h2_section_count"],
- "kinds": ["removed"],
+{
+ "tests": [
+  "test_readmes_have_same_h2_section_count",
+  "::tests.test_structure::test_readmes_have_same_h2_section_count"
+ ],
+ "kinds": [
+  "removed"
+ ],
  "reason": "The owner removed README.ru.md and README.zh-CN.md on 2026-11-21 (owner message 263016509/16422) because law 10 forbids Russian text in the repository, so the Russian README could not be kept in step. test_readmes_have_same_h2_section_count only compared the section counts of the three READMEs and has nothing to compare with one README left. Every README fact the i18n guard pinned is still asserted against README.md in tests/test_readme_i18n.py.",
  "recorded": "2026-11-21",
- "expires": "2027-02-19"}
+ "expires": "2027-02-19"
+}

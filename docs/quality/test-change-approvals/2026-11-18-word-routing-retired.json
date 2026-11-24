@@ -1,5 +1,24 @@
-{"tests": ["test_the_plan_adds_the_graph_only_for_relations", "test_an_anchored_preposition_is_still_a_time_window", "test_ru_zh_analyzer_covers_all_intents", "test_ru_zh_profiles_behavioral", "test_recall_reports_the_dense_component_a_planned_graph_run_used"],
- "kinds": ["removed"],
+{
+ "tests": [
+  "test_the_plan_adds_the_graph_only_for_relations",
+  "test_an_anchored_preposition_is_still_a_time_window",
+  "test_ru_zh_analyzer_covers_all_intents",
+  "test_ru_zh_profiles_behavioral",
+  "test_recall_reports_the_dense_component_a_planned_graph_run_used",
+  "::tests.test_retrieval_review_round2::test_ru_zh_profiles_behavioral[\u4ec0\u4e48\u4f9d\u8d56 search_memory-GRAPH]",
+  "::tests.test_retrieval_review_round2::test_ru_zh_profiles_behavioral[\u4ec0\u4e48\u662f auth\uff1f-HYBRID]",
+  "::tests.test_retrieval_review_round2::test_ru_zh_profiles_behavioral[\u663e\u793a\u4ed3\u5e93\u5730\u56fe-REPO_MAP]",
+  "::tests.test_retrieval_review_round2::test_ru_zh_profiles_behavioral[\u66f4\u6539\u7684\u5f71\u54cd search_memory.py-IMPACT]",
+  "::tests.test_retrieval_review_round2::test_ru_zh_profiles_behavioral[\u81ea 2025-01-01 \u4ee5\u6765\u7684\u51b3\u7b56-TEMPORAL]",
+  "::tests.test_retrieval_review_round2::test_ru_zh_profiles_behavioral[\u8de8\u9879\u76ee\u7efc\u5408\u67b6\u6784-GLOBAL]",
+  "::tests.test_semantic_leg_reaches_the_answer::test_an_anchored_preposition_is_still_a_time_window[\u81ea 2025-01-01 \u4ee5\u6765\u7684\u51b3\u7b56]",
+  "::tests.test_semantic_leg_reaches_the_answer::test_an_anchored_preposition_is_still_a_time_window[decisions since 2025-01-01]",
+  "::tests.test_semantic_leg_reaches_the_answer::test_an_anchored_preposition_is_still_a_time_window[what changed after 2026-01-01]"
+ ],
+ "kinds": [
+  "removed"
+ ],
  "reason": "Each pinned a word-list route that this change retires on purpose: relation words adding the graph, a date phrase making a query TEMPORAL and lexical only, and Russian/Chinese word lists choosing a profile. The owner rejected word lists as a class; every unnamed search now runs lexical, dense and the graph (docs/research/2026-11-17-every-search-runs-every-leg.md). The behaviour they asserted no longer exists, so they cannot run. Their replacements are in tests/test_every_search_runs_every_leg.py (no wording plans a profile, including a Chinese relation question; a relation query still asks the graph; the graph-off caller is planned HYBRID) and tests/test_semantic_leg_reaches_the_answer.py::test_a_bare_preposition_is_not_a_time_window. test_recall_reports_the_dense_component_a_planned_graph_run_used is not retired but renamed, unchanged in body, to tests/test_every_search_runs_every_leg.py::test_recall_reports_a_signal_that_ran_beside_its_profile: since no search is planned GRAPH any more, the old name described a run that no longer happens, while the behaviour it pins (a trace reports dense beside the profile it asked for) still holds.",
  "recorded": "2026-11-18",
- "expires": "2027-02-16"}
+ "expires": "2027-02-16"
+}
