@@ -5893,8 +5893,7 @@ def _tool_recall(arguments: dict, deadline: float):
         return _grounded_recall(arguments, deadline), False
     effective_limit, limit_clamped = _clamped_limit(arguments.get("limit", 8))
     reported: dict[str, object] = {}
-    search = functools.partial(_recall_search, arguments["query"], effective_limit, deadline)
-    results = _dated_first(search(filters, reported), search, filters, effective_limit)
+    results = _recall_results(arguments["query"], filters, effective_limit, deadline, reported)
     trace = _retrieval_trace(results, reported)
     data = {
         "results": [_agent_row(row) for row in results],
@@ -5905,6 +5904,27 @@ def _tool_recall(arguments: dict, deadline: float):
 
 
 Rows = list[dict[str, object]]
+RecallSearch = Callable[[Mapping[str, str], dict[str, object]], Rows]
+# A dated recall merges two searches, so it logs its impressions once, for the rows it shows.
+DATED_RECALL_CALLER = SearchCaller(RECALL_CALLER.source_tool, False)
+
+
+def _recall_results(
+    query: str,
+    filters: Mapping[str, str],
+    limit: int,
+    deadline: float,
+    reported: dict[str, object],
+) -> Rows:
+    undated = _without_dates(filters)
+    if len(undated) == len(filters):
+        return _recall_search(query, limit, deadline, filters, reported)
+    search = functools.partial(
+        _recall_search, query, limit, deadline, caller=DATED_RECALL_CALLER
+    )
+    rows = _dated_first(search(filters, reported), search, undated, limit, reported)
+    _record_shown_impressions(query, rows, reported)
+    return rows
 
 
 def _recall_search(
@@ -5913,27 +5933,71 @@ def _recall_search(
     deadline: float,
     filters: Mapping[str, str],
     reported: dict[str, object],
+    caller: SearchCaller = RECALL_CALLER,
 ) -> Rows:
     rows: Rows = _call_with_deadline(
-        _search_vault, query, limit=limit, deadline=deadline, trace_sink=reported, filters=filters
+        _search_vault,
+        query,
+        limit=limit,
+        deadline=deadline,
+        trace_sink=reported,
+        caller=caller,
+        filters=filters,
     )
     return rows
 
 
 def _dated_first(
     dated: Rows,
-    search: Callable[[Mapping[str, str], dict[str, object]], Rows],
-    filters: Mapping[str, str],
+    search: RecallSearch,
+    undated: Mapping[str, str],
     limit: int,
+    reported: dict[str, object],
 ) -> Rows:
     """The pages inside the asked dates, then the best pages outside them up to the limit."""
-    undated = _without_dates(filters)
-    if len(undated) == len(filters) or len(dated) >= limit:
+    if len(dated) >= limit:
         return dated
-    return [*dated, *_rows_not_in(search(undated, {}), dated)][:limit]
+    return [*dated, *_rows_not_in(_fill_rows(search, undated, reported), dated)][:limit]
+
+
+def _fill_rows(search: RecallSearch, undated: Mapping[str, str], reported: dict[str, object]) -> Rows:
+    """The best pages outside the dates; a fill that runs out of time keeps the dated answer."""
+    filled: dict[str, object] = {}
+    try:
+        rows = search(undated, filled)
+    except TimeoutError:
+        filled = _lexical_fallback_row({})
+        rows = []
+    _merge_fill_trace(reported, filled)
+    return rows
+
+
+def _merge_fill_trace(reported: dict[str, object], filled: Mapping[str, object]) -> None:
+    """The answer is partial when either search was, and names every signal either used."""
+    signals = [*_signals(reported), *_signals(filled)]
+    reported["signals_used"] = list(dict.fromkeys(signals))
+    if not filled.get("partial"):
+        return
+    reported["partial"] = True
+    reported["fallback_reason"] = reported.get("fallback_reason") or filled.get("fallback_reason")
+
+
+def _signals(trace: Mapping[str, object]) -> list[object]:
+    signals = trace.get("signals_used")
+    return list(signals) if isinstance(signals, (list, tuple)) else []
+
+
+def _record_shown_impressions(query: str, rows: Rows, reported: Mapping[str, object]) -> None:
+    from retrieval import _record_impressions
+
+    generation = str(reported.get("corpus_generation") or "legacy")
+    _record_impressions(
+        rows, query=query, corpus_generation=generation, source_tool=RECALL_CALLER.source_tool
+    )
 
 
 def _without_dates(filters: Mapping[str, str]) -> dict[str, str]:
+    """The filters a date-free fill search keeps: project, type and path still narrow it."""
     return {key: value for key, value in filters.items() if key not in RECALL_DATE_FILTERS}
 
 

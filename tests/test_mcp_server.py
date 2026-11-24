@@ -1680,8 +1680,9 @@ class TestHandleToolCall:
         searches: list[tuple[str, int, object]] = []
 
         def search(
-            query: str, *, limit: int, trace_sink: object = None, filters: object = None
+            query: str, *, limit: int, trace_sink: object = None, **filtered: object
         ) -> list[dict[str, object]]:
+            filters = filtered.get("filters")
             searches.append((query, limit, filters))
             return []
 
@@ -2890,7 +2891,7 @@ class TestHandleToolCall:
         received: list[int] = []
 
         def search(
-            query: str, *, limit: int, trace_sink: object = None, filters: object = None
+            query: str, *, limit: int, trace_sink: object = None, **_routing: object
         ) -> list[dict[str, object]]:
             received.append(limit)
             return [{"path": "page.md", "fused_score": 0.1}]

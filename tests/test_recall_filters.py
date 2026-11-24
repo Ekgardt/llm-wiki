@@ -175,18 +175,50 @@ def test_a_grounded_recall_refuses_filters_it_cannot_apply() -> None:
         )
 
 
-def _recall_paths(monkeypatch: pytest.MonkeyPatch, arguments: dict[str, object]) -> list[str]:
-    """Recall over two pages: an old one that matches best and a new one inside the window."""
-    pages = {"old": "knowledge/notes/old.md", "new": "knowledge/notes/new.md"}
+NEW_PAGE = "knowledge/notes/new.md"
+OLD_PAGE = "knowledge/notes/old.md"
+HYBRID_TRACE = {
+    "requested_mode": "HYBRID",
+    "effective_mode": "HYBRID",
+    "signals_used": ["lexical", "dense"],
+    "corpus_generation": "g",
+}
+
+
+def _dated_recall(
+    monkeypatch: pytest.MonkeyPatch,
+    arguments: dict[str, object],
+    fill: tuple[str, ...] | BaseException = (OLD_PAGE, NEW_PAGE),
+    fill_trace: dict[str, object] | None = None,
+) -> tuple[dict, list[dict[str, object]]]:
+    """Recall where only the new page is inside the window; `fill` answers the date-free search."""
+    calls: list[dict[str, object]] = []
+    impressions: list[dict[str, object]] = []
 
     def search(_query: str, **kwargs: object) -> list[dict[str, object]]:
-        filters = kwargs.get("filters")
-        if isinstance(filters, dict) and "since" in filters:
-            return [{"path": pages["new"]}]
-        return [{"path": pages["old"]}, {"path": pages["new"]}]
+        calls.append(kwargs)
+        sink, filters = kwargs["trace_sink"], kwargs["filters"]
+        assert isinstance(sink, dict)
+        assert isinstance(filters, dict)
+        if "since" in filters:
+            sink.update(HYBRID_TRACE)
+            return [{"path": NEW_PAGE}]
+        if isinstance(fill, BaseException):
+            raise fill
+        sink.update(fill_trace or HYBRID_TRACE)
+        return [{"path": path} for path in fill]
 
     monkeypatch.setattr(mcp_server, "_search_vault", search)
+    monkeypatch.setattr(retrieval, "_record_impressions", lambda rows, **kw: impressions.append(
+        {"paths": [row["path"] for row in rows], **kw}
+    ))
     data, _clamped = mcp_server._tool_recall(arguments, time.monotonic() + SHORT_TIMEOUT)
+    assert {getattr(call["caller"], "emit_telemetry", None) for call in calls} == {False}
+    return data, impressions
+
+
+def _recall_paths(monkeypatch: pytest.MonkeyPatch, arguments: dict[str, object]) -> list[str]:
+    data, _impressions = _dated_recall(monkeypatch, arguments)
     return [str(row["path"]) for row in data["results"]]
 
 
@@ -195,13 +227,56 @@ def test_a_recall_date_puts_pages_inside_it_first_and_keeps_the_rest(
 ) -> None:
     paths = _recall_paths(monkeypatch, {"query": "nightly", "since": "2026-11-01", "limit": 5})
 
-    assert paths == ["knowledge/notes/new.md", "knowledge/notes/old.md"]
+    assert paths == [NEW_PAGE, OLD_PAGE]
 
 
 def test_a_recall_date_never_pushes_out_a_full_window(monkeypatch: pytest.MonkeyPatch) -> None:
     paths = _recall_paths(monkeypatch, {"query": "nightly", "since": "2026-11-01", "limit": 1})
 
-    assert paths == ["knowledge/notes/new.md"]
+    assert paths == [NEW_PAGE]
+
+
+def test_a_fill_that_runs_out_of_time_keeps_the_dated_pages_and_says_partial(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    arguments = {"query": "nightly", "since": "2026-11-01", "limit": 5}
+
+    data, _impressions = _dated_recall(monkeypatch, arguments, fill=TimeoutError("deadline"))
+
+    trace = data["retrieval_trace"]
+    assert [row["path"] for row in data["results"]] == [NEW_PAGE]
+    assert (trace["partial"], trace["fallback_reason"]) == (True, "retrieval_deadline_exceeded")
+
+
+def test_a_fill_answered_by_words_alone_makes_the_whole_answer_partial(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    lexical = {
+        **HYBRID_TRACE,
+        "effective_mode": "BASE",
+        "signals_used": ["lexical"],
+        "partial": True,
+        "fallback_reason": "retrieval_deadline_exceeded",
+    }
+    arguments = {"query": "nightly", "since": "2026-11-01", "limit": 5}
+
+    data, _impressions = _dated_recall(monkeypatch, arguments, fill_trace=lexical)
+
+    trace = data["retrieval_trace"]
+    assert (trace["partial"], trace["fallback_reason"]) == (True, "retrieval_deadline_exceeded")
+
+
+def test_a_dated_recall_logs_each_shown_page_once_at_its_shown_rank(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fill = (NEW_PAGE, "knowledge/notes/o1.md", "knowledge/notes/o2.md", "knowledge/notes/o3.md")
+    arguments = {"query": "nightly", "since": "2026-11-01", "limit": 3}
+
+    _data, impressions = _dated_recall(monkeypatch, arguments, fill=fill)
+
+    assert [entry["paths"] for entry in impressions] == [
+        [NEW_PAGE, "knowledge/notes/o1.md", "knowledge/notes/o2.md"]
+    ]
 
 
 def test_the_lexical_fallback_keeps_the_filters(monkeypatch: pytest.MonkeyPatch) -> None:

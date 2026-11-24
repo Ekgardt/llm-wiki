@@ -339,3 +339,19 @@ def test_with_no_runtime_installed_there_is_nothing_to_fetch_and_no_failure(
 
     assert install_models.main([]) == 0
     assert "nothing to fetch" in capsys.readouterr().out
+
+
+def test_forgetting_a_revision_that_cannot_be_written_keeps_the_previous_record(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    record = tmp_path / "verified.json"
+    record.write_text(json.dumps({"kept/model": [1], "gone/model": [2]}), encoding="utf-8")
+    monkeypatch.setattr(install_models, "_verification_record", lambda: record)
+
+    def refuse(_self: Path, _target: Path) -> Path:
+        raise OSError("disk full")
+
+    monkeypatch.setattr(Path, "replace", refuse)
+    install_models._forget_verification("gone/model")
+
+    assert json.loads(record.read_text(encoding="utf-8")) == {"kept/model": [1], "gone/model": [2]}
