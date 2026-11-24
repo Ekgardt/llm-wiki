@@ -2814,6 +2814,12 @@ def _recorded_descendants(pids_path: Path, kind: str | None = None) -> list[int]
     return [int(pid) for recorded, pid in records if kind in (None, recorded)]
 
 
+def _recorded_runs(pids_path: Path) -> str:
+    if not pids_path.exists():
+        return "no git run"
+    return pids_path.read_text(encoding="ascii")
+
+
 def _kill_recorded_descendants(pids_path: Path) -> None:
     for pid in _recorded_descendants(pids_path):
         try:
@@ -2851,7 +2857,7 @@ def _assert_private_descendants_reaped(
     try:
         assert workspace_revision.verify_workspace_revision_unchanged(scope, expected) is True
         private_descendants = _recorded_descendants(pids_path, "private")
-        assert private_descendants, pids_path.read_text(encoding="ascii") if pids_path.exists() else "no git run"
+        assert private_descendants, _recorded_runs(pids_path)
         for pid in private_descendants:
             _await_descendant_reaped(pid)
     finally:
