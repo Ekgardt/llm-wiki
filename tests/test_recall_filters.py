@@ -55,9 +55,8 @@ def _paths(connection: sqlite3.Connection, **filters: str) -> list[str]:
         scope="all",
         limit=1,
         project=None,
-        since=None,
         as_of=None,
-        **filters,
+        **{"since": None, **filters},
     )
     return [str(row["path"]) for row in rows]
 
@@ -149,6 +148,18 @@ def test_recall_names_its_filters_by_the_search_keywords() -> None:
         "path_prefix": "knowledge/",
         "since": "2026-11-01",
     }
+
+
+def test_a_since_floor_keeps_only_pages_from_that_day_on() -> None:
+    """The caller asked for a window, so older pages are left out, however well they match."""
+    connection = _crowded_artifact()
+    connection.execute("UPDATE chunks SET valid_from = '2026-01-01'")
+    connection.execute(
+        "UPDATE chunks SET valid_from = '2026-11-20' "
+        "WHERE source_path = 'knowledge/notes/cache-decision.md'"
+    )
+
+    assert _paths(connection, since="2026-11-01") == ["knowledge/notes/cache-decision.md"]
 
 
 @pytest.mark.parametrize("day", ["last week", "20261124", "2026-W47-2", "2026-11-1", "2026-02-30"])
