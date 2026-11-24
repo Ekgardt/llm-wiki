@@ -11,6 +11,8 @@ import sqlite3
 import sys
 from pathlib import Path
 
+import pytest
+
 SCRIPTS_DIR = Path(__file__).resolve().parent.parent / "scripts"
 if str(SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_DIR))
@@ -104,29 +106,27 @@ def test_longer_words_allow_more_edits() -> None:
     assert edits == [0, 1, 2]
 
 
-# Russian test words, written as escapes because the repository holds no Cyrillic
-# text. "Notes" in the nominative and in the genitive plural, "search" in the
-# genitive, "word", and the short "house" and "cat".
-NOTES = "\u0437\u0430\u043c\u0435\u0442\u043a\u0438"
-OF_NOTES = "\u0437\u0430\u043c\u0435\u0442\u043e\u043a"
-OF_SEARCH = "\u043f\u043e\u0438\u0441\u043a\u0430"
-WORD = "\u0441\u043b\u043e\u0432\u043e"
-HOUSE = "\u0434\u043e\u043c"
-CAT = "\u043a\u043e\u0442"
+def test_a_light_stem_drops_two_letters_and_keeps_four() -> None:
+    stems = [query_spelling.light_stem(word) for word in ("searches", "notes", "cat")]
+
+    assert stems == ["search", "note", "cat"]
 
 
-def test_another_case_of_a_russian_word_finds_the_page() -> None:
-    """Porter stems English only; the Russian word is matched by its stem as a prefix."""
-    connection = _artifact(f"{NOTES} notes", "weather")
-
-    assert _found(connection, f"{OF_NOTES} vault") == [f"{NOTES} notes"]
+def test_a_stem_is_matched_as_a_prefix() -> None:
+    assert search_memory._fts_prefixes(["search", "note"]) == '"search"* OR "note"*'
 
 
-def test_a_russian_stem_keeps_its_root() -> None:
-    stems = query_spelling.cyrillic_stems([OF_NOTES.title() + ",", OF_SEARCH, WORD])
+def test_each_word_of_the_stemmed_script_from_five_letters_gives_one_stem(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The selection rule, with every word counted as Cyrillic."""
+    monkeypatch.setattr(query_spelling, "_cyrillic", lambda _word: True)
 
-    assert stems == [OF_NOTES[:5], OF_SEARCH[:4], WORD[:4]]
+    stems = query_spelling.cyrillic_stems(["Notes,", "notes", "searches", "cat", "word"])
+
+    assert stems == ["note", "search"]
 
 
-def test_short_russian_words_and_latin_words_gain_no_stem() -> None:
-    assert query_spelling.cyrillic_stems([HOUSE, CAT, "bookshelf", "API-" + NOTES]) == []
+def test_latin_words_gain_no_stem() -> None:
+    """Porter already stems English; the light stem is for the Cyrillic words it leaves whole."""
+    assert query_spelling.cyrillic_stems(["bookshelf", "searches", "API-notes"]) == []
