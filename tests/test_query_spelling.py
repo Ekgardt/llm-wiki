@@ -11,8 +11,6 @@ import sqlite3
 import sys
 from pathlib import Path
 
-import pytest
-
 SCRIPTS_DIR = Path(__file__).resolve().parent.parent / "scripts"
 if str(SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_DIR))
@@ -106,27 +104,26 @@ def test_longer_words_allow_more_edits() -> None:
     assert edits == [0, 1, 2]
 
 
-def test_a_light_stem_drops_two_letters_and_keeps_four() -> None:
-    stems = [query_spelling.light_stem(word) for word in ("searches", "notes", "cat")]
-
-    assert stems == ["search", "note", "cat"]
-
-
-def test_a_stem_is_matched_as_a_prefix() -> None:
-    assert search_memory._fts_prefixes(["search", "note"]) == '"search"* OR "note"*'
+NOTES = "заметки"
+OF_NOTES = "заметок"
+OF_SEARCH = "поиска"
+WORD = "слово"
+HOUSE = "дом"
+CAT = "кот"
 
 
-def test_each_word_of_the_stemmed_script_from_five_letters_gives_one_stem(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """The selection rule, with every word counted as Cyrillic."""
-    monkeypatch.setattr(query_spelling, "_cyrillic", lambda _word: True)
+def test_another_case_of_a_russian_word_finds_the_page() -> None:
+    """Porter stems English only; the Russian word is matched by its stem as a prefix."""
+    connection = _artifact(f"{NOTES} notes", "weather")
 
-    stems = query_spelling.cyrillic_stems(["Notes,", "notes", "searches", "cat", "word"])
-
-    assert stems == ["note", "search"]
+    assert _found(connection, f"{OF_NOTES} vault") == [f"{NOTES} notes"]
 
 
-def test_latin_words_gain_no_stem() -> None:
-    """Porter already stems English; the light stem is for the Cyrillic words it leaves whole."""
-    assert query_spelling.cyrillic_stems(["bookshelf", "searches", "API-notes"]) == []
+def test_a_russian_stem_keeps_its_root() -> None:
+    stems = query_spelling.cyrillic_stems([OF_NOTES.title() + ",", OF_SEARCH, WORD])
+
+    assert stems == [OF_NOTES[:5], OF_SEARCH[:4], WORD[:4]]
+
+
+def test_short_russian_words_and_latin_words_gain_no_stem() -> None:
+    assert query_spelling.cyrillic_stems([HOUSE, CAT, "bookshelf", "API-" + NOTES]) == []

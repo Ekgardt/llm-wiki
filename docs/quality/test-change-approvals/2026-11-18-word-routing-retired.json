@@ -5,15 +5,19 @@
   "test_ru_zh_analyzer_covers_all_intents",
   "test_ru_zh_profiles_behavioral",
   "test_recall_reports_the_dense_component_a_planned_graph_run_used",
-  "::tests.test_retrieval_review_round2::test_ru_zh_profiles_behavioral[\u4ec0\u4e48\u4f9d\u8d56 search_memory-GRAPH]",
-  "::tests.test_retrieval_review_round2::test_ru_zh_profiles_behavioral[\u4ec0\u4e48\u662f auth\uff1f-HYBRID]",
-  "::tests.test_retrieval_review_round2::test_ru_zh_profiles_behavioral[\u663e\u793a\u4ed3\u5e93\u5730\u56fe-REPO_MAP]",
-  "::tests.test_retrieval_review_round2::test_ru_zh_profiles_behavioral[\u66f4\u6539\u7684\u5f71\u54cd search_memory.py-IMPACT]",
-  "::tests.test_retrieval_review_round2::test_ru_zh_profiles_behavioral[\u81ea 2025-01-01 \u4ee5\u6765\u7684\u51b3\u7b56-TEMPORAL]",
-  "::tests.test_retrieval_review_round2::test_ru_zh_profiles_behavioral[\u8de8\u9879\u76ee\u7efc\u5408\u67b6\u6784-GLOBAL]",
-  "::tests.test_semantic_leg_reaches_the_answer::test_an_anchored_preposition_is_still_a_time_window[\u81ea 2025-01-01 \u4ee5\u6765\u7684\u51b3\u7b56]",
+  "::tests.test_retrieval_review_round2::test_ru_zh_profiles_behavioral[什么依赖 search_memory-GRAPH]",
+  "::tests.test_retrieval_review_round2::test_ru_zh_profiles_behavioral[什么是 auth？-HYBRID]",
+  "::tests.test_retrieval_review_round2::test_ru_zh_profiles_behavioral[显示仓库地图-REPO_MAP]",
+  "::tests.test_retrieval_review_round2::test_ru_zh_profiles_behavioral[更改的影响 search_memory.py-IMPACT]",
+  "::tests.test_retrieval_review_round2::test_ru_zh_profiles_behavioral[自 2025-01-01 以来的决策-TEMPORAL]",
+  "::tests.test_retrieval_review_round2::test_ru_zh_profiles_behavioral[跨项目综合架构-GLOBAL]",
+  "::tests.test_semantic_leg_reaches_the_answer::test_an_anchored_preposition_is_still_a_time_window[自 2025-01-01 以来的决策]",
   "::tests.test_semantic_leg_reaches_the_answer::test_an_anchored_preposition_is_still_a_time_window[decisions since 2025-01-01]",
-  "::tests.test_semantic_leg_reaches_the_answer::test_an_anchored_preposition_is_still_a_time_window[what changed after 2026-01-01]"
+  "::tests.test_semantic_leg_reaches_the_answer::test_an_anchored_preposition_is_still_a_time_window[what changed after 2026-01-01]",
+  "::tests.test_retrieval_review_round2::test_ru_zh_profiles_behavioral[решения с 2025-01-01-TEMPORAL]",
+  "::tests.test_retrieval_review_round2::test_ru_zh_profiles_behavioral[синтез across all projects-GLOBAL]",
+  "::tests.test_retrieval_review_round2::test_ru_zh_profiles_behavioral[что зависит от search_memory-GRAPH]",
+  "::tests.test_semantic_leg_reaches_the_answer::test_an_anchored_preposition_is_still_a_time_window[решения с 2025-01-01]"
  ],
  "kinds": [
   "removed"

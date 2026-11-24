@@ -167,10 +167,15 @@ def test_a_cli_hit_shows_the_passage_that_holds_the_query_words() -> None:
     assert "The bookshelf came from the flea market." in snippet
 
 
-def test_a_passage_is_found_by_another_form_of_the_word() -> None:
-    hit = {"content": "## Notes\n\n" + "Filler. " * 60 + "Two notes about search."}
+# "Notes" in the query is in the genitive plural; the passage spells it in the nominative.
+TWO_NOTES_ABOUT_SEARCH = "Две заметки о поиске."
+SEARCH_OF_NOTES = "поиск заметок"
 
-    assert "Two notes about search." in search_memory.result_snippet(hit, "noted searches")
+
+def test_a_passage_is_found_by_another_form_of_the_word() -> None:
+    hit = {"content": "## Notes\n\n" + "Filler. " * 60 + TWO_NOTES_ABOUT_SEARCH}
+
+    assert TWO_NOTES_ABOUT_SEARCH in search_memory.result_snippet(hit, SEARCH_OF_NOTES)
 
 
 def test_a_hit_without_the_query_words_shows_its_first_lines() -> None:
