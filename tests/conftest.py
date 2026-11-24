@@ -76,6 +76,11 @@ else:
     )
     if _problem is not None:
         raise pytest.UsageError(_problem)
+    # Parallel workers must not share one runtime: each gets its own directory below it.
+    if os.environ.get("PYTEST_XDIST_WORKER"):
+        os.environ["LLM_WIKI_STATE_ROOT"] = str(
+            Path(os.environ["LLM_WIKI_STATE_ROOT"]) / os.environ["PYTEST_XDIST_WORKER"]
+        )
 
 # 2. Isolated state root OUTSIDE the vault for hermetic tests (production
 #    runtime lives inside the vault under gitignored cache/logs/run/, but
@@ -94,7 +99,10 @@ def _isolate_test_state_root():
     state_file = state_dir / "state.json"
     if not state_file.exists():
         state_file.write_text("{}\n", encoding="utf-8")
-    yield
+
+
+def pytest_unconfigure(config):  # noqa: ARG001
+    """Remove this process's state root; the xdist controller makes one and runs no test."""
     if _EARLY_STATE_ROOT is not None:
         shutil.rmtree(_EARLY_STATE_ROOT, ignore_errors=True)
 
