@@ -103,8 +103,8 @@ constraint-dependencies = ["filelock<3.30; python_full_version < '3.11'"]
 testpaths = ["tests"]
 # `conftest.py` injects scripts/ into sys.path; no package install needed.
 pythonpath = ["scripts"]
-# The serial suite outgrew the 10-minute limit on a full check run (997 s on
-# 2026-11-24); one worker per CPU brought it to 339-347 s. `-n 0` runs serially.
+# One worker per CPU: a full check run must stay within 10 minutes, and the serial
+# suite took 997 s there on 2026-11-24. `-n 0` runs serially.
 addopts = ["-n", "auto"]
 # A test still running after this many seconds has every thread's stack dumped to the
 # log, so a hang names itself instead of silently burning the CI job until it is

@@ -190,6 +190,21 @@ def test_parallel_workers_each_get_their_own_external_state_root(
     assert roots == [tmp_path / "state" / "gw0", tmp_path / "state" / "gw1", tmp_path / "state"]
 
 
+def test_a_worker_state_root_that_resolves_into_the_vault_is_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    vault = tmp_path / "vault"
+    (vault / "run").mkdir(parents=True)
+    (tmp_path / "state").mkdir()
+    (tmp_path / "state" / "gw0").symlink_to(vault / "run", target_is_directory=True)
+    monkeypatch.setattr(conftest, "VAULT_ROOT", vault)
+    monkeypatch.setenv("LLM_WIKI_STATE_ROOT", str(tmp_path / "state"))
+    monkeypatch.setenv("PYTEST_XDIST_WORKER", "gw0")
+
+    with pytest.raises(pytest.UsageError, match="inside it"):
+        conftest._external_state_root()
+
+
 def test_the_progress_file_gets_its_directory_before_the_first_test(tmp_path: Path) -> None:
     path = tmp_path / "pytest-timings" / "progress.txt"
 

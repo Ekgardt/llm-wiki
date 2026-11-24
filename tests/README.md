@@ -51,20 +51,15 @@ The suite is the **full regression suite**. Highlights:
 ## Running
 
 ```bash
-uv run pytest tests/
-```
-
-or
-
-```bash
-pip install pytest
-pytest tests/
+uv sync --locked
+uv run pytest tests/          # one pytest-xdist worker per CPU (`-n auto`)
+uv run pytest tests/ -n 0     # serially, e.g. to debug one test
 ```
 
 **Runs hermetically on a fresh clone** — `conftest.py` bootstraps:
   - `LLM_WIKI_ROOT` → the vault directory (so hook subprocesses operate)
-  - `LLM_WIKI_STATE_ROOT` → `$TEMP/llm-wiki-test-state/` (stable temp dir
-    OUTSIDE the vault for hermeticity — production runtime lives inside
+  - `LLM_WIKI_STATE_ROOT` → a fresh `$TEMP/llm-wiki-test-state-*/` per pytest
+    process, removed when it ends (OUTSIDE the vault for hermeticity — production runtime lives inside
     the vault under gitignored `cache/logs/run/`, but tests must not
     mutate those; never touches the operator's real runtime)
   - `MEMORY_LLM_PROVIDER` → `fake` (no live LLM calls)
@@ -76,7 +71,7 @@ All tests are self-contained and use `tmp_path` + state snapshots, so running th
 
 ### If you want total isolation (CI-style)
 
-`conftest.py` defaults to `$TEMP/llm-wiki-test-state/` (outside the vault)
+`conftest.py` defaults to a per-process `$TEMP/llm-wiki-test-state-*/` (outside the vault)
 regardless of any pre-set env value, to guarantee isolation. Production
 runtime lives inside the vault under gitignored `cache/logs/run/`, but tests
 must not mutate those. To opt INTO using an external state root (e.g. your
@@ -87,6 +82,8 @@ LLM_WIKI_TEST_USE_EXTERNAL_STATE=1 uv run pytest tests/
 ```
 
 This switches conftest to `setdefault` semantics so a pre-set `LLM_WIKI_STATE_ROOT` wins.
+Under xdist each worker uses its own `<LLM_WIKI_STATE_ROOT>/gwN` below it, and a
+root that is or resolves into the vault is refused.
 
 ## Design principles
 

@@ -6,10 +6,13 @@ any pre-set environment variables or pre-existing runtime state.
   1. Subprocess-invoked hooks read `LLM_WIKI_ROOT`; absent env → no-op.
   2. State must not pollute the developer's real runtime (production
      lives inside the vault under gitignored `cache/logs/run/`). Tests
-     redirect `LLM_WIKI_STATE_ROOT` to a session-scoped pytest temp dir.
+     redirect `LLM_WIKI_STATE_ROOT` to a per-process temp dir, removed when
+     pytest unconfigures.
 
 Override: set `LLM_WIKI_STATE_ROOT` before pytest AND
-`LLM_WIKI_TEST_USE_EXTERNAL_STATE=1` if you need a custom location.
+`LLM_WIKI_TEST_USE_EXTERNAL_STATE=1` if you need a custom location. The suite
+runs under pytest-xdist (`-n auto`; `-n 0` runs serially), and each worker then
+uses its own `<LLM_WIKI_STATE_ROOT>/gwN` below that location.
 """
 from __future__ import annotations
 
@@ -17,9 +20,11 @@ import os
 import shutil
 import sys
 import tempfile
+from collections.abc import MutableMapping
 from pathlib import Path
 
 import pytest
+from xdist import is_xdist_controller
 
 pytest_plugins = ("tests.code_kernel_helpers",)
 collect_ignore_glob = ["fixtures/code_kernel/python/tests/test_service.py"]
@@ -30,8 +35,19 @@ SCRIPTS = VAULT_ROOT / "scripts"
 if str(SCRIPTS) not in sys.path:
     sys.path.insert(0, str(SCRIPTS))
 
-# The vault the host's own hooks write to, as this process received it.
-_HOST_VAULT = os.environ.get("LLM_WIKI_ROOT")
+HOST_VAULT_VARIABLE = "LLM_WIKI_TEST_HOST_VAULT"
+
+
+def _host_vault(environ: MutableMapping[str, str]) -> str | None:
+    """The vault the host's own hooks write to, as the first pytest process received it.
+
+    The line below pins `LLM_WIKI_ROOT` to this checkout, and xdist workers inherit
+    the pinned value; the first process records the host's value for them.
+    """
+    return environ.setdefault(HOST_VAULT_VARIABLE, environ.get("LLM_WIKI_ROOT", "")) or None
+
+
+_HOST_VAULT = _host_vault(os.environ)
 # 1. Vault root — always pin to this checkout for hermetic subprocess hooks.
 os.environ["LLM_WIKI_ROOT"] = str(VAULT_ROOT)
 # A test that starts a server must not load models in the background by accident:
@@ -67,13 +83,13 @@ def _external_state_root_problem(state_root: Path, vault_root: Path) -> str | No
 def _external_state_root() -> Path:
     """The state root the caller chose, below it a directory of its own per parallel worker."""
     root = Path(os.environ.get("LLM_WIKI_STATE_ROOT", str(VAULT_ROOT)))
+    worker = os.environ.get("PYTEST_XDIST_WORKER")
+    if worker:
+        root = root / worker
     problem = _external_state_root_problem(root, VAULT_ROOT)
     if problem is not None:
         raise pytest.UsageError(problem)
-    worker = os.environ.get("PYTEST_XDIST_WORKER")
-    if not worker:
-        return root
-    return root / worker
+    return root
 
 
 _EARLY_STATE_ROOT: Path | None = None
@@ -87,8 +103,9 @@ else:
 
 # 2. Isolated state root OUTSIDE the vault for hermetic tests (production
 #    runtime lives inside the vault under gitignored cache/logs/run/, but
-#    tests must not mutate those). Uses a session-scoped pytest temp dir
-#    so state is fresh per session and cleaned up automatically.
+#    tests must not mutate those). Uses a per-process temp dir so state is
+#    fresh per session; `pytest_unconfigure` removes it, also in the xdist
+#    controller, which creates one and runs no test.
 #    Override: set LLM_WIKI_STATE_ROOT before pytest AND
 #    LLM_WIKI_TEST_USE_EXTERNAL_STATE=1.
 @pytest.fixture(scope="session", autouse=True)
@@ -278,11 +295,23 @@ def _arm_progress_file(path: str | None) -> str | None:
 _PROGRESS_FILE = _arm_progress_file(os.environ.get("LLM_WIKI_TEST_PROGRESS_FILE"))
 
 
+def pytest_sessionstart(session: pytest.Session) -> None:
+    """Only the process that runs a test names it: the xdist controller repeats every start."""
+    global _PROGRESS_FILE
+    if is_xdist_controller(session):
+        _PROGRESS_FILE = None
+
+
+def progress_line(nodeid: str) -> str:
+    """The test a process starts, prefixed by its xdist worker, so each worker's last line names its test."""
+    return f"{os.environ.get('PYTEST_XDIST_WORKER', 'main')} {nodeid}\n"
+
+
 def pytest_runtest_logstart(nodeid, location):  # noqa: ARG001
     if not _PROGRESS_FILE:
         return
     try:
         with open(_PROGRESS_FILE, "a", encoding="utf-8") as progress:
-            progress.write(f"{nodeid}\n")
+            progress.write(progress_line(nodeid))
     except OSError:
         return
