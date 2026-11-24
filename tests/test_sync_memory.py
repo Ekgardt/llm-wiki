@@ -12,8 +12,6 @@ from types import SimpleNamespace
 
 import pytest
 
-from tests.clock_bounds import within_budget
-
 ROOT = Path(__file__).resolve().parent.parent
 SYNC_SCRIPT = ROOT / "scripts" / "sync_memory.py"
 EXPECTED_ACTIONS = (
@@ -245,7 +243,7 @@ def test_dependency_action_checks_lock_and_baseline_environment(tmp_path):
     assert result["status"] == "ok"
     assert result["details"] == {"lock": "current", "environment": "current"}
     assert commands[0][0][:3] == ["uv", "lock", "--check"]
-    assert within_budget(commands[0][1]["timeout"], sync_memory.DEPENDENCY_TIMEOUT_SECONDS)
+    assert commands[0][1]["timeout"] <= sync_memory.DEPENDENCY_TIMEOUT_SECONDS
 
 
 def test_production_baseline_declares_python310_tomli_parser():

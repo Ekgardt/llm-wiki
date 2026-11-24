@@ -18,7 +18,6 @@ from pathlib import Path
 
 import pytest
 
-from tests.clock_bounds import ROUNDING_CLOCK_READING, within_budget
 from tests.slow_machine import LONG_TIMEOUT, SHORT_TIMEOUT
 
 SCRIPTS = Path(__file__).resolve().parent.parent / "scripts"
@@ -1050,13 +1049,10 @@ def test_codex_hooks_probe_is_bounded_and_uses_exact_cwd(tmp_path, monkeypatch):
         lambda: ["codex", "app-server", "--listen", "stdio://"],
     )
 
-    # The clock stands at a reading whose deadline rounds the budget up by one
-    # spacing, as a Windows runner's did (run 45482419969); see tests/clock_bounds.py.
-    monkeypatch.setattr(doctor.time, "monotonic", lambda: ROUNDING_CLOCK_READING)
     response = doctor._probe_codex_hooks_list(
         root,
         home,
-        deadline=ROUNDING_CLOCK_READING + doctor.CODEX_HOOK_PROBE_SECONDS,
+        deadline=time.monotonic() + doctor.CODEX_HOOK_PROBE_SECONDS,
     )
 
     _assert_codex_probe_identity(observed, root, home)
@@ -1076,7 +1072,7 @@ def _assert_codex_probe_limits(observed):
 
     assert observed["kwargs"]["stdout"] is subprocess.PIPE
     assert observed["kwargs"]["stderr"] is subprocess.PIPE
-    assert within_budget(observed["timeout"], doctor.CODEX_HOOK_PROBE_SECONDS)
+    assert observed["timeout"] <= doctor.CODEX_HOOK_PROBE_SECONDS
 
 
 def _assert_codex_probe_requests(observed, root):
@@ -1085,6 +1081,27 @@ def _assert_codex_probe_requests(observed, root):
     assert requests[1]["method"] == "initialized"
     assert requests[2] == {"id": 2, "method": "hooks/list", "params": {"cwds": [str(root)]}}
     assert "bypass" not in observed["input"].casefold()
+
+
+def test_codex_probe_wait_never_exceeds_its_budget_when_the_deadline_rounds_up(monkeypatch):
+    import doctor
+
+    # At this reading `(reading + 2.0) - reading` is 2.000000000000057.
+    reading = 511.5275492379532
+    monkeypatch.setattr(doctor.time, "monotonic", lambda: reading)
+    deadline = reading + doctor.CODEX_HOOK_PROBE_SECONDS
+    assert deadline - reading > doctor.CODEX_HOOK_PROBE_SECONDS
+
+    assert doctor._codex_wait_seconds(deadline) == doctor.CODEX_HOOK_PROBE_SECONDS
+
+
+def test_codex_probe_wait_is_the_time_left_to_an_earlier_deadline(monkeypatch):
+    import doctor
+
+    monkeypatch.setattr(doctor.time, "monotonic", lambda: 100.0)
+
+    assert doctor._codex_wait_seconds(100.5) == 0.5
+    assert doctor._codex_wait_seconds(99.0) == 0.0
 
 
 def test_codex_app_server_command_supports_windows_cmd_shim(monkeypatch):
