@@ -421,7 +421,14 @@ def _await_descendant_reaped(pid: int, attempts: int = 100) -> None:
         if _process_is_gone_or_zombie(pid):
             return
         time.sleep(0.01)
-    pytest.fail("successful private Git descendant remained alive")
+    pytest.fail(f"successful private Git descendant remained alive: {_process_stat(pid)}")
+
+
+def _process_stat(pid: int) -> str:
+    try:
+        return Path(f"/proc/{pid}/stat").read_text(encoding="ascii").strip()
+    except FileNotFoundError:
+        return "gone"
 
 
 def _expected_status_command(scope) -> list[str]:
@@ -2844,7 +2851,7 @@ def _assert_private_descendants_reaped(
     try:
         assert workspace_revision.verify_workspace_revision_unchanged(scope, expected) is True
         private_descendants = _recorded_descendants(pids_path, "private")
-        assert private_descendants
+        assert private_descendants, pids_path.read_text(encoding="ascii") if pids_path.exists() else "no git run"
         for pid in private_descendants:
             _await_descendant_reaped(pid)
     finally:
