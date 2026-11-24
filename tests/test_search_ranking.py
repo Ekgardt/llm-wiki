@@ -442,7 +442,8 @@ def test_generation_connection_uses_remaining_deadline_as_busy_timeout(
     artifact = tmp_path / "generation" / search_memory.GENERATION_FTS_ARTIFACT
     artifact.parent.mkdir()
     artifact.touch()
-    deadline = time.monotonic() + 0.25
+    started = time.monotonic()
+    deadline = started + 0.25
     captured = []
 
     class Connection:
@@ -468,7 +469,8 @@ def test_generation_connection_uses_remaining_deadline_as_busy_timeout(
 
     assert connection is not None
     assert captured[0]["uri"] is True
-    assert 0 <= captured[0]["timeout"] <= 0.25
+    # `started + 0.25 - started` can round above 0.25; the clock only grows after it.
+    assert 0 <= captured[0]["timeout"] <= deadline - started
 
 
 def test_generation_connection_checks_cancel_after_open_before_validation(
