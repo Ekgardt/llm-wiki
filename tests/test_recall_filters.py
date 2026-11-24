@@ -10,6 +10,7 @@ import sqlite3
 import sys
 import time
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -190,7 +191,7 @@ def _dated_recall(
     arguments: dict[str, object],
     fill: tuple[str, ...] | BaseException = (OLD_PAGE, NEW_PAGE),
     fill_trace: dict[str, object] | None = None,
-) -> tuple[dict, list[dict[str, object]]]:
+) -> tuple[dict[str, Any], list[dict[str, object]]]:
     """Recall where only the new page is inside the window; `fill` answers the date-free search."""
     calls: list[dict[str, object]] = []
     impressions: list[dict[str, object]] = []

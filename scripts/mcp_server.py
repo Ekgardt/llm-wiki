@@ -5960,7 +5960,9 @@ def _dated_first(
     return [*dated, *_rows_not_in(_fill_rows(search, undated, reported), dated)][:limit]
 
 
-def _fill_rows(search: RecallSearch, undated: Mapping[str, str], reported: dict[str, object]) -> Rows:
+def _fill_rows(
+    search: RecallSearch, undated: Mapping[str, str], reported: dict[str, object]
+) -> Rows:
     """The best pages outside the dates; a fill that runs out of time keeps the dated answer."""
     filled: dict[str, object] = {}
     try:
