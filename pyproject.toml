@@ -72,6 +72,7 @@ dev = [
     "tree-sitter-php>=0.23,<1",
     "tree-sitter-c-sharp>=0.23,<1",
     "tree-sitter-bash>=0.23,<1",
+    "tokenizers>=0.19,<1",
     "pre-commit>=4.5.1",
     "pytest>=8.0.0",
     "pytest-xdist>=3.8,<4",

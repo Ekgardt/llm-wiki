@@ -204,9 +204,16 @@ def _settled_before(modified_ns: object, verified_ns: object) -> bool:
 def _remember_verified(path: Path, model: PinnedModel) -> None:
     """One entry per pinned model; a write that fails only costs a re-hash."""
     try:
-        record = _verification_record()
         entry = [*_file_identity(path), model.weights_sha256, time.time_ns()]
-        verified = {**_read_verifications(), model.repo_id: entry}
+    except OSError:
+        return
+    _write_verifications({**_read_verifications(), model.repo_id: entry})
+
+
+def _write_verifications(verified: dict[str, object]) -> None:
+    """Staged then renamed, so a write that fails leaves the previous record whole."""
+    record = _verification_record()
+    try:
         record.parent.mkdir(parents=True, exist_ok=True)
         staged = record.with_suffix(".tmp")
         staged.write_text(json.dumps(verified, sort_keys=True), encoding="utf-8")
@@ -314,12 +321,9 @@ def retire_replaced(model: PinnedModel, hub: Any) -> list[str]:
 
 
 def _forget_verification(repo_id: str) -> None:
-    """Drop the record of a deleted revision; a write that fails leaves a record of nothing."""
+    """Drop the record of a deleted revision."""
     remaining = {key: entry for key, entry in _read_verifications().items() if key != repo_id}
-    try:
-        _verification_record().write_text(json.dumps(remaining, sort_keys=True), encoding="utf-8")
-    except OSError:
-        return
+    _write_verifications(remaining)
 
 
 def _settled_and_retired(model: PinnedModel, hub, *, download: bool) -> dict:
