@@ -303,7 +303,10 @@ def pytest_sessionstart(session: pytest.Session) -> None:
 
 
 def progress_line(nodeid: str) -> str:
-    """The test a process starts, prefixed by its xdist worker, so each worker's last line names its test."""
+    """The test a process starts, prefixed by its xdist worker.
+
+    Each worker's last line then names the test it was running.
+    """
     return f"{os.environ.get('PYTEST_XDIST_WORKER', 'main')} {nodeid}\n"
 
 

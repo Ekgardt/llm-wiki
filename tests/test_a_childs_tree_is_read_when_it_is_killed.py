@@ -87,9 +87,9 @@ def test_the_tree_read_at_the_signal_holds_what_the_task_left_running(
     try:
         run.stop()
         run.receiver.close()
-        assert (grandchild in tracked, memory_queue._pid_is_alive(grandchild)) == (
-            True,
-            False,
-        )
+        # A killed grandchild is a zombie until its new parent reaps it, and on a loaded
+        # machine that can lag behind `stop`; the queue counts a zombie as gone.
+        still_running = memory_queue._descendant_alive({grandchild}, platform_name=os.name)
+        assert (grandchild in tracked, still_running) == (True, False)
     finally:
         _kill(grandchild)
