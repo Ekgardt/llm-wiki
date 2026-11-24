@@ -13,7 +13,8 @@ from pathlib import Path
 def models_root() -> Path:
     from memory_state import STATE_ROOT
 
-    return STATE_ROOT / "cache" / "models"
+    root: Path = STATE_ROOT / "cache" / "models"
+    return root
 
 
 def model_directory(repo_id: str, revision: str) -> Path:

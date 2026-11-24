@@ -8,6 +8,7 @@ import hashlib
 import sys
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
+from typing import Any
 
 import pytest
 
@@ -37,15 +38,15 @@ class _FakeCache:
         self.deleted: list[str] = []
 
     @property
-    def repos(self):
+    def repos(self) -> list[SimpleNamespace]:
         return [
             SimpleNamespace(repo_id=repo, repo_type="model",
                             revisions=[SimpleNamespace(commit_hash=revision)])
             for repo, revision in self.held
         ]
 
-    def delete_revisions(self, revision):
-        def execute():
+    def delete_revisions(self, revision: str) -> SimpleNamespace:
+        def execute() -> None:
             self.deleted.append(revision)
             self.held = [entry for entry in self.held if entry[1] != revision]
 
@@ -63,7 +64,9 @@ class _FakeHub(ModuleType):
         self.downloads: list[tuple[str, str, list[str]]] = []
         self.cache = _FakeCache([])
 
-    def snapshot_download(self, repo_id, *, revision, allow_patterns, local_dir):
+    def snapshot_download(
+        self, repo_id: str, *, revision: str, allow_patterns: list[str], local_dir: str
+    ) -> str:
         self.downloads.append((repo_id, revision, list(allow_patterns)))
         for name in allow_patterns:
             target = Path(local_dir) / name
@@ -71,7 +74,7 @@ class _FakeHub(ModuleType):
             target.write_bytes(self.contents[repo_id] if name == WEIGHTS else b"companion")
         return local_dir
 
-    def scan_cache_dir(self):
+    def scan_cache_dir(self) -> Any:
         return self.cache
 
 
@@ -91,7 +94,7 @@ def _pinned_to(contents: dict[str, bytes]) -> tuple[install_models.PinnedModel, 
 
 
 @pytest.fixture
-def two_models(tmp_path, monkeypatch):
+def two_models(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> _FakeHub:
     contents = {"org/encoder": b"encoder weights", "org/reranker": b"reranker weights"}
     hub = _FakeHub(contents)
     pins = _pinned_to(contents)
@@ -107,16 +110,21 @@ def two_models(tmp_path, monkeypatch):
 
 
 def _installed_path(repo_id: str, name: str) -> Path:
-    return model_files.model_directory(repo_id, REVISION) / name
+    path: Path = model_files.model_directory(repo_id, REVISION) / name
+    return path
 
 
-def test_the_install_declines_openvino_telemetry_before_any_load(two_models, tmp_path):
+def test_the_install_declines_openvino_telemetry_before_any_load(
+    two_models: _FakeHub, tmp_path: Path
+) -> None:
     install_models.main(["--check"])
 
     assert (tmp_path / "openvino_telemetry").read_text(encoding="utf-8").strip() == "0"
 
 
-def test_missing_weights_are_fetched_at_the_pinned_commit_and_verified(two_models, capsys):
+def test_missing_weights_are_fetched_at_the_pinned_commit_and_verified(
+    two_models: _FakeHub, capsys: pytest.CaptureFixture[str]
+) -> None:
     assert install_models.main([]) == 0
 
     assert [(repo, rev) for repo, rev, _ in two_models.downloads] == [
@@ -128,14 +136,18 @@ def test_missing_weights_are_fetched_at_the_pinned_commit_and_verified(two_model
     assert capsys.readouterr().out.count("fetched") == 2
 
 
-def test_the_files_are_ordinary_files_under_the_pinned_revision(two_models, tmp_path):
+def test_the_files_are_ordinary_files_under_the_pinned_revision(
+    two_models: _FakeHub, tmp_path: Path
+) -> None:
     install_models.main([])
 
     weights = tmp_path / "models" / "org--reranker" / REVISION / WEIGHTS
     assert (weights.is_file(), weights.is_symlink()) == (True, False)
 
 
-def test_present_verified_weights_are_not_fetched_again(two_models, capsys):
+def test_present_verified_weights_are_not_fetched_again(
+    two_models: _FakeHub, capsys: pytest.CaptureFixture[str]
+) -> None:
     install_models.main([])
     two_models.downloads.clear()
 
@@ -144,7 +156,9 @@ def test_present_verified_weights_are_not_fetched_again(two_models, capsys):
     assert capsys.readouterr().out.count("present") == 2
 
 
-def test_a_file_that_does_not_match_its_pin_is_removed_and_the_run_fails(two_models, capsys):
+def test_a_file_that_does_not_match_its_pin_is_removed_and_the_run_fails(
+    two_models: _FakeHub, capsys: pytest.CaptureFixture[str]
+) -> None:
     two_models.contents["org/reranker"] = b"not the pinned bytes"
 
     assert install_models.main([]) == install_models.EXIT_INCOMPLETE
@@ -153,13 +167,17 @@ def test_a_file_that_does_not_match_its_pin_is_removed_and_the_run_fails(two_mod
     assert "mismatch org/reranker" in out and "fetched org/encoder" in out
 
 
-def test_check_reports_without_downloading(two_models, capsys):
+def test_check_reports_without_downloading(
+    two_models: _FakeHub, capsys: pytest.CaptureFixture[str]
+) -> None:
     assert install_models.main(["--check", "--json"]) == install_models.EXIT_INCOMPLETE
     assert two_models.downloads == []
     assert '"state": "missing"' in capsys.readouterr().out
 
 
-def test_without_the_library_the_command_says_which_extra_to_install(monkeypatch, capsys):
+def test_without_the_library_the_command_says_which_extra_to_install(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
     monkeypatch.setattr(install_models, "hub_library", lambda: None)
     # A runtime is installed but the hub library is not: the vault the test runs
     # in may have neither, and then the command has nothing to fetch at all.
@@ -169,7 +187,7 @@ def test_without_the_library_the_command_says_which_extra_to_install(monkeypatch
     assert "uv sync --locked --inexact --extra semantic" in capsys.readouterr().err
 
 
-def test_the_pins_name_the_two_models_the_read_path_loads():
+def test_the_pins_name_the_two_models_the_read_path_loads() -> None:
     import embedding_model
     import reranker
 
@@ -190,7 +208,7 @@ def test_the_pins_name_the_two_models_the_read_path_loads():
     )
 
 
-def test_doctor_names_the_missing_weights_and_the_command(monkeypatch):
+def test_doctor_names_the_missing_weights_and_the_command(monkeypatch: pytest.MonkeyPatch) -> None:
     import doctor
 
     monkeypatch.setattr(install_models, "wanted_models", install_models.pinned_models)
@@ -206,7 +224,7 @@ def test_doctor_names_the_missing_weights_and_the_command(monkeypatch):
     assert finding["details"]["command"] == "uv run python scripts/install_models.py"
 
 
-def test_doctor_expects_no_weights_without_a_model_runtime(monkeypatch):
+def test_doctor_expects_no_weights_without_a_model_runtime(monkeypatch: pytest.MonkeyPatch) -> None:
     import doctor
 
     monkeypatch.setattr(install_models, "wanted_models", lambda: [])
@@ -214,7 +232,7 @@ def test_doctor_expects_no_weights_without_a_model_runtime(monkeypatch):
     assert doctor._models_check()["status"] == "ok"
 
 
-def test_the_nightly_fetches_missing_weights_after_its_index_work():
+def test_the_nightly_fetches_missing_weights_after_its_index_work() -> None:
     import scheduled_nightly
 
     steps = {step.label: step for step in scheduled_nightly._post_compile_steps()}
@@ -224,7 +242,7 @@ def test_the_nightly_fetches_missing_weights_after_its_index_work():
     assert steps["models"].command[-1].endswith("install_models.py")
 
 
-def test_weights_without_their_companion_file_are_fetched_again(two_models):
+def test_weights_without_their_companion_file_are_fetched_again(two_models: _FakeHub) -> None:
     install_models.main([])
     _installed_path("org/encoder", COMPANION).unlink()
     two_models.downloads.clear()
@@ -233,7 +251,9 @@ def test_weights_without_their_companion_file_are_fetched_again(two_models):
     assert [repo for repo, _, _ in two_models.downloads] == ["org/encoder"]
 
 
-def test_verified_weights_delete_the_revision_they_replace_from_the_hub_cache(two_models, capsys):
+def test_verified_weights_delete_the_revision_they_replace_from_the_hub_cache(
+    two_models: _FakeHub, capsys: pytest.CaptureFixture[str]
+) -> None:
     two_models.cache.held = [RETIRED, ("org/unrelated", "d" * 40)]
 
     assert install_models.main(["--json"]) == 0
@@ -241,7 +261,7 @@ def test_verified_weights_delete_the_revision_they_replace_from_the_hub_cache(tw
     assert '"retired": ["org/old-encoder@eeeeeeeeeeee"]' in capsys.readouterr().out
 
 
-def test_a_check_or_a_failed_fetch_retires_nothing(two_models):
+def test_a_check_or_a_failed_fetch_retires_nothing(two_models: _FakeHub) -> None:
     two_models.cache.held = [RETIRED]
     two_models.contents["org/encoder"] = b"not the pinned bytes"
 
@@ -251,8 +271,10 @@ def test_a_check_or_a_failed_fetch_retires_nothing(two_models):
     assert two_models.cache.deleted == []
 
 
-def test_no_hub_cache_at_all_retires_nothing_and_does_not_fail(two_models, monkeypatch):
-    def no_cache():
+def test_no_hub_cache_at_all_retires_nothing_and_does_not_fail(
+    two_models: _FakeHub, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def no_cache() -> Any:
         raise _CacheNotFound("no cache directory")
 
     monkeypatch.setattr(two_models, "scan_cache_dir", no_cache)
@@ -260,7 +282,9 @@ def test_no_hub_cache_at_all_retires_nothing_and_does_not_fail(two_models, monke
     assert install_models.main([]) == 0
 
 
-def test_the_text_report_names_the_revision_it_removed(two_models, capsys):
+def test_the_text_report_names_the_revision_it_removed(
+    two_models: _FakeHub, capsys: pytest.CaptureFixture[str]
+) -> None:
     two_models.cache.held = [RETIRED]
 
     install_models.main([])
@@ -270,7 +294,9 @@ def test_the_text_report_names_the_revision_it_removed(two_models, capsys):
     )
 
 
-def test_a_model_whose_runtime_is_absent_is_not_fetched(two_models, monkeypatch):
+def test_a_model_whose_runtime_is_absent_is_not_fetched(
+    two_models: _FakeHub, monkeypatch: pytest.MonkeyPatch
+) -> None:
     monkeypatch.setattr(
         install_models, "_runtime_installed", lambda model: model.repo_id == "org/encoder"
     )
@@ -279,7 +305,9 @@ def test_a_model_whose_runtime_is_absent_is_not_fetched(two_models, monkeypatch)
     assert [repo for repo, _, _ in two_models.downloads] == ["org/encoder"]
 
 
-def test_with_no_runtime_installed_there_is_nothing_to_fetch_and_no_failure(monkeypatch, capsys):
+def test_with_no_runtime_installed_there_is_nothing_to_fetch_and_no_failure(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
     """A base install's nightly `models` step is not a failed night."""
     monkeypatch.setattr(install_models, "_runtime_installed", lambda _model: False)
     monkeypatch.setattr(install_models, "hub_library", lambda: None)

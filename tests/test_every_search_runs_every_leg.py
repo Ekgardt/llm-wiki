@@ -132,7 +132,7 @@ def _planned_run(query: str, graph: Callable[..., list[dict[str, object]]]) -> R
 def test_a_planned_graph_run_uses_dense_and_graph(query: str) -> None:
     called: list[str] = []
 
-    def graph(**_options):
+    def graph(**_options: object) -> list[dict[str, object]]:
         called.append("graph")
         return []
 
@@ -154,7 +154,7 @@ def test_retrieve_with_no_profile_plans_like_the_search(query: str) -> None:
 
 
 def test_a_failed_graph_leaves_a_hybrid_answer() -> None:
-    def graph(**_options):
+    def graph(**_options: object) -> list[dict[str, object]]:
         raise RuntimeError("graph store unreadable")
 
     trace = _planned_run(RELATION, graph).trace

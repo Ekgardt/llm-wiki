@@ -883,14 +883,6 @@ hybrid = [
 lexical-benchmark = [
     { name = "jieba" },
 ]
-reranker = [
-    { name = "huggingface-hub" },
-    { name = "numpy", version = "2.2.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
-    { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version == '3.11.*'" },
-    { name = "numpy", version = "2.5.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12'" },
-    { name = "openvino", marker = "platform_machine != 'x86_64' or sys_platform != 'darwin'" },
-    { name = "tokenizers" },
-]
 retrieval-benchmark = [
     { name = "jieba" },
     { name = "sentence-transformers" },
@@ -941,10 +933,10 @@ requires-dist = [
     { name = "jedi", marker = "extra == 'code-graph'", specifier = ">=0.19,<1" },
     { name = "jieba", marker = "extra == 'lexical-benchmark'", specifier = "==0.42.1" },
     { name = "jieba", marker = "extra == 'retrieval-benchmark'", specifier = "==0.42.1" },
-    { name = "llm-wiki", extras = ["semantic"], marker = "extra == 'reranker'" },
-    { name = "llm-wiki", extras = ["semantic", "hybrid", "code-graph", "mcp-server", "reranker"], marker = "extra == 'full'" },
-    { name = "llm-wiki", extras = ["semantic", "reranker"], marker = "extra == 'hybrid'" },
+    { name = "llm-wiki", extras = ["semantic"], marker = "extra == 'hybrid'" },
+    { name = "llm-wiki", extras = ["semantic", "hybrid", "code-graph", "mcp-server"], marker = "extra == 'full'" },
     { name = "mcp", specifier = ">=1.29,<2" },
+    { name = "numpy", marker = "extra == 'hybrid'", specifier = ">=2.2.6,<3" },
     { name = "numpy", marker = "extra == 'semantic'", specifier = ">=2.2.6,<2.6" },
     { name = "openvino", marker = "(platform_machine != 'x86_64' and extra == 'semantic') or (sys_platform != 'darwin' and extra == 'semantic')", specifier = ">=2026.4.1,<2027" },
     { name = "pyyaml", specifier = ">=6.0.3,<7" },
@@ -966,7 +958,7 @@ requires-dist = [
     { name = "tree-sitter-typescript", marker = "extra == 'code-graph'", specifier = ">=0.23,<1" },
     { name = "usearch", marker = "extra == 'retrieval-benchmark'", specifier = "==2.26.0" },
 ]
-provides-extras = ["lexical-benchmark", "retrieval-benchmark", "semantic", "hybrid", "code-graph", "mcp-server", "reranker", "full"]
+provides-extras = ["lexical-benchmark", "retrieval-benchmark", "semantic", "hybrid", "code-graph", "mcp-server", "full"]
 
 [package.metadata.requires-dev]
 audit = [{ name = "pip-audit", specifier = ">=2.10.1,<3" }]

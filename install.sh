@@ -831,7 +831,6 @@ esac
 info "Optional: install hybrid search (BM25 + vector + reranker)?"
 info "  uv sync --locked --no-default-groups --inexact --extra hybrid"
 info "  uv sync --locked --no-default-groups --inexact --extra code-graph"
-info "  uv sync --locked --no-default-groups --inexact --extra reranker"
 
 # ─── 10. Print summary ─────────────────────────────────────────────
 
@@ -873,5 +872,4 @@ echo "MCP baseline: 12 local task-shaped tools (installed)"
 echo "Optional enhancements:"
 echo "  uv sync --locked --no-default-groups --inexact --extra hybrid"
 echo "  uv sync --locked --no-default-groups --inexact --extra code-graph"
-echo "  uv sync --locked --no-default-groups --inexact --extra reranker"
 echo ""

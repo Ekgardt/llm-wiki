@@ -65,7 +65,6 @@ def compile_config() -> dict[str, Any]:
 
 
 def compiled_model(path: Path) -> Any:
-    """The model at `path`, compiled for the CPU."""
     decline_telemetry()
     import openvino
 
@@ -74,4 +73,4 @@ def compiled_model(path: Path) -> Any:
 
 def precision_name() -> str:
     """What the operator asked for: the engine's default unless told f32."""
-    return compile_config().get("INFERENCE_PRECISION_HINT", "auto")
+    return F32 if "INFERENCE_PRECISION_HINT" in compile_config() else "auto"

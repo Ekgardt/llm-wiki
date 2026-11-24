@@ -4827,10 +4827,11 @@ def _models_check() -> dict:
 def _openvino_telemetry_declined() -> bool:
     from openvino_runtime import telemetry_declined
 
-    return telemetry_declined()
+    declined: bool = telemetry_declined()
+    return declined
 
 
-def _telemetry_verdict(details: dict) -> dict:
+def _telemetry_verdict(details: dict[str, Any]) -> dict[str, Any]:
     if details["telemetry_declined"]:
         return _result("models", "ok", "Pinned model weights are installed.", details)
     from openvino_runtime import telemetry_consent_file

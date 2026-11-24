@@ -43,7 +43,7 @@ def _about_drums(text: str) -> float:
     return float("drum" in lowered or "pearl" in lowered)
 
 
-def _encode(texts):
+def _encode(texts: list[str]) -> np.ndarray:
     """A fake encoder: a sentence about drums points the way the question does."""
     return np.asarray([[_about_drums(text), 1.0] for text in texts], dtype=float)
 

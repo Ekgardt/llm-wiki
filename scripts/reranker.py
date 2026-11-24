@@ -3,7 +3,7 @@
 Re-ranks fused candidates using a cross-encoder that scores each
 (query, document) pair jointly, on the CPU through OpenVINO.
 
-Install: uv sync --locked --no-default-groups --inexact --extra reranker
+Install: uv sync --locked --no-default-groups --inexact --extra semantic
 The default is `Horizon-Labs/multilingual-reranker-base` at its pinned revision;
 the environment may name another model ID with an immutable 40-hex revision,
 installed under `cache/models/` with the same files, or

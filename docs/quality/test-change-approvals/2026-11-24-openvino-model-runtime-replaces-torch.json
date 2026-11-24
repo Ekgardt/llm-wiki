@@ -1,0 +1,27 @@
+{
+ "tests": [
+  "test_a_corrupted_cached_file_is_fetched_again_in_the_same_run",
+  "test_a_fake_model_that_is_not_a_module_is_left_alone",
+  "test_a_file_not_in_the_cache_is_named",
+  "test_anything_but_fp32_means_int8",
+  "test_a_quantized_model_still_scores_the_same_order",
+  "test_doctor_expects_no_weights_without_the_semantic_extra",
+  "test_explicit_immutable_model_load_is_local_only",
+  "test_fp32_by_name_keeps_the_model_as_loaded",
+  "test_nothing_in_the_product_loads_the_encoder_through_sentence_transformers",
+  "test_quantisation_happens_in_place_so_no_second_copy_of_the_weights_exists",
+  "test_reranker_extra_owns_every_direct_import",
+  "test_rows_are_mean_pooled_over_real_tokens_normalised_and_in_order",
+  "test_semantic_extra_owns_every_import_of_the_encoder",
+  "test_the_default_is_int8_on_the_linear_layers",
+  "test_the_loader_reads_the_pinned_files_on_the_cpu",
+  "test_the_text_report_names_the_file_it_removed",
+  "test_verified_weights_retire_the_file_they_replace_and_its_blob"
+ ],
+ "kinds": [
+  "removed"
+ ],
+ "reason": "The owner chose bge-m3 as the encoder and Horizon-Labs/multilingual-reranker-base as the reranker, both run through OpenVINO from ordinary files under cache/models/<repo>/<revision>/ (owner messages 263016509/17933, 17943 and 18033). torch, transformers, sentence-transformers and onnxruntime left the product, so the tests of what they did go with them: the reranker-that-never-finished file and the int8/fp32 quantisation tests (int8 now comes with the published ONNX export, nothing is quantised at load), mean pooling (bge-m3 uses the first token; tests/test_the_encoder_runs_without_torch.py::test_rows_are_the_first_token_normalised_and_in_order), loading from the Hugging Face cache and its blobs (tests/test_the_encoder_runs_without_torch.py::test_the_loader_compiles_the_graph_from_the_pinned_directory, tests/test_a_bad_model_file_is_fetched_again.py::test_a_corrupted_installed_file_is_fetched_again_in_the_same_run, tests/test_install_models.py::test_the_files_are_ordinary_files_under_the_pinned_revision and test_verified_weights_delete_the_revision_they_replace_from_the_hub_cache), the local_files_only switch (tests/test_the_query_path_reads_local_weights_only.py and tests/test_reranker.py::test_explicit_immutable_model_loads_from_its_pinned_directory), the separate reranker extra (both models are the semantic extra; tests/test_dependency_environments.py::test_search_is_the_model_runtime_plus_the_vectors_numpy) and the semantic-extra import ownership (tests/test_the_encoder_runs_without_torch.py::test_nothing_in_the_product_loads_a_model_through_torch_or_onnx_runtime). Doctor with no runtime is test_doctor_expects_no_weights_without_a_model_runtime.",
+ "recorded": "2026-11-24",
+ "expires": "2027-02-22"
+}

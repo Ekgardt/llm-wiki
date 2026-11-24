@@ -36,7 +36,7 @@ from collections import OrderedDict
 from collections.abc import Callable, Collection, Iterable, Iterator, Mapping, Sequence
 from contextlib import AbstractContextManager, closing, contextmanager, nullcontext
 from pathlib import Path
-from typing import NamedTuple
+from typing import Any, NamedTuple
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import query_spelling
@@ -953,9 +953,10 @@ def _built_generation_vectors(
     ], reused
 
 
-def _encoded_rows(embedder, texts) -> list[list[float]]:
+def _encoded_rows(embedder: Any, texts: Iterable[str]) -> list[list[float]]:
     """The generation paths want plain rows; bge-m3 encodes questions and pages alike."""
-    return embedder.encode(list(texts)).tolist()
+    rows: list[list[float]] = embedder.encode(list(texts)).tolist()
+    return rows
 
 
 def _lazy_generation_query_encoder():

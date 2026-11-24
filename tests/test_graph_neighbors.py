@@ -354,7 +354,8 @@ def _run_cli(
     monkeypatch.setattr(sys, "argv", ["graph_neighbors.py", *arguments])
 
     assert fake_graph.main() == 0
-    return capsys.readouterr().out
+    printed: str = capsys.readouterr().out
+    return printed
 
 
 def test_cli_stats_count_pages_and_edges(

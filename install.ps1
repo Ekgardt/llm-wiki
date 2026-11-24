@@ -773,6 +773,5 @@ Write-Host "MCP baseline: 12 local task-shaped tools (installed)"
 Write-Host "Optional enhancements:"
 Write-Host "  uv sync --locked --no-default-groups --inexact --extra hybrid"
 Write-Host "  uv sync --locked --no-default-groups --inexact --extra code-graph"
-Write-Host "  uv sync --locked --no-default-groups --inexact --extra reranker"
 Write-Host ""
 if ($schedulerWarning) { exit 1 }

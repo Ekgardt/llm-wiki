@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
+from typing import Any, NoReturn
 from unittest.mock import patch
 
 import pytest
@@ -92,7 +93,8 @@ def _installed_model(monkeypatch: pytest.MonkeyPatch, root: Path, repo: str, rev
     for name in reranker.RERANKER_READ_FILES:
         (directory / name).parent.mkdir(parents=True, exist_ok=True)
         (directory / name).write_bytes(b"")
-    return directory
+    installed: Path = directory
+    return installed
 
 
 def test_explicit_immutable_model_loads_from_its_pinned_directory(
@@ -108,8 +110,17 @@ def test_explicit_immutable_model_loads_from_its_pinned_directory(
     directory = _installed_model(monkeypatch, tmp_path, "org/model", revision)
     compiled: list[Path] = []
     tokenizers: list[Path] = []
-    monkeypatch.setattr("openvino_runtime.compiled_model", lambda path: compiled.append(path) or "m")
-    monkeypatch.setattr(reranker, "_pair_tokenizer", lambda path: tokenizers.append(path) or "t")
+
+    def compile_model(path: Path) -> str:
+        compiled.append(path)
+        return "m"
+
+    def pair_tokenizer(path: Path) -> str:
+        tokenizers.append(path)
+        return "t"
+
+    monkeypatch.setattr("openvino_runtime.compiled_model", compile_model)
+    monkeypatch.setattr(reranker, "_pair_tokenizer", pair_tokenizer)
 
     bundle = reranker._get_reranker_bundle()
 
@@ -157,7 +168,7 @@ def test_a_failed_load_is_recorded_once_and_not_retried_per_question(
     _installed_model(monkeypatch, tmp_path, "org/broken", "c" * 40)
     calls: list[Path] = []
 
-    def broken(path: Path):
+    def broken(path: Path) -> NoReturn:
         calls.append(path)
         raise RuntimeError("cannot compile")
 
@@ -390,13 +401,14 @@ def test_a_batch_feeds_ids_and_mask_and_reads_one_logit_per_pair(tmp_path: Path)
     import reranker
 
     tokenizer = reranker._pair_tokenizer(_word_tokenizer_file(tmp_path, shipped_window=None))
-    fed: list[dict] = []
+    fed: list[dict[str, Any]] = []
 
-    def model(feeds):
+    def model(feeds: dict[str, Any]) -> list[Any]:
         fed.append(feeds)
         return [feeds["attention_mask"].sum(axis=1, keepdims=True).astype(np.float32)]
 
-    logits = reranker._batch_logits({"model": model, "tokenizer": tokenizer}, [("a", "b"), ("a", "a b a")])
+    bundle = {"model": model, "tokenizer": tokenizer}
+    logits = reranker._batch_logits(bundle, [("a", "b"), ("a", "a b a")])
 
     assert logits == [2.0, 4.0]
     assert fed[0]["input_ids"].tolist() == [[2, 3, 0, 0], [2, 2, 3, 2]]

@@ -27,9 +27,9 @@ semantic = [
     "openvino>=2026.4.1,<2027; sys_platform != 'darwin' or platform_machine != 'x86_64'",
     "tokenizers>=0.19,<1",
 ]
-# Search as documented: the encoder and the reranker, which is on by default
-# (docs/research/2026-09-25-an-update-brings-the-extras-the-operator-chose.md).
-hybrid = ["llm-wiki[semantic,reranker]"]
+# Search as documented: the encoder, the reranker (on by default) and the vectors'
+# numpy (docs/research/2026-09-25-an-update-brings-the-extras-the-operator-chose.md).
+hybrid = ["numpy>=2.2.6,<3", "llm-wiki[semantic]"]
 # v4.0: tree-sitter code graph (12 languages; grammars remain optional as a group).
 code-graph = [
     "jedi>=0.19,<1",
@@ -49,12 +49,9 @@ code-graph = [
 ]
 # v4.0: MCP server (12 task-shaped tools, stdio transport, 100% local).
 mcp-server = []
-# The cross-encoder reranker runs on the encoder's runtime and is fetched by the
-# same installer, so choosing it chooses that runtime.
-reranker = ["llm-wiki[semantic]"]
 # Convenience: install everything.
 full = [
-    "llm-wiki[semantic,hybrid,code-graph,mcp-server,reranker]",
+    "llm-wiki[semantic,hybrid,code-graph,mcp-server]",
 ]
 
 [dependency-groups]

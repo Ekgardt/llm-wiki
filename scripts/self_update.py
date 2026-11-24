@@ -21,6 +21,7 @@ import subprocess
 import sys
 from collections.abc import Sequence
 from pathlib import Path
+from typing import Any
 
 if sys.version_info >= (3, 11):
     import tomllib
@@ -349,7 +350,9 @@ def _chosen_by_itself(
     return bool((exclusive & installed.keys()) - pulled_in)
 
 
-def _declared_outside(project: dict, own: dict[str, set[str]], extra: str) -> set[str]:
+def _declared_outside(
+    project: dict[str, Any], own: dict[str, set[str]], extra: str
+) -> set[str]:
     """What the project declares in its base and in every other extra."""
     base = {_requirement_name(value) for value in project.get("dependencies", [])}
     return base.union(*(names for name, names in own.items() if name != extra))

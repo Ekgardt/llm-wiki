@@ -25,6 +25,7 @@ import time
 from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
@@ -36,8 +37,8 @@ from embedding_model import (  # noqa: E402
     EMBEDDING_WEIGHTS_FILE,
     EMBEDDING_WEIGHTS_SHA256,
 )
-from model_files import model_directory  # noqa: E402
-from openvino_runtime import decline_telemetry  # noqa: E402
+from model_files import model_directory
+from openvino_runtime import decline_telemetry
 from reranker import (  # noqa: E402
     DEFAULT_RERANKER_MODEL,
     DEFAULT_RERANKER_REVISION,
@@ -75,7 +76,8 @@ class PinnedModel:
 
     @property
     def directory(self) -> Path:
-        return model_directory(self.repo_id, self.revision)
+        directory: Path = model_directory(self.repo_id, self.revision)
+        return directory
 
 
 def pinned_models() -> tuple[PinnedModel, ...]:
@@ -262,13 +264,13 @@ def ensure(model: PinnedModel, hub, *, download: bool) -> dict:
     return _verified_download(model, hub)
 
 
-def _holds(repo, repo_id: str, revision: str) -> bool:
+def _holds(repo: Any, repo_id: str, revision: str) -> bool:
     if repo.repo_id != repo_id or repo.repo_type != "model":
         return False
     return any(entry.commit_hash == revision for entry in repo.revisions)
 
 
-def _cache_holding(hub, repo_id: str, revision: str):
+def _cache_holding(hub: Any, repo_id: str, revision: str) -> Any:
     """The Hugging Face cache when it holds that pinned revision, else None."""
     try:
         cache = hub.scan_cache_dir()
@@ -279,7 +281,7 @@ def _cache_holding(hub, repo_id: str, revision: str):
     return None
 
 
-def retire_replaced(model: PinnedModel, hub) -> list[str]:
+def retire_replaced(model: PinnedModel, hub: Any) -> list[str]:
     """Delete the revision this model replaced from the Hugging Face cache."""
     if model.replaces is None:
         return []

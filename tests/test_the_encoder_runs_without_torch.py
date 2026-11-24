@@ -10,6 +10,7 @@ from __future__ import annotations
 import re
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 
 import model_files
 import numpy as np
@@ -23,10 +24,10 @@ PAD_ID = 1
 class _Tokenizer:
     """One token per character code, so each text's tokens are known."""
 
-    def encode_batch(self, texts):
+    def encode_batch(self, texts: list[str]) -> list[SimpleNamespace]:
         return [SimpleNamespace(ids=[ord(character) for character in text]) for text in texts]
 
-    def token_to_id(self, token):
+    def token_to_id(self, token: str) -> int | None:
         return PAD_ID if token == onnx_encoder.PAD_TOKEN else None
 
 
@@ -34,13 +35,13 @@ class _CompiledModel:
     """A hidden state of (token id, position + 1) per position, like a compiled OpenVINO model."""
 
     def __init__(self) -> None:
-        self.batches: list[dict] = []
+        self.batches: list[dict[str, Any]] = []
 
-    def output(self, _index):
+    def output(self, _index: int) -> SimpleNamespace:
         width = SimpleNamespace(get_length=lambda: 2)
         return SimpleNamespace(get_partial_shape=lambda: [None, None, width])
 
-    def __call__(self, feeds):
+    def __call__(self, feeds: dict[str, Any]) -> list[np.ndarray]:
         self.batches.append(feeds)
         ids = feeds["input_ids"].astype(np.float32)
         positions = np.broadcast_to(np.arange(1, ids.shape[1] + 1, dtype=np.float32), ids.shape)
@@ -49,10 +50,11 @@ class _CompiledModel:
 
 def _expected(text: str) -> np.ndarray:
     vector = np.array([ord(text[0]), 1.0])
-    return vector / np.linalg.norm(vector)
+    normalised: np.ndarray = vector / np.linalg.norm(vector)
+    return normalised
 
 
-def test_rows_are_the_first_token_normalised_and_in_order(monkeypatch) -> None:
+def test_rows_are_the_first_token_normalised_and_in_order(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(onnx_encoder, "BATCH_SIZE", 2)
     model = _CompiledModel()
     encoder = onnx_encoder.OnnxEncoder(model, _Tokenizer())
@@ -80,23 +82,28 @@ def test_no_text_gives_no_rows() -> None:
     assert encoder.encode([]).shape == (0, 2)
 
 
-def test_a_file_not_installed_is_named(tmp_path, monkeypatch) -> None:
+def test_a_file_not_installed_is_named(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(model_files, "models_root", lambda: tmp_path)
 
-    with pytest.raises(FileNotFoundError, match="onnx/model.onnx_data is not installed"):
+    with pytest.raises(FileNotFoundError, match=r"onnx/model\.onnx_data is not installed"):
         onnx_encoder.load_encoder("org/model", "f" * 40)
 
 
-def test_the_loader_compiles_the_graph_from_the_pinned_directory(tmp_path, monkeypatch) -> None:
+def test_the_loader_compiles_the_graph_from_the_pinned_directory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     monkeypatch.setattr(model_files, "models_root", lambda: tmp_path)
     directory = model_files.model_directory("org/model", "f" * 40)
     for name in ("onnx/model.onnx", "onnx/model.onnx_data", "tokenizer.json"):
         (directory / name).parent.mkdir(parents=True, exist_ok=True)
         (directory / name).write_bytes(b"")
     compiled: list[Path] = []
-    monkeypatch.setattr(
-        onnx_encoder, "compiled_model", lambda path: compiled.append(path) or _CompiledModel()
-    )
+
+    def compile_model(path: Path) -> _CompiledModel:
+        compiled.append(path)
+        return _CompiledModel()
+
+    monkeypatch.setattr(onnx_encoder, "compiled_model", compile_model)
     monkeypatch.setattr(onnx_encoder, "_tokenizer", lambda path: _Tokenizer())
 
     encoder = onnx_encoder.load_encoder("org/model", "f" * 40)

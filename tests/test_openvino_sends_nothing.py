@@ -1,4 +1,4 @@
-"""OpenVINO is told to send nothing before it is first imported, and runs on the threads it is given.
+"""OpenVINO is told to send nothing before its first import and runs on the given threads.
 
 `import openvino` imports its converter, and the converter sends a usage event
 unless the consent file declines; a missing file counts as consent. The memory
@@ -20,21 +20,21 @@ SCRIPTS = Path(__file__).resolve().parent.parent / "scripts"
 
 
 @pytest.fixture
-def home(tmp_path, monkeypatch) -> Path:
+def home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.setenv("LOCALAPPDATA", str(tmp_path))
     monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
     return tmp_path
 
 
-def test_a_missing_consent_is_written_as_declined(home) -> None:
+def test_a_missing_consent_is_written_as_declined(home: Path) -> None:
     openvino_runtime.decline_telemetry()
 
     assert openvino_runtime.telemetry_consent_file().read_text(encoding="utf-8").strip() == "0"
     assert openvino_runtime.telemetry_declined()
 
 
-def test_a_choice_already_recorded_is_kept(home) -> None:
+def test_a_choice_already_recorded_is_kept(home: Path) -> None:
     consent = openvino_runtime.telemetry_consent_file()
     consent.parent.mkdir(parents=True)
     consent.write_text("1\n", encoding="utf-8")
@@ -47,15 +47,19 @@ def test_a_choice_already_recorded_is_kept(home) -> None:
     )
 
 
-def test_the_consent_is_declined_before_openvino_is_imported(home, monkeypatch) -> None:
+def test_the_consent_is_declined_before_openvino_is_imported(
+    home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     seen: list[bool] = []
 
     class _Core:
-        def compile_model(self, path, device, config):
+        def compile_model(
+            self, path: str, device: str, config: dict[str, object]
+        ) -> tuple[str, str, dict[str, object]]:
             return (path, device, config)
 
     class _Importing:
-        def __getattr__(self, name):
+        def __getattr__(self, name: str) -> type[_Core]:
             seen.append(openvino_runtime.telemetry_declined())
             return _Core
 
@@ -66,7 +70,9 @@ def test_the_consent_is_declined_before_openvino_is_imported(home, monkeypatch) 
     assert (set(seen), path, device) == ({True}, str(home / "model.onnx"), "CPU")
 
 
-def test_a_consent_that_cannot_be_written_stops_the_load(home, monkeypatch) -> None:
+def test_a_consent_that_cannot_be_written_stops_the_load(
+    home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     (home / "intel").write_text("a file where the directory should be", encoding="utf-8")
     monkeypatch.setattr(sys, "platform", "linux")
     monkeypatch.setitem(sys.modules, "openvino", None)
@@ -75,7 +81,9 @@ def test_a_consent_that_cannot_be_written_stops_the_load(home, monkeypatch) -> N
         openvino_runtime.compiled_model(home / "model.onnx")
 
 
-def test_the_stand_thread_count_and_the_f32_switch_reach_the_compiler(monkeypatch) -> None:
+def test_the_stand_thread_count_and_the_f32_switch_reach_the_compiler(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     monkeypatch.setenv(openvino_runtime.THREADS_ENV, "3")
     monkeypatch.setenv(openvino_runtime.PRECISION_ENV, "F32")
 
@@ -87,14 +95,16 @@ def test_the_stand_thread_count_and_the_f32_switch_reach_the_compiler(monkeypatc
 
 
 @pytest.mark.parametrize("threads", ["", "0", "four"])
-def test_no_usable_thread_count_leaves_the_engine_its_default(monkeypatch, threads) -> None:
+def test_no_usable_thread_count_leaves_the_engine_its_default(
+    monkeypatch: pytest.MonkeyPatch, threads: str
+) -> None:
     monkeypatch.setenv(openvino_runtime.THREADS_ENV, threads)
     monkeypatch.delenv(openvino_runtime.PRECISION_ENV, raising=False)
 
     assert (openvino_runtime.compile_config(), openvino_runtime.precision_name()) == ({}, "auto")
 
 
-def test_the_real_import_finds_the_declining_consent(tmp_path) -> None:
+def test_the_real_import_finds_the_declining_consent(tmp_path: Path) -> None:
     """With the real package: the consent checker reads what the memory wrote."""
     pytest.importorskip("openvino_telemetry")
     script = (
@@ -113,7 +123,9 @@ def test_the_real_import_finds_the_declining_consent(tmp_path) -> None:
     assert done.stdout.strip() == "True"
 
 
-def test_doctor_names_a_consent_that_is_not_declined(home, monkeypatch) -> None:
+def test_doctor_names_a_consent_that_is_not_declined(
+    home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     import doctor
     import install_models
 

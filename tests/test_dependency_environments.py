@@ -29,8 +29,11 @@ def _project() -> dict:
     return tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
 
 
-def test_the_reranker_extra_is_the_runtime_both_models_share() -> None:
-    assert _project()["project"]["optional-dependencies"]["reranker"] == ["llm-wiki[semantic]"]
+def test_search_is_the_model_runtime_plus_the_vectors_numpy() -> None:
+    optional = _project()["project"]["optional-dependencies"]
+
+    assert optional["hybrid"] == ["numpy>=2.2.6,<3", "llm-wiki[semantic]"]
+    assert "reranker" not in optional
 
 
 def test_semantic_extra_owns_every_import_of_both_models() -> None:
@@ -166,7 +169,7 @@ def test_generated_mcp_entries_use_exact_arguments(tmp_path: Path) -> None:
 def test_installer_optional_commands_are_additive() -> None:
     expected = {
         f"uv sync --locked --no-default-groups --inexact --extra {extra}"
-        for extra in ("hybrid", "code-graph", "reranker")
+        for extra in ("hybrid", "code-graph")
     }
     for installer in ("install.sh", "install.ps1"):
         source = (ROOT / installer).read_text(encoding="utf-8")

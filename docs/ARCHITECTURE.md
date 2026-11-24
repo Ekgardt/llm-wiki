@@ -197,8 +197,8 @@ No embedding model, vector cache, or optional package is required in this tier.
 
 ### Hybrid tier (`uv sync --locked --inexact --extra hybrid`)
 The semantic tier plus a cross-encoder reranker: `Horizon-Labs/multilingual-reranker-base`,
-its int8 ONNX export through OpenVINO, re-scores the head of the list. `hybrid` and
-`reranker` name the same runtime as `semantic`; both models are read from
+its int8 ONNX export through OpenVINO, re-scores the head of the list. `hybrid` adds
+only the vectors' numpy to `semantic`; both models are read from
 `cache/models/<repo>/<revision>/`, which `scripts/install_models.py` fills and verifies.
 
 **RRF formula**: `score = 1.0/(60+bm25_rank) + 2.0/(60+vector_rank) + 0.5/(60+graph_rank)` for signals that actually return a ranked candidate.
@@ -325,7 +325,7 @@ no environment variables.
 ## What v4.0 adds (optional, all behind `--extra` flags)
 
 - **Hybrid vectors** (`--extra hybrid`): in-process numpy vector search, embedded, zero-daemon.
-- **Cross-encoder reranker** (`--extra reranker`): `Horizon-Labs/multilingual-reranker-base` on OpenVINO, re-ranks the head of the list.
+- **Cross-encoder reranker** (`--extra semantic`): `Horizon-Labs/multilingual-reranker-base` on OpenVINO, re-ranks the head of the list.
 - **Code graph** (`--extra code-graph`): lazy tree-sitter parsing of Python,
   JavaScript, TypeScript, Go, Rust, Java, C, C++, Ruby, PHP, C#, and Bash;
   materialized `.scm` queries, call graph, and impact analysis.

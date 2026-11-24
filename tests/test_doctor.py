@@ -288,7 +288,9 @@ def _check(report: dict, check_id: str) -> dict:
     return next(item for item in report["checks"] if item["id"] == check_id)
 
 
-def _install_pinned_models(tmp_path: Path, home: Path, monkeypatch) -> None:
+def _install_pinned_models(
+    tmp_path: Path, home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """The pinned model files and the declined telemetry, as `install_models.py` leaves them.
 
     The report used to read this machine's real cache and home, so a healthy-vault

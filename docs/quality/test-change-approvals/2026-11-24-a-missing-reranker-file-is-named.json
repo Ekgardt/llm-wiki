@@ -1,0 +1,11 @@
+{
+ "tests": [
+  "test_missing_local_artifact_degrades_without_network"
+ ],
+ "kinds": [
+  "assertions"
+ ],
+ "reason": "The reranker no longer asks the Hugging Face library with local_files_only; it reads its files from cache/models/<repo>/<revision>/ and compiles them with OpenVINO (owner messages 263016509/17943 and 18033). The test still proves a missing model degrades without any network call, and now asserts the reason names the file that is not installed instead of the library's local_files_only error.",
+ "recorded": "2026-11-24",
+ "expires": "2027-02-22"
+}
