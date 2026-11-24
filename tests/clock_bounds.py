@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import math
-import time
+from time import monotonic
 
 # A clock reading just below 1024 s at which `(reading + 2.0) - reading` is
 # 2.0000000000001137: a Windows runner hit such a reading (run 45482419969).
@@ -19,4 +19,4 @@ def within_budget(seconds: float, budget: float) -> bool:
     only grows, so the spacing of `now + budget` covers the deadline's; anything
     beyond it is a real overrun and fails.
     """
-    return seconds <= budget + math.ulp(time.monotonic() + budget)
+    return seconds <= budget + math.ulp(monotonic() + budget)

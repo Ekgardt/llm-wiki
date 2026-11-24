@@ -7165,8 +7165,9 @@ def test_windows_owner_acl_uses_one_bounded_change_and_one_verification(
         assert kwargs["shell"] is False
         assert kwargs["check"] is False
         assert kwargs["capture_output"] is True
-        assert float(kwargs["timeout"]) > 0
-        assert within_budget(float(kwargs["timeout"]), lsp_process._STARTUP_WAIT_SECONDS)
+        timeout = kwargs["timeout"]
+        assert isinstance(timeout, (int, float)) and timeout > 0
+        assert within_budget(timeout, lsp_process._STARTUP_WAIT_SECONDS)
     assert set(path.name for path in owner.iterdir()) == {
         "cancellation",
         "failure.json",
