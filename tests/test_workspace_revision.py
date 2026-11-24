@@ -2827,29 +2827,20 @@ def _fail_first_private_proof(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(workspace_revision, "_validate_private_git_proof", validate_after_first)
 
 
-@pytest.mark.skipif(not _linux_memfd_available(), reason="Linux process groups")
-@pytest.mark.parametrize("private_pass_restarts", [False, True])
-def test_private_index_success_cleans_descendants_before_reaping_group_leader(
-    repository: Path,
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    private_pass_restarts: bool,
+def _assert_private_descendants_reaped(
+    repository: Path, wrapper_root: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Every private-index run's descendants are gone, even when an ordinary pass follows it.
 
-    The ordinary reader does not kill its group on success, so a restart used to
-    leave the last recorded descendant alive and fail this test under load.
+    The ordinary reader does not kill its group on success, so the test reads only
+    the private runs' descendants; a restart under load used to hand it an ordinary one.
     """
     real_git = shutil.which("git")
     if real_git is None:
         pytest.skip("Git executable is unavailable")
     scope = resolve_repository_scope(repository)
     expected = compute_workspace_revision(scope)
-    pids_path = _install_descendant_recording_git(
-        monkeypatch, tmp_path / "successful-git-wrapper", real_git
-    )
-    if private_pass_restarts:
-        _fail_first_private_proof(monkeypatch)
+    pids_path = _install_descendant_recording_git(monkeypatch, wrapper_root, real_git)
     try:
         assert workspace_revision.verify_workspace_revision_unchanged(scope, expected) is True
         private_descendants = _recorded_descendants(pids_path, "private")
@@ -2858,6 +2849,29 @@ def test_private_index_success_cleans_descendants_before_reaping_group_leader(
             _await_descendant_reaped(pid)
     finally:
         _kill_recorded_descendants(pids_path)
+
+
+@pytest.mark.skipif(not _linux_memfd_available(), reason="Linux process groups")
+def test_private_index_success_cleans_descendants_before_reaping_group_leader(
+    repository: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _assert_private_descendants_reaped(
+        repository, tmp_path / "successful-git-wrapper", monkeypatch
+    )
+
+
+@pytest.mark.skipif(not _linux_memfd_available(), reason="Linux process groups")
+def test_private_index_descendants_stay_cleaned_when_verification_restarts(
+    repository: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _fail_first_private_proof(monkeypatch)
+    _assert_private_descendants_reaped(
+        repository, tmp_path / "successful-git-wrapper", monkeypatch
+    )
 
 
 @pytest.mark.skipif(not _linux_memfd_available(), reason="Linux memfd optimization")
