@@ -6320,6 +6320,15 @@ def test_unchanged_content_sends_no_did_change_and_keeps_version(
         session.close(deadline=time.monotonic() + 5)
 
 
+def test_an_event_the_fake_server_is_still_appending_is_not_read_yet(tmp_path: Path) -> None:
+    """Under parallel load a reader can catch the server mid-append (a torn last line)."""
+    event_log = tmp_path / "events.jsonl"
+    event_log.write_text('{"kind":"started"}\n{"kind":"client-mes', encoding="utf-8")
+    fixture = SemanticPyrightFixture(object(), tmp_path / "config.json", event_log)
+
+    assert fixture.events() == ({"kind": "started"},)
+
+
 def test_created_and_deleted_files_produce_watched_file_events(
     repository: Path,
     state_root: Path,

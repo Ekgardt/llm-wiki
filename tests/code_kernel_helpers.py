@@ -56,13 +56,12 @@ class SemanticPyrightFixture:
     event_log: Path
 
     def events(self) -> tuple[dict[str, object], ...]:
+        """Every event the server has finished writing; a line still being appended waits."""
         if not self.event_log.exists():
             return ()
-        return tuple(
-            json.loads(line)
-            for line in self.event_log.read_text(encoding="utf-8").splitlines()
-            if line
-        )
+        text = self.event_log.read_text(encoding="utf-8")
+        complete = text[: text.rfind("\n") + 1]
+        return tuple(json.loads(line) for line in complete.splitlines() if line)
 
 
 def create_semantic_pyright_fixture(
