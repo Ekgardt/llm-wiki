@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import re
+import subprocess
 from pathlib import Path
 
+import pytest
 import yaml
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -202,14 +204,17 @@ def test_the_shards_cover_every_test_file_exactly_once() -> None:
     assert all(shard for shard in shards)
 
 
-def test_a_shard_runs_its_files_serially(monkeypatch) -> None:
+def test_a_shard_runs_its_files_serially(monkeypatch: pytest.MonkeyPatch) -> None:
     """The `-n auto` default must not reach a shard: the shards are the parallelism."""
     from tests import shard_plan
 
     commands: list[list[str]] = []
-    monkeypatch.setattr(
-        shard_plan.subprocess, "call", lambda command: commands.append(command) or 0
-    )
+
+    def recorded(command: list[str]) -> int:
+        commands.append(command)
+        return 0
+
+    monkeypatch.setattr(subprocess, "call", recorded)
 
     shard_plan.main(["--shard", "1", "--of", str(SHARD_COUNT), "--", "-q"])
 
