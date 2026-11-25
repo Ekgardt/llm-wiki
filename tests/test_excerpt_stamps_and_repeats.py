@@ -86,9 +86,34 @@ def test_an_operation_marker_entry_after_a_heading_carries_its_own_stamp() -> No
     )
 
 
-def test_a_heading_padded_to_a_hundred_kilobytes_is_still_stamped() -> None:
-    day = b"## [09:15:00]" + b" " * 100_000 + b"x\nbody\n"
+def test_a_heading_padded_after_its_pipe_is_still_stamped() -> None:
+    day = b"## [09:15:00] x |" + b" " * 100_000 + b"\nbody\n"
 
     stamps = EntryStamps.of("knowledge/daily/2024-03-02.md", day)
 
     assert stamps.at(day.index(b"body")) == ExcerptStamp("2024-03-02 09:15:00", "")
+
+
+def test_a_long_correction_of_a_figure_in_one_session_is_kept() -> None:
+    said = (
+        "For the trip to Lisbon next month I am planning a total budget of 500 dollars covering"
+        " the hotel, the flights, food, museum tickets and a day trip to Sintra with my sister"
+        " and her husband."
+    )
+    passages = [("s", said), ("s", "Sorry, correction: " + said.replace("500", "900"))]
+
+    assert repeated(passages) == set()
+
+
+def test_a_tool_line_is_stamped_with_its_session_not_its_agent() -> None:
+    marker = b"<!-- llm-wiki-operation:" + b"cd" * 32 + b" -->\n"
+    day = (
+        b"# 2026-11-20\n\n" + marker
+        + b"- `[15:42:10] tool | claude | sessB123 | proj | Edit` scripts/a.py\n"
+        + marker.replace(b"cd", b"ef")
+        + b"- `[16:00:00] episodes | 2026-11-20` consolidated\n"
+    )
+    stamps = EntryStamps.of("knowledge/daily/2026-11-20.md", day)
+
+    assert stamps.at(day.index(b"scripts/a.py")).session == "sessB123"
+    assert stamps.at(day.index(b"consolidated")).session == ""

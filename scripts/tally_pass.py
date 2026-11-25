@@ -37,8 +37,11 @@ _SPELLED = "|".join(_NUMBER_WORDS)
 _WORD = re.compile(rf"\b({_SPELLED})\b", re.IGNORECASE)
 _NUMBER = re.compile(r"\d[\d,]*(?:\.\d+)?")
 _DURATION = re.compile(
-    rf"(?<![\w.])(\d+(?:\.\d+)?|an?|{_SPELLED})\s*(year|month|week|day)s?\b", re.IGNORECASE
+    rf"(?<![\w.])(\d+(?:\.\d+)?|{_SPELLED})\s*(year|month|week|day)s?\b", re.IGNORECASE
 )
+# A rate ("$15 a month", "3 times a week") or a fraction ("a year and a half")
+# names an amount this does not read, so the entry gives no figure at all.
+_UNREAD = re.compile(r"\b(?:half|times|per|an?\s+(?:year|month|week|day))\b", re.IGNORECASE)
 _UNITS = {"year": ("months", 12), "month": ("months", 1), "week": ("days", 7), "day": ("days", 1)}
 _PLURAL = re.compile(r"\b(year|month|week|day)s\b")
 _AMOUNT = re.compile(r"([$€£¥₽])?\s*\d[\d,]*(?:\.\d+)?\s*([^\W\d_]*)")
@@ -86,8 +89,6 @@ def count_of(inputs: Sequence[str]) -> Tally | None:
 
 def _amount(word: str) -> Decimal:
     lowered = word.lower()
-    if lowered in ("a", "an"):
-        return Decimal(1)
     if lowered in _NUMBER_WORDS:
         return Decimal(_NUMBER_WORDS.index(lowered))
     return Decimal(word)
@@ -126,7 +127,7 @@ def _duration(text: str) -> tuple[str, Decimal] | None:
 
 
 def _quantity(text: str) -> tuple[str, Decimal] | None:
-    if _ISO.search(text) or _MONTH_NAME.search(text):
+    if _ISO.search(text) or _MONTH_NAME.search(text) or _UNREAD.search(text):
         return None
     return _duration(text)
 
@@ -150,13 +151,13 @@ def _in_years(months: Decimal) -> Tally:
     years, rest = divmod(months, 12)
     y, m, total = _shown(years), _shown(rest), _shown(months)
     patterns = [rf"{total} month", rf"{y} year,? (?:and )?{m} month"]
-    patterns += [rf"{y} year"] if rest == 0 else []
+    patterns += [rf"{y} year(?!,? (?:and )?\d+ month)"] if rest == 0 else []
     return Tally(f"{y} years and {m} months ({total} months)", tuple(patterns))
 
 
 def _in_days(days: Decimal) -> Tally:
     patterns = [rf"{_shown(days)} day"]
-    patterns += [rf"{_shown(days / 7)} week"] if days % 7 == 0 else []
+    patterns += [rf"{_shown(days / 7)} week(?!,? (?:and )?\d+ day)"] if days % 7 == 0 else []
     return Tally(f"{_shown(days)} days", tuple(patterns))
 
 

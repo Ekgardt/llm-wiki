@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import os
 import sys
 from pathlib import Path
 
@@ -36,8 +35,10 @@ def _checkout(tmp_path: Path) -> Path:
 def _prepared(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     monkeypatch.setattr(longmemeval_vault, "REPO", _checkout(tmp_path))
     monkeypatch.setattr(sys, "path", list(sys.path))
-    for name in ("LLM_WIKI_ROOT", "LLM_WIKI_STATE_ROOT", "MEMORY_LLM_PROVIDER"):
-        monkeypatch.setenv(name, os.environ.get(name, ""))
+    for name in (
+        "LLM_WIKI_ROOT", "LLM_WIKI_STATE_ROOT", "MEMORY_LLM_PROVIDER", "MEMORY_LLM_TIMEOUT_S"
+    ):
+        monkeypatch.delenv(name, raising=False)
     monkeypatch.chdir(tmp_path)
     _root, state = longmemeval_vault.prepare_environment(tmp_path / "stand")
     monkeypatch.setattr(memory_state, "STATE_ROOT", state)

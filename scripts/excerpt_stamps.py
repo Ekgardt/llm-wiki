@@ -22,6 +22,10 @@ if TYPE_CHECKING:
 
 _DAILY_FILE = re.compile(r"(?:^|/)daily/(\d{4}-\d{2}-\d{2})\.md$")
 _MARKER = re.compile(r"^<!-- llm-wiki-operation:")
+# Where each writer puts the session among the `|` fields: a heading and a
+# prompt (`user_prompt_capture`) put it second, a tool line (`post_tool_capture`)
+# names its agent first, and an episodes line (`episode_consolidation`) has none.
+_SESSION_FIELD: dict[str, int | None] = {"tool": 2, "episodes": None}
 
 
 @dataclass(frozen=True)
@@ -75,11 +79,18 @@ def _entry_stamp(day: str, content: bytes, entry: tuple[str, int, int]) -> Excer
 
 
 def _session(entry: bytes) -> str:
-    """The second `|` field of the line that declares the entry's time."""
+    """The session field of the line that declares the entry's time, by the entry's kind."""
+    fields = [part.strip(" \t`") for part in _declaring_line(entry).split("|")]
+    kind = next(reversed(fields[0].split()), "")
+    position = _SESSION_FIELD.get(kind, 1)
+    if position is None or position >= len(fields):
+        return ""
+    return fields[position]
+
+
+def _declaring_line(entry: bytes) -> str:
     lines = entry.decode("utf-8", errors="replace").splitlines()
-    declaring = [line for line in lines if line.strip() and not _MARKER.match(line)][:1]
-    fields = "".join(declaring).split("|")
-    return fields[1].strip(" \t`") if len(fields) > 1 else ""
+    return next((line for line in lines if line.strip() and not _MARKER.match(line)), "")
 
 
 @dataclass

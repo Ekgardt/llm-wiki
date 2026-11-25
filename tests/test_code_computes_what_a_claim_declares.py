@@ -129,11 +129,39 @@ def test_dates_named_by_month_are_left_to_the_calendar() -> None:
 
 def test_amounts_written_in_words_are_read() -> None:
     claim = _marked(
-        "difference", ["for a year and 3 months", "for two years and 3 months"], "One year."
+        "difference", ["for one year and 3 months", "for two years and 3 months"], "One year."
     )
 
     assert claim["computed"] == "1 years and 0 months (12 months)"
     assert claim["computed_stated"] is True
+
+
+def test_a_rate_is_not_read_as_a_duration() -> None:
+    claim = _marked("sum", ["Netflix $15 a month", "Spotify $10 a month"], "You pay $25.")
+
+    assert "computed" not in claim
+
+
+def test_a_fraction_of_a_unit_gives_no_figure() -> None:
+    for inputs in (
+        ["a year and a half at Acme", "6 months at Beta"],
+        ["half a year in Berlin", "2 years in Paris"],
+        ["yoga 3 times a week", "running 2 times a week"],
+    ):
+        assert "computed" not in _marked("difference", inputs, "Some time.")
+
+
+def test_a_whole_unit_followed_by_a_smaller_one_does_not_state_the_figure() -> None:
+    days = _marked(
+        "difference", ["10 days in Rome", "3 days in Paris"], "You stayed 1 week and 2 days longer."
+    )
+    years = _marked(
+        "difference", ["worked 9 years", "5 years at NovaTech"], "About 4 years and 3 months."
+    )
+
+    assert (days["computed"], days["computed_stated"]) == ("7 days", False)
+    assert years["computed_stated"] is False
+    assert _marked("difference", ["10 days", "3 days"], "One week longer.")["computed_stated"]
 
 
 def test_a_sum_converts_weeks_to_days() -> None:

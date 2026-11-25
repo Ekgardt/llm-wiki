@@ -126,29 +126,30 @@ def _verdict_key(text: str) -> bytes:
     return hashlib.blake2b(text.encode("utf-8"), digest_size=16).digest()
 
 
-def test_threads_filling_a_full_cache_never_break_a_search(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    import threading
+class _LockChecked(dict[bytes, bool]):
+    """A cache that fails when it is changed without the verdict lock held."""
 
+    def __setitem__(self, key: bytes, value: bool) -> None:
+        import provenance
+
+        assert provenance._VERDICTS_LOCK.locked()
+        super().__setitem__(key, value)
+
+    def pop(self, key: bytes, default: object = None) -> object:  # type: ignore[override]
+        import provenance
+
+        assert provenance._VERDICTS_LOCK.locked()
+        return super().pop(key, default)
+
+
+def test_a_full_cache_is_changed_only_under_its_lock(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Concurrent searches evict and insert; one unlocked change can break another's iteration."""
     import provenance
 
-    monkeypatch.setattr(provenance, "_NAVIGATION_VERDICTS", {})
-    monkeypatch.setattr(provenance, "NAVIGATION_VERDICTS_KEPT", 8)
-    failures: list[BaseException] = []
+    monkeypatch.setattr(provenance, "_NAVIGATION_VERDICTS", _LockChecked())
+    monkeypatch.setattr(provenance, "NAVIGATION_VERDICTS_KEPT", 2)
 
-    def weigh(worker: int) -> None:
-        try:
-            for line in range(2_000):
-                provenance.substance_weight(f"prose line {worker} {line}")
-        except BaseException as error:
-            failures.append(error)
+    for text in ("first prose line", "second prose line", "third prose line"):
+        provenance.substance_weight(text)
 
-    workers = [threading.Thread(target=weigh, args=(worker,)) for worker in range(8)]
-    for thread in workers:
-        thread.start()
-    for thread in workers:
-        thread.join()
-
-    assert failures == []
-    assert len(provenance._NAVIGATION_VERDICTS) <= 8
+    assert len(provenance._NAVIGATION_VERDICTS) == 2
