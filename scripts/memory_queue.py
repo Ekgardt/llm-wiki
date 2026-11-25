@@ -13938,23 +13938,34 @@ def _descendants_of(
     return descendants
 
 
-def _windows_created_no_later(parent: int, child: int) -> bool:
-    """Whether `parent` really created `child`, not a process that reused its PID.
+def _created_before(created: int, reference: int | None) -> bool:
+    return reference is not None and created < reference
+
+
+def _windows_may_be_child(root_created: int | None, parent: int, child: int) -> bool:
+    """Whether `child` may be ours; only creation times that prove otherwise reject it.
 
     Windows keeps the parent PID as it was when the child started; once that parent
-    exits, the number can go to an unrelated, newer process, and every process that
-    old parent started would read as ours: cleanup cannot end a foreign process, waits
-    out its 60 s and reports `process_cleanup_failed` — the most likely reading of
-    GitHub run 45509749019. A process whose creation time cannot be read is not
-    claimed: our own children are always readable to us.
+    exits, the number can go to a newer, unrelated process. A process created before
+    the root, or before the parent it names, was started by an earlier owner of that
+    PID and is not ours. A time that cannot be read proves nothing — a parent that
+    exited after the snapshot still leads to its running children — so the process
+    is claimed, as it was before this check.
     """
     import process_liveness
 
-    parent_created: int | None = process_liveness.windows_creation_filetime(parent)
     child_created: int | None = process_liveness.windows_creation_filetime(child)
-    if parent_created is None or child_created is None:
+    if child_created is None:
+        return True
+    if _created_before(child_created, root_created):
         return False
-    return parent_created <= child_created
+    return not _created_before(child_created, process_liveness.windows_creation_filetime(parent))
+
+
+def _windows_parent_check(root_pid: int) -> ParentCheck:
+    import process_liveness
+
+    return partial(_windows_may_be_child, process_liveness.windows_creation_filetime(root_pid))
 
 
 def _posix_process_pairs() -> list[tuple[int, int]]:
@@ -13970,7 +13981,7 @@ def _tracked_descendant_pids(root_pid: int, platform_name: str) -> set[int] | No
     pairs = _windows_process_pairs()
     if pairs is None:
         return None
-    return _descendants_of(root_pid, pairs, _windows_created_no_later)
+    return _descendants_of(root_pid, pairs, _windows_parent_check(root_pid))
 
 
 def _process_group_alive_by_signal(group_id: int) -> bool:

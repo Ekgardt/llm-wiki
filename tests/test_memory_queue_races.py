@@ -433,13 +433,30 @@ def test_a_windows_process_older_than_its_recorded_parent_is_not_a_descendant(
     assert memory_queue._tracked_descendant_pids(5, "nt") == {11}
 
 
-def test_a_windows_process_whose_age_cannot_be_read_is_not_claimed(
+def test_a_windows_process_older_than_the_parent_it_names_is_not_a_descendant(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(memory_queue, "_windows_process_pairs", lambda: [(11, 5), (4, 5)])
-    monkeypatch.setattr(process_liveness, "windows_creation_filetime", {5: 1, 11: 2}.get)
+    """Our child 11 exited and its PID went to a newer process; 20 is that PID's old child."""
+    created = {5: 1, 11: 50, 20: 10}
+    monkeypatch.setattr(memory_queue, "_windows_process_pairs", lambda: [(11, 5), (20, 11)])
+    monkeypatch.setattr(process_liveness, "windows_creation_filetime", created.get)
 
     assert memory_queue._tracked_descendant_pids(5, "nt") == {11}
+
+
+@pytest.mark.parametrize(
+    "created",
+    [{5: 1, 12: 3}, {11: 2, 12: 3}, {5: 1, 11: 2}],
+    ids=["parent-exited", "root-exited", "child-exited"],
+)
+def test_a_process_that_exited_after_the_snapshot_still_leads_to_its_children(
+    monkeypatch: pytest.MonkeyPatch, created: dict[int, int]
+) -> None:
+    """An unreadable creation time proves nothing, so the tree stays whole."""
+    monkeypatch.setattr(memory_queue, "_windows_process_pairs", lambda: [(11, 5), (12, 11)])
+    monkeypatch.setattr(process_liveness, "windows_creation_filetime", created.get)
+
+    assert memory_queue._tracked_descendant_pids(5, "nt") == {11, 12}
 
 
 def test_a_failed_snapshot_reports_unknown_rather_than_empty(monkeypatch):
