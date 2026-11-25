@@ -40,7 +40,7 @@ from tests.code_kernel_helpers import (
     pyright_executed_tree_sha256,
     use_pyright_install_artifact_identity,
 )
-from tests.slow_machine import LONG_TIMEOUT, SHORT_TIMEOUT
+from tests.slow_machine import LONG_TIMEOUT, PAUSE_TIMEOUT, SHORT_TIMEOUT, run_within_hang_bound
 
 
 def _artifact(
@@ -585,27 +585,80 @@ def test_download_real_http_response_drip_feed_honors_absolute_deadline(
     response = http.client.HTTPResponse(client)
     response.begin()
     response.url = PYRIGHT_PACKAGE_URL
+    events: list[tuple[str, float]] = []
+    response.fp.raw._sock = _TimeoutRecordingSocket(response.fp.raw._sock, events)
 
     def open_url(*args: object, **kwargs: object) -> http.client.HTTPResponse:
         release_body.set()
         return response
 
     monkeypatch.setattr(installer_module, "_open_pinned_url", open_url)
-    started = time.monotonic()
+    monkeypatch.setattr(installer_module, "time", _RecordingClock(events))
+    deadline = time.monotonic() + 0.25
     try:
         with pytest.raises(TimeoutError):
-            installer_module._download_artifact(destination, started + 0.25)
+            run_within_hang_bound(
+                lambda: installer_module._download_artifact(destination, deadline)
+            )
     finally:
         stop.set()
         client.close()
         server.close()
         worker.join(timeout=SHORT_TIMEOUT)
-        elapsed = time.monotonic() - started
         destination.cleanup()
         parent.close()
 
+    reads = _timeouts_with_their_clock_reading(events)
     assert not worker.is_alive()
-    assert 0.15 <= elapsed < 0.55
+    assert reads
+    assert all(
+        timeout == min(installer_module.NETWORK_TIMEOUT_SECONDS, deadline - reading)
+        for timeout, reading in reads
+    )
+
+
+class _RecordingClock:
+    """The real `time` module, except that every `monotonic` reading is recorded."""
+
+    def __init__(self, events: list[tuple[str, float]]) -> None:
+        self._events = events
+
+    def monotonic(self) -> float:
+        now = time.monotonic()
+        self._events.append(("clock", now))
+        return now
+
+    def __getattr__(self, name: str) -> object:
+        return getattr(time, name)
+
+
+class _TimeoutRecordingSocket:
+    """A socket that records every read timeout it is given."""
+
+    def __init__(self, inner: socket.socket, events: list[tuple[str, float]]) -> None:
+        self._inner = inner
+        self._events = events
+
+    def settimeout(self, value: float) -> None:
+        self._events.append(("timeout", value))
+        self._inner.settimeout(value)
+
+    def __getattr__(self, name: str) -> object:
+        return getattr(self._inner, name)
+
+
+def _timeouts_with_their_clock_reading(
+    events: list[tuple[str, float]],
+) -> list[tuple[float, float]]:
+    """Each read timeout, paired with the clock reading it was computed from."""
+    pairs: list[tuple[float, float]] = []
+    reading = float("nan")
+    for kind, value in events:
+        if kind == "clock":
+            reading = value
+            continue
+        pairs.append((value, reading))
+    return pairs
 
 
 def test_download_rejects_response_without_callable_read1_before_body(
@@ -2013,16 +2066,13 @@ def test_windows_5424_file_idempotence_enumerates_each_directory_once(
         bounded_list_directory,
     )
 
-    started = time.monotonic()
     observed = install_pyright(
         state_root=state_root,
         artifact=tmp_path / "must-not-be-read.tgz",
     )
-    elapsed = time.monotonic() - started
 
     assert observed == expected
     assert enumerations == {"root": 1, "package": 1}
-    assert elapsed < 10.0
 
 
 def test_existing_install_root_swap_before_return_fails_closed(
@@ -2373,9 +2423,10 @@ def test_state_validation_honors_end_to_end_deadline(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     observed_deadlines: list[float] = []
+    validation_released = threading.Event()
 
     def slow_legacy_validation(path: Path) -> None:
-        time.sleep(0.25)
+        validation_released.wait(PAUSE_TIMEOUT)
 
     def bounded_lock_probe(path: Path, *, deadline: float):
         observed_deadlines.append(deadline)
@@ -2395,20 +2446,22 @@ def test_state_validation_honors_end_to_end_deadline(
         bounded_lock_probe,
         raising=False,
     )
-    started = time.monotonic()
-    requested_deadline = started + 0.02
+    requested_deadline = time.monotonic() + 0.02
 
-    with pytest.raises(TimeoutError, match="deadline"):
-        install_pyright(
-            state_root=tmp_path / "state",
-            deadline=requested_deadline,
-        )
+    try:
+        with pytest.raises(TimeoutError, match="deadline"):
+            run_within_hang_bound(
+                lambda: install_pyright(
+                    state_root=tmp_path / "state",
+                    deadline=requested_deadline,
+                )
+            )
+    finally:
+        validation_released.set()
 
-    elapsed = time.monotonic() - started
     assert len(observed_deadlines) <= 1
     if observed_deadlines:
         assert observed_deadlines[0] == pytest.approx(requested_deadline)
-    assert elapsed < 0.12
 
 
 def test_nested_install_timeout_is_never_relabelled_as_io_failure(

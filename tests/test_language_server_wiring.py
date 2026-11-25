@@ -18,6 +18,7 @@ import dataclasses
 import subprocess
 import time
 from pathlib import Path
+from types import SimpleNamespace
 
 import lsp_identity
 import lsp_profiles
@@ -267,9 +268,10 @@ def test_the_gate_never_delays_pyright(tmp_path: Path) -> None:
     )
     with session._lock:
         assert session._progress_gate_satisfied_locked() is True
-    started = time.monotonic()
-    session._await_progress_gate(started + 5)
-    assert time.monotonic() - started < 0.05
+    waits: list[float] = []
+    session._condition = SimpleNamespace(wait=waits.append)
+    session._await_progress_gate(time.monotonic() + 5)
+    assert waits == []
 
 
 def test_the_work_done_token_registry_is_bounded(tmp_path: Path) -> None:

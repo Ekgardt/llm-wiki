@@ -80,3 +80,19 @@ class TimeoutRecordingLock:
 
     def __exit__(self, *_exc: object) -> None:
         self.release()
+
+
+class NeverSetEvent:
+    """An event nobody sets: each wait records `(now, timeout)` and advances `clock`."""
+
+    def __init__(self, clock: VirtualClock) -> None:
+        self.clock = clock
+        self.waits: list[tuple[float, float]] = []
+
+    def wait(self, timeout: float) -> bool:
+        self.waits.append((self.clock.now, timeout))
+        self.clock.sleep(timeout)
+        return False
+
+    def is_set(self) -> bool:
+        return False
