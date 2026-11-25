@@ -16,6 +16,8 @@ from pathlib import Path
 import openvino_runtime
 import pytest
 
+from tests.slow_machine import LONG_TIMEOUT
+
 SCRIPTS = Path(__file__).resolve().parent.parent / "scripts"
 
 
@@ -117,7 +119,7 @@ def test_the_real_import_finds_the_declining_consent(tmp_path: Path) -> None:
 
     done = subprocess.run(
         [sys.executable, "-c", script, str(SCRIPTS)],
-        env=environment, capture_output=True, text=True, timeout=60, check=True,
+        env=environment, capture_output=True, text=True, timeout=LONG_TIMEOUT, check=True,
     )
 
     assert done.stdout.strip() == "True"
