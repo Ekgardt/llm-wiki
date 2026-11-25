@@ -412,24 +412,20 @@ def test_ci_runs_a_whole_installer_on_every_supported_os_family():
 
 
 def test_ci_closes_the_gaps_the_third_audit_named():
-    """Skipped dependencies, an unused extra, unparsed PowerShell, a shallow secret scan.
+    """Skipped dependencies and an unused extra; the platform's lint and secret scan close the rest.
 
     Research: `docs/research/2026-09-17-the-remaining-ci-gaps-of-the-third-audit.md`.
     """
     jobs = _workflow()["jobs"]
-    lint, hybrid, lexical = (_commands(jobs[name]) for name in ("lint", "clean-hybrid", "lexical-and-typescript"))
-    checkout = jobs["gitleaks"]["steps"][0]
+    hybrid, lexical = (_commands(jobs[name]) for name in ("clean-hybrid", "lexical-and-typescript"))
     facts = (
-        "shellcheck install.sh" in lint,
-        "System.Management.Automation.Language.Parser" in lint,
         "import onnxruntime, tokenizers, huggingface_hub" in hybrid,
         "scripts/search_memory.py" in hybrid,
         "-k jieba" in lexical,
         "install_language_server.py" in lexical,
-        checkout["with"]["fetch-depth"],
     )
 
-    assert facts == (True, True, True, True, True, True, 0)
+    assert facts == (True, True, True, True)
 
 
 def test_docs_state_security_install_and_market_truth():
