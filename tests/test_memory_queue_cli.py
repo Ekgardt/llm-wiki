@@ -381,6 +381,23 @@ def test_worker_child_process_is_terminated_at_deadline(
     assert run.process.exitcode not in {None, 0}
 
 
+@pytest.mark.skipif(not Path("/proc").is_dir(), reason="Linux /proc process states")
+def test_a_killed_process_not_yet_reaped_has_stopped_running() -> None:
+    sleeper = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+    try:
+        assert _still_running(sleeper.pid)
+        sleeper.kill()
+        deadline = time.monotonic() + SHORT_TIMEOUT
+        while not _zombie_or_reaped(sleeper.pid) and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert memory_queue._pid_is_alive(sleeper.pid)
+        assert not _still_running(sleeper.pid)
+    finally:
+        sleeper.kill()
+        sleeper.wait()
+    assert not _still_running(sleeper.pid)
+
+
 def test_worker_timeout_kills_spawned_grandchild_tree(tmp_path: Path) -> None:
     pid_path = tmp_path / "grandchild.pid"
     with pytest.raises(TimeoutError):
