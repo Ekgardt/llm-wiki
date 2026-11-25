@@ -28,8 +28,6 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 # that on an idle machine and failed at 0.551 s on a loaded one, which is the
 # machine and not the property. The outer bound stays larger than the inner one
 # so a process that truly hangs still fails as a hang.
-_SHUTDOWN_SECONDS = 2.0
-_HUNG_PROCESS_SECONDS = 5.0
 
 
 def _named_generations(components: dict) -> set:
@@ -1501,10 +1499,12 @@ def _assert_timed_out_envelope(envelope, loop_progressed) -> None:
     assert envelope["coverage"] == 0
 
 
-def _assert_clean_shutdown(process, stdout, stderr, shutdown_started) -> None:
+def _assert_clean_shutdown(
+    process: subprocess.Popen[str], stdout: str, stderr: str, lingering_threads: str
+) -> None:
     assert process.returncode == 0, stderr
     assert stdout == ""
-    assert time.perf_counter() - shutdown_started < _SHUTDOWN_SECONDS
+    assert lingering_threads == "0", "a non-daemon thread would hold the exit"
 
 
 def _assert_no_sensitive_text(envelope, sensitive: str) -> None:
@@ -2077,7 +2077,9 @@ class TestHandleToolCall:
             "mcp_server._vault_status=lambda *,deadline: threading.Event().wait(); "
             "result=asyncio.run(mcp_server._handle_tool_call('vault_status',{})); "
             "assert json.loads(result)['data']=={'error':'operation_timeout'}; "
-            "print('TIMEOUT_RETURNED', flush=True)"
+            "print('TIMEOUT_RETURNED', flush=True); "
+            "print(sum(1 for t in threading.enumerate() "
+            "if t is not threading.main_thread() and not t.daemon), flush=True)"
         )
         process = subprocess.Popen(
             [sys.executable, "-c", code],
@@ -2087,10 +2089,11 @@ class TestHandleToolCall:
         )
         assert process.stdout is not None
         assert process.stdout.readline().strip() == "TIMEOUT_RETURNED"
-        shutdown_started = time.perf_counter()
-        stdout, stderr = process.communicate(timeout=_HUNG_PROCESS_SECONDS)
+        lingering_threads = process.stdout.readline().strip()
+        # The blocked worker never finishes: a process it kept alive hangs past this bound.
+        stdout, stderr = process.communicate(timeout=LONG_TIMEOUT)
 
-        _assert_clean_shutdown(process, stdout, stderr, shutdown_started)
+        _assert_clean_shutdown(process, stdout, stderr, lingering_threads)
 
     def test_thread_start_failure_releases_reserved_worker_slot(self, monkeypatch):
         import threading

@@ -21,6 +21,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 
 import retrieval  # noqa: E402
 
+from tests.clocks import frozen_clock
 from tests.slow_machine import SHORT_TIMEOUT
 
 
@@ -75,15 +76,18 @@ def test_a_stage_with_no_time_left_is_still_started_but_not_waited_for():
     assert started.wait(SHORT_TIMEOUT)
 
 
-def test_a_generous_caller_keeps_a_window_far_wider_than_the_reserve():
+def test_a_generous_caller_keeps_a_window_far_wider_than_the_reserve(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """A CLI granting minutes is unaffected by the reserve.
 
     The ceiling itself is applied later, inside the wait, so what the reserve
     must not do here is bite: half of ten minutes is still minutes.
     """
-    deadline = time.monotonic() + 600.0
+    monkeypatch.setattr(retrieval, "time", frozen_clock(1000.0))
+    deadline = 1000.0 + 600.0
     granted = retrieval._optional_stage_deadline(deadline)
-    window = granted - time.monotonic()
+    window = granted - 1000.0
     assert window > retrieval.OPTIONAL_STAGE_MAX_SECONDS
     assert window == pytest.approx(300.0, abs=1.0)
 

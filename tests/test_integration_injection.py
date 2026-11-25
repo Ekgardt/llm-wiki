@@ -25,11 +25,12 @@ import uuid
 from concurrent.futures import ThreadPoolExecutor
 from datetime import timedelta
 from pathlib import Path
+from typing import Any
 
 import pytest
 
 from tests.powershell_literal import ps_literal
-from tests.slow_machine import SHORT_TIMEOUT
+from tests.slow_machine import PAUSE_TIMEOUT, SHORT_TIMEOUT, run_within_hang_bound
 
 ROOT = Path(__file__).resolve().parent.parent
 # Session start must answer from the projection instead of recomputing the
@@ -1600,13 +1601,13 @@ def test_opencode_node_injects_shared_bounded_legacy_handoff_for_unicode_slug(
         {"sessionId": "unicode-session", "directory": str(project)},
     )
 
-    started = time.perf_counter()
-    result = integration_adapter.ingest_event(envelope)
-    elapsed = time.perf_counter() - started
+    recovery_waits = _record_recovery_waits(monkeypatch, ProjectStore)
+    result = run_within_hang_bound(lambda: integration_adapter.ingest_event(envelope))
+    start_waits = list(recovery_waits)
     shared = recover_project_handoff(ProjectStore(vault, state_root), slug, project_root=project)
 
     assert (
-        elapsed < SESSION_START_BUDGET_SECONDS,
+        start_waits != [] and all(wait < SESSION_START_BUDGET_SECONDS for wait in start_waits),
         result["context"],
         len(result["context"]) <= 2400,
         (project_state / "journal.md").exists(),
@@ -1705,6 +1706,21 @@ def test_opencode_session_start_project_recovery_is_fail_open(monkeypatch):
     assert errors == ["recovery unavailable"]
 
 
+def _record_recovery_waits(monkeypatch: pytest.MonkeyPatch, store_type: Any) -> list[float]:
+    """Every writer wait a project recovery is handed: the only wait of a session start."""
+    waits: list[float] = []
+    recover = store_type.recover
+
+    def recording(
+        store: object, *args: object, writer_wait_seconds: float, **kwargs: object
+    ) -> Any:
+        waits.append(writer_wait_seconds)
+        return recover(store, *args, writer_wait_seconds=writer_wait_seconds, **kwargs)
+
+    monkeypatch.setattr(store_type, "recover", recording)
+    return waits
+
+
 def test_opencode_session_start_writer_contention_is_bounded_and_degraded(monkeypatch, tmp_path):
 
     _ensure_scripts_on_path()
@@ -1724,7 +1740,8 @@ def test_opencode_session_start_writer_contention_is_bounded_and_degraded(monkey
     def hold_writer():
         with store.coordinator.writer_gate():
             held.set()
-            release.wait(WRITER_HOLD_SECONDS)
+            # Longer than the hang bound: a start that waited for this writer fails.
+            release.wait(PAUSE_TIMEOUT)
 
     monkeypatch.setattr(integration_adapter, "ROOT", vault)
     monkeypatch.setattr(integration_adapter, "STATE_ROOT", state_root)
@@ -1732,6 +1749,7 @@ def test_opencode_session_start_writer_contention_is_bounded_and_degraded(monkey
     monkeypatch.setattr(
         integration_adapter, "_project_context", lambda event: ("demo", project_dir)
     )
+    recovery_waits = _record_recovery_waits(monkeypatch, ProjectStore)
     monkeypatch.setattr(integration_adapter, "_record_activity", lambda *args: True)
     monkeypatch.setattr(integration_adapter, "spawn_detached", lambda args: None)
     monkeypatch.setattr(
@@ -1744,13 +1762,15 @@ def test_opencode_session_start_writer_contention_is_bounded_and_degraded(monkey
     with ThreadPoolExecutor(max_workers=1) as pool:
         holder = pool.submit(hold_writer)
         assert held.wait(SHORT_TIMEOUT)
-        started = time.perf_counter()
-        result = integration_adapter.ingest_event(envelope)
-        elapsed = time.perf_counter() - started
-        release.set()
+        try:
+            result = run_within_hang_bound(lambda: integration_adapter.ingest_event(envelope))
+            writer_still_held = not holder.done()
+        finally:
+            release.set()
         holder.result(timeout=WRITER_HOLD_SECONDS)
 
-    assert elapsed < SESSION_START_BUDGET_SECONDS
+    assert writer_still_held
+    assert recovery_waits and all(wait < SESSION_START_BUDGET_SECONDS for wait in recovery_waits)
     assert (
         _unmet_substrings(
             (
@@ -4122,6 +4142,12 @@ def test_opencode_node_harness_times_out_stalled_capture(tmp_path, opencode_plug
         process.env.LLM_WIKI_ROOT = {json.dumps(root)};
         process.env.LLM_WIKI_CAPTURE_TIMEOUT_MS = "20";
         let killed = false;
+        const delays = [];
+        const realSetTimeout = globalThis.setTimeout;
+        globalThis.setTimeout = (callback, delay, ...rest) => {{
+          delays.push(delay);
+          return realSetTimeout(callback, delay, ...rest);
+        }};
         globalThis.Bun = {{ spawn() {{
           let finish;
           const exited = new Promise((resolve) => {{ finish = resolve; }});
@@ -4133,11 +4159,10 @@ def test_opencode_node_harness_times_out_stalled_capture(tmp_path, opencode_plug
         }} }};
         const {{ LlmWikiMemoryPlugin }} = await import({json.dumps(plugin_url)} + "?harness=timeout");
         const hooks = await LlmWikiMemoryPlugin({{ client: {{}}, directory: "project" }});
-        const started = Date.now();
         await hooks.event({{ event: {{
           type: "session.created", properties: {{ sessionID: "session-1" }},
         }} }});
-        console.log(JSON.stringify({{ elapsed: Date.now() - started, killed }}));
+        console.log(JSON.stringify({{ delays, killed }}));
         """
     )
 
@@ -4145,13 +4170,14 @@ def test_opencode_node_harness_times_out_stalled_capture(tmp_path, opencode_plug
         [require_tool("node"), "--input-type=module", "-e", script],
         capture_output=True,
         text=True,
-        timeout=2,
+        timeout=SHORT_TIMEOUT,
         check=False,
     )
 
     assert result.returncode == 0, result.stderr
     observed = json.loads(result.stdout)
-    assert observed["elapsed"] < 500
+    # The stalled child is killed by the configured 20 ms timer, not by the 5 s default.
+    assert 20 in observed["delays"] and 5000 not in observed["delays"]
     assert observed["killed"] is True
 
 

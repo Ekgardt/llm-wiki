@@ -58,7 +58,7 @@ from tests.code_kernel_helpers import (
     create_python_repository,
     create_semantic_pyright_fixture,
 )
-from tests.slow_machine import SHORT_TIMEOUT
+from tests.slow_machine import PAUSE_TIMEOUT, SHORT_TIMEOUT, run_within_hang_bound
 
 
 @pytest.fixture
@@ -2726,10 +2726,15 @@ def test_open_document_propagates_deadline_to_stable_source_read(
 
 
 # The subject must return on its own deadline while the lock is still held, so
-# the holder keeps holding until the test says otherwise. A fixed sleep raced
-# the assertions on a loaded macOS runner and the hold ended first.
-CONTENTION_HOLD_SECONDS = 60.0
-CONTENTION_RETURN_SECONDS = 5.0
+# the holder keeps holding until the test says otherwise -- longer than the hang
+# bound, so a subject that waited for the holder fails instead of passing late.
+CONTENTION_HOLD_SECONDS = PAUSE_TIMEOUT
+CONTENTION_BUDGET_SECONDS = 0.05
+
+
+def _waits_within_budget(recorder: TimeoutRecordingLock) -> bool:
+    """No lock wait outlived the budget; an expired budget may refuse without one."""
+    return all(0 < timeout <= CONTENTION_BUDGET_SECONDS for timeout in recorder.timeouts)
 
 
 def _hold_document_lock_for_contention(
@@ -2775,14 +2780,19 @@ def test_open_document_lock_contention_obeys_deadline_without_mutation(
         session._generation_nonce,
     )
     before_events = tuple(semantic_pyright.events())
-    started = time.monotonic()
+    document_lock = session._document_lock
+    recorder = TimeoutRecordingLock(document_lock)
+    session._document_lock = recorder
     try:
         with pytest.raises(TimeoutError, match="document lock"):
-            session.open_document(
-                "pkg/service.py",
-                deadline=started + 0.05,
+            run_within_hang_bound(
+                lambda: session.open_document(
+                    "pkg/service.py",
+                    deadline=time.monotonic() + CONTENTION_BUDGET_SECONDS,
+                )
             )
-        assert time.monotonic() - started < CONTENTION_RETURN_SECONDS
+        session._document_lock = document_lock
+        assert _waits_within_budget(recorder), recorder.timeouts
         assert released.is_set() is False
         assert (
             session._readiness,
@@ -2843,11 +2853,18 @@ def test_synchronize_lock_contention_obeys_deadline_without_mutation(
         session._generation_nonce,
     )
     before_events = tuple(semantic_pyright.events())
-    started = time.monotonic()
+    document_lock = session._document_lock
+    recorder = TimeoutRecordingLock(document_lock)
+    session._document_lock = recorder
     try:
         with pytest.raises(TimeoutError, match="document lock"):
-            session.synchronize(revision, deadline=started + 0.05)
-        assert time.monotonic() - started < CONTENTION_RETURN_SECONDS
+            run_within_hang_bound(
+                lambda: session.synchronize(
+                    revision, deadline=time.monotonic() + CONTENTION_BUDGET_SECONDS
+                )
+            )
+        session._document_lock = document_lock
+        assert _waits_within_budget(recorder), recorder.timeouts
         assert released.is_set() is False
         assert (
             session._readiness,
@@ -6878,11 +6895,16 @@ def test_session_close_state_lock_wait_obeys_absolute_deadline(
     holder = threading.Thread(target=hold_state_lock)
     holder.start()
     assert held.wait(SHORT_TIMEOUT)
-    started = time.monotonic()
+    state_lock = session._lock
+    recorder = TimeoutRecordingLock(state_lock)
+    session._lock = recorder
     try:
         with pytest.raises(TimeoutError, match="state lock"):
-            session.close(deadline=started + 0.05)
-        assert time.monotonic() - started < CONTENTION_RETURN_SECONDS
+            run_within_hang_bound(
+                lambda: session.close(deadline=time.monotonic() + CONTENTION_BUDGET_SECONDS)
+            )
+        session._lock = state_lock
+        assert _waits_within_budget(recorder), recorder.timeouts
         assert session._closed is False
     finally:
         release_request.set()

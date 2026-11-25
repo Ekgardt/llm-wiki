@@ -218,6 +218,9 @@ def test_no_test_gives_real_work_a_literal_deadline() -> None:
 # margin on the real clock measures the machine. A test controls the clock
 # instead (`tests/clocks.py`) or bounds a hang with `run_within_hang_bound`; a
 # margin may only be a named wait from `slow_machine`, scaled at the invocation.
+# A span of real time -- two clock readings apart, a name or helper holding one,
+# or an `elapsed` a child process reports -- is never ordered against a fixed
+# number or a named constant: that is the same margin under another name.
 
 _CLOCKS = frozenset({"monotonic", "perf_counter", "time"})
 _ORDERINGS = (ast.Lt, ast.LtE, ast.Gt, ast.GtE)
@@ -295,6 +298,110 @@ def _is_stopwatch(compare: ast.Compare, readings: set[str]) -> bool:
     return timed and _has_literal_margin(operands)
 
 
+_HANG_BOUNDS = frozenset({"SHORT_TIMEOUT", "LONG_TIMEOUT", "PAUSE_TIMEOUT"})
+_IDENTIFIER = re.compile(r"[A-Za-z_][\w.]*")
+
+
+def _is_clock_difference(node: ast.AST, readings: set[str]) -> bool:
+    """`later - earlier` on the real clock; a direct clock call needs no named partner."""
+    if not isinstance(node, ast.BinOp) or not isinstance(node.op, ast.Sub):
+        return False
+    sides = (node.left, node.right)
+    return any(map(_calls_clock, sides)) or all(_reads_clock(side, readings) for side in sides)
+
+
+def _calls_clock(node: ast.AST) -> bool:
+    return any(_is_clock_call(term) for term in _terms(node))
+
+
+def _is_reported_elapsed(node: ast.AST) -> bool:
+    if not isinstance(node, ast.Subscript) or not isinstance(node.slice, ast.Constant):
+        return False
+    return "elapsed" in str(node.slice.value)
+
+
+def _names_a_duration(node: ast.AST, durations: set[str]) -> bool:
+    """A name holding a span, or a call to a helper that returns one."""
+    target = node.func if isinstance(node, ast.Call) else node
+    return _leaf_name(target) in durations
+
+
+def _is_span(node: ast.AST, readings: set[str], durations: set[str]) -> bool:
+    checks = (
+        _is_clock_difference(node, readings),
+        _is_reported_elapsed(node),
+        _names_a_duration(node, durations),
+    )
+    return any(checks)
+
+
+def _holds_span(node: ast.AST, readings: set[str], durations: set[str]) -> bool:
+    return any(_is_span(child, readings, durations) for child in ast.walk(node))
+
+
+def _target_names(target: ast.AST) -> set[str]:
+    """Every name a value lands in, tuple unpacking included."""
+    if isinstance(target, (ast.Tuple, ast.List)):
+        return {name for element in target.elts for name in _target_names(element)}
+    return {_leaf_name(target) or ""}
+
+
+def _widen_durations(function: ast.AST, readings: set[str], durations: set[str]) -> None:
+    for node in ast.walk(function):
+        assigned = _assigned_value(node)
+        if assigned is not None and _holds_span(assigned[1], readings, durations):
+            durations.update(_target_names(assigned[0]))
+
+
+def _durations(function: ast.AST, readings: set[str], timers: set[str]) -> set[str]:
+    """Every name the function keeps a span in, through one level of renaming."""
+    durations = set(timers)
+    for _pass in range(2):
+        _widen_durations(function, readings, durations)
+    durations.discard("")
+    return durations
+
+
+def _returns_span(function: ast.AST, timers: set[str]) -> bool:
+    readings = _clock_readings(function)
+    durations = _durations(function, readings, timers)
+    returned = [node.value for node in ast.walk(function) if isinstance(node, ast.Return)]
+    return any(_holds_span(value, readings, durations) for value in returned if value is not None)
+
+
+def _timers(tree: ast.AST) -> set[str]:
+    """Helpers that hand back a span of real time, directly or through another helper."""
+    timers: set[str] = set()
+    for _depth in range(3):
+        timers |= {
+            function.name for function in _functions(tree) if _returns_span(function, timers)
+        }
+    return timers
+
+
+def _is_fixed_margin(operand: ast.AST) -> bool:
+    """A non-zero number, a named constant, or arithmetic of only those."""
+    text = ast.unparse(operand)
+    names = [found.rsplit(".", 1)[-1] for found in _IDENTIFIER.findall(text)]
+    if not names:
+        return text.strip("0.()- ") != ""
+    return all(name.lstrip("_").isupper() for name in names)
+
+
+def _is_span_against_margin(
+    compare: ast.Compare, readings: set[str], durations: set[str]
+) -> bool:
+    if not _is_ordering(compare) or _names_a_hang_bound(compare):
+        return False
+    operands = [compare.left, *compare.comparators]
+    timed = any(_holds_span(operand, readings, durations) for operand in operands)
+    return timed and any(map(_is_fixed_margin, operands))
+
+
+def _names_a_hang_bound(compare: ast.Compare) -> bool:
+    return bool(_HANG_BOUNDS & {_leaf_name(node) for node in ast.walk(compare)})
+
+
 def _asserted(function: ast.AST) -> list[ast.expr]:
     return [node.test for node in ast.walk(function) if isinstance(node, ast.Assert)]
 
@@ -303,20 +410,34 @@ def _compares(node: ast.AST) -> list[ast.Compare]:
     return [child for child in ast.walk(node) if isinstance(child, ast.Compare)]
 
 
-def _stopwatches(function: ast.AST) -> list[int]:
+def _asserted_compares(function: ast.AST) -> list[ast.Compare]:
+    return [compare for test in _asserted(function) for compare in _compares(test)]
+
+
+def _stopwatches(function: ast.AST, timers: set[str]) -> list[int]:
     readings = _clock_readings(function)
-    compares = [compare for test in _asserted(function) for compare in _compares(test)]
-    return sorted({compare.lineno for compare in compares if _is_stopwatch(compare, readings)})
+    durations = _durations(function, readings, timers)
+    return sorted(
+        compare.lineno
+        for compare in _asserted_compares(function)
+        if _is_stopwatch(compare, readings) or _is_span_against_margin(compare, readings, durations)
+    )
 
 
-def _functions(tree: ast.AST) -> list[ast.AST]:
+def _functions(tree: ast.AST) -> list[ast.FunctionDef | ast.AsyncFunctionDef]:
     kinds = (ast.FunctionDef, ast.AsyncFunctionDef)
     return [node for node in ast.walk(tree) if isinstance(node, kinds)]
 
 
+def _tree_stopwatches(tree: ast.AST) -> list[int]:
+    timers = _timers(tree)
+    return sorted(
+        {line for function in _functions(tree) for line in _stopwatches(function, timers)}
+    )
+
+
 def _file_stopwatches(path: Path) -> list[int]:
-    tree = ast.parse(path.read_text(encoding="utf-8"))
-    return sorted({line for function in _functions(tree) for line in _stopwatches(function)})
+    return _tree_stopwatches(ast.parse(path.read_text(encoding="utf-8")))
 
 
 @pytest.mark.parametrize(
@@ -330,12 +451,33 @@ def _file_stopwatches(path: Path) -> list[int]:
         "def t():\n    started = time.monotonic()\n    assert started < seen <= started + 0.11\n",
         "def t():\n    deadline = time.monotonic() + 1\n"
         "    assert time.monotonic() <= deadline + 0.2\n",
+        "def t():\n    started = time.perf_counter()\n    work()\n"
+        "    elapsed = time.perf_counter() - started\n"
+        "    assert elapsed < SESSION_BUDGET_SECONDS\n",
+        "def t():\n    started = time.monotonic()\n"
+        "    assert time.monotonic() - started >= module._STARTUP_WAIT_SECONDS\n",
+        "def t():\n    observed = json.loads(out)\n    assert observed['elapsed'] < 500\n",
+        "def spent():\n    started = time.monotonic()\n    work()\n"
+        "    return time.monotonic() - started\n"
+        "def t():\n    assert spent() < LIMIT * 2\n",
+        "def measure():\n    started = time.perf_counter()\n"
+        "    return time.perf_counter() - started\n"
+        "def t():\n    timings = [measure(), measure()]\n    assert sum(timings) < 1.0\n",
+        "def measure():\n    started = time.process_time()\n    elapsed = 0\n"
+        "    return time.perf_counter() - started\n"
+        "def cheapest():\n    return min(measure() for _ in range(5))\n"
+        "def t():\n    assert cheapest() < 5.0\n",
+        "def bounded():\n    started = time.monotonic()\n"
+        "    return run(), time.monotonic() - started\n"
+        "def t():\n    data, elapsed = bounded()\n    assert elapsed < _CUTOFF_SECONDS\n",
+        "def check(shutdown_started):\n"
+        "    assert time.perf_counter() - shutdown_started < _SHUTDOWN_SECONDS\n",
     ],
 )
 def test_the_stopwatch_guard_recognizes_a_literal_margin_on_the_real_clock(source: str) -> None:
-    function = ast.parse(source).body[0]
+    tree = ast.parse(source)
 
-    assert _stopwatches(function) != []
+    assert _tree_stopwatches(tree) != []
 
 
 @pytest.mark.parametrize(
@@ -345,14 +487,18 @@ def test_the_stopwatch_guard_recognizes_a_literal_margin_on_the_real_clock(sourc
         "def t():\n    now = time.monotonic()\n    assert next_deadline() == now - 1\n",
         "def t():\n    assert 0 <= timeout <= deadline - time.monotonic()\n",
         "def t():\n    clock = VirtualClock(100.0)\n    assert clock.now - 100.0 <= 0.1\n",
+        "def t():\n    started = time.monotonic()\n    remaining = deadline - started\n"
+        "    assert 0 < recorded[0] <= remaining\n",
+        "def t():\n    assert 0 < waits[0] <= BUDGET_SECONDS\n",
+        "def t():\n    elapsed = time.monotonic() - started\n    assert elapsed > 0\n",
     ],
 )
 def test_the_stopwatch_guard_lets_named_waits_exact_values_and_controlled_clocks_pass(
     source: str,
 ) -> None:
-    function = ast.parse(source).body[0]
+    tree = ast.parse(source)
 
-    assert _stopwatches(function) == []
+    assert _tree_stopwatches(tree) == []
 
 
 def test_no_test_times_real_work_against_a_literal_margin() -> None:

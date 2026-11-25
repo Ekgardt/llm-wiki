@@ -12,10 +12,11 @@ import subprocess
 import time
 import unicodedata
 from collections import Counter
+from collections.abc import Callable
 from dataclasses import FrozenInstanceError, fields
 from itertools import product
 from pathlib import Path, PurePosixPath, PureWindowsPath
-from typing import get_type_hints
+from typing import Any, get_type_hints
 
 import lsp_security
 import pytest
@@ -509,23 +510,11 @@ def _token_separator(index: int) -> str:
 
 
 from tests.slow_machine import SHORT_TIMEOUT  # noqa: E402
-from tests.timing_floor import noise_floor_seconds  # noqa: E402
 
 
-def _best_measurement(measure, count: int, attempts: int = 5):
-    """The fastest of several attempts, so scheduler noise cannot fail a gate.
-
-    Two attempts were not enough on a hosted runner: at these magnitudes the
-    scheduler can add as much as the work itself costs, and the ratio gate
-    then compares noise with noise. Taking the best of five costs a few
-    hundred milliseconds and leaves the ratio measuring the algorithm.
-    """
-    return min(
-        (measure(count) for _attempt in range(attempts)), key=lambda item: item[0]
-    )
-
-
-def _measurement_columns(measurements):
+def _measurement_columns(
+    measurements: tuple[tuple[int, int, int], ...],
+) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...]]:
     return (
         tuple(item[0] for item in measurements),
         tuple(item[1] for item in measurements),
@@ -1328,40 +1317,47 @@ def test_posix_scanner_does_not_rescan_overlapping_dot_candidates(
     real_add_component = lsp_security._posix_add_semantic_component
     component_calls = 0
     call_limit = 0
+    # The characters each component step touches: its own text and the stack it
+    # is matched against. Counted, not timed, so the bound holds at any load.
+    touched = 0
 
-    def counted_component(*args, **kwargs):
-        nonlocal component_calls
+    def counted_component(
+        raw_component: str, components: list[str], *args: Any, **kwargs: Any
+    ) -> Any:
+        nonlocal component_calls, touched
         component_calls += 1
+        touched += len(raw_component) + len(components)
         assert component_calls <= call_limit, "candidate suffix was rescanned"
-        return real_add_component(*args, **kwargs)
+        return real_add_component(raw_component, components, *args, **kwargs)
 
     monkeypatch.setattr(
         lsp_security, "_posix_add_semantic_component", counted_component
     )
 
-    def measure(characters: int) -> tuple[float, int]:
+    sizes = (1_200, 2_400, 4_800, 16_000)
+
+    def measure(characters: int) -> tuple[int, int]:
         nonlocal call_limit
         before = component_calls
+        touched_before = touched
         call_limit = before + characters * 2
         value = "/." * (characters // 2)
         value += " next=/srv/projects/linear-repository/private.py"
-        started = time.perf_counter()
         result = lsp_security._redact_path(value, root, "<repository>")
-        elapsed = time.perf_counter() - started
         assert result.endswith(" next=<repository>")
-        return elapsed, component_calls - before
+        return touched - touched_before, component_calls - before
 
-    measurements = tuple(measure(size) for size in (1_200, 2_400, 4_800, 16_000))
-    timings = tuple(measurement[0] for measurement in measurements)
+    measurements = tuple(measure(size) for size in sizes)
+    work = tuple(measurement[0] for measurement in measurements)
     calls = tuple(measurement[1] for measurement in measurements)
 
     assert calls[1] <= calls[0] * 2 + 8
     assert calls[2] <= calls[1] * 2 + 8
     assert calls[3] <= calls[2] * 4
-    assert timings[1] <= max(noise_floor_seconds(), timings[0] * 3.0)
-    assert timings[2] <= max(noise_floor_seconds(), timings[1] * 3.0)
-    assert timings[3] <= max(0.20, timings[2] * 5.0)
-    assert sum(timings) < 1.0
+    assert work[1] <= work[0] * 3
+    assert work[2] <= work[1] * 3
+    assert work[3] <= work[2] * 5
+    assert sum(work) <= sum(sizes)
 
 
 def test_redaction_bounds_every_stage_before_contractions_and_output(
@@ -1489,20 +1485,37 @@ def test_redaction_preserves_ordinary_log_after_bounded_ansi_prefix() -> None:
     assert redact_lsp_text(value) == message
 
 
-def test_oversized_redaction_time_is_independent_of_attacker_suffix_length() -> None:
+def test_oversized_redaction_time_is_independent_of_attacker_suffix_length(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     ceiling = 256 * 1024
     values = ("x" * (ceiling + 1), "x" * (ceiling * 64))
+    scanned: list[int] = []
 
-    def measure(value: str) -> float:
-        started = time.perf_counter()
+    def scanning(name: str) -> Callable[..., Any]:
+        real = getattr(lsp_security, name)
+
+        def recorded(value: str, *args: Any, **kwargs: Any) -> Any:
+            scanned.append(len(value))
+            return real(value, *args, **kwargs)
+
+        return recorded
+
+    # Every step that reads the text character by character; a refusal by
+    # length alone reaches none of them, whatever follows the ceiling.
+    for name in ("_fits_utf8_redaction_ceiling", "_normalize_log_text"):
+        monkeypatch.setattr(lsp_security, name, scanning(name))
+
+    def measure(value: str) -> int:
+        before = sum(scanned)
         for _iteration in range(2_000):
             assert redact_lsp_text(value) == "<redacted: oversized LSP log>"
-        return time.perf_counter() - started
+        return sum(scanned) - before
 
-    timings = tuple(measure(value) for value in values)
+    work = tuple(measure(value) for value in values)
 
-    assert timings[1] <= max(noise_floor_seconds(), timings[0] * 3.0)
-    assert sum(timings) < 0.2
+    assert work[1] <= work[0]
+    assert sum(work) == 0
 
 
 _WINDOWS_NATIVE_SEPARATOR_ATOMS = ("/", "\\")
@@ -2235,42 +2248,48 @@ def test_windows_tokenizer_scales_near_linearly_for_200_400_800_tokens(
         semantic_calls += 1
         return real_semantic_match(*args, **kwargs)
 
-    def add_component(*args, **kwargs):
-        nonlocal component_calls
+    touched = 0
+
+    def add_component(
+        raw_component: str, components: list[str], *args: Any, **kwargs: Any
+    ) -> Any:
+        nonlocal component_calls, touched
         component_calls += 1
-        return real_add_component(*args, **kwargs)
+        touched += len(raw_component) + len(components)
+        return real_add_component(raw_component, components, *args, **kwargs)
 
     monkeypatch.setattr(lsp_security, "_windows_semantic_root_match_end", semantic_match)
     monkeypatch.setattr(lsp_security, "_windows_add_semantic_component", add_component)
 
-    def measure(count: int) -> tuple[float, int, int]:
+    lengths: list[int] = []
+
+    def measure(count: int) -> tuple[int, int, int]:
         tokens = [
             _windows_scanner_token(index, root_text, uri_root) for index in range(count)
         ]
         value = _joined_tokens(tokens)
+        lengths.append(len(value))
         semantic_before = semantic_calls
         component_before = component_calls
-        started = time.perf_counter()
+        touched_before = touched
         result = lsp_security._redact_path(value, root, "<repository>")
-        elapsed = time.perf_counter() - started
         semantic_delta = semantic_calls - semantic_before
         component_delta = component_calls - component_before
         assert result.count("<repository>") == count * 3 // 5
         assert semantic_delta == count * 4 // 5
         assert component_delta <= count * 4
-        return elapsed, semantic_delta, component_delta
+        return touched - touched_before, semantic_delta, component_delta
 
-    measurements = tuple(
-        _best_measurement(measure, count) for count in (200, 400, 800)
-    )
-    timings, semantic_counts, component_counts = _measurement_columns(measurements)
+    measurements = tuple(measure(count) for count in (200, 400, 800))
+    work, semantic_counts, component_counts = _measurement_columns(measurements)
 
+    # Counted characters, not seconds: the same near-linear claim at any load.
     assert semantic_counts == (160, 320, 640)
     assert component_counts[1] <= component_counts[0] * 2 + 4
     assert component_counts[2] <= component_counts[1] * 2 + 4
-    assert timings[1] <= max(noise_floor_seconds(), timings[0] * 3.25)
-    assert timings[2] <= max(noise_floor_seconds(), timings[1] * 3.25)
-    assert sum(timings) < 5.0
+    assert work[1] <= work[0] * 3
+    assert work[2] <= work[1] * 3
+    assert sum(work) <= sum(lengths)
 
 
 def test_windows_file_uri_token_ceiling_does_not_split_percent_triplet(

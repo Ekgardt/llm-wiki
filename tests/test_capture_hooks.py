@@ -26,6 +26,8 @@ from unittest.mock import patch
 
 import pytest
 
+from tests.clocks import VirtualClock
+
 # ---------------------------------------------------------------------------
 # UserPromptSubmit capture — user_prompt_capture.py
 # ---------------------------------------------------------------------------
@@ -464,14 +466,15 @@ def test_prompt_bookkeeping_fails_open_quickly_when_state_lock_is_held(
     monkeypatch.setattr(memory_state, "STATE_FILE", state_dir / "state.json")
     monkeypatch.setattr(memory_state, "LOCK_FILE", lock_file)
     monkeypatch.setattr(user_prompt_capture, "update_state", memory_state.update_state)
+    clock = VirtualClock(time.time())
+    monkeypatch.setattr(memory_state, "time", clock)
 
-    started = time.perf_counter()
     count = user_prompt_capture._increment_prompt_count("session-a", "project-a")
-    count_elapsed = time.perf_counter() - started
+    count_elapsed = sum(clock.slept)
 
-    started = time.perf_counter()
+    clock.slept.clear()
     claimed = user_prompt_capture._claim_prompt_operation("project-a", "hash-a")
-    claim_elapsed = time.perf_counter() - started
+    claim_elapsed = sum(clock.slept)
 
     # Fails open: the prompt is still written, under a fallback operation id.
     assert (count, claimed is not None) == (0, True)
