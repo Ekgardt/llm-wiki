@@ -13905,16 +13905,56 @@ def _windows_process_pairs() -> list[tuple[int, int]] | None:
         return None
 
 
-def _descendants_of(root_pid: int, pairs: list[tuple[int, int]]) -> set[int]:
+ParentCheck = Callable[[int, int], bool]
+
+
+def _recorded_parent(_parent: int, _child: int) -> bool:
+    return True
+
+
+def _children_of(
+    parents: set[int],
+    pairs: list[tuple[int, int]],
+    seen: set[int],
+    is_parent: ParentCheck,
+) -> set[int]:
+    return {
+        pid
+        for pid, ppid in pairs
+        if ppid in parents and pid not in seen and is_parent(ppid, pid)
+    }
+
+
+def _descendants_of(
+    root_pid: int,
+    pairs: list[tuple[int, int]],
+    is_parent: ParentCheck = _recorded_parent,
+) -> set[int]:
     descendants: set[int] = set()
     frontier = {root_pid}
     while frontier:
-        children = {
-            pid for pid, ppid in pairs if ppid in frontier and pid not in descendants
-        }
-        descendants.update(children)
-        frontier = children
+        frontier = _children_of(frontier, pairs, descendants, is_parent)
+        descendants.update(frontier)
     return descendants
+
+
+def _windows_created_no_later(parent: int, child: int) -> bool:
+    """Whether `parent` really created `child`, not a process that reused its PID.
+
+    Windows keeps the parent PID as it was when the child started; once that parent
+    exits, the number can go to an unrelated, newer process, and every process that
+    old parent started would read as ours: cleanup cannot end a foreign process, waits
+    out its 60 s and reports `process_cleanup_failed` — the most likely reading of
+    GitHub run 45509749019. A process whose creation time cannot be read is not
+    claimed: our own children are always readable to us.
+    """
+    import process_liveness
+
+    parent_created = process_liveness.windows_creation_filetime(parent)
+    child_created = process_liveness.windows_creation_filetime(child)
+    if parent_created is None or child_created is None:
+        return False
+    return parent_created <= child_created
 
 
 def _posix_process_pairs() -> list[tuple[int, int]]:
@@ -13930,7 +13970,7 @@ def _tracked_descendant_pids(root_pid: int, platform_name: str) -> set[int] | No
     pairs = _windows_process_pairs()
     if pairs is None:
         return None
-    return _descendants_of(root_pid, pairs)
+    return _descendants_of(root_pid, pairs, _windows_created_no_later)
 
 
 def _process_group_alive_by_signal(group_id: int) -> bool:

@@ -21,6 +21,7 @@ if str(SCRIPTS_DIR) not in sys.path:
 import markdown_transaction  # noqa: E402
 import memory_queue  # noqa: E402
 import operational_ownership  # noqa: E402
+import process_liveness  # noqa: E402
 from memory_queue import LeaseFenceError, MemoryQueue  # noqa: E402
 
 
@@ -410,8 +411,31 @@ def test_a_busy_database_makes_the_worker_wait_instead_of_dying(tmp_path, monkey
 def test_the_windows_process_tree_comes_from_the_kernel_snapshot(monkeypatch):
     """One source, present on every supported Windows and needing no subprocess."""
     monkeypatch.setattr(memory_queue, "_windows_process_pairs", lambda: [(11, 5), (12, 11)])
+    monkeypatch.setattr(process_liveness, "windows_creation_filetime", lambda pid: pid)
 
     assert memory_queue._tracked_descendant_pids(5, "nt") == {11, 12}
+
+
+def test_a_windows_process_older_than_its_recorded_parent_is_not_a_descendant(monkeypatch):
+    """Process 7 was started by an earlier owner of PID 5, which exited; 5 is now our child.
+
+    Windows keeps the old parent PID, so 7 and its own child 8 name 5 as their
+    parent. Claiming them made cleanup wait on processes it could not end.
+    """
+    created = {5: 500, 11: 600, 7: 100, 8: 150}
+    monkeypatch.setattr(
+        memory_queue, "_windows_process_pairs", lambda: [(11, 5), (7, 5), (8, 7)]
+    )
+    monkeypatch.setattr(process_liveness, "windows_creation_filetime", created.get)
+
+    assert memory_queue._tracked_descendant_pids(5, "nt") == {11}
+
+
+def test_a_windows_process_whose_age_cannot_be_read_is_not_claimed(monkeypatch):
+    monkeypatch.setattr(memory_queue, "_windows_process_pairs", lambda: [(11, 5), (4, 5)])
+    monkeypatch.setattr(process_liveness, "windows_creation_filetime", {5: 1, 11: 2}.get)
+
+    assert memory_queue._tracked_descendant_pids(5, "nt") == {11}
 
 
 def test_a_failed_snapshot_reports_unknown_rather_than_empty(monkeypatch):
