@@ -1,4 +1,5 @@
-{"tests": ["test_the_windows_tick_is_the_floor_on_windows"],
+{"tests": ["test_the_windows_tick_is_the_floor_on_windows",
+           "::tests.test_the_scanner_scales_on_a_coarse_clock::test_the_windows_tick_is_the_floor_on_windows"],
  "kinds": ["removed"],
  "reason": "It tested tests/timing_floor.py, the Windows process-clock floor under the timed scanner ratio. The scaling test now counts the characters the scanner touches instead of timing it, so nothing reads that floor any more and the helper and its test were removed together.",
  "recorded": "2026-11-25",
