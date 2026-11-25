@@ -1097,3 +1097,16 @@ def test_a_doc_ranks_below_a_compiled_page_and_below_code() -> None:
 
     assert provenance.type_weight("doc") < provenance.DEFAULT_TYPE_WEIGHT
     assert provenance.type_weight("doc") < provenance.type_weight("decision")
+
+
+@pytest.mark.skipif(os.name != "posix", reason="descriptor chains are verified on POSIX")
+def test_a_sealed_root_whose_identity_changed_before_it_was_opened_is_refused(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "corpus-root"
+    root.mkdir(mode=0o755)
+    sealed = corpus_snapshot._identity(root, root.stat())
+    root.chmod(0o700)
+
+    with pytest.raises(CorpusChanged, match=f"corpus ancestor changed: {root}$"):
+        corpus_snapshot._verify_descriptor_chain((sealed,), changed_error=CorpusChanged)
