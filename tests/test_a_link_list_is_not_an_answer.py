@@ -80,3 +80,30 @@ def test_the_generation_search_weighs_a_link_list_down() -> None:
     prose_score = search_memory._generation_result(row(PROSE), "g")["score"]
 
     assert link_score < prose_score
+
+
+def test_a_chunk_is_judged_once_however_often_it_is_weighed(monkeypatch) -> None:
+    import provenance
+
+    judged: list[str] = []
+    real = provenance._navigation
+    monkeypatch.setattr(provenance, "_navigation", lambda text: judged.append(text) or real(text))
+    monkeypatch.setattr(provenance, "_NAVIGATION_VERDICTS", {})
+    text = RELATED + "\n<!-- judged once -->"
+
+    weights = {provenance.substance_weight(text) for _ in range(3)}
+
+    assert weights == {provenance.NAVIGATION_WEIGHT}
+    assert judged == [text]
+
+
+def test_the_oldest_verdict_makes_room_past_the_bound(monkeypatch) -> None:
+    import provenance
+
+    monkeypatch.setattr(provenance, "_NAVIGATION_VERDICTS", {})
+    monkeypatch.setattr(provenance, "NAVIGATION_VERDICTS_KEPT", 2)
+
+    for text in ("first prose line", "second prose line", "third prose line"):
+        provenance.substance_weight(text)
+
+    assert len(provenance._NAVIGATION_VERDICTS) == 2

@@ -7,6 +7,7 @@ MRR@10 0.906 clean, 0.865 with one transposition, 0.901 with the corrections.
 
 from __future__ import annotations
 
+import os
 import sqlite3
 import sys
 from pathlib import Path
@@ -140,3 +141,41 @@ def test_a_russian_stem_keeps_its_root() -> None:
 
 def test_short_russian_words_and_latin_words_gain_no_stem() -> None:
     assert query_spelling.cyrillic_stems([HOUSE, CAT, "bookshelf", "API-" + NOTES]) == []
+
+
+def test_the_pruned_walk_finds_every_term_a_full_comparison_finds() -> None:
+    """Skipping a prefix whose alignment already exceeds the bound loses no term."""
+    import random
+
+    generator = random.Random(11)
+    terms = sorted({"".join(generator.choices("abcde", k=generator.randint(3, 9))) for _ in range(3000)})
+
+    for word in ("abcdeab", "eeddcc", "aabbccdde", "bacedb"):
+        for bound in (1, 2):
+            expected = {
+                term: distance
+                for term in terms
+                if (distance := query_spelling.edit_distance(word, term, bound)) <= bound
+            }
+            assert query_spelling._within(terms, word, bound) == expected
+
+
+def test_a_file_artifact_reads_its_vocabulary_once_until_it_changes(tmp_path: Path) -> None:
+    path = tmp_path / "search.sqlite3"
+    connection = sqlite3.connect(path)
+    connection.executescript(search_memory._GENERATION_FTS_DDL)
+    connection.execute(
+        "INSERT INTO chunks(chunk_id, chunk_order, title, content, keys) VALUES ('c0', 0, '', 'bookshelf', '')"
+    )
+    connection.commit()
+
+    first = query_spelling.vocabulary(connection)
+    assert query_spelling.vocabulary(connection) is first
+
+    connection.execute(
+        "INSERT INTO chunks(chunk_id, chunk_order, title, content, keys) VALUES ('c1', 1, '', 'lantern', '')"
+    )
+    connection.commit()
+    os.utime(path, ns=(path.stat().st_atime_ns, path.stat().st_mtime_ns + 1_000_000))
+
+    assert "lantern" in query_spelling.vocabulary(connection).terms
