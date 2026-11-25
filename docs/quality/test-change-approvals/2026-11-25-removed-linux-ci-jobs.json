@@ -1,5 +1,20 @@
-{"tests": ["test_ci_uses_current_gitleaks_action", "test_compileall_excludes_the_intentionally_invalid_parser_fixture", "test_ruff_covers_scripts_tests_and_benchmark", "test_the_audit_legs_together_install_every_locked_version", "test_the_walk_sees_the_fork_a_single_interpreter_misses"],
- "kinds": ["removed"],
+{
+ "tests": [
+  "test_ci_uses_current_gitleaks_action",
+  "test_compileall_excludes_the_intentionally_invalid_parser_fixture",
+  "test_ruff_covers_scripts_tests_and_benchmark",
+  "test_the_audit_legs_together_install_every_locked_version",
+  "test_the_walk_sees_the_fork_a_single_interpreter_misses",
+  "::tests.test_quality_guards::test_ci_uses_current_gitleaks_action",
+  "::tests.test_ci_policy::test_compileall_excludes_the_intentionally_invalid_parser_fixture",
+  "::tests.test_ci_policy::test_ruff_covers_scripts_tests_and_benchmark",
+  "::tests.test_the_audit_reads_every_locked_pin::test_the_audit_legs_together_install_every_locked_version",
+  "::tests.test_the_audit_reads_every_locked_pin::test_the_walk_sees_the_fork_a_single_interpreter_misses"
+ ],
+ "kinds": [
+  "removed"
+ ],
  "reason": "They pinned the contents of the GitHub gitleaks, lint and Linux dependency-audit jobs, which are removed by the owner's decision (owner message 263016509/18808, 2026-11-25): the platform's secrets, lint and dependencies checks run the same scans on every change, the last one over every package of uv.lock.",
  "recorded": "2026-11-25",
- "expires": "2027-02-23"}
+ "expires": "2027-02-23"
+}
