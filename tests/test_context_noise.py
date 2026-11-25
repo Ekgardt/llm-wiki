@@ -22,6 +22,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -382,8 +383,6 @@ def test_direct_session_start_drops_optional_sections_whole_under_pressure(monke
 
 
 def test_session_start_heading_and_body_drop_as_one_complete_item(monkeypatch):
-    from types import SimpleNamespace
-
     import session_start_context
     from context_budget import ContextBudget
 
@@ -908,6 +907,8 @@ def test_session_start_recovery_passes_hard_limit_and_deadline(tmp_path, monkeyp
     )
 
     started = time.monotonic()
+    frozen_clock = SimpleNamespace(**{**vars(time), "monotonic": lambda: started})
+    monkeypatch.setattr(session_start_context, "time", frozen_clock)
     session_start_context._recover_transactions()
 
     assert received[0]["max_transactions"] > 0

@@ -16,6 +16,7 @@ import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from types import SimpleNamespace
 
 import compile_cache
 import lsp_process
@@ -2212,6 +2213,7 @@ def test_configured_start_passes_caller_deadline_to_tree_protocol_and_bootstrap(
 
 def test_configured_start_preserves_explicit_autonomous_bootstrap_budget(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     process = LspProcess.start_configured(
         _command("--lifecycle"),
@@ -2227,9 +2229,12 @@ def test_configured_start_preserves_explicit_autonomous_bootstrap_budget(
         configuration = process._coordinator.generation_configuration
         assert configuration.bootstrap_timeout_seconds == 1.25
         started = time.monotonic()
-        restart_deadline = lsp_process._fresh_bootstrap_deadline(
-            process._coordinator
-        )
+        frozen_clock = SimpleNamespace(**{**vars(time), "monotonic": lambda: started})
+        with monkeypatch.context() as frozen:
+            frozen.setattr(lsp_process, "time", frozen_clock)
+            restart_deadline = lsp_process._fresh_bootstrap_deadline(
+                process._coordinator
+            )
         assert started + 1.20 <= restart_deadline <= started + 1.30
     finally:
         process.close(time.monotonic() + 5)
