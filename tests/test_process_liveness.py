@@ -171,7 +171,7 @@ def test_a_pid_beyond_the_platform_range_is_never_alive_by_guess() -> None:
     [("windows:77", 77), (None, None), (PermissionError(5, "denied"), None)],
 )
 def test_a_windows_creation_time_is_read_from_the_start_identity(
-    monkeypatch, probe, created
+    monkeypatch: pytest.MonkeyPatch, probe: str | BaseException | None, created: int | None
 ) -> None:
     def identity(_pid: int) -> str | None:
         if isinstance(probe, BaseException):

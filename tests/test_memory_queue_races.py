@@ -416,7 +416,7 @@ def test_the_windows_process_tree_comes_from_the_kernel_snapshot(monkeypatch):
     assert memory_queue._tracked_descendant_pids(5, "nt") == {11, 12}
 
 
-def test_a_windows_process_older_than_its_recorded_parent_is_not_a_descendant(monkeypatch):
+def test_a_windows_process_older_than_its_recorded_parent_is_not_a_descendant(monkeypatch: pytest.MonkeyPatch) -> None:
     """Process 7 was started by an earlier owner of PID 5, which exited; 5 is now our child.
 
     Windows keeps the old parent PID, so 7 and its own child 8 name 5 as their
@@ -431,7 +431,7 @@ def test_a_windows_process_older_than_its_recorded_parent_is_not_a_descendant(mo
     assert memory_queue._tracked_descendant_pids(5, "nt") == {11}
 
 
-def test_a_windows_process_whose_age_cannot_be_read_is_not_claimed(monkeypatch):
+def test_a_windows_process_whose_age_cannot_be_read_is_not_claimed(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(memory_queue, "_windows_process_pairs", lambda: [(11, 5), (4, 5)])
     monkeypatch.setattr(process_liveness, "windows_creation_filetime", {5: 1, 11: 2}.get)
 

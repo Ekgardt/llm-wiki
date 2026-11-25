@@ -13950,8 +13950,8 @@ def _windows_created_no_later(parent: int, child: int) -> bool:
     """
     import process_liveness
 
-    parent_created = process_liveness.windows_creation_filetime(parent)
-    child_created = process_liveness.windows_creation_filetime(child)
+    parent_created: int | None = process_liveness.windows_creation_filetime(parent)
+    child_created: int | None = process_liveness.windows_creation_filetime(child)
     if parent_created is None or child_created is None:
         return False
     return parent_created <= child_created
