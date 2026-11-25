@@ -1,0 +1,5 @@
+{"tests": ["test_vault_status_wording_is_limited_to_compile_status_and_backlog"],
+ "kinds": ["assertions"],
+ "reason": "Task 337 item 8 asks that every memory tool description start with when to call the tool. Its helper _assert_vault_status_tool_description pinned the old vault_status wording word for word; it now pins the new wording, which keeps the old content (compile status and the current daily-file backlog) after the when-to-call clause. test_every_tool_description_opens_with_when_to_call_it asserts the rule for all twelve tools.",
+ "recorded": "2026-11-25",
+ "expires": "2027-02-23"}
