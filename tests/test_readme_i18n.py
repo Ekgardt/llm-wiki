@@ -1,7 +1,4 @@
-"""Guard: public READMEs stay in sync on critical facts.
-
-Prevents shipping EN updates while RU/ZH lag (release regression).
-"""
+"""Guard: the public README states the critical facts the code and CI hold."""
 
 from __future__ import annotations
 
@@ -11,11 +8,7 @@ import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-README_FILES = [
-    ROOT / "README.md",
-    ROOT / "README.ru.md",
-    ROOT / "README.zh-CN.md",
-]
+README_FILES = [ROOT / "README.md"]
 SHARED_COMMANDS = (
     "uv sync --locked --no-default-groups",
     "uv sync --locked --no-default-groups --inexact --extra hybrid",
@@ -127,18 +120,6 @@ _PARITY_MARKERS = {
         "retrieval-v2.json",
         "optional Obsidian viewer",
     ),
-    "README.ru.md": (
-        "12 task-shaped",
-        "полный регрессионный набор",
-        "retrieval-v2.json",
-        "Obsidian как опциональный viewer",
-    ),
-    "README.zh-CN.md": (
-        "12 个 task-shaped",
-        "完整回归套件",
-        "retrieval-v2.json",
-        "Obsidian 为可选 viewer",
-    ),
 }
 
 
@@ -206,8 +187,6 @@ def test_readmes_mark_precommit_as_opt_in() -> None:
     )
     markers = {
         "README.md": "Opt-in; the installer does not activate these hooks",
-        "README.ru.md": "Опционально; установщик не активирует эти хуки",
-        "README.zh-CN.md": "可选；安装程序不会启用这些钩子",
     }
     for path, text in _readmes():
         assert markers[path.name] in text, f"{path.name}: pre-commit activation is ambiguous"
@@ -220,16 +199,6 @@ def test_readmes_describe_the_retired_hosts_and_viewer_integration() -> None:
             "Cursor and Antigravity were retired on 2026-08-26",
             "`uninstall` still takes back hooks an earlier install wrote",
             "Viewer only",
-        ),
-        "README.ru.md": (
-            "Cursor и Antigravity сняты с поддержки 2026-08-26",
-            "`uninstall` по-прежнему забирает хуки",
-            "Только viewer",
-        ),
-        "README.zh-CN.md": (
-            "Cursor 与 Antigravity 已于 2026-08-26 退出支持",
-            "`uninstall` 仍会收回旧版安装写入的钩子",
-            "仅 viewer",
         ),
     }
     for path, text in _readmes():
@@ -419,7 +388,7 @@ def test_ci_closes_the_gaps_the_third_audit_named():
     jobs = _workflow()["jobs"]
     hybrid, lexical = (_commands(jobs[name]) for name in ("clean-hybrid", "lexical-and-typescript"))
     facts = (
-        "import onnxruntime, tokenizers, huggingface_hub" in hybrid,
+        "import openvino, tokenizers, huggingface_hub" in hybrid,
         "scripts/search_memory.py" in hybrid,
         "-k jieba" in lexical,
         "install_language_server.py" in lexical,
@@ -462,10 +431,8 @@ def test_user_guide_describes_search_signals_conditionally() -> None:
 
 
 def test_all_readmes_share_python_navigation_operator_contract():
-    translated_trust_markers = {
+    trust_markers = {
         "README.md": ("trusted local repositories", "not an OS sandbox"),
-        "README.ru.md": ("доверенных локальных репозиториях", "не является OS sandbox"),
-        "README.zh-CN.md": ("受信任的本地仓库", "不是 OS sandbox"),
     }
     shared = (
         "Pyright 1.1.411",
@@ -476,7 +443,7 @@ def test_all_readmes_share_python_navigation_operator_contract():
         "`diagnostics`",
     )
     for path, text in _readmes():
-        for marker in (*shared, *translated_trust_markers[path.name]):
+        for marker in (*shared, *trust_markers[path.name]):
             assert marker in text, f"{path.name}: missing navigation marker {marker!r}"
 
 

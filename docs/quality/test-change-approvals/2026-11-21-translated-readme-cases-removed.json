@@ -1,0 +1,16 @@
+{
+ "tests": [
+  "test_no_current_document_repeats_a_retired_claim",
+  "::tests.test_the_docs_name_the_command_that_rebuilds_the_generation::test_no_paragraph_says_repair_rebuilds_the_generation[README.ru.md]",
+  "::tests.test_the_docs_name_the_command_that_rebuilds_the_generation::test_no_paragraph_says_repair_rebuilds_the_generation[README.zh-CN.md]",
+  "::tests.test_the_documents_say_what_the_code_does::test_no_current_document_repeats_a_retired_claim[README.ru.md]",
+  "::tests.test_the_documents_say_what_the_code_does::test_no_current_document_repeats_a_retired_claim[README.zh-CN.md]"
+ ],
+ "kinds": [
+  "cases",
+  "removed"
+ ],
+ "reason": "The owner removed README.ru.md and README.zh-CN.md on 2026-11-21 (owner message 263016509/16422) because law 10 forbids Russian text in the repository. test_no_current_document_repeats_a_retired_claim stays and still checks every other current document, README.md included; only its two cases for the deleted files are gone.",
+ "recorded": "2026-11-21",
+ "expires": "2027-02-19"
+}

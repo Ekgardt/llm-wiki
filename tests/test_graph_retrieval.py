@@ -194,9 +194,31 @@ def test_graph_only_proximity_cannot_beat_weak_text_except_direct_graph_query() 
         rerank_enabled=False,
     )
 
-    assert ordinary.candidates[0].candidate_id == "weak-text"
-    assert all(item.candidate_id != "proximity" for item in ordinary.candidates)
+    ordered = [item.candidate_id for item in ordinary.candidates]
+    assert ordered == ["weak-text", "proximity"]
     assert any(item.candidate_id == "proximity" for item in direct.candidates)
+
+
+def test_a_planned_search_keeps_a_relation_neighbour_sharing_no_word() -> None:
+    """What a relation question asks for is often a page that never names the subject."""
+    from retrieval import planned_request
+
+    requested, signals = planned_request(None, semantic=True)
+    result = retrieve(
+        "what depends on the capture queue",
+        requested_profile=requested,
+        signals=signals,
+        lexical_backend=lambda **_filters: [
+            _hit("seed", "seed.md", 1.0, content="capture queue")
+        ],
+        dense_backend=lambda **_filters: (),
+        graph_backend=lambda **_options: [
+            _expansion("dependent", seed_id="seed", content="nightly scheduler")
+        ],
+        rerank_enabled=False,
+    )
+
+    assert [item.candidate_id for item in result.candidates] == ["seed", "dependent"]
 
 
 def test_edge_family_ablation_removes_disabled_family_before_fusion() -> None:
@@ -576,6 +598,9 @@ def test_generation_search_seals_graph_artifact_and_uses_same_generation(
         lambda *_a, **_k: [
             _hit("seed", "seed.py", 1.0, retrieval_confidence="high", content="seed")
         ],
+    )
+    monkeypatch.setattr(
+        search_memory, "generation_eligible_paths", lambda _connection, paths, **_k: set(paths)
     )
     monkeypatch.setattr(evidence_graph, "EvidenceGraph", Graph)
     monkeypatch.setattr(

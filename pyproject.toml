@@ -18,18 +18,18 @@ retrieval-benchmark = [
     "usearch==2.26.0",
     "jieba==0.42.1",
 ]
-# The E5 encoder through ONNX Runtime, without torch (2026-09-25; see
-# docs/research/2026-09-25-the-encoder-runs-without-torch.md).
+# The two models search reads, the bge-m3 encoder and the multilingual reranker,
+# on one runtime: OpenVINO, which publishes no wheel for Intel macOS (there the
+# search answers by words alone). huggingface-hub fetches the weights.
 semantic = [
     "huggingface-hub>=0.34,<2",
-    "numpy>=2.2.6,<3",
-    "onnxruntime>=1.18,<1.24; python_version < '3.11'",
-    "onnxruntime>=1.18,<2; python_version >= '3.11'",
+    "numpy>=2.2.6,<2.6",
+    "openvino>=2026.4.1,<2027; sys_platform != 'darwin' or platform_machine != 'x86_64'",
     "tokenizers>=0.19,<1",
 ]
-# Search as documented: the encoder and the reranker, which is on by default
-# (docs/research/2026-09-25-an-update-brings-the-extras-the-operator-chose.md).
-hybrid = ["numpy>=2.2.6,<3", "llm-wiki[semantic,reranker]"]
+# Search as documented: the encoder, the reranker (on by default) and the vectors'
+# numpy (docs/research/2026-09-25-an-update-brings-the-extras-the-operator-chose.md).
+hybrid = ["numpy>=2.2.6,<3", "llm-wiki[semantic]"]
 # v4.0: tree-sitter code graph (12 languages; grammars remain optional as a group).
 code-graph = [
     "jedi>=0.19,<1",
@@ -49,16 +49,9 @@ code-graph = [
 ]
 # v4.0: MCP server (12 task-shaped tools, stdio transport, 100% local).
 mcp-server = []
-# Cross-encoder reranker (bge-reranker-v2-m3 through transformers on torch,
-# local CPU, int8 dynamic quantisation).
-reranker = [
-    "tokenizers>=0.19,<1",
-    "torch>=2.2,<3",
-    "transformers>=4.44,<6",
-]
 # Convenience: install everything.
 full = [
-    "llm-wiki[semantic,hybrid,code-graph,mcp-server,reranker]",
+    "llm-wiki[semantic,hybrid,code-graph,mcp-server]",
 ]
 
 [dependency-groups]
@@ -79,6 +72,7 @@ dev = [
     "tree-sitter-php>=0.23,<1",
     "tree-sitter-c-sharp>=0.23,<1",
     "tree-sitter-bash>=0.23,<1",
+    "tokenizers>=0.19,<1",
     "pre-commit>=4.5.1",
     "pytest>=8.0.0",
     "pytest-xdist>=3.8,<4",

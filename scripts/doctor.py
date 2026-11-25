@@ -4787,36 +4787,61 @@ def _tool_failure_check(state_root: Path, deadline: float) -> dict:
 
 
 def _models_check() -> dict:
-    """Name the pinned model weights the cache lacks, with the command that fetches them.
+    """Name the pinned model files `cache/models/` lacks, with the command that fetches them.
 
     Without them the vault answers by words alone and only the trace says so.
     Presence at the pinned revision is what is checked here; the digest is
-    verified by `install_models.py` when it fetches.
+    verified by `install_models.py` when it fetches. A vault that runs OpenVINO
+    and has not declined its telemetry is named too: the install and every model
+    load decline it when no choice is recorded.
     """
-    from install_models import hub_library, missing_models, pinned_models
+    from install_models import missing_models, wanted_models
 
-    hub = hub_library()
-    if hub is None:
+    if not wanted_models():
         return _result(
             "models",
             "ok",
             "Semantic search is not installed; no model weights are expected.",
             {"installed": False, "missing": []},
         )
-    missing = [f"{model.repo_id}@{model.revision[:12]}" for model in missing_models(hub)]
+    missing = [f"{model.repo_id}@{model.revision[:12]}" for model in missing_models()]
     details = {
         "installed": True,
         "missing": missing,
-        "expected": [model.repo_id for model in pinned_models()],
+        "expected": [model.repo_id for model in wanted_models()],
         "command": "uv run python scripts/install_models.py",
+        "telemetry_declined": _openvino_telemetry_declined(),
     }
-    if not missing:
-        return _result("models", "ok", "Pinned model weights are in the local cache.", details)
+    if missing:
+        return _result(
+            "models",
+            "degraded",
+            "Model weights missing: " + ", ".join(missing)
+            + "; search answers by words alone until `uv run python scripts/install_models.py`"
+            + " runs.",
+            details,
+        )
+    return _telemetry_verdict(details)
+
+
+def _openvino_telemetry_declined() -> bool:
+    from openvino_runtime import telemetry_declined
+
+    declined: bool = telemetry_declined()
+    return declined
+
+
+def _telemetry_verdict(details: dict[str, Any]) -> dict[str, Any]:
+    if details["telemetry_declined"]:
+        return _result("models", "ok", "Pinned model weights are installed.", details)
+    from openvino_runtime import telemetry_consent_file
+
     return _result(
         "models",
         "degraded",
-        "Model weights missing: " + ", ".join(missing)
-        + "; search answers by words alone until `uv run python scripts/install_models.py` runs.",
+        f"OpenVINO telemetry is not declined in {telemetry_consent_file()};"
+        " `uv run python scripts/install_models.py` writes 0 there when the file is absent,"
+        " and a file holding another value is the operator's own choice to change.",
         details,
     )
 

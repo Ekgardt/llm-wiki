@@ -1,15 +1,14 @@
 """Hybrid search over the vault's knowledge.
 
 Uses Python's built-in sqlite3 + FTS5 for BM25 full-text search over the active
-generation. When the `semantic` extra is installed, the pinned E5 encoder runs
-through ONNX Runtime (`scripts/onnx_encoder.py`) for the dense leg. Results are
+generation. When the `semantic` extra is installed, the pinned bge-m3 encoder
+runs through OpenVINO (`scripts/onnx_encoder.py`) for the dense leg. Results are
 fused via Reciprocal Rank Fusion (RRF) for hybrid ranking.
 
-Costs measured on this vault:
+Costs on this vault:
 - lexical only: tens of milliseconds, zero optional dependencies
-- with vectors: loading the encoder costs about 1.5 s once per process
-  (2026-09-25; it was 6.5 s through `sentence-transformers` and `torch`), and
-  finds semantically related pages ("database performance" → "N+1 query fix")
+- with vectors: loading the encoder once per process, and the dense leg finds
+  related pages in either language ("database performance" → "N+1 query fix")
 
 Usage:
     uv run python scripts/search_memory.py "auth decision"
@@ -34,12 +33,13 @@ import threading
 import time
 import uuid
 from collections import OrderedDict
-from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
+from collections.abc import Callable, Collection, Iterable, Iterator, Mapping, Sequence
 from contextlib import AbstractContextManager, closing, contextmanager, nullcontext
 from pathlib import Path
-from typing import NamedTuple
+from typing import Any, NamedTuple
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import query_spelling
 from bounded_io import (
     MAX_KNOWLEDGE_PAGE_BYTES,
     TIMESTAMP_SETTLE_NS,
@@ -161,7 +161,6 @@ from embedding_model import (  # noqa: E402
     EMBEDDING_DIM,
     EMBEDDING_MODEL,
     EMBEDDING_MODEL_REVISION,
-    prefixed_texts,
 )
 
 # Why there is no dense signal, in three words a reader can act on:
@@ -235,7 +234,7 @@ def _note_embedder_unavailable(kind: str, detail: str) -> None:
     )
 
 
-ENCODER_PACKAGES = ("onnxruntime", "tokenizers", "huggingface_hub", "numpy")
+ENCODER_PACKAGES = ("openvino", "tokenizers", "numpy")
 
 
 def _have_encoder_runtime() -> bool:
@@ -251,16 +250,16 @@ def _have_encoder_runtime() -> bool:
 def _get_embedder():
     """Lazily load the embedding model. Returns None if unavailable.
 
-    The model is cached at module level: the 470 MB session is built once per
-    process, not per query.
+    The model is cached at module level: it is compiled once per process, not
+    per query.
 
     Unavailable still means None, never an exception: the generation reader
     treats an unusable query vector as "no dense signal" by contract and that
     is exactly what an unavailable model means. What changed is that the
     reason is recorded and named — see `embedder_unavailable_reason`.
 
-    The load is local-only: the files come from the Hugging Face cache and
-    never the network (`scripts/install_models.py` fetches them). A vault that
+    The load is local-only: the files come from `cache/models/` and never the
+    network (`scripts/install_models.py` fetches them). A vault that
     does not have the weights says `model_unavailable` and degrades to lexical,
     which is the same answer it gives for weights it cannot read.
     """
@@ -954,17 +953,10 @@ def _built_generation_vectors(
     ], reused
 
 
-def _generation_embedder(embedder, *, is_query: bool):
-    """The generation paths want a callable, and E5 wants each side told apart.
-
-    A page is a passage and a question is a query; encoding either with the
-    other's prefix costs accuracy the model was trained to give.
-    """
-
-    def encode(texts) -> list[list[float]]:
-        return embedder.encode(prefixed_texts(list(texts), is_query)).tolist()
-
-    return encode
+def _encoded_rows(embedder: Any, texts: Iterable[str]) -> list[list[float]]:
+    """The generation paths want plain rows; bge-m3 encodes questions and pages alike."""
+    rows: list[list[float]] = embedder.encode(list(texts)).tolist()
+    return rows
 
 
 def _lazy_generation_query_encoder():
@@ -993,7 +985,7 @@ def _lazy_generation_query_encoder():
         loaded = _get_embedder()
         if loaded is None:
             return []
-        return _generation_embedder(loaded, is_query=True)(texts)
+        return _encoded_rows(loaded, texts)
 
     return encode
 
@@ -1013,7 +1005,7 @@ def _lazy_passage_encoder():
         loaded = _get_embedder()
         if loaded is None:
             raise _EmbedderUnavailable(str(_embedder_unavailable_reason))
-        return _generation_embedder(loaded, is_query=False)(texts)
+        return _encoded_rows(loaded, texts)
 
     return encode
 
@@ -2179,6 +2171,7 @@ def _validated_generation_connection(
         if not _fts_contents_hold(connection, manifest, deadline, cancelled):
             connection.close()
             return None
+        register_casefold_function(connection)
         return connection
     except BaseException:
         _close_quietly(connection)
@@ -3040,9 +3033,38 @@ def _fts_query(query: str) -> str:
     a chunk holding every term still outranks one holding a single term. What
     changes is that the one-term chunk is now reachable instead of discarded.
     """
-    words = _query_terms(query)
+    return _fts_expression(_query_terms(query))
+
+
+def _fts_expression(words: Sequence[str]) -> str:
     quoted = [f'"{word.replace(chr(34), chr(34) * 2)}"' for word in words]
     return " OR ".join(quoted)
+
+
+def _spelled_fts_query(connection: sqlite3.Connection, query: str) -> str:
+    """The query, plus the indexed words nearest to each word the index does not hold.
+
+    Measured 2026-11-21 on LongMemEval_S (470 answerable questions, lexical lane
+    alone): one transposed letter in the longest word took MRR@10 from 0.906 to
+    0.865; with the corrections it is 0.901, and a query without typos is
+    unchanged (0.906 to 0.907).
+    """
+    terms = _query_terms(query)
+    corrections = query_spelling.corrections(connection, terms, GENERATION_TOKENIZER)
+    glued = query_spelling.glued_words(connection, terms, GENERATION_TOKENIZER)
+    stems = query_spelling.cyrillic_stems(terms)
+    expressions = (_fts_query(query), _fts_prefixes([*corrections, *glued, *stems]))
+    return " OR ".join(filter(None, expressions))
+
+
+def _fts_prefixes(terms: Sequence[str]) -> str:
+    """Prefix queries, which the tokenizer does not stem again.
+
+    Corrections and glued words are terms as the index stores them, already
+    stemmed; written as a phrase, Porter would stem them a second time and
+    "advertis" (from "advertise") would become "adverti", which matches nothing.
+    """
+    return " OR ".join(f'"{term.replace(chr(34), chr(34) * 2)}"*' for term in terms)
 
 
 def _normalized_filename_stem(value: str) -> str:
@@ -3053,14 +3075,42 @@ def _normalized_filename_stem(value: str) -> str:
 
 
 def _generation_filters(
-    *, scope: str, since: str | None, as_of: str | None
+    *,
+    scope: str,
+    since: str | None,
+    as_of: str | None,
+    page_type: str | None = None,
+    path_prefix: str | None = None,
 ) -> tuple[str, list[str]]:
     clauses = []
     values: list[str] = []
     if scope in {"wiki", "memory", "knowledge"}:
         clauses.append("source_path LIKE 'knowledge/notes/%'")
     _add_validity_clauses(clauses, values, as_of=as_of, since=since)
+    _add_page_clauses(clauses, values, page_type=page_type, path_prefix=path_prefix)
     return (" AND " + " AND ".join(clauses) if clauses else ""), values
+
+
+def normalized_path_prefix(path_prefix: str | None) -> str:
+    """A vault-relative prefix written the way `source_path` stores paths."""
+    return str(path_prefix or "").replace("\\", "/").removeprefix("./").lstrip("/")
+
+
+def _add_page_clauses(
+    clauses: list[str], values: list[str], *, page_type: str | None, path_prefix: str | None
+) -> None:
+    """The page's own type in any case of any script, and the path it must start with.
+
+    SQLite's lower() folds ASCII only, so the type is folded by Python's casefold,
+    the rule `_field_mismatch` applies to the rows read back.
+    """
+    if page_type:
+        clauses.append("llm_wiki_casefold(type) = ?")
+        values.append(page_type.casefold())
+    prefix = normalized_path_prefix(path_prefix)
+    if prefix:
+        clauses.append("substr(source_path, 1, length(?)) = ?")
+        values.extend((prefix, prefix))
 
 
 def _add_validity_clauses(
@@ -3155,13 +3205,23 @@ def _passes_hard_filters(
     as_of: str | None,
     scope: str,
     authority: str | None,
+    page_type: str | None = None,
+    path_prefix: str | None = None,
 ) -> bool:
-    return (
-        not _out_of_scope(row, scope)
-        and not _field_mismatch(row, "project", project)
-        and not _field_mismatch(row, "authority", authority)
-        and not _temporally_excluded(row, since, as_of)
+    exclusions = (
+        _out_of_scope(row, scope),
+        _field_mismatch(row, "project", project),
+        _field_mismatch(row, "authority", authority),
+        _field_mismatch(row, "type", page_type),
+        _outside_prefix(row, path_prefix),
+        _temporally_excluded(row, since, as_of),
     )
+    return not any(exclusions)
+
+
+def _outside_prefix(row: Mapping[str, object], path_prefix: str | None) -> bool:
+    prefix = normalized_path_prefix(path_prefix)
+    return not _row_path(row).replace("\\", "/").startswith(prefix)
 
 
 def _subset_or_empty(inner: set[str], outer: set[str]) -> bool:
@@ -3183,6 +3243,8 @@ def apply_hard_filters(
     as_of: str | None = None,
     scope: str = "all",
     authority: str | None = None,
+    page_type: str | None = None,
+    path_prefix: str | None = None,
     **_ignored: object,
 ) -> list[dict]:
     """Single hard-filter contract shared by the lexical and NumPy paths."""
@@ -3196,8 +3258,103 @@ def apply_hard_filters(
             as_of=as_of,
             scope=scope,
             authority=authority,
+            page_type=page_type,
+            path_prefix=path_prefix,
         )
     ]
+
+
+def generation_eligible_paths(
+    connection: sqlite3.Connection,
+    paths: Collection[str],
+    *,
+    scope: str = "all",
+    project: str | None = None,
+    since: str | None = None,
+    as_of: str | None = None,
+    page_type: str | None = None,
+    path_prefix: str | None = None,
+) -> set[str]:
+    """The pages among `paths` that the generation's lexical leg would admit.
+
+    A row the evidence graph reached carries no page metadata of its own; its
+    page answers to the same scope, date and current-status SQL as a lexical
+    hit, and to the same casefolded project rule (SQLite's lower() folds ASCII only).
+    """
+    if not paths:
+        return set()
+    filters, values = _generation_filters(
+        scope=scope, since=since, as_of=as_of, page_type=page_type, path_prefix=path_prefix
+    )
+    wanted = sorted(paths)
+    placeholders = ", ".join("?" for _ in wanted)
+    rows = connection.execute(
+        "SELECT DISTINCT source_path, project FROM chunks"
+        f" WHERE source_path IN ({placeholders}){filters}",
+        [*wanted, *values],
+    ).fetchall()
+    return {
+        str(row[0])
+        for row in rows
+        if not _field_mismatch({"project": row[1]}, "project", project)
+    }
+
+
+def markdown_page_row(
+    relative_path: str,
+    *,
+    project: str | None = None,
+    since: str | None = None,
+    as_of: str | None = None,
+) -> dict[str, object] | None:
+    """A page reached another way, as the Markdown leg reports it, if that leg would admit it.
+
+    The Markdown walk never yields a superseded or archived page, nor a file outside
+    the notes tree, a skipped name or directory, or a link; neither does this.
+    """
+    read = _walked_page_read(relative_path)
+    if read is None or _is_retired_page(read.content):
+        return None
+    if not _page_read_eligible(read, project=project, since=since, as_of=as_of):
+        return None
+    return _page_hit(read, score=0.0, bm25_score=0.0)
+
+
+def _walked_page_read(relative_path: str) -> _PageRead | None:
+    if not _walk_reaches(_notes_parts(relative_path)):
+        return None
+    return _read_page(ROOT / relative_path, "graph neighbour page")
+
+
+def _notes_parts(relative_path: str) -> tuple[str, ...]:
+    """The path's parts below the notes tree; empty when it lies outside."""
+    path: Path = ROOT / relative_path
+    try:
+        return path.relative_to(KNOWLEDGE_DIR).parts
+    except ValueError:
+        return ()
+
+
+def _walk_reaches(parts: tuple[str, ...]) -> bool:
+    return _walk_admits_names(parts) and _walk_admits_entries(parts)
+
+
+def _walk_admits_names(parts: tuple[str, ...]) -> bool:
+    if not parts or ".." in parts:
+        return False
+    name = parts[-1]
+    skipped = name in SKIP_NAMES or SKIP_DIRS.intersection(parts[:-1])
+    return name.endswith(".md") and not skipped
+
+
+def _walk_admits_entries(parts: tuple[str, ...]) -> bool:
+    """Every directory on the way is a real directory and the page a regular file."""
+    path = KNOWLEDGE_DIR
+    for part in parts[:-1]:
+        path /= part
+        if not _is_safe_entry(path, directory=True):
+            return False
+    return _is_safe_entry(path / parts[-1], directory=False)
 
 
 def _row_text(row: sqlite3.Row, key: str) -> str:
@@ -3265,6 +3422,15 @@ _GENERATION_CHUNK_COLUMNS = (
 )
 
 
+def register_casefold_function(connection: sqlite3.Connection) -> None:
+    connection.create_function(
+        "llm_wiki_casefold",
+        1,
+        lambda value: value.casefold() if isinstance(value, str) else "",
+        deterministic=True,
+    )
+
+
 def _register_filename_stem_function(connection: sqlite3.Connection) -> None:
     connection.create_function(
         "llm_wiki_filename_stem",
@@ -3312,7 +3478,7 @@ def _generation_matched_rows(
     return connection.execute(
         f"SELECT {_GENERATION_CHUNK_COLUMNS}, bm25(chunks) AS rank FROM chunks "
         f"WHERE chunks MATCH ?{filters} ORDER BY rank, chunk_order LIMIT ?",
-        [_fts_query(query), *values, limit * 5],
+        [_spelled_fts_query(connection, query), *values, limit * 5],
     ).fetchall()
 
 
@@ -3374,11 +3540,15 @@ def _generation_fts_search(
     as_of: str | None,
     deadline: float | None = None,
     cancelled: Callable[[], bool] | None = None,
+    page_type: str | None = None,
+    path_prefix: str | None = None,
 ) -> list[dict[str, object]]:
     """BM25 over one generation, with an exact filename match kept in front."""
     with _generation_sqlite_guard(connection, deadline, cancelled):
         connection.row_factory = sqlite3.Row
-        filters, values = _generation_filters(scope=scope, since=since, as_of=as_of)
+        filters, values = _generation_filters(
+            scope=scope, since=since, as_of=as_of, page_type=page_type, path_prefix=path_prefix
+        )
         _register_filename_stem_function(connection)
         exact_rows = _exact_filename_rows(
             connection, _normalized_filename_stem(query), filters, values, project
@@ -3407,7 +3577,13 @@ def _generation_fts_search(
         result["score"] = round(float(result["score"]), 4)
         result.pop("_chunk_order", None)
     filtered = apply_hard_filters(
-        results, project=project, since=since, as_of=as_of, scope=scope
+        results,
+        project=project,
+        since=since,
+        as_of=as_of,
+        scope=scope,
+        page_type=page_type,
+        path_prefix=path_prefix,
     )
     return filtered[:limit]
 
@@ -3541,6 +3717,8 @@ def _vector_scored_rows(
     project: str | None,
     deadline,
     cancelled,
+    page_type: str | None = None,
+    path_prefix: str | None = None,
 ) -> list[dict[str, object]]:
     """Cosine rows, ordered by the same trust-weighted score the lexical leg uses.
 
@@ -3560,7 +3738,9 @@ def _vector_scored_rows(
     120-row over-fetch, so no downstream weight could reach it. Weighting here
     puts those same pages at 1-14.
     """
-    filters, values = _generation_filters(scope=scope, since=since, as_of=as_of)
+    filters, values = _generation_filters(
+        scope=scope, since=since, as_of=as_of, page_type=page_type, path_prefix=path_prefix
+    )
     with _generation_sqlite_guard(connection, deadline, cancelled):
         rows = connection.execute(
             f"SELECT {_GENERATION_CHUNK_COLUMNS}, 0.0 AS rank FROM chunks "
@@ -3628,6 +3808,8 @@ def _generation_vector_rows(
     as_of: str | None,
     deadline: float | None,
     cancelled: Callable[[], bool] | None,
+    page_type: str | None = None,
+    path_prefix: str | None = None,
 ) -> list[dict[str, object]] | None:
     """The scored rows, or None when the stored vectors cannot be trusted."""
     import numpy as np
@@ -3667,6 +3849,8 @@ def _generation_vector_rows(
         project=project,
         deadline=deadline,
         cancelled=cancelled,
+        page_type=page_type,
+        path_prefix=path_prefix,
     )
     _check_generation_stop(deadline, cancelled)
     return results[: limit * 3]
@@ -3688,6 +3872,8 @@ def _generation_vectors_search(
     as_of: str | None,
     deadline: float | None = None,
     cancelled: Callable[[], bool] | None = None,
+    page_type: str | None = None,
+    path_prefix: str | None = None,
 ) -> list[dict[str, object]] | None:
     """Cosine search over one generation's vectors, or None when unusable."""
     _check_generation_stop(deadline, cancelled)
@@ -3712,6 +3898,8 @@ def _generation_vectors_search(
             as_of=as_of,
             deadline=deadline,
             cancelled=cancelled,
+            page_type=page_type,
+            path_prefix=path_prefix,
         )
     except TimeoutError:
         raise
@@ -3742,8 +3930,13 @@ def search(
     max_candidates: int | None = None,
     cancelled: Callable[[], bool] | None = None,
     trace_sink: dict[str, object] | None = None,
+    page_type: str | None = None,
+    path_prefix: str | None = None,
 ) -> list[dict]:
     """Public search API — always routes through retrieval.retrieve().
+
+    `page_type` keeps only pages of that frontmatter type; `path_prefix` only
+    pages whose vault-relative path starts with it. Both bind every leg.
 
     `trace_sink`, when given, receives the planner trace of the run — which
     generation was selected, which signals ran, what fell back — even when
@@ -3782,6 +3975,8 @@ def search(
         max_candidates=max_candidates,
         cancelled=cancelled,
         trace_sink=trace_sink,
+        page_type=page_type,
+        path_prefix=path_prefix,
     )
 
 
@@ -3867,6 +4062,7 @@ def _page_hit(read: _PageRead, *, score: float, bm25_score: float) -> dict:
         "score": score,
         "bm25_score": bm25_score,
         "project": read.project,
+        "type": read.page_type,
         "timestamp": read.timestamp,
         "candidate_id": legacy_candidate_id(read.relative_path),
         "source_sha256": hashlib.sha256(read.raw).hexdigest(),
@@ -4087,6 +4283,7 @@ def _direct_markdown_hits(
     as_of: str | None,
     deadline: float | None,
     cancelled: Callable[[], bool] | None,
+    page_filters: Mapping[str, str | None] | None = None,
 ) -> list[dict]:
     """Return bounded literal matches from authoritative Markdown only.
 
@@ -4108,10 +4305,20 @@ def _direct_markdown_hits(
             since=since,
             as_of=as_of,
         )
-        if hit is not None:
+        if hit is not None and _kept_by_page_filters(hit, page_filters):
             results.append(hit)
     results.sort(key=lambda item: (-float(item["score"]), str(item["path"])))
     return results[: max(limit * 3, limit)]
+
+
+def _kept_by_page_filters(
+    hit: Mapping[str, object], page_filters: Mapping[str, str | None] | None
+) -> bool:
+    """A hit of the type and under the path asked for, judged before the pool is cut."""
+    wanted = page_filters or {}
+    if _field_mismatch(hit, "type", wanted.get("page_type")):
+        return False
+    return not _outside_prefix(hit, wanted.get("path_prefix"))
 
 
 def markdown_hits(
@@ -4125,6 +4332,8 @@ def markdown_hits(
     page_paths: list[Path] | None = None,
     deadline: float | None = None,
     cancelled: Callable[[], bool] | None = None,
+    page_type: str | None = None,
+    path_prefix: str | None = None,
 ) -> list[dict]:
     """The lexical signal when no generation is active: Markdown, read directly.
 
@@ -4147,6 +4356,7 @@ def markdown_hits(
         as_of=as_of,
         deadline=deadline,
         cancelled=cancelled,
+        page_filters={"page_type": page_type, "path_prefix": path_prefix},
     )
     normalized_stem = _normalized_filename_stem(query)
     hits = _with_exact_page(hits, pages, normalized_stem, project=project, since=since, as_of=as_of)
@@ -4311,7 +4521,7 @@ def _print_search_results(query: str, results: list[dict], elapsed: float) -> No
         ts_tag = f" ({r['timestamp']})" if r["timestamp"] else ""
         print(f"{i}. [{r['score']}] {r['title']}{proj_tag}{ts_tag}")
         print(f"   {r['path']}")
-        snippet = result_snippet(r)
+        snippet = result_snippet(r, query)
         if snippet:
             print(f"   {snippet}")
         print()
@@ -4322,17 +4532,64 @@ def _print_search_results(query: str, results: list[dict], elapsed: float) -> No
 SNIPPET_CHARS = 240
 
 
-def result_snippet(result: dict) -> str:
-    """The first words of the hit's text after its heading; the summary otherwise.
+def result_snippet(result: Mapping[str, object], query: str = "") -> str:
+    """The passage of the hit's text that holds the most query words; the summary otherwise.
 
     A chunk's summary is its heading, and a heading such as "Consequences" says
     nothing on its own line. See
-    `docs/research/2026-09-24-an-answer-says-how-old-its-index-is.md`.
+    `docs/research/2026-09-24-an-answer-says-how-old-its-index-is.md`. The
+    passage is the one Obsidian Omnisearch shows: where the words are, not the
+    chunk's first line.
     """
     text = _body_text(str(result.get("content") or ""))
     if not text:
         return str(result.get("summary") or "")
-    return _clipped(text, SNIPPET_CHARS)
+    return _clipped(_matched_passage(text, query), SNIPPET_CHARS)
+
+
+# Characters of context kept before the first matched word of a passage.
+SNIPPET_LEAD_CHARS = 40
+
+
+def _snippet_stems(query: str) -> list[str]:
+    """Each evidence word cut to a light stem, so "notes" also marks "note"."""
+    words = (word.strip(_SNIPPET_PUNCTUATION).casefold() for word in _query_terms(query))
+    stems = {query_spelling.light_stem(word) for word in words if len(word) >= 3 and word.isalpha()}
+    return sorted(stems)
+
+
+# ASCII marks, guillemets and curly quotes a query word may carry.
+_SNIPPET_PUNCTUATION = "\"'.,;:!?()[]{}<>`*_\u00ab\u00bb\u201c\u201d\u2018\u2019"
+
+
+def _matched_passage(text: str, query: str) -> str:
+    stems = _snippet_stems(query)
+    if not stems:
+        return text
+    pattern = re.compile(r"\b(?:" + "|".join(map(re.escape, stems)) + ")", re.IGNORECASE)
+    hits = [(match.start(), match.group(0).casefold()) for match in pattern.finditer(text)]
+    if not hits:
+        return text
+    match = _densest_start(hits)
+    return _passage_from(text, max(0, match - SNIPPET_LEAD_CHARS), match)
+
+
+def _densest_start(hits: list[tuple[int, str]]) -> int:
+    """Where the window holding the most distinct query words begins; the earliest on a tie."""
+    def distinct_from(index: int) -> int:
+        start = hits[index][0]
+        return len({word for position, word in hits[index:] if position < start + SNIPPET_CHARS})
+
+    best = max(range(len(hits)), key=lambda index: (distinct_from(index), -index))
+    return hits[best][0]
+
+
+def _passage_from(text: str, start: int, match: int) -> str:
+    """The text from the first word boundary of the lead, never from past the match."""
+    if start == 0:
+        return text
+    boundary = text.find(" ", start, match)
+    return "…" + text[boundary if boundary >= 0 else start:]
 
 
 def _body_text(content: str) -> str:

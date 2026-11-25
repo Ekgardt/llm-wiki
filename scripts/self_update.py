@@ -21,6 +21,7 @@ import subprocess
 import sys
 from collections.abc import Sequence
 from pathlib import Path
+from typing import Any
 
 if sys.version_info >= (3, 11):
     import tomllib
@@ -322,17 +323,39 @@ def _installed_distributions() -> dict[str, set[str]]:
     return installed
 
 
-def _chosen_by_itself(
-    exclusive: set[str], own: set[str], installed: dict[str, set[str]]
-) -> bool:
-    """An exclusive distribution is installed and nothing outside the extra pulled it in.
+def _required_closure(roots: set[str], installed: dict[str, set[str]]) -> set[str]:
+    """The installed roots and everything they require, however deep."""
+    reached: set[str] = set()
+    pending = roots & installed.keys()
+    while pending:
+        reached |= pending
+        pending = set().union(*(installed[name] for name in pending)) & installed.keys()
+        pending -= reached
+    return reached
 
-    `transformers` (reranker) requires `huggingface-hub` (semantic's own), so the
-    reranker alone read as a semantic choice (audit 2026-09-26, regress 9,
-    docs/research/2026-09-26-an-extra-is-chosen-by-what-nothing-else-pulled-in.md).
+
+def _chosen_by_itself(
+    exclusive: set[str], outside: set[str], installed: dict[str, set[str]]
+) -> bool:
+    """An exclusive distribution is installed and nothing the project declares outside the extra
+    pulled it in.
+
+    `transformers` requires `huggingface-hub` (semantic's own), so a vault that chose only
+    another extra bringing it read as a semantic choice (audit 2026-09-26, regress 9,
+    docs/research/2026-09-26-an-extra-is-chosen-by-what-nothing-else-pulled-in.md). A package
+    an earlier release declared and the current one does not (torch and transformers before
+    the models moved to OpenVINO) pulls nothing in: it is a leftover, not a choice.
     """
-    pulled_in = set().union(*(needs for name, needs in installed.items() if name not in own))
+    pulled_in = _required_closure(outside, installed)
     return bool((exclusive & installed.keys()) - pulled_in)
+
+
+def _declared_outside(
+    project: dict[str, Any], own: dict[str, set[str]], extra: str
+) -> set[str]:
+    """What the project declares in its base and in every other extra."""
+    base = {_requirement_name(value) for value in project.get("dependencies", [])}
+    return base.union(*(names for name, names in own.items() if name != extra))
 
 
 def _project(root: Path) -> dict:
@@ -381,7 +404,11 @@ def chosen_extras(root: Path) -> tuple[str, ...]:
     own = _own_names(project)
     exclusive = _exclusive_names(project)
     return tuple(
-        sorted(extra for extra, names in exclusive.items() if _chosen_by_itself(names, own[extra], installed))
+        sorted(
+            extra
+            for extra, names in exclusive.items()
+            if _chosen_by_itself(names, _declared_outside(project, own, extra), installed)
+        )
     )
 
 

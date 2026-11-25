@@ -48,7 +48,6 @@ def test_a_code_question_leaves_code_and_docs_exactly_where_they_were():
     for question in (
         "what does scripts/retrieval.py::_weigh_by_trust do",
         "who calls fuse_rrf",
-        "покажи структуру проекта",
     ):
         assert _weight("code", SOURCE_FILE, question=question) == (
             provenance.DEFAULT_TYPE_WEIGHT
@@ -65,7 +64,7 @@ def test_the_prior_is_only_ever_turned_off_by_a_positive_reading():
     """An unreadable or absent intent list keeps the vault's own rule."""
     assert provenance.curated_pages_first(()) is True
     assert provenance.curated_pages_first(None) is True
-    assert provenance.curated_pages_first(("question", "cross_language")) is True
+    assert provenance.curated_pages_first(("quoted_phrase",)) is True
     assert provenance.curated_pages_first(("exact_identifier",)) is False
 
 

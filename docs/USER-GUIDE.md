@@ -21,8 +21,8 @@ when healthy and injects only degraded/error findings.
 **The LLM part**: the system needs a "brain" to read transcripts and decide
 what to keep. That brain is **whichever agent you're already using** — the
 `llm_client.py` abstraction auto-detects the first alive backend
-(OpenCode → Codex → Claude CLI → OpenAI → Ollama). **No extra API keys
-required** beyond what you already have; Ollama is an optional local backend.
+(OpenCode → Codex → Claude CLI → any OpenAI-compatible API). **No extra API keys
+required** beyond what you already have; a local model server is optional.
 
 Backend disclosure:
 
@@ -30,8 +30,7 @@ Backend disclosure:
 |---------|---------------------|
 | OpenCode | LLM Wiki calls a loopback OpenCode server; the selected OpenCode model may use a remote service. |
 | Codex / Claude | LLM Wiki invokes a local CLI; the CLI may use its account's remote service. |
-| OpenAI | Prompts are sent to the configured HTTPS API. |
-| Ollama | The configured Ollama endpoint is used. A remote endpoint or cloud model is not local processing. |
+| OpenAI-compatible API | Prompts are sent to `MEMORY_LLM_BASE_URL` (default `https://api.openai.com/v1`). A local server keeps them on the machine; a cloud one does not. |
 
 All first-party calls pass through the fail-closed model boundary. Built-in secret
 detectors are always active. `LLM_WIKI_DLP_POLICY`, when set, must name an absolute,
@@ -41,34 +40,23 @@ first three fields. Literals are fixed strings, not regular expressions; fingerp
 allow only one exact payload. A missing, unreadable, invalid, oversized, or
 digest-mismatched required policy blocks model transport and publication.
 
-For the strict Ollama path, disable cloud in the Ollama server, restart it, and force
-the provider and a literal loopback IP:
+To use a model on this machine, run any server that speaks the OpenAI-compatible
+API — Ollama, LM Studio, vLLM, llama.cpp — and point LLM Wiki at it:
 
 ```bash
-export MEMORY_LLM_PROVIDER=ollama
-export OLLAMA_NO_CLOUD=1
+export MEMORY_LLM_PROVIDER=openai
 export MEMORY_LLM_BASE_URL=http://127.0.0.1:11434/v1
+export MEMORY_LLM_MODEL=qwen3:8b
 ```
 
 ```powershell
-$env:MEMORY_LLM_PROVIDER = "ollama"
-$env:OLLAMA_NO_CLOUD = "1"
+$env:MEMORY_LLM_PROVIDER = "openai"
 $env:MEMORY_LLM_BASE_URL = "http://127.0.0.1:11434/v1"
+$env:MEMORY_LLM_MODEL = "qwen3:8b"
 ```
 
-This disables provider fallback, rejects non-literal-loopback endpoints, and requires
-the selected model to appear in `/api/tags` with local size/digest metadata and no
-`remote_model` or `remote_host`. The descriptor still reports
-`external_runtime_unverified`: the client cannot prove that an independently managed
-Ollama process was restarted with cloud disabled. Do not describe this state as
-verified network isolation.
-
-Calls go to Ollama's native `/api/chat` (the `/v1` in the base URL is accepted and
-stripped), because only that endpoint can set a context window. Each call asks for a
-window that holds its prompt and answer, rounded up to a power of two, at least 4 096
-tokens and never above the model's trained length. On a machine with little memory,
-cap it with `MEMORY_OLLAMA_MAX_CONTEXT=<tokens>`; a prompt that then fills the window
-fails as `context_overflow` rather than being answered half-read.
+Naming the provider disables fallback, so no prompt reaches another backend. A key is
+sent only when `MEMORY_LLM_API_KEY` or `OPENAI_API_KEY` is set.
 
 ---
 
@@ -187,7 +175,7 @@ integrated Tasks 1-29 branch, not the broader Task 17 target:
 
 | Tool | Current behavior |
 |---|---|
-| `recall` | Routes search through the retrieval planner. Result rows expose requested/effective mode, actual signals, generation, reranker fields, and fallback reason. The requested result limit is clamped to 1-20. |
+| `recall` | Routes search through the retrieval planner. Result rows expose requested/effective mode, actual signals, generation, reranker fields, and fallback reason. The requested result limit is clamped to 1-20. Optional `project`, `type` (frontmatter type) and `path_prefix` (vault-relative) narrow a plain recall; every leg applies them before the candidate pool is cut. Optional `since` and `as_of` (days as YYYY-MM-DD) order it: pages inside the dates come first, and the best pages outside them fill the rest of the limit. A grounded recall refuses all five. |
 | `read_page` | Reads one bounded slug-only Markdown page and resolves cited daily/archive evidence with source hashes. A cited reference that does not resolve fails the page read closed; a `daily:` mention that is not a reference is listed as `not_an_evidence_reference` and the page is still returned. |
 | `wiki_overview` | Reports page count, recommended retrieval tier, and vault root. It does not yet provide per-component generation health. |
 | `vault_status` | Reports compile timestamp/status and changed-daily backlog only. |
@@ -538,9 +526,9 @@ deletion contract.
 The model matrix pins candidate revisions and forbids a predetermined winner. A new
 embedding or reranker default requires complete raw EN/RU/ZH quality and resource
 measurements, license checks, no parent-recall regression, material improvement, and
-Pareto efficiency. The pinned defaults are `intfloat/multilingual-e5-small` and
-`BAAI/bge-reranker-v2-m3`; evidence that any candidate should replace them is
-pending.
+Pareto efficiency. The pinned defaults are `BAAI/bge-m3` and
+`Horizon-Labs/multilingual-reranker-base`, run on OpenVINO; they replaced
+`intfloat/multilingual-e5-small` and `BAAI/bge-reranker-v2-m3` on 2026-11-24.
 
 Token fields must be read with their labels. `reported` comes from a provider;
 `tokenizer` from a model adapter; `estimated` currently uses UTF-8 byte length;
@@ -789,12 +777,18 @@ don't match:
 uv sync --locked --inexact --extra semantic
 ```
 
-This installs ONNX Runtime and `tokenizers`, not `torch`; the encoder is `intfloat/multilingual-e5-small`
-— 384 dimensions over 100 languages, so a question in one language reaches a page
-written in another. The English-only model it replaces scored every candidate alike
-on non-English questions. The weights themselves (0.5 GB, plus 2.2 GB for the
-reranker below) are fetched by one explicit, verified step that the installer and
-the nightly pass run for you and that you can run by hand:
+This installs OpenVINO and `tokenizers`, not `torch`, and brings both models
+search reads: the encoder `BAAI/bge-m3` (1 024 dimensions, over 100 languages)
+and the reranker below. A question in one language reaches a page written in
+another: on 996 questions across the four crossings of Russian and English, a
+Russian question over English pages found its answer first on 46 % of them,
+where the previous encoder, `intfloat/multilingual-e5-small`, managed 4 %.
+OpenVINO publishes no wheel for Intel macOS; there the extra installs without it
+and search answers by words alone.
+
+The weights themselves (2.3 GB for the encoder, 0.6 GB for the reranker) are
+fetched by one explicit, verified step that the installer and the nightly pass
+run for you and that you can run by hand:
 
 ```bash
 uv run python scripts/install_models.py          # fetch what is missing, verify
@@ -802,16 +796,25 @@ uv run python scripts/install_models.py --check  # report only
 ```
 
 Each model is fetched at its pinned commit, only the files the loaders read,
-and its weights file (`onnx/model.onnx` for the encoder, `model.safetensors`
-for the reranker) is checked against the size and SHA-256 recorded beside the
-revision; a file that does not match is removed and the command fails. Once the
-encoder's ONNX weights are verified, the PyTorch weights it read before are
-removed from the cache.
+as ordinary files under `cache/models/<repo>/<revision>/`, and its weights file
+(`onnx/model.onnx_data` for the encoder, `onnx/model_quantized.onnx` for the
+reranker) is checked against the size and SHA-256 recorded beside the revision;
+a file that does not match is removed and the command fails. Once a model is
+verified, the revision it replaced is deleted from the Hugging Face cache
+(`~/.cache/huggingface/hub`): the old encoder and reranker, about 2.8 GB.
 Present files are never fetched again. Until the weights are there, `doctor`
 reports `models: degraded` with that command and search stays lexical.
-A first query in a fresh process loads the model: measured on this vault on
-2026-09-25, a cold CLI query takes 2.3 s (it was 8.2 s when the encoder ran on
-`torch`), while the MCP server loads it once and answers warm afterwards.
+
+OpenVINO sends Intel a usage event on import unless its consent file declines.
+`scripts/install_models.py` and every model load write `0` to
+`~/intel/openvino_telemetry` (`%LOCALAPPDATA%\Intel Corporation\openvino_telemetry`
+on Windows) when no choice is recorded there, keep a choice that is, and
+do not load a model when it cannot write the file. `doctor` names the file
+when it holds anything but `0`.
+
+Both models run at the precision OpenVINO picks for the CPU (bf16 where the CPU
+has it); `LLMWIKI_INFERENCE_PRECISION=f32` keeps full precision. `OMP_NUM_THREADS`
+sets how many threads each model uses.
 Vectors live inside the active evidence generation
 (`cache/evidence-graph/generations/<id>/`, beside its search index), and
 are built by a generation refresh — the nightly maintenance pass, or
@@ -822,28 +825,28 @@ reports `vector_state: absent` and search stays lexical. (Issue #29.)
 ## Reranker (on by default)
 
 After the lexical and dense legs are fused, a multilingual cross-encoder,
-`BAAI/bge-reranker-v2-m3` at a pinned revision, reads the question together
-with each of the ten best candidates and reorders them. It is on by default
-since 2026-09-10: on the cross-lingual corpus it takes a Russian question over
-English pages from MRR 0.60 to 0.98, where swapping the embedding model gained
-at most 0.04 (`docs/research/2026-09-10-cross-lingual-memory-world-practice.md`).
+`Horizon-Labs/multilingual-reranker-base` at a pinned revision in its int8 ONNX
+export, reads the question together with each of the ten best candidates and
+reorders them. With the encoder above, it put the answer first on 52.8 % of the
+996 questions, against 37.9 % for the previous pair of models.
 
-- The MCP server loads it once at start-up (about 2 s, quantised to int8 on the
-  CPU) and keeps it resident; a question then pays only the scoring, about 2 s
-  for ten passages on four quiet cores and up to 3.5 s on loaded ones. The
-  trace reports `reranker_applied`, `reranker_depth` and `reranker_duration_ms`.
+- The MCP server loads it once and keeps it resident; on eight threads a
+  question then paid a median 0.47 s for the scoring and about 1 s for the
+  whole search. The trace reports `reranker_applied`, `reranker_depth` and
+  `reranker_duration_ms`.
 - The CLI reranks only when asked with `--rerank`: a one-shot process cannot
   amortise the load.
-- Weights are read from the local Hugging Face cache only, like the embedding
-  model's; `scripts/install_models.py` puts them there (see above). Without
-  them the trace says `reranker_unavailable` and the fused order stands.
+- Weights are read from `cache/models/` only, like the encoder's;
+  `scripts/install_models.py` puts them there (see above). Without them the
+  trace says `reranker_unavailable` and the fused order stands.
 - When the rerank's measured cost does not fit the time a question has left, it
   is not waited for: the trace says `optional_stage_not_admitted`, the fused
   order stands and the answer is not marked partial. `optional_stage_timeout`
   means a stage was waited for and ran out of time.
 - `LLMWIKI_RERANKER_MODEL=off` switches it off; `LLMWIKI_RERANKER_MODEL` plus a
-  40-hex `LLMWIKI_RERANKER_REVISION` name another model.
-  `LLMWIKI_RERANKER_PRECISION=fp32` restores full precision at twice the time.
+  40-hex `LLMWIKI_RERANKER_REVISION` name another model, whose
+  `onnx/model_quantized.onnx` and `tokenizer.json` you place under
+  `cache/models/<repo with / as -->/<revision>/` yourself.
 
 ---
 

@@ -69,4 +69,4 @@ def test_an_http_provider_still_working_at_its_deadline_is_a_timeout(a_server_th
     monkeypatch.setenv("MEMORY_LLM_BASE_URL", a_server_that_never_answers)
     monkeypatch.setenv("MEMORY_LLM_TIMEOUT_S", "1")
 
-    assert _failure_of("ollama") == "provider_timeout"
+    assert _failure_of("openai") == "provider_timeout"

@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
-from types import ModuleType
+from typing import Any, NoReturn
 from unittest.mock import patch
 
 import pytest
@@ -39,7 +39,7 @@ def test_no_environment_configuration_means_the_default_reranker(
         reranker.DEFAULT_RERANKER_MODEL,
         reranker.DEFAULT_RERANKER_REVISION,
     )
-    assert reranker.DEFAULT_RERANKER_MODEL == "BAAI/bge-reranker-v2-m3"
+    assert reranker.DEFAULT_RERANKER_MODEL == "Horizon-Labs/multilingual-reranker-base"
     assert reranker.IMMUTABLE_REVISION.fullmatch(reranker.DEFAULT_RERANKER_REVISION)
 
 
@@ -53,7 +53,7 @@ def test_the_off_switch_means_no_reranker_bundle(
     _reset_bundle(monkeypatch)
     monkeypatch.setattr(
         reranker,
-        "_have_reranker_deps",
+        "_libraries_importable",
         lambda: pytest.fail("dependency probe ran with the reranker switched off"),
     )
 
@@ -83,40 +83,22 @@ def test_partial_or_mutable_identity_is_rejected(
     assert reranker.configured_reranker_identity() is None
 
 
-def _fake_reranker_modules(monkeypatch: pytest.MonkeyPatch, calls: list[tuple]) -> None:
-    """Stand in for `transformers` and `torch`, recording how they were called."""
-    transformers = ModuleType("transformers")
-    torch = ModuleType("torch")
-    torch.float32 = "float32"
+def _installed_model(monkeypatch: pytest.MonkeyPatch, root: Path, repo: str, revision: str) -> Path:
+    """The model's two files under a temporary `cache/models/`."""
+    import model_files
+    import reranker
 
-    class Model:
-        @classmethod
-        def from_pretrained(cls, model: str, **options):
-            calls.append(("model", model, options))
-            return _LoadedModel()
-
-    class Tokenizer:
-        @classmethod
-        def from_pretrained(cls, model: str, **options):
-            calls.append(("tokenizer", model, options))
-            return object()
-
-    transformers.AutoModelForSequenceClassification = Model
-    transformers.AutoTokenizer = Tokenizer
-    monkeypatch.setitem(sys.modules, "transformers", transformers)
-    monkeypatch.setitem(sys.modules, "torch", torch)
+    monkeypatch.setattr(model_files, "models_root", lambda: root)
+    directory = model_files.model_directory(repo, revision)
+    for name in reranker.RERANKER_READ_FILES:
+        (directory / name).parent.mkdir(parents=True, exist_ok=True)
+        (directory / name).write_bytes(b"")
+    installed: Path = directory
+    return installed
 
 
-class _LoadedModel:
-    def __init__(self) -> None:
-        self.evaluated = False
-
-    def eval(self) -> None:
-        self.evaluated = True
-
-
-def test_explicit_immutable_model_load_is_local_only(
-    monkeypatch: pytest.MonkeyPatch,
+def test_explicit_immutable_model_loads_from_its_pinned_directory(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     import reranker
 
@@ -124,78 +106,79 @@ def test_explicit_immutable_model_load_is_local_only(
     monkeypatch.setenv("LLMWIKI_RERANKER_MODEL", "org/model")
     monkeypatch.setenv("LLMWIKI_RERANKER_REVISION", revision)
     _reset_bundle(monkeypatch)
-    monkeypatch.setattr(reranker, "_have_reranker_deps", lambda: True)
-    calls: list[tuple] = []
-    _fake_reranker_modules(monkeypatch, calls)
+    monkeypatch.setattr(reranker, "_libraries_importable", lambda: True)
+    directory = _installed_model(monkeypatch, tmp_path, "org/model", revision)
+    compiled: list[Path] = []
+    tokenizers: list[Path] = []
+
+    def compile_model(path: Path) -> str:
+        compiled.append(path)
+        return "m"
+
+    def pair_tokenizer(path: Path) -> str:
+        tokenizers.append(path)
+        return "t"
+
+    monkeypatch.setattr("openvino_runtime.compiled_model", compile_model)
+    monkeypatch.setattr(reranker, "_pair_tokenizer", pair_tokenizer)
 
     bundle = reranker._get_reranker_bundle()
 
-    pinned = {
-        "revision": revision,
-        "local_files_only": True,
-        "trust_remote_code": False,
-    }
-
     assert bundle is not None
-    assert (bundle["model_id"], bundle["model_revision"], bundle["model"].evaluated) == (
+    assert (bundle["model_id"], bundle["model_revision"], bundle["model"]) == (
         "org/model",
         revision,
-        True,
+        "m",
     )
-    assert calls == [
-        ("tokenizer", "org/model", pinned),
-        ("model", "org/model", {**pinned, "dtype": "float32"}),
-    ]
+    assert (compiled, tokenizers) == (
+        [directory / reranker.RERANKER_WEIGHTS_FILE],
+        [directory / reranker.RERANKER_TOKENIZER_FILE],
+    )
 
 
 def test_missing_local_artifact_degrades_without_network(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
+    import model_files
     import reranker
 
-    revision = "b" * 40
     monkeypatch.setenv("LLMWIKI_RERANKER_MODEL", "org/missing")
-    monkeypatch.setenv("LLMWIKI_RERANKER_REVISION", revision)
+    monkeypatch.setenv("LLMWIKI_RERANKER_REVISION", "b" * 40)
     _reset_bundle(monkeypatch)
-    monkeypatch.setattr(reranker, "_have_reranker_deps", lambda: True)
-    calls: list[tuple] = []
-    _fake_reranker_modules(monkeypatch, calls)
-
-    def missing(model: str, **options):
-        calls.append(("missing", model, options))
-        raise OSError("not cached")
-
-    sys.modules["transformers"].AutoTokenizer.from_pretrained = missing
+    monkeypatch.setattr(reranker, "_libraries_importable", lambda: True)
+    monkeypatch.setattr(model_files, "models_root", lambda: tmp_path)
+    monkeypatch.setattr(
+        "openvino_runtime.compiled_model", lambda path: pytest.fail("compiled a missing model")
+    )
 
     assert reranker._get_reranker_bundle() is None
-    assert len(calls) == 1
-    assert calls[0][2]["local_files_only"] is True
-    assert calls[0][2]["trust_remote_code"] is False
+    assert "is not installed" in reranker.reranker_unavailable_reason()
 
 
 def test_a_failed_load_is_recorded_once_and_not_retried_per_question(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     """A default reranker without local weights must not cost every question a load."""
     import reranker
 
-    monkeypatch.setenv("LLMWIKI_RERANKER_MODEL", "org/missing")
+    monkeypatch.setenv("LLMWIKI_RERANKER_MODEL", "org/broken")
     monkeypatch.setenv("LLMWIKI_RERANKER_REVISION", "c" * 40)
     _reset_bundle(monkeypatch)
-    monkeypatch.setattr(reranker, "_have_reranker_deps", lambda: True)
-    calls: list[tuple] = []
-    _fake_reranker_modules(monkeypatch, calls)
+    monkeypatch.setattr(reranker, "_libraries_importable", lambda: True)
+    _installed_model(monkeypatch, tmp_path, "org/broken", "c" * 40)
+    calls: list[Path] = []
 
-    def missing(model: str, **options):
-        calls.append(("missing", model, options))
-        raise OSError("not cached")
+    def broken(path: Path) -> NoReturn:
+        calls.append(path)
+        raise RuntimeError("cannot compile")
 
-    sys.modules["transformers"].AutoTokenizer.from_pretrained = missing
+    monkeypatch.setattr("openvino_runtime.compiled_model", broken)
+    monkeypatch.setattr(reranker, "_pair_tokenizer", lambda path: "t")
 
     assert reranker._get_reranker_bundle() is None
     assert reranker._get_reranker_bundle() is None
     assert len(calls) == 1
-    assert reranker.reranker_unavailable_reason() == "OSError: not cached"
+    assert reranker.reranker_unavailable_reason() == "RuntimeError: cannot compile"
 
 
 class TestGracefulDegradation:
@@ -375,3 +358,74 @@ class TestSigmoid:
     def test_sigmoid_symmetry(self):
         for x in [0.5, 1.0, 2.0, 5.0]:
             assert abs(_sigmoid(x) + _sigmoid(-x) - 1.0) < 0.001
+
+
+def _word_tokenizer_file(tmp_path: Path, *, shipped_window: int | None) -> Path:
+    from tokenizers import Tokenizer
+    from tokenizers.models import WordLevel
+    from tokenizers.pre_tokenizers import Whitespace
+
+    vocabulary = {"<pad>": 0, "<unk>": 1, "a": 2, "b": 3}
+    tokenizer = Tokenizer(WordLevel(vocabulary, unk_token="<unk>"))
+    tokenizer.pre_tokenizer = Whitespace()
+    if shipped_window is not None:
+        tokenizer.enable_truncation(max_length=shipped_window, strategy="only_second")
+    path = tmp_path / "tokenizer.json"
+    tokenizer.save(str(path))
+    return path
+
+
+def test_the_tokenizer_keeps_the_window_the_model_ships_with(tmp_path: Path) -> None:
+    pytest.importorskip("tokenizers")
+    import reranker
+
+    shipped = reranker._pair_tokenizer(_word_tokenizer_file(tmp_path, shipped_window=3))
+
+    truncation = shipped.truncation
+    assert (truncation["max_length"], truncation["strategy"]) == (3, "longest_first")
+    assert shipped.padding is not None
+
+
+def test_a_query_longer_than_the_window_is_still_scored(tmp_path: Path) -> None:
+    pytest.importorskip("tokenizers")
+    import numpy as np
+    import reranker
+
+    tokenizer = reranker._pair_tokenizer(_word_tokenizer_file(tmp_path, shipped_window=3))
+
+    def model(feeds: dict[str, Any]) -> list[Any]:
+        return [feeds["attention_mask"].sum(axis=1, keepdims=True).astype(np.float32)]
+
+    bundle = {"model": model, "tokenizer": tokenizer}
+
+    assert reranker._batch_logits(bundle, [("a b a b a", "b")]) == [3.0]
+
+
+def test_a_tokenizer_without_a_window_gets_the_product_one(tmp_path: Path) -> None:
+    pytest.importorskip("tokenizers")
+    import reranker
+
+    bare = reranker._pair_tokenizer(_word_tokenizer_file(tmp_path, shipped_window=None))
+
+    assert bare.truncation["max_length"] == reranker.RERANK_MAX_TOKENS
+    assert bare.padding["pad_id"] == 0
+
+
+def test_a_batch_feeds_ids_and_mask_and_reads_one_logit_per_pair(tmp_path: Path) -> None:
+    pytest.importorskip("tokenizers")
+    import numpy as np
+    import reranker
+
+    tokenizer = reranker._pair_tokenizer(_word_tokenizer_file(tmp_path, shipped_window=None))
+    fed: list[dict[str, Any]] = []
+
+    def model(feeds: dict[str, Any]) -> list[Any]:
+        fed.append(feeds)
+        return [feeds["attention_mask"].sum(axis=1, keepdims=True).astype(np.float32)]
+
+    bundle = {"model": model, "tokenizer": tokenizer}
+    logits = reranker._batch_logits(bundle, [("a", "b"), ("a", "a b a")])
+
+    assert logits == [2.0, 4.0]
+    assert fed[0]["input_ids"].tolist() == [[2, 3, 0, 0], [2, 2, 3, 2]]
+    assert fed[0]["input_ids"].dtype == np.int64

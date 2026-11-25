@@ -19,6 +19,8 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
+import pytest
+
 BENCHMARK_DIR = Path(__file__).resolve().parent.parent / "benchmark"
 if str(BENCHMARK_DIR) not in sys.path:
     sys.path.insert(0, str(BENCHMARK_DIR))
@@ -31,7 +33,26 @@ def _generate(metrics: dict, reply: str | None, monkeypatch) -> str | None:
 
     monkeypatch.setattr(llm_client, "call_llm", lambda *a, **k: reply)
     generator = longmemeval_vault._instrumented_generator(metrics)
-    return generator("prompt", "system", 512)
+    answer: str | None = generator("prompt", "system", None)
+    return answer
+
+
+def test_the_counted_prompt_includes_the_schema_the_model_receives(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import llm_client
+
+    monkeypatch.setattr(llm_client, "call_llm", lambda *a, **k: "answer")
+    metrics: dict[str, object] = {}
+    schema: dict[str, object] = {"type": "object"}
+
+    longmemeval_vault._instrumented_generator(metrics)("prompt", "system", schema)
+
+    sent = llm_client.system_with_schema("system", schema)
+    assert (metrics["system_chars"], metrics["est_total_prompt_tokens"]) == (
+        len(sent),
+        round((len("prompt") + len(sent)) / 4),
+    )
 
 
 def test_the_reply_is_recorded_so_a_discarded_answer_can_be_judged(monkeypatch):

@@ -1,0 +1,15 @@
+{
+ "tests": [
+  "test_a_local_only_install_persists_what_makes_it_local_only",
+  "test_a_scheduler_unit_carries_the_local_only_switch",
+  "test_real_openai_and_ollama_descriptors_produce_distinct_keys",
+  "::tests.test_the_installed_choice_of_provider_travels_whole::test_a_local_only_install_persists_what_makes_it_local_only",
+  "::tests.test_the_installed_choice_of_provider_travels_whole::test_a_scheduler_unit_carries_the_local_only_switch"
+ ],
+ "kinds": [
+  "removed"
+ ],
+ "reason": "Renamed, not dropped, because the Ollama provider and its OLLAMA_NO_CLOUD switch were retired on 2026-11-21 (owner message 263016509/16398). The first two now run as test_a_local_install_persists_the_address_and_the_model and test_a_scheduler_unit_carries_the_local_address in the same file: a local install persists provider, address and model, and the scheduler unit carries the address; only the retired switch left their assertions. The third runs as test_real_openai_and_claude_descriptors_produce_distinct_keys in tests/test_compile_cache.py: two real providers still produce distinct cache keys, with Claude standing in for the retired Ollama.",
+ "recorded": "2026-11-21",
+ "expires": "2027-02-19"
+}

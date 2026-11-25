@@ -450,6 +450,9 @@ def test_generation_connection_uses_remaining_deadline_as_busy_timeout(
         def close(self):
             pass
 
+        def create_function(self, *_args: object, **_kwargs: object) -> None:
+            pass
+
     def connect(*_args, **kwargs):
         captured.append(kwargs)
         return Connection()
@@ -519,11 +522,18 @@ def test_generation_connection_checks_cancel_after_open_before_validation(
     assert closed is True
 
 
-def _assert_orchestrated_legacy_fallback(results, expected_reasons):
+PLANNED_LEGACY_SIGNALS = ["lexical", "graph"]
+
+
+def _assert_orchestrated_legacy_fallback(
+    results: list[dict[str, object]], expected_reasons: set[str], expected_signals: list[str]
+) -> None:
+    """Markdown has no vectors, so a planned search there reports the wikilink
+    neighbours as its graph; a search that asked for no graph reports lexical only."""
     assert [result["candidate_id"] for result in results] == ["legacy"]
     assert results[0]["generation"] == "legacy"
     assert results[0]["fallback_reason"] in expected_reasons
-    assert results[0]["signals_used"] == ["lexical"]
+    assert results[0]["signals_used"] == expected_signals
 
 
 def _column(rows, index: int) -> list:
@@ -1087,7 +1097,8 @@ def test_semantic_search_uses_complete_matching_generation_numpy_vectors(tmp_pat
     assert results[0]["path"] == "knowledge/notes/a.md"
     assert all(result["generation"] == "gen-search" for result in results)
     assert all(result["effective_mode"] == "HYBRID" for result in results)
-    assert all(result["fallback_reason"] is None for result in results)
+    # The generation was built without a graph, and the search says so.
+    assert all(result["fallback_reason"] == "graph_unavailable" for result in results)
 
 
 def test_semantic_generation_vectors_run_under_a_caller_deadline(tmp_path):
@@ -1486,6 +1497,7 @@ def test_malformed_generation_fts_falls_back_to_markdown(
     _assert_orchestrated_legacy_fallback(
         results,
         {"generation_unavailable", "generation_corrupt", "generation_seal_invalid"},
+        PLANNED_LEGACY_SIGNALS,
     )
 
 
@@ -1575,6 +1587,7 @@ def test_generation_fts_rejects_inexact_schema(tmp_path, monkeypatch, schema_dam
     _assert_orchestrated_legacy_fallback(
         results,
         {"generation_unavailable", "generation_corrupt", "generation_seal_invalid"},
+        PLANNED_LEGACY_SIGNALS,
     )
 
 
@@ -1601,7 +1614,7 @@ def test_generation_results_discarded_when_active_manifest_changes_after_read(
 
     results = search_memory.search("semantic", catalog=Catalog(), emit_telemetry=False)
     _assert_orchestrated_legacy_fallback(
-        results, {"generation_unavailable", "generation_seal_changed"}
+        results, {"generation_unavailable", "generation_seal_changed"}, PLANNED_LEGACY_SIGNALS
     )
 
 
@@ -1624,7 +1637,9 @@ def test_generation_results_discarded_when_fts_corrupts_after_query(
     _orchestrated_legacy_marker(monkeypatch, search_memory)
 
     results = search_memory.search("semantic", catalog=catalog, emit_telemetry=False)
-    _assert_orchestrated_legacy_fallback(results, {"generation_seal_changed"})
+    _assert_orchestrated_legacy_fallback(
+        results, {"generation_seal_changed"}, PLANNED_LEGACY_SIGNALS
+    )
 
 
 def test_generation_hybrid_discarded_when_vector_artifact_changes_after_use(
@@ -1661,7 +1676,7 @@ def test_generation_hybrid_discarded_when_vector_artifact_changes_after_use(
         rerank=False,
         emit_telemetry=False,
     )
-    _assert_orchestrated_legacy_fallback(results, {"generation_seal_changed"})
+    _assert_orchestrated_legacy_fallback(results, {"generation_seal_changed"}, ["lexical"])
 
 
 def test_generation_hybrid_discarded_after_same_byte_vector_replacement(
@@ -1699,7 +1714,7 @@ def test_generation_hybrid_discarded_after_same_byte_vector_replacement(
         rerank=False,
         emit_telemetry=False,
     )
-    _assert_orchestrated_legacy_fallback(results, {"generation_seal_changed"})
+    _assert_orchestrated_legacy_fallback(results, {"generation_seal_changed"}, ["lexical"])
 
 
 def test_publication_survives_a_vault_that_moved_while_the_build_ran(tmp_path):

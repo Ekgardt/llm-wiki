@@ -214,8 +214,6 @@ _WEB_CLIPPER_FREE_DOCS = (
 )
 _TOOL_COUNT_DOCS = (
     "README.md",
-    "README.ru.md",
-    "README.zh-CN.md",
     "AGENTS.md",
     "CLAUDE.md",
     "docs/ARCHITECTURE.md",
@@ -512,7 +510,7 @@ _ARCHITECTURE_REQUIRED = (
     "NATIVE LIFECYCLE EVENTS",
     "MCP READS + ACTIONS",
     "LLM BACKEND (CLASSIFY + COMPILE ONLY)",
-    "5 backends including Ollama",
+    "any OpenAI-compatible API",
     "### Optional semantic tier",
     "### Hybrid tier",
 )
@@ -825,8 +823,7 @@ def test_lint_check_count_matches_code():
     actual = len(lint_memory.CHECK_NAMES)
     assert actual > 0, "Could not count lint checks in lint_memory.py"
 
-    for doc_name in ("README.md", "README.ru.md", "README.zh-CN.md",
-                      "docs/ARCHITECTURE.md"):
+    for doc_name in ("README.md", "docs/ARCHITECTURE.md"):
         doc = (ROOT / doc_name).read_text(encoding="utf-8")
         # Find "N lint checks" or "N checks" patterns
         for m in re.finditer(r"(\d+)\s*(?:lint[- ]?checks?|structural\s+(?:lint\s+)?checks?)", doc, re.IGNORECASE):
@@ -843,8 +840,6 @@ def test_lint_check_count_matches_code():
 
 _COGNEE_FREE_DOCS = (
     "README.md",
-    "README.ru.md",
-    "README.zh-CN.md",
     "docs/ARCHITECTURE.md",
     "docs/USER-GUIDE.md",
     "CONTRIBUTING.md",

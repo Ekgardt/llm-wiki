@@ -30,9 +30,8 @@ Before changing **structure, paths, env contracts, or runtime location**:
 Never improvise architectural decisions mid-task. When unsure, ask.
 
 ### Release / docs sync
-- Before any release or version bump: **sync `README.md` + `README.ru.md` +
-  `README.zh-CN.md` in the same change**.
-- Never leave RU/ZH with stale test counts, install URLs, or architecture.
+- Before any release or version bump: **update `README.md` in the same change**.
+  It is the only README; translations were removed on 2026-11-21 (law 10).
 - Run `uv run pytest tests/test_readme_i18n.py -q` after README edits.
 - Update `CHANGELOG.md` (Keep-a-Changelog format) and `pyproject.toml`
   `version` in the same change.
@@ -72,7 +71,8 @@ run/       # state, transactions, queue results, locks, install ownership
   `cache/`, `logs/`, `run/` at vault root, all gitignored.
   Override for multi-disk setups or hermetic tests.
 - `$MEMORY_LLM_PROVIDER` → `fake` (tests), or one of
-  `opencode|codex|claude|openai|ollama` (runtime, auto-detected).
+  `opencode|codex|claude|openai` (runtime, auto-detected). `openai` is any
+  OpenAI-compatible API, cloud or local, at `$MEMORY_LLM_BASE_URL`.
 - `$LLM_WIKI_DLP_POLICY` → optional absolute external policy path. Invalid or
   digest-mismatched required policy blocks protected work.
 
@@ -85,8 +85,8 @@ for events MCP cannot observe. Automatic health context is injected only when
 **Approved audit-closure contract (2026-08-15):** Cognee is retired from the
 supported product; existing `cache/cognee/` is disposable legacy cache and is not
 deleted automatically. First-party model calls use one fail-closed DLP boundary.
-Verified local-only mode accepts only literal-loopback Ollama and requires
-verifiable Ollama cloud disablement. Coherent encrypted private-vault recovery uses
+Local processing means an OpenAI-compatible server on this machine; the dedicated
+Ollama provider and its local-only mode were removed on 2026-11-21. Coherent encrypted private-vault recovery uses
 Restic with the existing maintenance fence, SQLite online backup, manifests, and
 staged validation. `run/install/` is the only new runtime directory and owns
 resumable install state, exact-release/external-path manifests, verified preimages,
@@ -266,10 +266,14 @@ report kept whole up to 8 000 characters. Retention never depends on
 a judgement made before the question exists; the classifier decides only whether
 a session also deserves a compiled page. That directory is private by default
 (`knowledge/raw/**` is denied in `.gitignore`), the record is bounded, and a
-failed write never breaks capture. Session evidence is not yet a member of the
-corpus generation, so it is on disk and greppable but not yet part of hybrid
-retrieval — adding it requires the corpus collector to carry a `session` source
-kind. See `knowledge/notes/session-evidence-retention-decision.md`.
+failed write never breaks capture. Session evidence is deliberately not a member
+of the corpus generation: it is on disk, greppable and read by the nightly
+consolidation, but not part of hybrid retrieval. Indexing 236 past sessions on
+2026-08-24 moved the vault stand from hit@5 0.7 to 0.0 because the transcripts
+crowded the compiled pages out of the candidate pool; a second tier consulted
+when the pages do not answer, or a per-source quota in the pool, would be needed
+first (`scripts/corpus_snapshot.py::_walk_knowledge`). See
+`knowledge/notes/session-evidence-retention-decision.md`.
 
 **Forbidden at vault root:** `wiki/`, `memory/`, `outputs/`, `state/`,
 `LLM-wiki-state/` (legacy sibling layout — removed). Runtime lives **inside**
@@ -462,7 +466,8 @@ contradiction checks, and playbook crystallization. Backend is
 **auto-detected** via `scripts/llm_client.py` — no API keys required.
 
 Priority: OpenCode (only when `OPENCODE_SERVER_PASSWORD` protects its server) →
-Codex → Claude CLI → OpenAI → Ollama. If none answers, the call returns
+Codex → Claude CLI → any OpenAI-compatible API (`MEMORY_LLM_BASE_URL`, cloud or
+local: OpenAI, DeepSeek, Ollama, LM Studio, vLLM). If none answers, the call returns
 nothing: a capture already sits in `run/queue.sqlite3` and waits an hour before
 its next attempt, and every other caller skips or fails its step; nothing else is
 queued for later (2026-09-25). A `run/queue/` directory left by a release before
@@ -471,8 +476,8 @@ v4.0.0 is refused and named by `doctor`, never imported (2026-09-23).
 Override via `MEMORY_LLM_PROVIDER` env var. `fake` returns a canned response
 for tests/e2e. A value that names no provider calls none, and `doctor` names it.
 
-**Zero-cost path:** no paid API beyond existing agent subscriptions. Ollama remains
-an optional local backend; the retired Cognee bridge is not a supported feature.
+**Zero-cost path:** no paid API beyond existing agent subscriptions. A local server
+reached by its address remains an optional backend; the retired Cognee bridge is not a supported feature.
 
 ---
 

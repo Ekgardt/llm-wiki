@@ -155,3 +155,40 @@ def test_a_failed_or_dry_compile_does_not_refresh(monkeypatch):
     dry = compile_memory.main()
 
     assert (failed, dry, calls) == (1, 0, [])
+
+
+def test_a_cli_hit_shows_the_passage_that_holds_the_query_words() -> None:
+    filler = "Nothing relevant is said here. " * 20
+    hit = {"content": f"## Shelf\n\n{filler}The bookshelf came from the flea market. {filler}"}
+
+    snippet = search_memory.result_snippet(hit, "where did I buy my bookshelf")
+
+    assert snippet.startswith("…")
+    assert "The bookshelf came from the flea market." in snippet
+
+
+def test_a_passage_without_a_space_before_the_word_still_holds_the_word() -> None:
+    filler = "Nothing relevant is said here. " * 20
+    link = "https://example.org/catalogue/furniture/living-room/oak-bookshelf"
+    hit = {"content": f"## Shelf\n\n{filler}{link} sold out."}
+
+    snippet = search_memory.result_snippet(hit, "bookshelf")
+
+    assert "bookshelf" in snippet
+
+
+# "Notes" in the query is in the genitive plural; the passage spells it in the nominative.
+TWO_NOTES_ABOUT_SEARCH = "Две заметки о поиске."
+SEARCH_OF_NOTES = "поиск заметок"
+
+
+def test_a_passage_is_found_by_another_form_of_the_word() -> None:
+    hit = {"content": "## Notes\n\n" + "Filler. " * 60 + TWO_NOTES_ABOUT_SEARCH}
+
+    assert TWO_NOTES_ABOUT_SEARCH in search_memory.result_snippet(hit, SEARCH_OF_NOTES)
+
+
+def test_a_hit_without_the_query_words_shows_its_first_lines() -> None:
+    hit = {"content": "## H\n\nThe first line.\n"}
+
+    assert search_memory.result_snippet(hit, "unrelated") == "The first line."
