@@ -104,9 +104,14 @@ def _plain(text: str) -> tuple[str, Decimal] | None:
     figures = _figures(text)
     if len(figures) != 1:
         return None
+    return f"unit:{_unit(text)}", figures[0]
+
+
+def _unit(text: str) -> str:
     match = _AMOUNT.search(text)
-    unit = (match.group(1) or match.group(2).lower().rstrip("s")) if match else ""
-    return f"unit:{unit}", figures[0]
+    if match is None:
+        return ""
+    return match.group(1) or match.group(2).lower().rstrip("s")
 
 
 def _duration(text: str) -> tuple[str, Decimal] | None:

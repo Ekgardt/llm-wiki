@@ -59,9 +59,10 @@ class EntryStamps:
 def _entries(content: bytes) -> list[tuple[str, int, int]]:
     """The file's entries; a file whose entries cannot be read is stamped by its day alone."""
     try:
-        return daily_entries(content)
+        entries: list[tuple[str, int, int]] = daily_entries(content)
     except EvidenceResolutionError:
         return []
+    return entries
 
 
 def _spans(entries: list[tuple[str, int, int]]) -> tuple[tuple[int, ...], tuple[int, ...]]:

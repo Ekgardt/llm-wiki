@@ -141,7 +141,7 @@ def test_threads_filling_a_full_cache_never_break_a_search(
         try:
             for line in range(2_000):
                 provenance.substance_weight(f"prose line {worker} {line}")
-        except BaseException as error:  # noqa: BLE001 - the test records any failure
+        except BaseException as error:
             failures.append(error)
 
     workers = [threading.Thread(target=weigh, args=(worker,)) for worker in range(8)]
