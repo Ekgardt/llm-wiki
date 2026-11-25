@@ -164,6 +164,17 @@ def test_a_whole_unit_followed_by_a_smaller_one_does_not_state_the_figure() -> N
     assert _marked("difference", ["10 days", "3 days"], "One week longer.")["computed_stated"]
 
 
+def test_a_whole_unit_followed_by_any_remainder_does_not_state_the_figure() -> None:
+    weeks = ["10 days in Rome", "3 days in Paris"]
+    years = ["worked 9 years", "5 years at NovaTech"]
+
+    for text in ("1 week and a day longer.", "1 week, 2 days longer.", "1 week plus a day."):
+        assert _marked("difference", weeks, text)["computed_stated"] is False
+    for text in ("4 years and a half.", "4 years and a month.", "4 years and 3 weeks."):
+        assert _marked("difference", years, text)["computed_stated"] is False
+    assert _marked("difference", years, "4 years in all.")["computed_stated"] is True
+
+
 def test_a_sum_converts_weeks_to_days() -> None:
     claim = _marked("sum", ["3 days in Paris", "1 week in Rome"], "You travelled for 10 days.")
 

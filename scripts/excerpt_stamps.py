@@ -4,9 +4,10 @@ A daily file holds every session of its day. Its entries are the ones
 `evidence_resolver.daily_entries` defines — a `## [HH:MM:SS] event | session`
 heading or an operation marker followed by a ``[HH:MM:SS] kind | session``
 line — so an excerpt's date is its file's day and its entry's time, and its
-session is the second field of that line. A compiled page is dated by its
-`valid_from`. Without either the reader saw one file name for every session of
-a day and could not tell two sessions, or an older value from a newer.
+session is the field of that line its writer puts it in (`_SESSION_FIELD`). A
+compiled page is dated by its `valid_from`. Without either the reader saw one
+file name for every session of a day and could not tell two sessions, or an
+older value from a newer.
 """
 from __future__ import annotations
 

@@ -51,6 +51,10 @@ _MONTH_NAME = re.compile(
     re.IGNORECASE,
 )
 
+# A whole year or week states the figure only when nothing is added after it:
+# "1 week and a day", "4 years, 3 weeks" and "4 years and a half" do not.
+_NO_REMAINDER = r"(?!,? (?:and|plus|\d+|an?|half)\b)"
+
 
 @dataclass(frozen=True)
 class Tally:
@@ -151,13 +155,13 @@ def _in_years(months: Decimal) -> Tally:
     years, rest = divmod(months, 12)
     y, m, total = _shown(years), _shown(rest), _shown(months)
     patterns = [rf"{total} month", rf"{y} year,? (?:and )?{m} month"]
-    patterns += [rf"{y} year(?!,? (?:and )?\d+ month)"] if rest == 0 else []
+    patterns += [rf"{y} year{_NO_REMAINDER}"] if rest == 0 else []
     return Tally(f"{y} years and {m} months ({total} months)", tuple(patterns))
 
 
 def _in_days(days: Decimal) -> Tally:
     patterns = [rf"{_shown(days)} day"]
-    patterns += [rf"{_shown(days / 7)} week(?!,? (?:and )?\d+ day)"] if days % 7 == 0 else []
+    patterns += [rf"{_shown(days / 7)} week{_NO_REMAINDER}"] if days % 7 == 0 else []
     return Tally(f"{_shown(days)} days", tuple(patterns))
 
 
