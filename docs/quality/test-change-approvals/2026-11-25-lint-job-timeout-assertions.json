@@ -1,0 +1,5 @@
+{"tests": ["test_job_timeouts_names_and_timing_artifacts_match_approved_classes"],
+ "kinds": ["assertions"],
+ "reason": "The two dropped assertions read the timeout and name of the GitHub lint job, which is removed because the platform's lint check runs the same tools (owner message 263016509/18808, 2026-11-25).",
+ "recorded": "2026-11-25",
+ "expires": "2027-02-23"}

@@ -21,7 +21,7 @@ concurrency:
   cancel-in-progress: true
 
 # The platform's own checks are this repository's CI and run on Linux: secret
-# scanning, lint and the full suite on Python 3.14. This workflow runs only what
+# scanning, the lock's advisories, lint and the full suite on Python 3.14. This workflow runs only what
 # they cannot: Windows, macOS, and the Linux jobs that check something they do not.
 
 jobs:
@@ -29,10 +29,9 @@ jobs:
   # lock against advisories. pip-audit is pinned by hash in uv.lock (the `audit`
   # group, synced alone), and it reads every extra and group the lock resolves.
   # pip-audit skips a requirement whose marker does not match the interpreter it
-  # runs on, so one run reads one branch of a lock that forks by Python and
-  # platform: there is one leg per supported Python, plus Windows for its own pins.
-  # tests/test_the_audit_reads_every_locked_pin.py proves the legs together
-  # install every locked version. `accepted` names advisories with no fix for that
+  # runs on; the platform's dependencies check reads every package of uv.lock on
+  # Linux, and this leg audits the pins a Windows interpreter installs. `accepted`
+  # names advisories with no fix for that
   # interpreter: filelock's fixed releases need Python 3.11, and the lock keeps 3.10
   # on the 3.x line with the fewest. It lapses when 3.10 support ends.
   # See docs/research/2026-09-27-the-lock-is-audited.md and
@@ -43,29 +42,13 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - target: linux-py3.10
-            os: ubuntu-24.04
-            python: "3.10"
-            accepted: &filelock-without-a-python-3-10-fix >-
-              GHSA-567q-5qvw-pf92 GHSA-69hj-f68j-2879 GHSA-8mx5-7m5m-r77g
-              GHSA-9vhv-jxww-xfm5 GHSA-cwqr-hh33-gh44 GHSA-fq56-3cx3-fjxp
-              GHSA-j8f7-rjxc-mr56 GHSA-rfpc-qcw5-3pc4 GHSA-v4x8-3wr5-3wq8
-          - target: linux-py3.11
-            os: ubuntu-24.04
-            python: "3.11"
-          - target: linux-py3.12
-            os: ubuntu-24.04
-            python: "3.12"
-          - target: linux-py3.13
-            os: ubuntu-24.04
-            python: "3.13"
-          - target: linux-py3.14
-            os: ubuntu-24.04
-            python: "3.14"
           - target: windows-py3.10
             os: windows-2025
             python: "3.10"
-            accepted: *filelock-without-a-python-3-10-fix
+            accepted: >-
+              GHSA-567q-5qvw-pf92 GHSA-69hj-f68j-2879 GHSA-8mx5-7m5m-r77g
+              GHSA-9vhv-jxww-xfm5 GHSA-cwqr-hh33-gh44 GHSA-fq56-3cx3-fjxp
+              GHSA-j8f7-rjxc-mr56 GHSA-rfpc-qcw5-3pc4 GHSA-v4x8-3wr5-3wq8
     runs-on: ${{ matrix.os }}
     timeout-minutes: 10
     steps:

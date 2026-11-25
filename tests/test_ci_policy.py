@@ -257,7 +257,10 @@ def test_clean_profiles_are_isolated_and_never_auto_sync() -> None:
 
 
 def test_native_installer_matrix_covers_every_platform_the_contract_names() -> None:
-    """Task Scheduler and a LaunchAgent get a runner; the platform's suite covers systemd (audit OPS-14)."""
+    """Task Scheduler and a LaunchAgent get a runner (audit OPS-14).
+
+    The systemd timer's tests run in the platform's Linux suite.
+    """
     job = _workflow()["jobs"]["installer"]
     assert job["runs-on"] == "${{ matrix.os }}"
     assert job["timeout-minutes"] == 20
