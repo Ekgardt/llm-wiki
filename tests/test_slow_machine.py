@@ -299,7 +299,7 @@ def _is_stopwatch(compare: ast.Compare, readings: set[str]) -> bool:
 
 
 _HANG_BOUNDS = frozenset({"SHORT_TIMEOUT", "LONG_TIMEOUT", "PAUSE_TIMEOUT"})
-_IDENTIFIER = re.compile(r"[A-Za-z_][\w.]*")
+_MARGIN_CHOOSERS = frozenset({"max", "min"})
 
 
 def _is_clock_difference(node: ast.AST, readings: set[str]) -> bool:
@@ -379,13 +379,33 @@ def _timers(tree: ast.AST) -> set[str]:
     return timers
 
 
+def _is_named_constant(node: ast.AST) -> bool:
+    name = node.attr if isinstance(node, ast.Attribute) else getattr(node, "id", "")
+    return str(name).lstrip("_").isupper()
+
+
+def _is_margin_arithmetic(node: ast.AST) -> bool:
+    """Numbers and named constants combined only by arithmetic."""
+    if isinstance(node, ast.BinOp):
+        return _is_margin_arithmetic(node.left) and _is_margin_arithmetic(node.right)
+    if isinstance(node, ast.UnaryOp):
+        return _is_margin_arithmetic(node.operand)
+    return _is_number(node) or _is_named_constant(node)
+
+
+def _is_margin_choice(node: ast.AST) -> bool:
+    """`max(0.2, ...)` or `min(LIMIT, ...)`: one fixed floor or ceiling is enough."""
+    if not isinstance(node, ast.Call) or _leaf_name(node.func) not in _MARGIN_CHOOSERS:
+        return False
+    return any(map(_is_fixed_margin, node.args))
+
+
 def _is_fixed_margin(operand: ast.AST) -> bool:
-    """A non-zero number, a named constant, or arithmetic of only those."""
-    text = ast.unparse(operand)
-    names = [found.rsplit(".", 1)[-1] for found in _IDENTIFIER.findall(text)]
-    if not names:
-        return text.strip("0.()- ") != ""
-    return all(name.lstrip("_").isupper() for name in names)
+    """A non-zero number, a named constant, arithmetic of only those, or a choice of one."""
+    if _is_margin_choice(operand):
+        return True
+    zero = _is_number(operand) and not _is_literal_margin(operand)
+    return _is_margin_arithmetic(operand) and not zero
 
 
 def _is_span_against_margin(
@@ -472,6 +492,12 @@ def _file_stopwatches(path: Path) -> list[int]:
         "def t():\n    data, elapsed = bounded()\n    assert elapsed < _CUTOFF_SECONDS\n",
         "def check(shutdown_started):\n"
         "    assert time.perf_counter() - shutdown_started < _SHUTDOWN_SECONDS\n",
+        "def measure():\n    started = time.perf_counter()\n"
+        "    return time.perf_counter() - started\n"
+        "def t():\n    timings = [measure() for _ in range(4)]\n"
+        "    assert timings[3] <= max(0.20, timings[2] * 5.0)\n",
+        "def t():\n    elapsed = time.monotonic() - started\n    assert elapsed < 1e-05\n",
+        "def t():\n    elapsed = time.monotonic() - started\n    assert elapsed < -(LIMIT * 2)\n",
     ],
 )
 def test_the_stopwatch_guard_recognizes_a_literal_margin_on_the_real_clock(source: str) -> None:

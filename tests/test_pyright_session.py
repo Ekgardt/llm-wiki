@@ -2732,9 +2732,14 @@ CONTENTION_HOLD_SECONDS = PAUSE_TIMEOUT
 CONTENTION_BUDGET_SECONDS = 0.05
 
 
-def _waits_within_budget(recorder: TimeoutRecordingLock) -> bool:
-    """No lock wait outlived the budget; an expired budget may refuse without one."""
-    return all(0 < timeout <= CONTENTION_BUDGET_SECONDS for timeout in recorder.timeouts)
+def _waits_within_budget(recorder: TimeoutRecordingLock, granted: float) -> bool:
+    """No lock wait outlived what the caller granted; an expired budget may refuse without one.
+
+    `granted` is `deadline - started` on the caller's own reading, not the budget
+    constant: `(t + 0.05) - t` can round above 0.05, and every later reading only
+    makes the remaining time smaller.
+    """
+    return all(0 < timeout <= granted for timeout in recorder.timeouts)
 
 
 def _hold_document_lock_for_contention(
@@ -2784,15 +2789,14 @@ def test_open_document_lock_contention_obeys_deadline_without_mutation(
     recorder = TimeoutRecordingLock(document_lock)
     session._document_lock = recorder
     try:
+        started = time.monotonic()
+        deadline = started + CONTENTION_BUDGET_SECONDS
         with pytest.raises(TimeoutError, match="document lock"):
             run_within_hang_bound(
-                lambda: session.open_document(
-                    "pkg/service.py",
-                    deadline=time.monotonic() + CONTENTION_BUDGET_SECONDS,
-                )
+                lambda: session.open_document("pkg/service.py", deadline=deadline)
             )
         session._document_lock = document_lock
-        assert _waits_within_budget(recorder), recorder.timeouts
+        assert _waits_within_budget(recorder, deadline - started), recorder.timeouts
         assert released.is_set() is False
         assert (
             session._readiness,
@@ -2857,14 +2861,12 @@ def test_synchronize_lock_contention_obeys_deadline_without_mutation(
     recorder = TimeoutRecordingLock(document_lock)
     session._document_lock = recorder
     try:
+        started = time.monotonic()
+        deadline = started + CONTENTION_BUDGET_SECONDS
         with pytest.raises(TimeoutError, match="document lock"):
-            run_within_hang_bound(
-                lambda: session.synchronize(
-                    revision, deadline=time.monotonic() + CONTENTION_BUDGET_SECONDS
-                )
-            )
+            run_within_hang_bound(lambda: session.synchronize(revision, deadline=deadline))
         session._document_lock = document_lock
-        assert _waits_within_budget(recorder), recorder.timeouts
+        assert _waits_within_budget(recorder, deadline - started), recorder.timeouts
         assert released.is_set() is False
         assert (
             session._readiness,
@@ -6899,12 +6901,12 @@ def test_session_close_state_lock_wait_obeys_absolute_deadline(
     recorder = TimeoutRecordingLock(state_lock)
     session._lock = recorder
     try:
+        started = time.monotonic()
+        deadline = started + CONTENTION_BUDGET_SECONDS
         with pytest.raises(TimeoutError, match="state lock"):
-            run_within_hang_bound(
-                lambda: session.close(deadline=time.monotonic() + CONTENTION_BUDGET_SECONDS)
-            )
+            run_within_hang_bound(lambda: session.close(deadline=deadline))
         session._lock = state_lock
-        assert _waits_within_budget(recorder), recorder.timeouts
+        assert _waits_within_budget(recorder, deadline - started), recorder.timeouts
         assert session._closed is False
     finally:
         release_request.set()

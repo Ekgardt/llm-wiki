@@ -34,10 +34,9 @@ from tests.slow_machine import PAUSE_TIMEOUT, SHORT_TIMEOUT, run_within_hang_bou
 
 ROOT = Path(__file__).resolve().parent.parent
 # Session start must answer from the projection instead of recomputing the
-# handoff or waiting for the Markdown writer gate. A four-core hosted Windows
-# runner needed seven seconds for that projected read, so a sub-second ceiling
-# measured the runner. The proof that survives load is the contrast with the
-# writer hold below: blocking on the gate would cost WRITER_HOLD_SECONDS.
+# handoff or waiting for the Markdown writer gate. The tests record every wait a
+# session start hands to the gate: each must stay below this budget, while the
+# writer holds the gate for WRITER_HOLD_SECONDS, so blocking on it would show.
 SESSION_START_BUDGET_SECONDS = 5.0
 WRITER_HOLD_SECONDS = 30.0
 

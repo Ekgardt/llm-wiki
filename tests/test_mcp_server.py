@@ -23,11 +23,9 @@ from tests.slow_machine import LONG_TIMEOUT, SHORT_TIMEOUT
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 
 
-# The property is that a blocked daemon worker never joins at exit, so the
-# interpreter leaves at once instead of waiting for it. Half a second measured
-# that on an idle machine and failed at 0.551 s on a loaded one, which is the
-# machine and not the property. The outer bound stays larger than the inner one
-# so a process that truly hangs still fails as a hang.
+# The property is that a blocked daemon worker never joins at exit. The child
+# reports its non-daemon threads itself, so the proof needs no stopwatch; the hang
+# bound only turns a process that truly never exits into a failure.
 
 
 def _named_generations(components: dict) -> set:
@@ -1499,6 +1497,12 @@ def _assert_timed_out_envelope(envelope, loop_progressed) -> None:
     assert envelope["coverage"] == 0
 
 
+def _reap(process: subprocess.Popen[str]) -> None:
+    if process.poll() is None:
+        process.kill()
+        process.communicate(timeout=SHORT_TIMEOUT)
+
+
 def _assert_clean_shutdown(
     process: subprocess.Popen[str], stdout: str, stderr: str, lingering_threads: str
 ) -> None:
@@ -2087,11 +2091,15 @@ class TestHandleToolCall:
             stderr=subprocess.PIPE,
             text=True,
         )
-        assert process.stdout is not None
-        assert process.stdout.readline().strip() == "TIMEOUT_RETURNED"
-        lingering_threads = process.stdout.readline().strip()
-        # The blocked worker never finishes: a process it kept alive hangs past this bound.
-        stdout, stderr = process.communicate(timeout=LONG_TIMEOUT)
+        try:
+            assert process.stdout is not None
+            assert process.stdout.readline().strip() == "TIMEOUT_RETURNED"
+            lingering_threads = process.stdout.readline().strip()
+            assert lingering_threads == "0", "a non-daemon thread would hold the exit"
+            # The blocked worker never finishes: a process it kept alive hangs past this bound.
+            stdout, stderr = process.communicate(timeout=LONG_TIMEOUT)
+        finally:
+            _reap(process)
 
         _assert_clean_shutdown(process, stdout, stderr, lingering_threads)
 

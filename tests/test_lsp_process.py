@@ -3499,7 +3499,10 @@ def test_legacy_start_signature_budget_and_state_are_unchanged(
     try:
         assert process.state is ProcessState.PROCESS_RUNNING
         [(before, deadline, after)] = budgets
-        assert deadline - after <= lsp_process._STARTUP_WAIT_SECONDS <= deadline - before
+        # Rounding moves with the clock: `t + budget` lies between the two sums,
+        # whereas `(t + budget) - t` may land one ulp either side of the budget.
+        wait = lsp_process._STARTUP_WAIT_SECONDS
+        assert before + wait <= deadline <= after + wait
         assert process._coordinator.generation_configuration.generation_bootstrap is None
         assert process._coordinator.generation_configuration.generation_guard is None
     finally:
@@ -7246,14 +7249,14 @@ def test_parallel_real_startup_failures_stay_bounded_secure_and_leak_free(
             children.append(child)
         return child
 
-    def fail_start(index: int) -> tuple[None, Path]:
+    def fail_start(index: int) -> Path:
         owner = tmp_path / f"{index + 100:032x}"
         with pytest.raises(RuntimeError) as raised:
             LspProcess.start(
                 _command("--sleep-seconds", str(PAUSE_TIMEOUT)), cwd=tmp_path, owner_root=owner
             )
         _assert_protocol_startup_failure(raised.value)
-        return None, owner
+        return owner
 
     monkeypatch.setattr(lsp_process.subprocess, "Popen", popen_spy)
     monkeypatch.setattr(lsp_process, "LspProtocol", BrokenProtocol)
@@ -7264,10 +7267,14 @@ def test_parallel_real_startup_failures_stay_bounded_secure_and_leak_free(
     assert len(cleanup) == 20 and _within_cleanup_budget(cleanup)
     assert len(children) == 20
     assert all(child.poll() is not None for child in children)
-    for _elapsed, owner in results:
+    for owner in results:
         _assert_startup_failure_evidence(owner, tmp_path)
 
     assert _await_thread_names(initial_threads) == initial_threads
+
+
+def _largest_grant(startup: list[tuple[float, float, float]]) -> float:
+    return max(deadline - before for before, deadline, _after in startup)
 
 
 @pytest.mark.skipif(os.name != "nt", reason="Windows ACL subprocess contract")
@@ -7286,7 +7293,7 @@ def test_four_delayed_owner_acl_starts_share_deadline_and_leave_no_leaks(
         time.sleep(timeout)
         raise subprocess.TimeoutExpired(command, timeout)
 
-    def fail_start(index: int) -> tuple[None, Path]:
+    def fail_start(index: int) -> Path:
         owner = tmp_path / f"{index + 200:032x}"
         with pytest.raises(
             (PermissionError, lsp_process.StartupCleanupError)
@@ -7294,17 +7301,20 @@ def test_four_delayed_owner_acl_starts_share_deadline_and_leave_no_leaks(
             LspProcess.start(_command(), cwd=tmp_path, owner_root=owner)
         if isinstance(raised.value, lsp_process.StartupCleanupError):
             raised.value.retry_cleanup(time.monotonic() + 5)
-        return None, owner
+        return owner
 
     monkeypatch.setattr(subprocess, "run", delayed_run)
+    startup = _record_deadlines(monkeypatch, "_resolved_startup_deadline")
     with ThreadPoolExecutor(max_workers=4) as pool:
         results = run_within_hang_bound(lambda: list(pool.map(fail_start, range(4))))
 
-    # Each ACL wait is what is left of its own start's deadline, never a fresh budget.
+    # No ACL wait outlives what a start was granted, read on the start's own clock:
+    # a later reading only shrinks `deadline - now`, so the bound holds exactly.
+    granted = _largest_grant(startup)
     assert acl_timeouts
-    assert all(0 < timeout <= lsp_process._STARTUP_WAIT_SECONDS for timeout in acl_timeouts)
-    assert all(owner.is_dir() and not any(owner.iterdir()) for _elapsed, owner in results)
-    for _elapsed, owner in results:
+    assert all(0 < timeout <= granted for timeout in acl_timeouts)
+    assert all(owner.is_dir() and not any(owner.iterdir()) for owner in results)
+    for owner in results:
         owner.rmdir()
     assert _lsp_thread_names() == initial_threads
 
