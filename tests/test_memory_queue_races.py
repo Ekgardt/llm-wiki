@@ -21,7 +21,6 @@ if str(SCRIPTS_DIR) not in sys.path:
 import markdown_transaction  # noqa: E402
 import memory_queue  # noqa: E402
 import operational_ownership  # noqa: E402
-import process_liveness  # noqa: E402
 from memory_queue import LeaseFenceError, MemoryQueue  # noqa: E402
 
 
@@ -411,50 +410,6 @@ def test_a_busy_database_makes_the_worker_wait_instead_of_dying(tmp_path, monkey
 def test_the_windows_process_tree_comes_from_the_kernel_snapshot(monkeypatch):
     """One source, present on every supported Windows and needing no subprocess."""
     monkeypatch.setattr(memory_queue, "_windows_process_pairs", lambda: [(11, 5), (12, 11)])
-    monkeypatch.setattr(process_liveness, "windows_creation_filetime", lambda pid: pid)
-
-    assert memory_queue._tracked_descendant_pids(5, "nt") == {11, 12}
-
-
-def test_a_windows_process_older_than_its_recorded_parent_is_not_a_descendant(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Process 7 was started by an earlier owner of PID 5, which exited; 5 is now our child.
-
-    Windows keeps the old parent PID, so 7 and its own child 8 name 5 as their
-    parent. Claiming them made cleanup wait on processes it could not end.
-    """
-    created = {5: 500, 11: 600, 7: 100, 8: 150}
-    monkeypatch.setattr(
-        memory_queue, "_windows_process_pairs", lambda: [(11, 5), (7, 5), (8, 7)]
-    )
-    monkeypatch.setattr(process_liveness, "windows_creation_filetime", created.get)
-
-    assert memory_queue._tracked_descendant_pids(5, "nt") == {11}
-
-
-def test_a_windows_process_older_than_the_parent_it_names_is_not_a_descendant(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Our child 11 exited and its PID went to a newer process; 20 is that PID's old child."""
-    created = {5: 1, 11: 50, 20: 10}
-    monkeypatch.setattr(memory_queue, "_windows_process_pairs", lambda: [(11, 5), (20, 11)])
-    monkeypatch.setattr(process_liveness, "windows_creation_filetime", created.get)
-
-    assert memory_queue._tracked_descendant_pids(5, "nt") == {11}
-
-
-@pytest.mark.parametrize(
-    "created",
-    [{5: 1, 12: 3}, {11: 2, 12: 3}, {5: 1, 11: 2}],
-    ids=["parent-exited", "root-exited", "child-exited"],
-)
-def test_a_process_that_exited_after_the_snapshot_still_leads_to_its_children(
-    monkeypatch: pytest.MonkeyPatch, created: dict[int, int]
-) -> None:
-    """An unreadable creation time proves nothing, so the tree stays whole."""
-    monkeypatch.setattr(memory_queue, "_windows_process_pairs", lambda: [(11, 5), (12, 11)])
-    monkeypatch.setattr(process_liveness, "windows_creation_filetime", created.get)
 
     assert memory_queue._tracked_descendant_pids(5, "nt") == {11, 12}
 

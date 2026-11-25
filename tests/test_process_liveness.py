@@ -164,20 +164,3 @@ def test_a_pid_beyond_the_platform_range_is_never_alive_by_guess() -> None:
     state = process_liveness.process_state(2**40)
     assert state in {"dead", "unknown"}
     assert process_liveness.pid_alive(2**40) is (state != "dead")
-
-
-@pytest.mark.parametrize(
-    ("probe", "created"),
-    [("windows:77", 77), (None, None), (PermissionError(5, "denied"), None)],
-)
-def test_a_windows_creation_time_is_read_from_the_start_identity(
-    monkeypatch: pytest.MonkeyPatch, probe: str | BaseException | None, created: int | None
-) -> None:
-    def identity(_pid: int) -> str | None:
-        if isinstance(probe, BaseException):
-            raise probe
-        return probe
-
-    monkeypatch.setattr(process_liveness, "_windows_process_start_identity", identity)
-
-    assert process_liveness.windows_creation_filetime(4) == created

@@ -276,21 +276,6 @@ def _windows_running_identity(
     return f"windows:{_windows_creation_filetime(handle, get_process_times)}"
 
 
-def windows_creation_filetime(pid: int) -> int | None:
-    """When a running Windows process was created, or None when it is gone or cannot be read.
-
-    A recorded parent PID may since belong to a newer, unrelated process; only a
-    parent created no later than its child is the real one.
-    """
-    try:
-        identity = _windows_process_start_identity(pid)
-    except OSError:
-        return None
-    if identity is None:
-        return None
-    return int(identity.removeprefix("windows:"))
-
-
 def _windows_process_start_identity(pid: int) -> str | None:
     kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
     open_process, get_exit_code, get_process_times, close_handle = (
