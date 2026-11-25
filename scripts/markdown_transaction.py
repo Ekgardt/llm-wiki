@@ -3645,12 +3645,14 @@ def _recover_initial_contention(
     deadline: float = float("inf"),
     cancelled: Callable[[], bool] | None = None,
 ) -> None:
-    deadline = min(deadline, time.monotonic() + _WRITER_WAIT_SECONDS)
+    # The writer wait bounds waiting for another writer; recovery's own disk work
+    # runs under the caller's deadline, however slow the disk.
+    wait_deadline = min(deadline, time.monotonic() + _WRITER_WAIT_SECONDS)
     attempt = 0
     while True:
         try:
             coordinator.recover(
-                writer_wait_seconds=max(0.0, deadline - time.monotonic()),
+                writer_wait_seconds=max(0.0, wait_deadline - time.monotonic()),
                 deadline=deadline,
                 cancelled=cancelled,
             )
@@ -3658,7 +3660,7 @@ def _recover_initial_contention(
         except (OSError, sqlite3.Error) as exc:
             if not _is_transient_writer_contention(exc):
                 raise
-            delay = _writer_retry_delay(attempt, deadline)
+            delay = _writer_retry_delay(attempt, wait_deadline)
             if delay <= 0:
                 raise
             time.sleep(delay)
@@ -4035,7 +4037,10 @@ def _settle_operation(
     deadline: float = float("inf"),
     cancelled: Callable[[], bool] | None = None,
 ) -> TransactionRecord | None:
-    deadline = min(deadline, time.monotonic() + _WRITER_WAIT_SECONDS)
+    # The writer wait bounds waiting for another process's preparation, not this
+    # process's own apply: a slow Windows disk spent 10 s on it and the committed
+    # move was reported as a write error (run 45615510034).
+    wait_deadline = min(deadline, time.monotonic() + _WRITER_WAIT_SECONDS)
     while True:
         coordinator._require_operation_active(deadline, cancelled)
         record = coordinator._record_for_operation_id(operation_id)
@@ -4049,7 +4054,7 @@ def _settle_operation(
         _recover_abandoned_preparation(
             coordinator, operation_id, deadline=deadline, cancelled=cancelled
         )
-        _require_settle_deadline(deadline)
+        _require_settle_deadline(wait_deadline)
         time.sleep(0.01)
 
 

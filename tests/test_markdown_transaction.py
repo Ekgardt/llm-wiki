@@ -1867,3 +1867,34 @@ def test_the_recorded_hash_is_of_the_plaintext(vault: Path, state_root: Path) ->
     )
     before = plan["operations"][0]["before"]
     assert before["sha256"] == hashlib.sha256(b"before\n").hexdigest()
+
+
+def test_a_mutation_slower_than_the_writer_wait_still_commits(tmp_path, monkeypatch):
+    """The writer wait bounds waiting for another writer, not this process's own apply.
+
+    A slow Windows disk spent the 10 s writer wait inside one archive move; the move
+    was committed on disk and reported as WRITE_ERROR (run 45615510034).
+    """
+    vault = tmp_path / "vault"
+    (vault / "knowledge" / "notes").mkdir(parents=True)
+    monkeypatch.setenv("LLM_WIKI_ROOT", str(vault))
+    monkeypatch.setenv("LLM_WIKI_STATE_ROOT", str(tmp_path / "state"))
+    slow_target_seconds = 0.3
+    monkeypatch.setattr(markdown_transaction, "_WRITER_WAIT_SECONDS", slow_target_seconds / 2)
+    real_killpoint = MarkdownCoordinator._killpoint
+
+    def slow_disk(self, name, parent_transaction_id=None):
+        if name == "after_each_target":
+            time.sleep(slow_target_seconds)
+        return real_killpoint(self, name, parent_transaction_id)
+
+    monkeypatch.setattr(MarkdownCoordinator, "_killpoint", slow_disk)
+    first = vault / "knowledge" / "notes" / "a.md"
+    second = vault / "knowledge" / "notes" / "b.md"
+
+    record = markdown_transaction.mutate_knowledge(
+        "slow-disk", {first: b"# A\n", second: b"# B\n"}
+    )
+
+    assert record.state == "committed"
+    assert (first.read_bytes(), second.read_bytes()) == (b"# A\n", b"# B\n")
