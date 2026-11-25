@@ -114,3 +114,41 @@ def test_the_oldest_verdict_makes_room_past_the_bound(monkeypatch: pytest.Monkey
         provenance.substance_weight(text)
 
     assert len(provenance._NAVIGATION_VERDICTS) == 2
+    assert list(provenance._NAVIGATION_VERDICTS) == [
+        _verdict_key("second prose line"),
+        _verdict_key("third prose line"),
+    ]
+
+
+def _verdict_key(text: str) -> bytes:
+    import hashlib
+
+    return hashlib.blake2b(text.encode("utf-8"), digest_size=16).digest()
+
+
+def test_threads_filling_a_full_cache_never_break_a_search(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import threading
+
+    import provenance
+
+    monkeypatch.setattr(provenance, "_NAVIGATION_VERDICTS", {})
+    monkeypatch.setattr(provenance, "NAVIGATION_VERDICTS_KEPT", 8)
+    failures: list[BaseException] = []
+
+    def weigh(worker: int) -> None:
+        try:
+            for line in range(2_000):
+                provenance.substance_weight(f"prose line {worker} {line}")
+        except BaseException as error:  # noqa: BLE001 - the test records any failure
+            failures.append(error)
+
+    workers = [threading.Thread(target=weigh, args=(worker,)) for worker in range(8)]
+    for thread in workers:
+        thread.start()
+    for thread in workers:
+        thread.join()
+
+    assert failures == []
+    assert len(provenance._NAVIGATION_VERDICTS) <= 8

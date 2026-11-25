@@ -1865,7 +1865,7 @@ def grounded_qa(
 def _offer_excerpts(answer: dict[str, object], context: GroundedContext, measured: object) -> None:
     """An answer the reader declined still hands the agent what it read.
 
-    The memory does not decide alone that it holds no answer (reading Б of
+    The memory does not decide alone that it holds no answer (reading B of
     task 178's plan item 5, accepted 2026-11-17): the excerpts the reader was
     shown, already bounded by the context budget, go to the answering agent
     beside the measured coverage, and a hint to search wider when they are weak.

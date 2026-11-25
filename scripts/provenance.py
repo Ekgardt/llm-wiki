@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import hashlib
 import re
+import threading
 
 # Higher weight = preferred in ranking (typed provenance).
 AUTHORITY_WEIGHTS: dict[str, float] = {
@@ -234,9 +235,11 @@ def _navigation(content: str) -> bool:
 # again (measured 2026-11-25, 85 ms of a 690 ms search), and the lexical lane and
 # the fusion weighed the same chunk twice. An entry is a 16-byte key and a flag,
 # about 100 bytes, so the bound keeps some 40 searches' candidates in about 6 MB;
-# past it the oldest entry goes first.
+# past it the oldest entry goes first. Searches run on several threads, so
+# eviction and insertion hold one lock.
 NAVIGATION_VERDICTS_KEPT = 65_536
 _NAVIGATION_VERDICTS: dict[bytes, bool] = {}
+_VERDICTS_LOCK = threading.Lock()
 
 
 def _known_navigation(content: str) -> bool:
@@ -249,9 +252,10 @@ def _known_navigation(content: str) -> bool:
 
 
 def _remember_verdict(key: bytes, verdict: bool) -> None:
-    if len(_NAVIGATION_VERDICTS) >= NAVIGATION_VERDICTS_KEPT:
-        _NAVIGATION_VERDICTS.pop(next(iter(_NAVIGATION_VERDICTS)), None)
-    _NAVIGATION_VERDICTS[key] = verdict
+    with _VERDICTS_LOCK:
+        if len(_NAVIGATION_VERDICTS) >= NAVIGATION_VERDICTS_KEPT:
+            _NAVIGATION_VERDICTS.pop(next(iter(_NAVIGATION_VERDICTS)), None)
+        _NAVIGATION_VERDICTS[key] = verdict
 
 
 def substance_weight(content: object) -> float:

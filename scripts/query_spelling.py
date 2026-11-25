@@ -146,10 +146,12 @@ def vocabulary(connection: sqlite3.Connection) -> Vocabulary:
     identity = _artifact_identity(connection)
     if identity is None:
         return _read_vocabulary(connection)
-    if identity not in _LOADED:
+    loaded = _LOADED.get(identity)
+    if loaded is None:
+        loaded = _read_vocabulary(connection)
         _LOADED.clear()
-        _LOADED[identity] = _read_vocabulary(connection)
-    return _LOADED[identity]
+        _LOADED[identity] = loaded
+    return loaded
 
 
 def _common_prefix(left: str, right: str) -> int:

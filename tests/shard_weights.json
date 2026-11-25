@@ -757,6 +757,7 @@
   "test_the_small_integrity_gaps.py": 0.01,
   "test_the_stand_keys_the_turns_before_it_builds.py": 1.71,
   "test_the_stand_prices_its_own_ceilings.py": 0.01,
+  "test_the_stand_reads_the_installed_models.py": 0.02,
   "test_the_supervisor_lets_the_worker_finish.py": 0.01,
   "test_the_task_is_named_to_the_model.py": 0.01,
   "test_the_tool_list_has_a_token_budget.py": 0.0,

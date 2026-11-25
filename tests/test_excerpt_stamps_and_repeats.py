@@ -58,3 +58,41 @@ def test_a_passage_with_a_new_fact_is_kept() -> None:
 
 def test_a_passage_too_short_to_compare_is_kept() -> None:
     assert repeated([("a", "Legal"), ("a", "Legal")]) == set()
+
+
+def test_a_restatement_that_corrects_a_figure_is_kept() -> None:
+    first = "I set aside a budget of 500 dollars for the new road bike and its gear this spring"
+    passages = [("a", first), ("a", first.replace("500", "900"))]
+
+    assert repeated(passages) == set()
+
+
+BREADCRUMB_DAY = (
+    b"# 2024-03-02\n\n"
+    b"## [09:15:00] session_end | sess-a\n\n**user:** first\n\n"
+    b"<!-- llm-wiki-operation:" + b"ab" * 32 + b" -->\n"
+    b"- `[15:42:10] prompt | sessB123 | proj` second\n"
+)
+
+
+def test_an_operation_marker_entry_after_a_heading_carries_its_own_stamp() -> None:
+    stamps = EntryStamps.of("knowledge/daily/2024-03-02.md", BREADCRUMB_DAY)
+
+    assert stamps.at(BREADCRUMB_DAY.index(b"first")) == ExcerptStamp(
+        "2024-03-02 09:15:00", "sess-a"
+    )
+    assert stamps.at(BREADCRUMB_DAY.index(b"second")) == ExcerptStamp(
+        "2024-03-02 15:42:10", "sessB123"
+    )
+
+
+def test_a_long_heading_line_is_read_in_linear_time() -> None:
+    import time
+
+    day = b"## [09:15:00]" + b" " * 100_000 + b"x\nbody\n"
+    started = time.perf_counter()
+
+    stamps = EntryStamps.of("knowledge/daily/2024-03-02.md", day)
+
+    assert time.perf_counter() - started < 1.0
+    assert stamps.at(day.index(b"body")) == ExcerptStamp("2024-03-02 09:15:00", "")

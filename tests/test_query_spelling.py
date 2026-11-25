@@ -12,6 +12,8 @@ import sqlite3
 import sys
 from pathlib import Path
 
+import pytest
+
 SCRIPTS_DIR = Path(__file__).resolve().parent.parent / "scripts"
 if str(SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_DIR))
@@ -184,3 +186,22 @@ def test_a_file_artifact_reads_its_vocabulary_once_until_it_changes(tmp_path: Pa
     os.utime(path, ns=(path.stat().st_atime_ns, path.stat().st_mtime_ns + 1_000_000))
 
     assert "lantern" in query_spelling.vocabulary(connection).terms
+
+
+
+class _Forgetful(dict[object, object]):
+    """A cache another thread empties the moment anything is stored."""
+
+    def __setitem__(self, key: object, value: object) -> None:
+        super().__setitem__(key, value)
+        self.clear()
+
+
+def test_a_vocabulary_another_thread_evicts_is_still_returned(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    connection = sqlite3.connect(tmp_path / "search.sqlite3")
+    connection.executescript(search_memory._GENERATION_FTS_DDL)
+    monkeypatch.setattr(query_spelling, "_LOADED", _Forgetful())
+
+    assert query_spelling.vocabulary(connection).terms == ()

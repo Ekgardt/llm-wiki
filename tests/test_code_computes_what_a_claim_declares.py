@@ -95,3 +95,62 @@ def test_the_stand_reads_a_figure_the_text_does_not_state() -> None:
     assert (
         hypothesis_of({"claims": [_marked("count", ["a", "b"], "You own two.")]}) == "You own two."
     )
+
+
+def test_a_text_showing_its_working_does_not_state_the_gap() -> None:
+    claim = _marked(
+        "difference",
+        ["working professionally for 9 years", "at NovaTech for 4 years and 3 months"],
+        "Of 9 years, 4 years and 3 months were at NovaTech, so about 5 years before it.",
+    )
+
+    assert claim["computed"] == "4 years and 9 months (57 months)"
+    assert claim["computed_stated"] is False
+
+
+def test_a_zero_gap_is_stated_only_when_the_text_says_it() -> None:
+    claim = _marked("difference", ["for 2 years", "for 24 months"], "You worked there longer.")
+
+    assert claim["computed"] == "0 years and 0 months (0 months)"
+    assert claim["computed_stated"] is False
+
+
+def test_hours_and_minutes_are_not_subtracted_as_plain_numbers() -> None:
+    claim = _marked("difference", ["2 hours", "45 minutes"], "The gap was 43.")
+
+    assert "computed" not in claim
+
+
+def test_dates_named_by_month_are_left_to_the_calendar() -> None:
+    claim = _marked("difference", ["March 9", "April 4"], "It was 5 days.")
+
+    assert "computed" not in claim
+
+
+def test_amounts_written_in_words_are_read() -> None:
+    claim = _marked(
+        "difference", ["for a year and 3 months", "for two years and 3 months"], "One year."
+    )
+
+    assert claim["computed"] == "1 years and 0 months (12 months)"
+    assert claim["computed_stated"] is True
+
+
+def test_a_sum_converts_weeks_to_days() -> None:
+    claim = _marked("sum", ["3 days in Paris", "1 week in Rome"], "You travelled for 10 days.")
+
+    assert claim["computed"] == "10 days"
+    assert claim["computed_stated"] is True
+
+
+def test_a_sum_of_different_units_is_not_guessed() -> None:
+    claim = _marked("sum", ["2 hours of piano", "30 minutes of guitar"], "You practised 32.")
+
+    assert "computed" not in claim
+
+
+def test_a_figure_too_large_to_compute_exactly_gives_no_figure() -> None:
+    huge = "9" * 40
+    claim = _marked("difference", [f"{huge} months", "1 month"], "A long time.")
+
+    assert "computed" not in claim

@@ -1,4 +1,4 @@
-"""Reading Б: the memory does not decide alone that it holds no answer.
+"""Reading B: the memory does not decide alone that it holds no answer.
 
 When the reader declines, the answering agent still gets the excerpts the
 reader was shown and the measured coverage, and a hint to search wider when
