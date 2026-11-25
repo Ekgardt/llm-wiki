@@ -24,18 +24,22 @@ from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from pathlib import Path
+from typing import TYPE_CHECKING, Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import bounded_thread
-from evidence_repeats import repeated  # noqa: E402
-from excerpt_stamps import ExcerptStamp, StampBook  # noqa: E402
+from evidence_repeats import repeated
+from excerpt_stamps import ExcerptStamp, StampBook
 from markdown_transaction import mutate_knowledge, stable_operation_id  # noqa: E402
 from memory_state import ROOT  # noqa: E402
 from reply_json import object_with, reply_document  # noqa: E402
 from retrieval import PROFILES as QA_PROFILES  # noqa: E402
 from secret_redact import redact_secrets  # noqa: E402
-from tally_pass import with_computed  # noqa: E402
+from tally_pass import with_computed
 from vault_log import LOG_NAME  # noqa: E402
+
+if TYPE_CHECKING:
+    from corpus_snapshot import CapturedSource
 
 # A provider call: prompt, system prompt and the answer schema, or None for free text.
 Generator = Callable[[str, str, "dict[str, object] | None"], "str | None"]
@@ -988,14 +992,21 @@ def _authoritative_evidence(
     return found, fresh.stale_paths
 
 
-def _stamped_spans(pairs: list[tuple], pruner: _Pruner | None) -> list[tuple]:
+# A packed item and its source file; with one span of it and that span's entry stamp.
+_Pair = tuple[Any, "CapturedSource"]
+_StampedSpan = tuple[Any, "CapturedSource", tuple[int, int], ExcerptStamp]
+
+
+def _stamped_spans(pairs: list[_Pair], pruner: _Pruner | None) -> list[_StampedSpan]:
     """Every span to quote with its entry's stamp, each passage of an entry once."""
     spans = _every_span(pairs, pruner, StampBook())
     dropped = repeated([_passage(*span) for span in spans])
     return [entry for position, entry in enumerate(spans) if position not in dropped]
 
 
-def _every_span(pairs: list[tuple], pruner: _Pruner | None, book: StampBook) -> list[tuple]:
+def _every_span(
+    pairs: list[_Pair], pruner: _Pruner | None, book: StampBook
+) -> list[_StampedSpan]:
     return [
         (item, source, span, book.of(source, span[0]))
         for item, source in pairs
@@ -1003,7 +1014,9 @@ def _every_span(pairs: list[tuple], pruner: _Pruner | None, book: StampBook) -> 
     ]
 
 
-def _passage(item: object, source: object, span: tuple[int, int], stamp: ExcerptStamp) -> tuple:
+def _passage(
+    item: Any, source: CapturedSource, span: tuple[int, int], stamp: ExcerptStamp
+) -> tuple[tuple[str, ExcerptStamp], str]:
     """The span's entry and its words, as `evidence_repeats` compares them."""
     start, end = span
     return (item.source, stamp), source.content[start:end].decode("utf-8", errors="replace")

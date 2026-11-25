@@ -21,15 +21,17 @@ import re
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
+from typing import Any
 
 _ISO = re.compile(r"\b\d{4}-\d{2}-\d{2}\b")
 _NUMBER = re.compile(r"\d[\d,]*(?:\.\d+)?")
 _DURATION = re.compile(r"(\d+(?:\.\d+)?)\s*(year|month|week|day)s?\b", re.IGNORECASE)
 _UNITS = {"year": ("months", 12), "month": ("months", 1), "week": ("days", 7), "day": ("days", 1)}
-_NUMBER_WORDS = (
-    "zero one two three four five six seven eight nine ten eleven twelve thirteen "
-    "fourteen fifteen sixteen seventeen eighteen nineteen twenty"
-).split()
+_NUMBER_WORDS = [
+    "zero", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten",
+    "eleven", "twelve", "thirteen", "fourteen", "fifteen", "sixteen", "seventeen", "eighteen",
+    "nineteen", "twenty",
+]
 _WORD = re.compile(r"\b(" + "|".join(_NUMBER_WORDS) + r")\b", re.IGNORECASE)
 
 
@@ -74,7 +76,7 @@ def sum_of(inputs: Sequence[str]) -> Tally | None:
     figures = _one_figure_each(inputs)
     if len(figures) < 2:
         return None
-    figure = _shown(sum(figures))
+    figure = _shown(sum(figures, Decimal(0)))
     return Tally(figure, (frozenset({figure}),))
 
 
@@ -94,7 +96,7 @@ def _duration(text: str) -> tuple[str, Decimal] | None:
     bases = {base for base, _amount in parts}
     if len(bases) != 1:
         return None
-    return bases.pop(), sum(amount for _base, amount in parts)
+    return bases.pop(), sum((amount for _base, amount in parts), Decimal(0))
 
 
 def _parts(text: str) -> list[tuple[str, Decimal]]:
@@ -135,10 +137,10 @@ def _as_figure(base: str, value: Decimal) -> Tally:
 
 def difference_of(inputs: Sequence[str]) -> Tally | None:
     """The gap between two quantities of one kind; dates are the calendar's."""
-    quantities = [_quantity(item) for item in inputs]
-    if len(quantities) != 2 or None in quantities:
+    known = list(filter(None, (_quantity(item) for item in inputs)))
+    if len(inputs) != 2 or len(known) != 2:
         return None
-    (first_base, first), (second_base, second) = quantities
+    (first_base, first), (second_base, second) = known
     if first_base != second_base:
         return None
     return _as_figure(first_base, abs(first - second))
@@ -151,7 +153,7 @@ COMPUTE: Mapping[str, Callable[[Sequence[str]], Tally | None]] = {
 }
 
 
-def tally(claim: Mapping[str, object]) -> Tally | None:
+def tally(claim: Mapping[str, Any]) -> Tally | None:
     """The figure the claim's own inputs give, or None when code cannot read them."""
     compute = COMPUTE.get(str(claim.get("derivation")))
     if compute is None:
@@ -159,19 +161,19 @@ def tally(claim: Mapping[str, object]) -> Tally | None:
     return compute([str(item).strip() for item in claim.get("inputs") or ()])
 
 
-def states(claim: Mapping[str, object], computed: Tally) -> bool:
+def states(claim: Mapping[str, Any], computed: Tally) -> bool:
     """Whether the claim's text already carries the computed figure."""
     numbers = _stated_numbers(str(claim.get("text") or ""))
     return any(expected <= numbers for expected in computed.stated_by)
 
 
-def with_computed(answer: Mapping[str, object]) -> None:
+def with_computed(answer: Mapping[str, Any]) -> None:
     """Mark every claim whose figure code can compute, in place."""
     for claim in answer.get("claims") or ():
         _mark(claim)
 
 
-def _mark(claim: dict) -> None:
+def _mark(claim: dict[str, Any]) -> None:
     computed = tally(claim)
     if computed is None:
         return

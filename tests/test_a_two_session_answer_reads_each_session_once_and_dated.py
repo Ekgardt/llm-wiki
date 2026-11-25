@@ -24,7 +24,7 @@ for folder in (SCRIPTS, BENCHMARK):
 from context_budget import ContextBudget  # noqa: E402
 from corpus_snapshot import collect_corpus  # noqa: E402
 from longmemeval_vault import daily_block, transcript_jsonl  # noqa: E402
-from query_memory import build_grounded_context  # noqa: E402
+from query_memory import GroundedContext, build_grounded_context  # noqa: E402
 from session_evidence import render_transcript  # noqa: E402
 
 DAILY = "knowledge/daily/2023-05-25.md"
@@ -41,10 +41,13 @@ NINE_YEARS = (
 
 
 def _session(*user_turns: str) -> str:
-    turns = []
+    turns: list[dict[str, str]] = []
     for text in user_turns:
-        turns += [{"role": "user", "content": text}, {"role": "assistant", "content": "Noted, thank you."}]
-    return render_transcript(transcript_jsonl(turns)).strip()
+        turns += [
+            {"role": "user", "content": text},
+            {"role": "assistant", "content": "Noted, thank you."},
+        ]
+    return str(render_transcript(transcript_jsonl(turns))).strip()
 
 
 def _vault(tmp_path: Path) -> Path:
@@ -65,21 +68,28 @@ def _vault(tmp_path: Path) -> Path:
     return root
 
 
-def _context(tmp_path: Path):
+def _context(tmp_path: Path) -> GroundedContext:
     vault = _vault(tmp_path)
     snapshot = collect_corpus(vault, code_roots=(), daily_paths=[DAILY])
     user_turns = tuple(chunk for chunk in snapshot.chunks if "**user:**" in chunk.text)
     return build_grounded_context(
-        snapshot, user_turns, vault=vault, profile="BASE", budget=ContextBudget(None, 65_536, 1200, 512)
+        snapshot,
+        user_turns,
+        vault=vault,
+        profile="BASE",
+        budget=ContextBudget(None, 65_536, 1200, 512),
     )
 
 
-def _manifest(context) -> list[dict]:
-    body = context.prompt_context.split("<evidence_manifest>\n", 1)[1].split("\n</evidence_manifest>", 1)[0]
-    return json.loads(body)
+def _manifest(context: GroundedContext) -> list[dict[str, str]]:
+    body = context.prompt_context.split("<evidence_manifest>\n", 1)[1].split(
+        "\n</evidence_manifest>", 1
+    )[0]
+    entries: list[dict[str, str]] = json.loads(body)
+    return entries
 
 
-def _dated(context, words: str) -> set[str]:
+def _dated(context: GroundedContext, words: str) -> set[str]:
     return {entry.get("date", "") for entry in _manifest(context) if words in entry["text"]}
 
 

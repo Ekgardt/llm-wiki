@@ -52,7 +52,7 @@ from collections.abc import Callable, Mapping
 from contextvars import ContextVar
 from dataclasses import asdict
 from pathlib import Path, PureWindowsPath
-from typing import NamedTuple
+from typing import Any, NamedTuple
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import bounded_thread
@@ -4300,7 +4300,7 @@ def _build_tool_definitions() -> list:
 ALWAYS_LOAD_META = {"anthropic/alwaysLoad": True}
 
 
-def _make_tool(**kwargs):
+def _make_tool(**kwargs: Any) -> Any:
     """Create a tool that loads with the session, with structured output when supported."""
     if MCP_STRUCTURED_OUTPUT_AVAILABLE:
         kwargs["outputSchema"] = envelope_schema()

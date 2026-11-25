@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
+from typing import Any
 
 SCRIPTS = Path(__file__).resolve().parents[1] / "scripts"
 BENCHMARK = Path(__file__).resolve().parents[1] / "benchmark"
@@ -15,14 +16,16 @@ from longmemeval_vault import hypothesis_of  # noqa: E402
 from tally_pass import with_computed  # noqa: E402
 
 
-def _marked(derivation: str, inputs: list[str], text: str) -> dict:
+def _marked(derivation: str, inputs: list[str], text: str) -> dict[str, Any]:
     claim = {"text": text, "derivation": derivation, "inputs": inputs}
     with_computed({"claims": [claim]})
     return claim
 
 
 def test_a_count_is_the_number_of_distinct_entries_it_listed() -> None:
-    claim = _marked("count", ["road bike", "Mountain bike", "road  bike", "e-bike"], "You own two bikes.")
+    claim = _marked(
+        "count", ["road bike", "Mountain bike", "road  bike", "e-bike"], "You own two bikes."
+    )
 
     assert claim["computed"] == "3"
     assert claim["computed_stated"] is False
@@ -35,7 +38,9 @@ def test_a_count_stated_in_words_is_stated() -> None:
 
 
 def test_a_sum_adds_one_figure_per_entry() -> None:
-    claim = _marked("sum", ["$1,200 for the bike", "$85.50 helmet", "$14.5 lights"], "You spent $1,300.")
+    claim = _marked(
+        "sum", ["$1,200 for the bike", "$85.50 helmet", "$14.5 lights"], "You spent $1,300."
+    )
 
     assert claim["computed"] == "1300"
     assert claim["computed_stated"] is True
@@ -87,4 +92,6 @@ def test_the_stand_reads_a_figure_the_text_does_not_state() -> None:
     claim = _marked("count", ["a", "b", "c"], "You own two.")
 
     assert hypothesis_of({"claims": [claim]}) == "You own two. (computed from its inputs: 3)"
-    assert hypothesis_of({"claims": [_marked("count", ["a", "b"], "You own two.")]}) == "You own two."
+    assert (
+        hypothesis_of({"claims": [_marked("count", ["a", "b"], "You own two.")]}) == "You own two."
+    )

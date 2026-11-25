@@ -82,12 +82,19 @@ def test_the_generation_search_weighs_a_link_list_down() -> None:
     assert link_score < prose_score
 
 
-def test_a_chunk_is_judged_once_however_often_it_is_weighed(monkeypatch) -> None:
+def test_a_chunk_is_judged_once_however_often_it_is_weighed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     import provenance
 
     judged: list[str] = []
     real = provenance._navigation
-    monkeypatch.setattr(provenance, "_navigation", lambda text: judged.append(text) or real(text))
+
+    def recorded(text: str) -> bool:
+        judged.append(text)
+        return bool(real(text))
+
+    monkeypatch.setattr(provenance, "_navigation", recorded)
     monkeypatch.setattr(provenance, "_NAVIGATION_VERDICTS", {})
     text = RELATED + "\n<!-- judged once -->"
 
@@ -97,7 +104,7 @@ def test_a_chunk_is_judged_once_however_often_it_is_weighed(monkeypatch) -> None
     assert judged == [text]
 
 
-def test_the_oldest_verdict_makes_room_past_the_bound(monkeypatch) -> None:
+def test_the_oldest_verdict_makes_room_past_the_bound(monkeypatch: pytest.MonkeyPatch) -> None:
     import provenance
 
     monkeypatch.setattr(provenance, "_NAVIGATION_VERDICTS", {})

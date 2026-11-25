@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import sys
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -46,10 +47,10 @@ def vault(tmp_path: Path) -> Path:
     return root
 
 
-def _declined(vault: Path, question: str) -> dict:
+def _declined(vault: Path, question: str) -> dict[str, Any]:
     snapshot = collect_corpus(vault)
     chunk = next(item for item in snapshot.chunks if item.source_path.endswith("shop.md"))
-    return grounded_qa(
+    document: dict[str, Any] = grounded_qa(
         question,
         vault=vault,
         snapshot=snapshot,
@@ -57,6 +58,7 @@ def _declined(vault: Path, question: str) -> dict:
         generator=lambda prompt, system_prompt, max_tokens: DECLINED,
         profile="BASE",
     )
+    return document
 
 
 def test_a_declined_answer_carries_the_excerpts_and_a_hint_when_they_are_weak(vault: Path) -> None:
@@ -77,6 +79,8 @@ def test_excerpts_that_cover_the_question_come_without_a_hint(vault: Path) -> No
 
 
 def test_the_tool_warns_with_the_hint_beside_the_reason() -> None:
-    quality = mcp_server._grounded_abstention_quality({"reason": "Nothing names the boss.", "hint": "Search wider."})
+    quality = mcp_server._grounded_abstention_quality(
+        {"reason": "Nothing names the boss.", "hint": "Search wider."}
+    )
 
     assert quality["warnings"] == ["Nothing names the boss.", "Search wider."]

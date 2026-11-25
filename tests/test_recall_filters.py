@@ -326,10 +326,13 @@ def test_since_and_until_together_keep_the_days_between() -> None:
     )
     for path, day in (("early", "2026-01-01"), ("inside", "2026-06-15"), ("late", "2026-12-01")):
         connection.execute(
-            "UPDATE chunks SET valid_from = ? WHERE source_path = ?", [day, f"knowledge/notes/{path}.md"]
+            "UPDATE chunks SET valid_from = ? WHERE source_path = ?",
+            [day, f"knowledge/notes/{path}.md"],
         )
 
-    assert _paths(connection, since="2026-06-01", until="2026-06-30") == ["knowledge/notes/inside.md"]
+    assert _paths(connection, since="2026-06-01", until="2026-06-30") == [
+        "knowledge/notes/inside.md"
+    ]
 
 
 def test_every_leg_drops_a_hit_dated_after_until() -> None:
@@ -349,17 +352,27 @@ def test_without_a_generation_an_until_ceiling_leaves_out_later_pages(
 ) -> None:
     monkeypatch.setattr(search_memory, "ROOT", tmp_path)
     late = _markdown_page(tmp_path, "cache-late", "qa", "cache policy")
-    late.write_text("---\ntype: qa\ntimestamp: 2026-11-20\n---\n# cache-late\n\ncache policy\n", encoding="utf-8")
+    late.write_text(
+        "---\ntype: qa\ntimestamp: 2026-11-20\n---\n# cache-late\n\ncache policy\n",
+        encoding="utf-8",
+    )
     early = _markdown_page(tmp_path, "cache-early", "qa", "cache policy")
-    early.write_text("---\ntype: qa\ntimestamp: 2026-03-01\n---\n# cache-early\n\ncache policy\n", encoding="utf-8")
+    early.write_text(
+        "---\ntype: qa\ntimestamp: 2026-03-01\n---\n# cache-early\n\ncache policy\n",
+        encoding="utf-8",
+    )
 
-    hits = search_memory.markdown_hits("cache", limit=5, page_paths=[late, early], until="2026-06-30")
+    hits = search_memory.markdown_hits(
+        "cache", limit=5, page_paths=[late, early], until="2026-06-30"
+    )
 
     assert [Path(hit["path"]).stem for hit in hits] == ["cache-early"]
 
 
 def test_recall_reads_until_as_a_date_that_orders_rather_than_cuts() -> None:
-    filters = mcp_server._recall_filters({"query": "q", "since": "2026-11-01", "until": "2026-11-30"})
+    filters = mcp_server._recall_filters(
+        {"query": "q", "since": "2026-11-01", "until": "2026-11-30"}
+    )
 
     assert filters == {"since": "2026-11-01", "until": "2026-11-30"}
     assert mcp_server._without_dates(filters) == {}

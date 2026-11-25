@@ -121,7 +121,9 @@ _LOADED: dict[tuple[str, int], Vocabulary] = {}
 
 
 def _artifact_identity(connection: sqlite3.Connection) -> tuple[str, int] | None:
-    path = next((str(row[2]) for row in connection.execute("PRAGMA database_list") if row[1] == "main"), "")
+    path = next(
+        (str(row[2]) for row in connection.execute("PRAGMA database_list") if row[1] == "main"), ""
+    )
     if not path or not os.path.exists(path):
         return None
     return path, os.stat(path).st_mtime_ns
@@ -129,12 +131,18 @@ def _artifact_identity(connection: sqlite3.Connection) -> tuple[str, int] | None
 
 def _read_vocabulary(connection: sqlite3.Connection) -> Vocabulary:
     _create_vocabulary(connection)
-    documents = {str(term): int(doc) for term, doc in connection.execute(f"SELECT term, doc FROM {_VOCABULARY}")}
+    documents = {
+        str(term): int(doc)
+        for term, doc in connection.execute(f"SELECT term, doc FROM {_VOCABULARY}")
+    }
     return Vocabulary(tuple(sorted(documents)), documents)
 
 
 def vocabulary(connection: sqlite3.Connection) -> Vocabulary:
-    """The artifact's vocabulary, read once per immutable file; an in-memory artifact is read each time."""
+    """The artifact's vocabulary, read once per immutable file.
+
+    An in-memory artifact has no file to remember, so it is read each time.
+    """
     identity = _artifact_identity(connection)
     if identity is None:
         return _read_vocabulary(connection)
@@ -145,7 +153,9 @@ def vocabulary(connection: sqlite3.Connection) -> Vocabulary:
 
 
 def _common_prefix(left: str, right: str) -> int:
-    return next((i for i, (a, b) in enumerate(zip(left, right)) if a != b), min(len(left), len(right)))
+    shorter = min(len(left), len(right))
+    pairs = enumerate(zip(left[:shorter], right[:shorter], strict=True))
+    return next((index for index, (a, b) in pairs if a != b), shorter)
 
 
 def _extend(rows: list[list[int]], term: str, word: str, bound: int) -> int | None:
@@ -183,13 +193,18 @@ def _within(terms: Sequence[str], word: str, bound: int) -> dict[str, int]:
 
 
 def _closest(left: dict[str, int], right: dict[str, int], bound: int) -> dict[str, int]:
-    return {term: min(left.get(term, bound + 1), right.get(term, bound + 1)) for term in left.keys() | right.keys()}
+    return {
+        term: min(left.get(term, bound + 1), right.get(term, bound + 1))
+        for term in left.keys() | right.keys()
+    }
 
 
 def _nearest(connection: sqlite3.Connection, word: str, bound: int, tokenizer: str) -> list[str]:
     stem = _stemmed(connection, word, tokenizer)
     terms = vocabulary(connection)
-    distances = _closest(_within(terms.terms, word, bound), _within(terms.terms, stem, bound), bound)
+    distances = _closest(
+        _within(terms.terms, word, bound), _within(terms.terms, stem, bound), bound
+    )
     scored = sorted(
         (distance, -terms.documents[term], term)
         for term, distance in distances.items()

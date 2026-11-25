@@ -3307,7 +3307,12 @@ def generation_eligible_paths(
     if not paths:
         return set()
     filters, values = _generation_filters(
-        scope=scope, since=since, until=until, as_of=as_of, page_type=page_type, path_prefix=path_prefix
+        scope=scope,
+        since=since,
+        until=until,
+        as_of=as_of,
+        page_type=page_type,
+        path_prefix=path_prefix,
     )
     wanted = sorted(paths)
     placeholders = ", ".join("?" for _ in wanted)
@@ -3572,7 +3577,12 @@ def _generation_fts_search(
     with _generation_sqlite_guard(connection, deadline, cancelled):
         connection.row_factory = sqlite3.Row
         filters, values = _generation_filters(
-            scope=scope, since=since, until=until, as_of=as_of, page_type=page_type, path_prefix=path_prefix
+            scope=scope,
+            since=since,
+            until=until,
+            as_of=as_of,
+            page_type=page_type,
+            path_prefix=path_prefix,
         )
         _register_filename_stem_function(connection)
         exact_rows = _exact_filename_rows(
@@ -3766,7 +3776,12 @@ def _vector_scored_rows(
     puts those same pages at 1-14.
     """
     filters, values = _generation_filters(
-        scope=scope, since=since, until=until, as_of=as_of, page_type=page_type, path_prefix=path_prefix
+        scope=scope,
+        since=since,
+        until=until,
+        as_of=as_of,
+        page_type=page_type,
+        path_prefix=path_prefix,
     )
     with _generation_sqlite_guard(connection, deadline, cancelled):
         rows = connection.execute(
@@ -4188,7 +4203,12 @@ def _retired_page_named(normalized_stem: str) -> Path | None:
 
 
 def _recalled_retired_hit(
-    normalized_stem: str, *, project: str | None, since: str | None, until: str | None, as_of: str | None
+    normalized_stem: str,
+    *,
+    project: str | None,
+    since: str | None,
+    until: str | None,
+    as_of: str | None,
 ) -> dict | None:
     page = _retired_page_named(normalized_stem)
     if page is None:

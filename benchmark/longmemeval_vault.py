@@ -704,7 +704,7 @@ def _uncited_hypothesis(document: dict) -> str:
     return UNCITED + unverified
 
 
-def _claim_text(claim: dict) -> str:
+def _claim_text(claim: Mapping[str, object]) -> str:
     """The claim's words, followed by the figure code computed when they do not state it."""
     text = str(claim.get("text", ""))
     if claim.get("computed_stated") is not False:
@@ -766,7 +766,9 @@ def _compile_trace_metrics(context: object) -> dict[str, object]:
     }
 
 
-def _measured_compile(root: Path, snapshot: object, rows: list[dict], profile: str, question: dict) -> dict:
+def _measured_compile(
+    root: Path, snapshot: Any, rows: list[Any], profile: str, question: dict[str, Any]
+) -> dict[str, object]:
     """One extra compile of the reader's first context, for its trace only. No provider call."""
     from context_budget import ContextBudget
     from query_memory import QA_OUTPUT_RESERVE_BYTES, build_grounded_context
@@ -785,7 +787,7 @@ def _measured_compile(root: Path, snapshot: object, rows: list[dict], profile: s
     return {**_compile_trace_metrics(context), **_context_sessions(question, context)}
 
 
-def _context_sessions(question: Mapping[str, object], context: object) -> dict[str, int]:
+def _context_sessions(question: Mapping[str, object], context: Any) -> dict[str, int]:
     """How many sessions, and how many labelled answer sessions, the reader's excerpts name."""
     named = {item.session for item in context.evidence if item.session}
     return {
