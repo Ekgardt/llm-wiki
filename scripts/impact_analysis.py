@@ -18,7 +18,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-import bounded_thread  # noqa: E402
+import bounded_thread
 from bounded_io import read_stable_bytes  # noqa: E402
 from corpus_snapshot import (  # noqa: E402
     CorpusChanged,

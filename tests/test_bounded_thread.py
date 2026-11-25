@@ -31,7 +31,9 @@ def interpreter_join_ignores_its_timeout(monkeypatch: pytest.MonkeyPatch) -> Non
     monkeypatch.setattr(threading.Thread, "join", join)
 
 
-def test_a_timed_join_returns_while_the_thread_still_runs(interpreter_join_ignores_its_timeout):
+def test_a_timed_join_returns_while_the_thread_still_runs(
+    interpreter_join_ignores_its_timeout: None,
+) -> None:
     release = threading.Event()
     thread = bounded_thread.BoundedThread(target=release.wait, args=(SHORT_TIMEOUT,))
     thread.start()
@@ -44,14 +46,14 @@ def test_a_timed_join_returns_while_the_thread_still_runs(interpreter_join_ignor
     assert not thread.is_alive()
 
 
-def test_a_finished_thread_is_joined_whole_by_a_timed_join():
+def test_a_finished_thread_is_joined_whole_by_a_timed_join() -> None:
     thread = bounded_thread.BoundedThread(target=lambda: None)
     thread.start()
     thread.join(SHORT_TIMEOUT)
     assert not thread.is_alive()
 
 
-def test_a_thread_that_raises_still_ends_its_timed_join(monkeypatch: pytest.MonkeyPatch):
+def test_a_thread_that_raises_still_ends_its_timed_join(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(threading, "excepthook", lambda _args: None)
 
     def fail() -> None:
@@ -72,7 +74,7 @@ def _plain_thread_constructions(path: Path) -> list[str]:
     ]
 
 
-def test_no_script_starts_a_thread_whose_join_can_lose_its_bound():
+def test_no_script_starts_a_thread_whose_join_can_lose_its_bound() -> None:
     scripts = sorted((ROOT / "scripts").rglob("*.py"))
     offenders = [
         site

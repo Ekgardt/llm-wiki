@@ -474,7 +474,9 @@ def test_a_second_stop_after_a_failed_one_keeps_the_first_error_visible(
     child and reported "child exited 1 before cleanup" instead."""
     calls: list[object] = []
 
-    def terminate(process, *, tracked_descendants=memory_queue._DISCOVER_DESCENDANTS):
+    def terminate(
+        process: object, *, tracked_descendants: object = memory_queue._DISCOVER_DESCENDANTS
+    ) -> set[int]:
         calls.append(tracked_descendants)
         if len(calls) == 1:
             raise memory_queue.QueueOperationError("process_cleanup_failed")

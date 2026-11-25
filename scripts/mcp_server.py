@@ -55,7 +55,7 @@ from pathlib import Path, PureWindowsPath
 from typing import NamedTuple
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-import bounded_thread  # noqa: E402
+import bounded_thread
 
 # Run as a program, this file is the supervisor that restarts the server when its
 # code changes; the server itself runs in a child with LLM_WIKI_MCP_WORKER=1. See

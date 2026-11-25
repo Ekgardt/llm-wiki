@@ -44,7 +44,7 @@ def _forget(thread: threading.Thread) -> None:
 
 def start(target: Callable[[], object], *, name: str) -> threading.Thread:
     """Start `target` on a daemon thread that `settle` will wait for."""
-    thread = bounded_thread.BoundedThread(target=_tracked(target), name=name, daemon=True)
+    thread: threading.Thread = bounded_thread.BoundedThread(target=_tracked(target), name=name, daemon=True)
     with _LOCK:
         _RUNNING.add(thread)
         _register_exit_settle()

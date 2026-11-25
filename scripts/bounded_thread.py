@@ -16,10 +16,11 @@ holds the scripts to that.
 from __future__ import annotations
 
 import threading
+from typing import Any
 
 
 class BoundedThread(threading.Thread):
-    def __init__(self, *args, **kwargs) -> None:
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
         super().__init__(*args, **kwargs)
         self._run_finished = threading.Event()
 

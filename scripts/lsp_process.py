@@ -2852,7 +2852,7 @@ def _adopt_recovery_thread_locked(
         return None
     coordinator.recovery_stop.clear()
     coordinator.recovery_wake.clear()
-    replacement = bounded_thread.BoundedThread(
+    replacement: threading.Thread = bounded_thread.BoundedThread(
         target=_recovery_loop,
         args=(instance,),
         name=f"lsp-recovery-{instance.owner_nonce}",
@@ -3407,7 +3407,7 @@ def _adopt_heartbeat_locked(
         return None
     coordinator.heartbeat_stop.clear()
     coordinator.heartbeat_wake.clear()
-    heartbeat = bounded_thread.BoundedThread(
+    heartbeat: threading.Thread = bounded_thread.BoundedThread(
         target=_heartbeat_loop,
         args=(instance,),
         name=f"lsp-heartbeat-{instance.owner_nonce}",

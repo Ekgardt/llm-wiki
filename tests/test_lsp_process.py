@@ -10567,7 +10567,7 @@ def test_posix_failure_retry_repeats_directory_fsync_before_success(
         owner.close()
 
 
-@pytest.mark.skipif(os.name != "posix", reason="the wake pipe exists where a pipe can be selected on")
+@pytest.mark.skipif(os.name != "posix", reason="the wake pipe exists where pipes can be selected")
 def test_a_second_cleanup_pass_leaves_the_reused_wake_descriptor_alone() -> None:
     """The drain thread closes the wake pipe's read end; a later cleanup pass closed
     the same number again, by then another file's: a lease write failed with EBADF

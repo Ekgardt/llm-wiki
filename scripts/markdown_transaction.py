@@ -8225,7 +8225,7 @@ class MarkdownCoordinator:
         lost: threading.Event,
     ) -> threading.Thread:
         # The gate is already taken; its expiry is counted from here.
-        heartbeat = bounded_thread.BoundedThread(
+        heartbeat: threading.Thread = bounded_thread.BoundedThread(
             target=self._heartbeat_canonical_writer_gate,
             args=(registry, lease, stop, lost, time.monotonic()),
             name="markdown-writer-heartbeat",

@@ -1869,7 +1869,9 @@ def test_the_recorded_hash_is_of_the_plaintext(vault: Path, state_root: Path) ->
     assert before["sha256"] == hashlib.sha256(b"before\n").hexdigest()
 
 
-def test_a_mutation_slower_than_the_writer_wait_still_commits(tmp_path, monkeypatch):
+def test_a_mutation_slower_than_the_writer_wait_still_commits(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """The writer wait bounds waiting for another writer, not this process's own apply.
 
     A slow Windows disk spent the 10 s writer wait inside one archive move; the move
@@ -1883,10 +1885,12 @@ def test_a_mutation_slower_than_the_writer_wait_still_commits(tmp_path, monkeypa
     monkeypatch.setattr(markdown_transaction, "_WRITER_WAIT_SECONDS", slow_target_seconds / 2)
     real_killpoint = MarkdownCoordinator._killpoint
 
-    def slow_disk(self, name, parent_transaction_id=None):
+    def slow_disk(
+        self: MarkdownCoordinator, name: str, parent_transaction_id: str | None = None
+    ) -> None:
         if name == "after_each_target":
             time.sleep(slow_target_seconds)
-        return real_killpoint(self, name, parent_transaction_id)
+        real_killpoint(self, name, parent_transaction_id)
 
     monkeypatch.setattr(MarkdownCoordinator, "_killpoint", slow_disk)
     first = vault / "knowledge" / "notes" / "a.md"

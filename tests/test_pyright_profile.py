@@ -3196,7 +3196,7 @@ def test_node_probe_never_constructs_a_reader_thread(
     server = create_pyright_fixture(repository)
     _install_node_probe(monkeypatch, tmp_path)
     created_names: list[object] = []
-    real_thread = bounded_thread.BoundedThread
+    real_thread: type[threading.Thread] = bounded_thread.BoundedThread
 
     def thread(*args: object, **kwargs: object) -> threading.Thread:
         created_names.append(kwargs.get("name"))

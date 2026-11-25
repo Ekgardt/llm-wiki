@@ -29,7 +29,9 @@ class _DeafQueue:
         return lease
 
 
-def test_a_heartbeat_thread_that_ignores_stop_is_refused_by_name(monkeypatch):
+def test_a_heartbeat_thread_that_ignores_stop_is_refused_by_name(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     monkeypatch.setattr(memory_queue, "HEARTBEAT_STOP_FLOOR_SECONDS", 0.05)
     queue = _DeafQueue()
     lease = type("Lease", (), {"id": "lease-1"})()
@@ -44,7 +46,9 @@ def test_a_heartbeat_thread_that_ignores_stop_is_refused_by_name(monkeypatch):
     assert not heartbeat._thread.is_alive()
 
 
-def test_the_refusal_keeps_its_bound_when_the_interpreter_join_ignores_its_timeout(monkeypatch):
+def test_the_refusal_keeps_its_bound_when_the_interpreter_join_ignores_its_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """CPython 3.13 can turn a timed join into an untimed one (python/cpython#161712).
 
     A hosted Windows runner did: the stop waited 30 s for the deaf heartbeat to end
