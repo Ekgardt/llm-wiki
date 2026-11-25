@@ -1359,7 +1359,7 @@ def test_delayed_crash_restart_commits_with_a_short_live_deadline(
         replacement_deadline = fresh_deadlines[0]
         # Both read one clock forward from the fresh deadline, so neither races it.
         assert replacement_margins[0] <= fresh_margins[0]
-        assert 0 < fresh_margins[0]
+        assert fresh_margins[0] > 0
         assert protocol_deadlines[1] == replacement_deadline
         assert bootstraps[1][1] == replacement_deadline
         assert commit_deadlines == [replacement_deadline]
@@ -6254,6 +6254,8 @@ def test_permanently_alive_child_preserves_evidence_without_pipe_close_or_join(
                 raise AssertionError("pipe close must not run while child is alive")
             super().close()
 
+    child_waits: list[float] = []
+
     class PermanentlyAliveProcess:
         args = _command("--ignored-secret", "secret")
         pid = 525252
@@ -6266,13 +6268,11 @@ def test_permanently_alive_child_preserves_evidence_without_pipe_close_or_join(
         def poll(self) -> int | None:
             return None if self.alive else 1
 
-        waits: list[float] = []
-
         def wait(self, timeout: float | None = None) -> int:
             if not self.alive:
                 return 1
             assert timeout is not None
-            self.waits.append(timeout)
+            child_waits.append(timeout)
             time.sleep(timeout)
             raise subprocess.TimeoutExpired(self.args, timeout)
 
@@ -6311,9 +6311,9 @@ def test_permanently_alive_child_preserves_evidence_without_pipe_close_or_join(
     # Every wait on the child that never exits fits inside the one cleanup budget.
     assert _within_cleanup_budget(cleanup) and all(
         timeout <= deadline - before
-        for timeout in child.waits
+        for timeout in child_waits
         for before, deadline, _after in cleanup
-    ), (cleanup, child.waits)
+    ), (cleanup, child_waits)
     assert (owner / "failure.json").is_file()
     assert (owner / "owner.json").is_file()
     child.cleanup_allowed = True
