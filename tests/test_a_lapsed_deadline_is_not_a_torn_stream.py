@@ -12,6 +12,7 @@ import os
 import threading
 import time
 from pathlib import Path
+from types import SimpleNamespace
 
 import pyright_session as pyright_session_module
 import pytest
@@ -20,6 +21,7 @@ from lsp_protocol import LspProtocol, ProtocolViolation
 from pyright_session import PyrightSession
 from repository_scope import resolve_repository_scope
 
+from tests.clocks import VirtualClock
 from tests.code_kernel_helpers import create_python_repository
 from tests.fake_lsp_server import FakeLspServer
 from tests.slow_machine import SHORT_TIMEOUT
@@ -177,10 +179,13 @@ def test_a_server_that_opened_a_token_still_gets_the_whole_deadline(
     )
     session = _gated_session(tmp_path, state_root)
     session._retain_work_done_token("loading")
-    started = time.monotonic()
+    clock = VirtualClock(500.0)
     try:
-        session._await_progress_gate(started + 0.2)
-        assert time.monotonic() - started >= 0.2
+        with monkeypatch.context() as virtual:
+            virtual.setattr(pyright_session_module, "time", clock)
+            virtual.setattr(session, "_condition", SimpleNamespace(wait=clock.sleep))
+            session._await_progress_gate(500.0 + 0.2)
+        assert clock.now >= 500.0 + 0.2
     finally:
         session.close(deadline=time.monotonic() + SHORT_TIMEOUT)
 

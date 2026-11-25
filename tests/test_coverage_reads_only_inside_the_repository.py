@@ -18,6 +18,8 @@ if str(SCRIPTS_DIR) not in sys.path:
 
 import path_coverage  # noqa: E402
 
+from tests.slow_machine import run_within_hang_bound  # noqa: E402
+
 
 class _EmptyGraph:
     generation_id = "generation-x"
@@ -67,10 +69,10 @@ def test_files_inside_keep_their_honest_answers(repository: Path) -> None:
 def test_a_fifo_and_a_symlink_are_refused_without_waiting(repository: Path) -> None:
     os.mkfifo(repository / "pipe")
     (repository / "link.txt").symlink_to(repository.parent / "outside.txt")
-    started = time.monotonic()
-    verdicts = (_freshness_of(repository, "pipe"), _freshness_of(repository, "link.txt"))
+    verdicts = run_within_hang_bound(
+        lambda: (_freshness_of(repository, "pipe"), _freshness_of(repository, "link.txt"))
+    )
     assert verdicts == ("unreadable", "unreadable")
-    assert time.monotonic() - started < 5
 
 
 def test_a_file_over_the_ceiling_is_unreadable_not_missing(repository: Path) -> None:

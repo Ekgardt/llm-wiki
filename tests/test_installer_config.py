@@ -382,15 +382,16 @@ def test_hung_or_oversized_debug_probe_is_bounded_and_cleans_child(
     tmp_path: Path, mode: str
 ) -> None:
     pid_file = tmp_path / f"{mode}.pid"
+    finished = tmp_path / f"{mode}.finished"
+    suffix = f"; pathlib.Path({str(finished)!r}).write_text('finished')"
     prefix = (
         "import os, pathlib, sys, time; "
         f"pathlib.Path({str(pid_file)!r}).write_text(str(os.getpid())); "
     )
     if mode == "hung":
-        code = prefix + "time.sleep(30)"
+        code = prefix + "time.sleep(30)" + suffix
     else:
-        code = prefix + "sys.stdout.write('x' * 1000000); sys.stdout.flush(); time.sleep(30)"
-    started = time.monotonic()
+        code = prefix + "sys.stdout.write('x' * 1000000); sys.stdout.flush(); time.sleep(30)" + suffix
 
     status = probe_effective_entry(
         [sys.executable, "-c", code],
@@ -402,7 +403,7 @@ def test_hung_or_oversized_debug_probe_is_bounded_and_cleans_child(
     )
 
     assert status == "configured_unverified"
-    assert time.monotonic() - started < 3
+    assert not finished.exists()
     pid = _await_probe_pid(pid_file)
     for _ in range(100):
         if not _process_exists(pid):

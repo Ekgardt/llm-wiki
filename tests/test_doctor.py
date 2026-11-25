@@ -18,6 +18,7 @@ from pathlib import Path
 
 import pytest
 
+from tests.opened_files import record_opens_in
 from tests.slow_machine import LONG_TIMEOUT, SHORT_TIMEOUT
 
 SCRIPTS = Path(__file__).resolve().parent.parent / "scripts"
@@ -1610,7 +1611,7 @@ def _index_verdicts(index, contents, root, state_root, home) -> list:
     return verdicts
 
 
-def test_queue_scan_is_bounded_by_count_and_file_size(tmp_path):
+def test_queue_scan_is_bounded_by_count_and_file_size(tmp_path, monkeypatch):
     from doctor import run_doctor
 
     root, state_root, home = _build_root(tmp_path)
@@ -1618,19 +1619,18 @@ def test_queue_scan_is_bounded_by_count_and_file_size(tmp_path):
     queue.mkdir()
     for number in range(250):
         (queue / f"{number:04}.json").write_bytes(b"x" * 70_000)
+    queue_reads = record_opens_in(monkeypatch, queue)
 
-    started = time.perf_counter()
     report = run_doctor(
         root=root,
         state_root=state_root,
         home=home,
         time_budget_seconds=0.1,
     )
-    elapsed = time.perf_counter() - started
     details = _check(report, "queue")["details"]
 
     assert (
-        elapsed < 0.5,
+        queue_reads == [],
         details["artifact_truncated"],
         details["legacy_retained"] <= 200,
         _check(report, "queue")["status"],

@@ -18,22 +18,27 @@ if str(SCRIPTS_DIR) not in sys.path:
 
 import memory_queue  # noqa: E402
 
+from tests.slow_machine import LONG_TIMEOUT  # noqa: E402
+
 
 def _long_processor(task: dict) -> bool:
     time.sleep(task["payload"]["seconds"])
+    Path(task["payload"]["finished"]).write_text("finished", encoding="utf-8")
     return True
 
 
-def test_the_child_is_stopped_soon_after_the_lease_is_lost():
+def test_the_child_is_stopped_soon_after_the_lease_is_lost(tmp_path: Path):
+    finished = tmp_path / "finished"
+    payload = {"seconds": LONG_TIMEOUT, "finished": str(finished)}
     started = time.monotonic()
 
     def lease_lost() -> bool:
         return time.monotonic() - started > 3.0
 
     with pytest.raises(memory_queue.QueueOperationError, match="lease_lost"):
-        memory_queue._run_processor_child(_long_processor, {"payload": {"seconds": 120}}, 90.0, lease_lost=lease_lost)
+        memory_queue._run_processor_child(_long_processor, {"payload": payload}, 90.0, lease_lost=lease_lost)
 
-    assert time.monotonic() - started < 30
+    assert not finished.exists()
 
 
 def test_only_the_child_runner_is_made_interruptible():
