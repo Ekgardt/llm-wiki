@@ -13,6 +13,8 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
+import bounded_thread
+
 SCHEMA_VERSION = "repository-scope/v1"
 # Ten, not two, and the same ten `repository_index` gives the same operation. Two
 # seconds is a Linux figure: on a hosted Windows runner spawning git and reading
@@ -368,7 +370,7 @@ class _GitWatch:
         self.cancelled = cancelled
         self.stopped = threading.Event()
         self.reason: list[str] = []
-        self.thread = threading.Thread(target=self._monitor, daemon=True)
+        self.thread = bounded_thread.BoundedThread(target=self._monitor, daemon=True)
 
     def _caller_cancelled(self) -> bool:
         """The caller's answer; a callback that raises is taken as "stop".

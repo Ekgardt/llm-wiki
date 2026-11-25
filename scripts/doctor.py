@@ -26,6 +26,7 @@ from pathlib import Path
 from types import MappingProxyType
 from typing import Any, NamedTuple
 
+import bounded_thread
 import integration_hook_config as _hook_config
 import process_liveness
 import reliable_memory
@@ -5843,8 +5844,8 @@ def _start_codex_readers(process: Any) -> _CodexProbeStreams:
             process.kill()
 
     readers = [
-        threading.Thread(target=drain, args=("stdout", process.stdout), daemon=True),
-        threading.Thread(target=drain, args=("stderr", process.stderr), daemon=True),
+        bounded_thread.BoundedThread(target=drain, args=("stdout", process.stdout), daemon=True),
+        bounded_thread.BoundedThread(target=drain, args=("stderr", process.stderr), daemon=True),
     ]
     for reader in readers:
         reader.start()
@@ -6830,7 +6831,7 @@ class _MaintenanceHeartbeat:
 
     def __enter__(self) -> _MaintenanceHeartbeat:
         self.check()
-        self._thread = threading.Thread(
+        self._thread = bounded_thread.BoundedThread(
             target=self._heartbeat_loop,
             name="llm-wiki-doctor-heartbeat",
             daemon=True,

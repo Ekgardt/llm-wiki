@@ -516,9 +516,10 @@ def test_optional_boundary_caps_concurrent_stragglers(monkeypatch):
 
 
 def test_optional_boundary_releases_capacity_when_thread_start_fails(monkeypatch):
+    import bounded_thread
     import retrieval
 
-    real_thread = retrieval.threading.Thread
+    real_thread = bounded_thread.BoundedThread
     starts = 0
 
     # A real thread, so the registry that tracks inference threads forgets it when it
@@ -531,7 +532,7 @@ def test_optional_boundary_releases_capacity_when_thread_start_fails(monkeypatch
                 raise RuntimeError("thread startup failed")
             super().start()
 
-    monkeypatch.setattr(retrieval.threading, "Thread", FailingThenRealThread)
+    monkeypatch.setattr(bounded_thread, "BoundedThread", FailingThenRealThread)
     monkeypatch.setattr(
         retrieval,
         "_OPTIONAL_STAGE_SLOTS",
@@ -580,6 +581,7 @@ def test_optional_boundary_releases_the_acquired_semaphore_after_rebind(monkeypa
 def test_optional_boundary_start_failure_releases_acquired_semaphore_after_rebind(
     monkeypatch,
 ):
+    import bounded_thread
     import retrieval
 
     acquired_slots = threading.BoundedSemaphore(1)
@@ -594,7 +596,7 @@ def test_optional_boundary_start_failure_releases_acquired_semaphore_after_rebin
             raise RuntimeError("thread startup failed")
 
     monkeypatch.setattr(retrieval, "_OPTIONAL_STAGE_SLOTS", acquired_slots)
-    monkeypatch.setattr(retrieval.threading, "Thread", RebindingFailedThread)
+    monkeypatch.setattr(bounded_thread, "BoundedThread", RebindingFailedThread)
 
     with pytest.raises(RuntimeError, match="thread startup failed"):
         retrieval._run_optional_bounded(

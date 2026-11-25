@@ -15,6 +15,7 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any, BinaryIO
 
+import bounded_thread
 from bounded_io import IO_CHUNK_BYTES
 from interruption import (
     exception_reaches as _exception_reaches,
@@ -1140,12 +1141,12 @@ class LspProtocol:
         self._owner_release_errors: dict[str, BaseException] = {}
         self.stdout_reader_owner: int | None = None
         self.stdin_writer_owner: int | None = None
-        self.writer_thread = threading.Thread(
+        self.writer_thread = bounded_thread.BoundedThread(
             target=self._writer_loop,
             name=f"lsp-stdin-{generation_nonce}",
             daemon=True,
         )
-        self.reader_thread = threading.Thread(
+        self.reader_thread = bounded_thread.BoundedThread(
             target=self._reader_loop,
             name=f"lsp-stdout-{generation_nonce}",
             daemon=True,

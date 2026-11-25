@@ -18,6 +18,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
+import bounded_thread
 import markdown_transaction
 import memory_queue
 from installed_memory_repair import validate_reliability_v3_runtime
@@ -236,7 +237,7 @@ def _output_readers(
     lock = threading.Lock()
     total = [0]
     return [
-        threading.Thread(
+        bounded_thread.BoundedThread(
             target=_read_command_stream,
             kwargs={
                 "stream": stream,
@@ -675,7 +676,7 @@ def _heartbeat(registry: OwnershipRegistry, lease: OwnerLease) -> Iterator[None]
     failures: list[BaseException] = []
     # The owner is already held; its expiry is counted from here.
     held_since = time.monotonic()
-    thread = threading.Thread(
+    thread = bounded_thread.BoundedThread(
         target=_maintain_heartbeat,
         args=(registry, lease, stop, failures, held_since),
         name="backup-owner-heartbeat",

@@ -55,6 +55,7 @@ from pathlib import Path, PureWindowsPath
 from typing import NamedTuple
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import bounded_thread
 
 # Run as a program, this file is the supervisor that restarts the server when its
 # code changes; the server itself runs in a child with LLM_WIKI_MCP_WORKER=1. See
@@ -353,7 +354,7 @@ def _run_submitted(submitted, context, function, args) -> None:
 
 
 def _start_worker_thread(submitted, context, function, args) -> None:
-    thread = threading.Thread(
+    thread = bounded_thread.BoundedThread(
         target=_run_submitted,
         args=(submitted, context, function, args),
         name=f"llm-wiki-mcp-{next(_MCP_WORKER_IDS)}",
@@ -390,7 +391,7 @@ def _started_code_graph_worker(function, args, kwargs):
             "code graph workers are still busy with previously abandoned work"
         )
     outcome = concurrent.futures.Future()
-    thread = threading.Thread(
+    thread = bounded_thread.BoundedThread(
         target=_run_code_graph_work,
         args=(function, args, kwargs, outcome),
         name="llm-wiki-code-graph",

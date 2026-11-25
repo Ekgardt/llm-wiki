@@ -15,9 +15,11 @@ import sys
 import threading
 import time
 import urllib.request
+from collections.abc import Callable
 from pathlib import Path
 from types import SimpleNamespace
 
+import bounded_thread
 import lsp_paths
 import lsp_process_tree
 import pyright_profile
@@ -3195,7 +3197,7 @@ def test_node_probe_never_constructs_a_reader_thread(
     server = create_pyright_fixture(repository)
     _install_node_probe(monkeypatch, tmp_path)
     created_names: list[object] = []
-    real_thread = threading.Thread
+    real_thread: Callable[..., threading.Thread] = bounded_thread.BoundedThread
 
     def thread(*args: object, **kwargs: object) -> threading.Thread:
         created_names.append(kwargs.get("name"))
@@ -3203,7 +3205,7 @@ def test_node_probe_never_constructs_a_reader_thread(
             raise AssertionError("Node probe must not construct a reader thread")
         return real_thread(*args, **kwargs)
 
-    monkeypatch.setattr(threading, "Thread", thread)
+    monkeypatch.setattr(bounded_thread, "BoundedThread", thread)
 
     result = discover_pyright(
         scope,

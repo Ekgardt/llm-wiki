@@ -28,6 +28,7 @@ from datetime import datetime
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import bounded_thread
 from iso_time import local_now  # noqa: E402
 from memory_state import (  # noqa: E402
     MAX_CAPTURE_INTENT_BYTES,
@@ -509,7 +510,9 @@ class _CaptureKeepAlive:
         # and not from the moment the thread below first gets to run.
         self._held_since = time.monotonic()
         self._stop = threading.Event()
-        self._thread = threading.Thread(target=self._run, name="capture-keepalive", daemon=True)
+        self._thread = bounded_thread.BoundedThread(
+            target=self._run, name="capture-keepalive", daemon=True
+        )
 
     def __enter__(self) -> _CaptureKeepAlive:
         self._thread.start()

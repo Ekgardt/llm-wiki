@@ -10565,3 +10565,40 @@ def test_posix_failure_retry_repeats_directory_fsync_before_success(
     finally:
         monkeypatch.setattr(lsp_process.os, "fsync", real_fsync)
         owner.close()
+
+
+@pytest.mark.skipif(os.name != "posix", reason="the wake pipe exists where pipes can be selected")
+def test_a_second_cleanup_pass_leaves_the_reused_wake_descriptor_alone() -> None:
+    """The drain thread closes the wake pipe's read end; a later cleanup pass closed
+    the same number again, by then another file's: a lease write failed with EBADF
+    on macOS (runs 44812540936 and 45547456425)."""
+    stderr_read, stderr_write = os.pipe()
+    wake = lsp_process._new_stderr_wake()
+    assert wake is not None and wake.read_fd is not None
+    wake_number = wake.read_fd
+    generation = lsp_process._Generation("double-close", None, None, stderr_wake=wake)
+    generation.stderr_thread = threading.Thread(
+        target=lsp_process._drain_stderr,
+        args=(
+            os.fdopen(stderr_read, "rb", buffering=0),
+            generation.stderr,
+            generation.stderr_size,
+            generation.stderr_lock,
+            wake,
+        ),
+    )
+    generation.stderr_thread.start()
+    try:
+        assert lsp_process._stop_stderr_drain(generation, time.monotonic() + SHORT_TIMEOUT)
+        generation.stderr_thread = None
+        another_file = os.open(os.devnull, os.O_RDONLY)
+        os.dup2(another_file, wake_number)
+        os.close(another_file)
+
+        lsp_process._stop_stderr_drain(generation, time.monotonic() + SHORT_TIMEOUT)
+
+        os.fstat(wake_number)
+    finally:
+        with contextlib.suppress(OSError):
+            os.close(wake_number)
+        os.close(stderr_write)

@@ -19,7 +19,6 @@ import queue
 import re
 import subprocess
 import sys
-import threading
 import time
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import asdict, dataclass, field
@@ -27,6 +26,7 @@ from datetime import datetime
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import bounded_thread
 from markdown_transaction import mutate_knowledge, stable_operation_id  # noqa: E402
 from memory_state import ROOT  # noqa: E402
 from reply_json import object_with, reply_document  # noqa: E402
@@ -206,7 +206,9 @@ def _detached_provider(
             outcome.put((False, exc))
 
     context = contextvars.copy_context()
-    threading.Thread(target=context.run, args=(invoke,), name="grounded-qa-provider", daemon=True).start()
+    bounded_thread.BoundedThread(
+        target=context.run, args=(invoke,), name="grounded-qa-provider", daemon=True
+    ).start()
     return outcome
 
 

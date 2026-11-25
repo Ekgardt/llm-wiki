@@ -29,6 +29,8 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal, NamedTuple
 
+import bounded_thread
+
 if TYPE_CHECKING:
     from operational_ownership import OwnerLease
 
@@ -3643,12 +3645,14 @@ def _recover_initial_contention(
     deadline: float = float("inf"),
     cancelled: Callable[[], bool] | None = None,
 ) -> None:
-    deadline = min(deadline, time.monotonic() + _WRITER_WAIT_SECONDS)
+    # The writer wait bounds waiting for another writer; recovery's own disk work
+    # runs under the caller's deadline, however slow the disk.
+    wait_deadline = min(deadline, time.monotonic() + _WRITER_WAIT_SECONDS)
     attempt = 0
     while True:
         try:
             coordinator.recover(
-                writer_wait_seconds=max(0.0, deadline - time.monotonic()),
+                writer_wait_seconds=max(0.0, wait_deadline - time.monotonic()),
                 deadline=deadline,
                 cancelled=cancelled,
             )
@@ -3656,7 +3660,7 @@ def _recover_initial_contention(
         except (OSError, sqlite3.Error) as exc:
             if not _is_transient_writer_contention(exc):
                 raise
-            delay = _writer_retry_delay(attempt, deadline)
+            delay = _writer_retry_delay(attempt, wait_deadline)
             if delay <= 0:
                 raise
             time.sleep(delay)
@@ -4033,7 +4037,10 @@ def _settle_operation(
     deadline: float = float("inf"),
     cancelled: Callable[[], bool] | None = None,
 ) -> TransactionRecord | None:
-    deadline = min(deadline, time.monotonic() + _WRITER_WAIT_SECONDS)
+    # The writer wait bounds waiting for another process's preparation, not this
+    # process's own apply: a slow Windows disk spent 10 s on it and the committed
+    # move was reported as a write error (run 45615510034).
+    wait_deadline = min(deadline, time.monotonic() + _WRITER_WAIT_SECONDS)
     while True:
         coordinator._require_operation_active(deadline, cancelled)
         record = coordinator._record_for_operation_id(operation_id)
@@ -4047,7 +4054,7 @@ def _settle_operation(
         _recover_abandoned_preparation(
             coordinator, operation_id, deadline=deadline, cancelled=cancelled
         )
-        _require_settle_deadline(deadline)
+        _require_settle_deadline(wait_deadline)
         time.sleep(0.01)
 
 
@@ -8075,7 +8082,7 @@ class MarkdownCoordinator:
         self._local.gate_fence = fencing_epoch
         heartbeat_stop = threading.Event()
         heartbeat_lost = threading.Event()
-        heartbeat_thread = threading.Thread(
+        heartbeat_thread = bounded_thread.BoundedThread(
             target=self._heartbeat_writer_gate,
             args=(owner_token, fencing_epoch, heartbeat_stop, heartbeat_lost),
             name="markdown-writer-heartbeat",
@@ -8218,7 +8225,7 @@ class MarkdownCoordinator:
         lost: threading.Event,
     ) -> threading.Thread:
         # The gate is already taken; its expiry is counted from here.
-        heartbeat = threading.Thread(
+        heartbeat: threading.Thread = bounded_thread.BoundedThread(
             target=self._heartbeat_canonical_writer_gate,
             args=(registry, lease, stop, lost, time.monotonic()),
             name="markdown-writer-heartbeat",
@@ -8260,7 +8267,7 @@ class MarkdownCoordinator:
         The registry reclaims only a dead owner, and this process is alive, so a
         release left undone shut every other writer out until it exited (A-13).
         """
-        threading.Thread(
+        bounded_thread.BoundedThread(
             target=self._retry_release,
             args=(registry, lease),
             name="markdown-writer-release",
