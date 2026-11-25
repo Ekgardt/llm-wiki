@@ -11,7 +11,10 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 
 import code_graph  # noqa: E402
+import pytest
 import workspace_revision  # noqa: E402
+
+from tests.clocks import frozen_clock
 
 
 def test_a_git_run_gets_the_whole_budget_its_caller_gave():
@@ -20,8 +23,9 @@ def test_a_git_run_gets_the_whole_budget_its_caller_gave():
     assert workspace_revision._git_run_deadline(budget) == budget
 
 
-def test_a_git_run_without_a_budget_is_still_bounded():
-    bound = workspace_revision._git_run_deadline(None) - time.monotonic()
+def test_a_git_run_without_a_budget_is_still_bounded(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(workspace_revision, "time", frozen_clock(1000.0))
+    bound = workspace_revision._git_run_deadline(None) - 1000.0
 
     assert 0 < bound <= workspace_revision.GIT_STATUS_TIMEOUT_SECONDS
 

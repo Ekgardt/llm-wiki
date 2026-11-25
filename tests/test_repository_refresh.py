@@ -176,7 +176,7 @@ def test_the_cli_detect_verb_answers_json_and_exit_two_when_not_indexed(tmp_path
         [sys.executable, str(SCRIPTS / "repository_index.py"), "detect", str(repository)],
         capture_output=True,
         text=True,
-        timeout=120,
+        timeout=LONG_TIMEOUT,
         env=environment,
     )
 

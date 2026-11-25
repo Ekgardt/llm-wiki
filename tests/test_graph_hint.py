@@ -21,6 +21,7 @@ SCRIPTS = ROOT / "scripts"
 if str(SCRIPTS) not in sys.path:
     sys.path.insert(0, str(SCRIPTS))
 
+from tests.slow_machine import LONG_TIMEOUT  # noqa: E402
 from tests.test_repository_index import ALPHA, _repository  # noqa: E402
 
 # ------------------------------------------------------------ what was searched
@@ -135,7 +136,7 @@ def _hook(source: str, payload: dict, state: Path) -> str:
         input=json.dumps(payload).encode("utf-8"),
         capture_output=True,
         env={**os.environ, "LLM_WIKI_STATE_ROOT": str(state)},
-        timeout=60,
+        timeout=LONG_TIMEOUT,
         check=True,
     )
     return completed.stdout.decode("utf-8")
@@ -172,7 +173,7 @@ def test_garbage_on_stdin_never_fails_the_host(tmp_path):
         [sys.executable, str(SCRIPTS / "graph_hint.py"), "--source", "claude"],
         input=b"{not json",
         capture_output=True,
-        timeout=60,
+        timeout=LONG_TIMEOUT,
         check=False,
     )
     assert (completed.returncode, completed.stdout) == (0, b"")

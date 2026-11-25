@@ -17,6 +17,8 @@ from build_tiers import (  # noqa: E402
 )
 from llm_client import ProviderDescriptor  # noqa: E402
 
+from tests.slow_machine import SHORT_TIMEOUT
+
 
 def _model_descriptor(
     provider: str = "openai", model: str = "test-model"
@@ -41,7 +43,7 @@ def test_legacy_cli_starts_without_site_packages(arguments):
         [sys.executable, "-S", str(script), *arguments],
         capture_output=True,
         text=True,
-        timeout=30,
+        timeout=SHORT_TIMEOUT,
         check=False,
     )
 

@@ -52,12 +52,13 @@ from workspace_revision import (
     compute_workspace_revision,
 )
 
+from tests.clocks import TimeoutRecordingLock, VirtualClock
 from tests.code_kernel_helpers import (
     SemanticPyrightFixture,
     create_python_repository,
     create_semantic_pyright_fixture,
 )
-from tests.slow_machine import SHORT_TIMEOUT
+from tests.slow_machine import PAUSE_TIMEOUT, SHORT_TIMEOUT, run_within_hang_bound
 
 
 @pytest.fixture
@@ -1097,6 +1098,7 @@ def test_start_forwards_one_capped_deadline_without_shrinking_restart_budget(
     session = _session(repository, state_root, semantic_pyright)
     captured: dict[str, float] = {}
     start_invoked: list[float] = []
+    clock = VirtualClock(1000.0)
 
     class CapturedProcess:
         state = ProcessState.PROTOCOL_INITIALIZED
@@ -1133,8 +1135,7 @@ def test_start_forwards_one_capped_deadline_without_shrinking_restart_budget(
 
     def qualified_paths(*, deadline: float) -> tuple[Path, Path]:
         captured["paths"] = deadline
-        if preflight_delay:
-            time.sleep(preflight_delay)
+        clock.sleep(preflight_delay)
         return (
             Path(semantic_pyright.identity.node_executable),  # type: ignore[arg-type]
             Path(semantic_pyright.identity.server_executable),  # type: ignore[arg-type]
@@ -1155,7 +1156,7 @@ def test_start_forwards_one_capped_deadline_without_shrinking_restart_budget(
     ) -> CapturedProcess:
         assert cls is LspProcess
         assert callable(generation_guard)
-        start_invoked.append(time.monotonic())
+        start_invoked.append(clock.now)
         captured["process"] = deadline
         captured["bootstrap_timeout"] = bootstrap_timeout_seconds
         guard = generation_guard("captured-generation", deadline)
@@ -1170,11 +1171,13 @@ def test_start_forwards_one_capped_deadline_without_shrinking_restart_budget(
         "start_configured",
         classmethod(capture_start),
     )
-    before = time.monotonic()
+    before = clock.now
     caller_deadline = before + caller_seconds
     try:
-        session.start(deadline=caller_deadline)
-        after = time.monotonic()
+        with monkeypatch.context() as clocked:
+            clocked.setattr(pyright_session_module, "time", clock)
+            session.start(deadline=caller_deadline)
+        after = clock.now
         effective = captured["process"]
         assert {
             captured["paths"],
@@ -1185,19 +1188,15 @@ def test_start_forwards_one_capped_deadline_without_shrinking_restart_budget(
         } == {effective}
         if caller_seconds > STARTUP_SECONDS:
             assert effective < caller_deadline
-            assert before + STARTUP_SECONDS - 0.05 <= effective
-            assert effective <= before + STARTUP_SECONDS + 0.05
+            assert effective == before + STARTUP_SECONDS
         else:
             assert effective == caller_deadline
-        expected_budget = min(caller_seconds, STARTUP_SECONDS)
-        assert captured["bootstrap_timeout"] == pytest.approx(
-            expected_budget,
-            abs=0.05,
-        )
+        assert captured["bootstrap_timeout"] == min(caller_seconds, STARTUP_SECONDS)
         assert start_invoked
+        assert clock.slept == [preflight_delay]
         invocation_remaining = effective - start_invoked[0]
-        assert captured["bootstrap_timeout"] - invocation_remaining >= (
-            preflight_delay - 0.02
+        assert captured["bootstrap_timeout"] - invocation_remaining == pytest.approx(
+            preflight_delay
         )
         assert effective > after
     finally:
@@ -2727,10 +2726,20 @@ def test_open_document_propagates_deadline_to_stable_source_read(
 
 
 # The subject must return on its own deadline while the lock is still held, so
-# the holder keeps holding until the test says otherwise. A fixed sleep raced
-# the assertions on a loaded macOS runner and the hold ended first.
-CONTENTION_HOLD_SECONDS = 60.0
-CONTENTION_RETURN_SECONDS = 5.0
+# the holder keeps holding until the test says otherwise -- longer than the hang
+# bound, so a subject that waited for the holder fails instead of passing late.
+CONTENTION_HOLD_SECONDS = PAUSE_TIMEOUT
+CONTENTION_BUDGET_SECONDS = 0.05
+
+
+def _waits_within_budget(recorder: TimeoutRecordingLock, granted: float) -> bool:
+    """No lock wait outlived what the caller granted; an expired budget may refuse without one.
+
+    `granted` is `deadline - started` on the caller's own reading, not the budget
+    constant: `(t + 0.05) - t` can round above 0.05, and every later reading only
+    makes the remaining time smaller.
+    """
+    return all(0 < timeout <= granted for timeout in recorder.timeouts)
 
 
 def _hold_document_lock_for_contention(
@@ -2776,14 +2785,18 @@ def test_open_document_lock_contention_obeys_deadline_without_mutation(
         session._generation_nonce,
     )
     before_events = tuple(semantic_pyright.events())
-    started = time.monotonic()
+    document_lock = session._document_lock
+    recorder = TimeoutRecordingLock(document_lock)
+    session._document_lock = recorder
     try:
+        started = time.monotonic()
+        deadline = started + CONTENTION_BUDGET_SECONDS
         with pytest.raises(TimeoutError, match="document lock"):
-            session.open_document(
-                "pkg/service.py",
-                deadline=started + 0.05,
+            run_within_hang_bound(
+                lambda: session.open_document("pkg/service.py", deadline=deadline)
             )
-        assert time.monotonic() - started < CONTENTION_RETURN_SECONDS
+        session._document_lock = document_lock
+        assert _waits_within_budget(recorder, deadline - started), recorder.timeouts
         assert released.is_set() is False
         assert (
             session._readiness,
@@ -2844,11 +2857,16 @@ def test_synchronize_lock_contention_obeys_deadline_without_mutation(
         session._generation_nonce,
     )
     before_events = tuple(semantic_pyright.events())
-    started = time.monotonic()
+    document_lock = session._document_lock
+    recorder = TimeoutRecordingLock(document_lock)
+    session._document_lock = recorder
     try:
+        started = time.monotonic()
+        deadline = started + CONTENTION_BUDGET_SECONDS
         with pytest.raises(TimeoutError, match="document lock"):
-            session.synchronize(revision, deadline=started + 0.05)
-        assert time.monotonic() - started < CONTENTION_RETURN_SECONDS
+            run_within_hang_bound(lambda: session.synchronize(revision, deadline=deadline))
+        session._document_lock = document_lock
+        assert _waits_within_budget(recorder, deadline - started), recorder.timeouts
         assert released.is_set() is False
         assert (
             session._readiness,
@@ -3629,15 +3647,16 @@ def test_diagnostics_wait_for_current_notification_and_timeout_partial(
         config={"diagnostics_delay_seconds": 0.1},
     )
     session = _session(repository, state_root, delayed)
-    started = time.monotonic()
     try:
         result = session.diagnostics(
             "pkg/service.py",
             deadline=time.monotonic() + 5,
         )
-        assert time.monotonic() - started >= 0.05
+        # The push comes 0.1 s after the open; a complete answer for version 1
+        # is one that waited for it (the silent server below answers partial).
         assert result.document_version == 1
         assert result.partial is False
+        assert [item.code for item in result.diagnostics] == ["reportUnknownMemberType"]
     finally:
         session.close(deadline=time.monotonic() + 5)
 
@@ -4307,10 +4326,12 @@ def test_terminal_process_state_revokes_session_readiness_before_semantic_use(
 def test_active_operation_and_lru_state_are_released_after_blocking_request(
     repository: Path,
     state_root: Path,
+    tmp_path: Path,
 ) -> None:
+    answer_released = tmp_path / "definition-released"
     fixture = create_semantic_pyright_fixture(
         repository,
-        config={"response_delays": {"textDocument/definition": 0.3}},
+        config={"response_gates": {"textDocument/definition": str(answer_released)}},
     )
     session = _session(repository, state_root, fixture)
     anchor = _anchor(repository, "pkg/service.py", 10, 20)
@@ -4339,10 +4360,10 @@ def test_active_operation_and_lru_state_are_released_after_blocking_request(
     try:
         assert thread.is_alive()
         assert session.active_operations == 1
-        observed = time.monotonic()
         assert session.readiness == "query_ready"
-        assert time.monotonic() - observed < 0.1
+        assert thread.is_alive()
         assert session.last_used_monotonic >= before
+        answer_released.write_text("released", encoding="ascii")
         thread.join(SHORT_TIMEOUT)
         assert not thread.is_alive()
         assert errors == []
@@ -4355,6 +4376,7 @@ def test_active_operation_and_lru_state_are_released_after_blocking_request(
             session.definition(invalid, deadline=time.monotonic() + SHORT_TIMEOUT)
         assert session.active_operations == 0
     finally:
+        answer_released.write_text("released", encoding="ascii")
         thread.join(SHORT_TIMEOUT)
         session.close(deadline=time.monotonic() + SHORT_TIMEOUT)
 
@@ -6320,6 +6342,15 @@ def test_unchanged_content_sends_no_did_change_and_keeps_version(
         session.close(deadline=time.monotonic() + 5)
 
 
+def test_an_event_the_fake_server_is_still_appending_is_not_read_yet(tmp_path: Path) -> None:
+    """Under parallel load a reader can catch the server mid-append (a torn last line)."""
+    event_log = tmp_path / "events.jsonl"
+    event_log.write_text('{"kind":"started"}\n{"kind":"client-mes', encoding="utf-8")
+    fixture = SemanticPyrightFixture(object(), tmp_path / "config.json", event_log)
+
+    assert fixture.events() == ({"kind": "started"},)
+
+
 def test_created_and_deleted_files_produce_watched_file_events(
     repository: Path,
     state_root: Path,
@@ -6866,11 +6897,16 @@ def test_session_close_state_lock_wait_obeys_absolute_deadline(
     holder = threading.Thread(target=hold_state_lock)
     holder.start()
     assert held.wait(SHORT_TIMEOUT)
-    started = time.monotonic()
+    state_lock = session._lock
+    recorder = TimeoutRecordingLock(state_lock)
+    session._lock = recorder
     try:
+        started = time.monotonic()
+        deadline = started + CONTENTION_BUDGET_SECONDS
         with pytest.raises(TimeoutError, match="state lock"):
-            session.close(deadline=started + 0.05)
-        assert time.monotonic() - started < CONTENTION_RETURN_SECONDS
+            run_within_hang_bound(lambda: session.close(deadline=deadline))
+        session._lock = state_lock
+        assert _waits_within_budget(recorder, deadline - started), recorder.timeouts
         assert session._closed is False
     finally:
         release_request.set()
@@ -7117,6 +7153,18 @@ def test_manager_close_all_unwraps_earliest_interruption_without_cycle(
     assert all(session._closed for session in sessions)
 
 
+def _run_manager_operation(
+    manager: PyrightSessionManager,
+    operation: str,
+    scope: object,
+    deadline: float,
+) -> None:
+    if operation == "get":
+        manager.get(scope, deadline=deadline)
+        return
+    manager.close_all(deadline=deadline)
+
+
 @pytest.mark.parametrize("operation", ["get", "close_all"])
 def test_manager_global_lock_wait_obeys_absolute_deadline(
     tmp_path: Path,
@@ -7142,15 +7190,14 @@ def test_manager_global_lock_wait_obeys_absolute_deadline(
     holder = threading.Thread(target=hold_manager_lock)
     holder.start()
     assert held.wait(SHORT_TIMEOUT)
+    recording = TimeoutRecordingLock(manager._lock)
+    manager._lock = recording
     started = time.monotonic()
     try:
+        deadline = started + 0.05
         with pytest.raises(TimeoutError, match="manager lock"):
-            deadline = started + 0.05
-            if operation == "get":
-                manager.get(scope, deadline=deadline)
-            else:
-                manager.close_all(deadline=deadline)
-        assert time.monotonic() - started < 0.3
+            _run_manager_operation(manager, operation, scope, deadline)
+        assert all(0 <= timeout <= deadline - started for timeout in recording.timeouts)
     finally:
         release.set()
         holder.join(SHORT_TIMEOUT)
@@ -7240,11 +7287,14 @@ def test_manager_per_key_lock_wait_obeys_absolute_deadline(
             time.monotonic() + 1,
         )
     key_lock_state.lock.acquire()
+    recording = TimeoutRecordingLock(key_lock_state.lock)
+    key_lock_state.lock = recording
     started = time.monotonic()
+    deadline = started + 0.05
     try:
         with pytest.raises(TimeoutError, match="key lock"):
-            manager.get(scope, deadline=started + 0.05)
-        assert time.monotonic() - started < 0.3
+            manager.get(scope, deadline=deadline)
+        assert all(0 <= timeout <= deadline - started for timeout in recording.timeouts)
         assert manager._sessions == {}
     finally:
         key_lock_state.lock.release()

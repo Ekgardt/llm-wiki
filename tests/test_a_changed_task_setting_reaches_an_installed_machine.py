@@ -24,6 +24,7 @@ import install_control  # noqa: E402
 from reliable_memory import canonical_json_bytes  # noqa: E402
 
 from tests.powershell_literal import ps_literal  # noqa: E402
+from tests.slow_machine import LONG_TIMEOUT  # noqa: E402
 
 SCRIPT = ROOT / "scripts" / "install-scheduled-tasks.ps1"
 RELEASE = {
@@ -147,7 +148,7 @@ def _run(command: str) -> subprocess.CompletedProcess[str]:
         [_pwsh(), "-NoProfile", "-NonInteractive", "-Command", command],
         capture_output=True,
         text=True,
-        timeout=120,
+        timeout=LONG_TIMEOUT,
         check=False,
     )
 

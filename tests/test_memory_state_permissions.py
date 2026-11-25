@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import inspect
 import os
 import time
 
 import pytest
+
+from tests.clocks import VirtualClock
 
 
 def test_update_state_honors_lock_timeout(tmp_path, monkeypatch):
@@ -17,11 +20,15 @@ def test_update_state_honors_lock_timeout(tmp_path, monkeypatch):
     monkeypatch.setattr(memory_state, "STATE_FILE", state_dir / "state.json")
     monkeypatch.setattr(memory_state, "LOCK_FILE", lock_file)
 
-    started = time.perf_counter()
+    clock = VirtualClock(1000.0)
+    monkeypatch.setattr(memory_state, "time", clock)
+    poll = inspect.signature(memory_state._state_lock).parameters["poll"].default
+    lock_timeout = 0.1
     with pytest.raises(TimeoutError):
-        memory_state.update_state(lambda state: state.update(value=1), lock_timeout=0.1)
+        memory_state.update_state(lambda state: state.update(value=1), lock_timeout=lock_timeout)
 
-    assert time.perf_counter() - started < 0.75
+    assert clock.slept
+    assert clock.now - 1000.0 < lock_timeout + 2 * poll
 
 
 def _permission_error(winerror: int | None) -> PermissionError:

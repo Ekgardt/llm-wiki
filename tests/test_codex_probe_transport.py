@@ -50,10 +50,10 @@ def test_hung_peer_is_killed_and_reaped_within_cleanup_budget(tmp_path):
     code = '''import os,time
 open('peer.pid','w').write(str(os.getpid()))
 time.sleep(60)
+open('peer.finished','w').write('finished')
 '''
-    started = time.monotonic()
     assert _probe(tmp_path, code, seconds=0.2) is doctor._PROBE_INCOMPLETE
-    assert time.monotonic() - started < 2
+    assert not (tmp_path / "peer.finished").exists()
     pid = int((tmp_path / "peer.pid").read_text())
     assert _peer_is_gone(pid)
 

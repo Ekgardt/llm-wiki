@@ -18,12 +18,15 @@ import os
 import re
 import subprocess
 import sys
-import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
+
+from tests.clocks import VirtualClock, frozen_clock
+from tests.opened_files import record_opens_in
 
 SCRIPT = Path(__file__).resolve().parent.parent / "scripts" / "session_start_context.py"
 
@@ -187,6 +190,18 @@ def test_session_start_spawns_scheduled_nightly_nonblocking_only_for_catchup(
     ]]
 
 
+def _state_lock_poll() -> float:
+    """How long `memory_state` sleeps between two looks at a held state lock."""
+    import inspect
+
+    import memory_state
+
+    return float(inspect.signature(memory_state._state_lock).parameters["poll"].default)
+
+
+_STATE_LOCK_POLL = _state_lock_poll()
+
+
 def test_nightly_catchup_claim_returns_quickly_when_state_lock_is_held(
     tmp_path, monkeypatch
 ):
@@ -201,12 +216,13 @@ def test_nightly_catchup_claim_returns_quickly_when_state_lock_is_held(
     monkeypatch.setattr(memory_state, "STATE_FILE", state_dir / "state.json")
     monkeypatch.setattr(memory_state, "LOCK_FILE", lock_file)
     monkeypatch.setattr(session_start_context, "update_state", memory_state.update_state)
+    clock = VirtualClock(1000.0)
+    monkeypatch.setattr(memory_state, "time", clock)
 
-    started = time.perf_counter()
     claimed = session_start_context._claim_nightly_catchup("2026-07-13")
 
     assert claimed is False
-    assert time.perf_counter() - started < 0.75
+    assert clock.now - 1000.0 < memory_state.HOOK_STATE_LOCK_TIMEOUT + 2 * _STATE_LOCK_POLL
 
 
 def test_failed_nightly_spawn_releases_quickly_when_state_lock_is_held(
@@ -226,11 +242,13 @@ def test_failed_nightly_spawn_releases_quickly_when_state_lock_is_held(
     monkeypatch.setattr(session_start_context, "_claim_nightly_catchup", lambda today: True)
     monkeypatch.setattr(session_start_context, "spawn_detached", lambda args: None)
     monkeypatch.delenv("MEMORY_LLM_PROVIDER", raising=False)
+    clock = VirtualClock(1000.0)
+    monkeypatch.setattr(memory_state, "time", clock)
 
-    started = time.perf_counter()
     session_start_context.maybe_spawn_nightly_catchup("2026-07-13")
 
-    assert time.perf_counter() - started < 0.75
+    assert clock.slept
+    assert clock.now - 1000.0 < memory_state.HOOK_STATE_LOCK_TIMEOUT + 2 * _STATE_LOCK_POLL
 
 
 def test_session_start_omits_health_when_doctor_is_healthy(monkeypatch):
@@ -382,8 +400,6 @@ def test_direct_session_start_drops_optional_sections_whole_under_pressure(monke
 
 
 def test_session_start_heading_and_body_drop_as_one_complete_item(monkeypatch):
-    from types import SimpleNamespace
-
     import session_start_context
     from context_budget import ContextBudget
 
@@ -907,7 +923,8 @@ def test_session_start_recovery_passes_hard_limit_and_deadline(tmp_path, monkeyp
         lambda self, **kwargs: received.append(kwargs),
     )
 
-    started = time.monotonic()
+    started = 740.0
+    monkeypatch.setattr(session_start_context, "time", frozen_clock(started))
     session_start_context._recover_transactions()
 
     assert received[0]["max_transactions"] > 0
@@ -937,13 +954,12 @@ def test_session_start_health_latency_is_bounded_with_large_unsafe_queue(
         pass
     monkeypatch.setattr(session_start_context, "ROOT", root)
     monkeypatch.setattr(session_start_context, "STATE_ROOT", state_root)
+    queue_reads = record_opens_in(monkeypatch, queue)
 
-    started = time.perf_counter()
     block = session_start_context.health_block()
-    elapsed = time.perf_counter() - started
 
-    assert (elapsed < 0.5, block.startswith("## Health"), "secret" in block) == (
-        True,
+    assert (queue_reads, block.startswith("## Health"), "secret" in block) == (
+        [],
         True,
         False,
     )

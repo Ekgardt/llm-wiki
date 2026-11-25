@@ -9,7 +9,6 @@ from __future__ import annotations
 import json
 import math
 import sys
-import time
 from pathlib import Path
 
 REPOSITORY = Path(__file__).resolve().parents[1]
@@ -18,6 +17,8 @@ sys.path.insert(0, str(REPOSITORY / "scripts"))
 import daily_log_append  # noqa: E402
 import integration_adapter  # noqa: E402
 import pytest  # noqa: E402
+
+from tests.clocks import frozen_clock  # noqa: E402
 
 # These tests measure the budgets themselves; every other test gets the slow-machine bound.
 pytestmark = pytest.mark.shipped_append_budgets
@@ -57,14 +58,24 @@ def test_both_budgets_leave_the_delegate_room_to_say_why():
     assert integration_adapter.DELEGATE_TIMEOUT_SECONDS - largest >= ROOM_SECONDS
 
 
+# Hook deadlines are taken from `daily_log_append.append_deadline`; with its clock
+# frozen here, a deadline minus this instant is exactly the budget it was given.
+_FROZEN_AT = 1000.0
+
+
 def _remaining(deadline: float) -> float:
-    return deadline - time.monotonic()
+    return deadline - _FROZEN_AT
+
+
+def _freeze_append_clock(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("daily_log_append.time", frozen_clock(_FROZEN_AT))
 
 
 def test_the_prompt_breadcrumb_is_given_the_breadcrumb_budget(monkeypatch):
     import user_prompt_capture
 
     seen: list[float] = []
+    _freeze_append_clock(monkeypatch)
     # By name: the hook imports the module at call time, and another test file may have
     # reloaded it since this file imported its own copy.
     monkeypatch.setattr(
@@ -81,6 +92,7 @@ def test_the_tool_breadcrumb_is_given_the_breadcrumb_budget(monkeypatch):
     import post_tool_capture
 
     seen: list[float] = []
+    _freeze_append_clock(monkeypatch)
     # By name: the hook imports the module at call time, and another test file may have
     # reloaded it since this file imported its own copy.
     monkeypatch.setattr(
@@ -97,6 +109,7 @@ def test_the_session_end_tag_is_given_the_lifecycle_budget(monkeypatch, tmp_path
     import session_end_project_tag
 
     seen: list[float] = []
+    _freeze_append_clock(monkeypatch)
     monkeypatch.setattr(
         session_end_project_tag,
         "locked_append",

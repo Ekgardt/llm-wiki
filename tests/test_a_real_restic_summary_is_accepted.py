@@ -82,7 +82,7 @@ def _real_restic() -> Path:
         pytest.skip("no restic on PATH")
     binary = Path(found).resolve()
     version = subprocess.run(
-        [str(binary), "version"], capture_output=True, check=False, timeout=30
+        [str(binary), "version"], capture_output=True, check=False, timeout=SHORT_TIMEOUT
     ).stdout
     if not version.startswith(b"restic 0.19.1 "):
         pytest.skip("restic on PATH is not the pinned release")

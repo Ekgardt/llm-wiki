@@ -13,6 +13,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+from tests.slow_machine import LONG_TIMEOUT
+
 SCRIPTS = Path(__file__).resolve().parent.parent / "scripts"
 
 
@@ -23,7 +25,7 @@ def _run(*arguments: str, state_root: Path, cwd: Path) -> subprocess.CompletedPr
         [sys.executable, str(SCRIPTS / "code_graph.py"), *arguments],
         capture_output=True,
         text=True,
-        timeout=120,
+        timeout=LONG_TIMEOUT,
         cwd=cwd,
         env=environment,
     )

@@ -13,6 +13,8 @@ if str(BENCHMARK) not in sys.path:
 
 import run_code_parity as stand  # noqa: E402
 
+from tests.slow_machine import LONG_TIMEOUT  # noqa: E402
+
 
 def _tasks() -> list[dict]:
     return stand.load_tasks(stand.TASKS_PATH)["tasks"]
@@ -162,7 +164,7 @@ def test_the_child_protocol_round_trips_a_real_tool_error(tmp_path):
         [sys.executable, str(BENCHMARK / "run_code_parity.py"), "--child", json.dumps(payload)],
         capture_output=True,
         text=True,
-        timeout=120,
+        timeout=LONG_TIMEOUT,
     )
     assert proc.returncode == 0, proc.stderr
     parsed = json.loads(proc.stdout)

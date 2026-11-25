@@ -81,6 +81,7 @@ dev = [
     "tree-sitter-bash>=0.23,<1",
     "pre-commit>=4.5.1",
     "pytest>=8.0.0",
+    "pytest-xdist>=3.8,<4",
     "pyyaml>=6.0.3,<7",
     "ruff>=0.6.0",
 ]
@@ -102,6 +103,9 @@ constraint-dependencies = ["filelock<3.30; python_full_version < '3.11'"]
 testpaths = ["tests"]
 # `conftest.py` injects scripts/ into sys.path; no package install needed.
 pythonpath = ["scripts"]
+# One worker per CPU: a full check run must stay within 10 minutes, and the serial
+# suite took 997 s there on 2026-11-24. `-n 0` runs serially.
+addopts = ["-n", "auto"]
 # A test still running after this many seconds has every thread's stack dumped to the
 # log, so a hang names itself instead of silently burning the CI job until it is
 # cancelled (run 36312497314 lost 48 minutes on one hung test and named nothing).

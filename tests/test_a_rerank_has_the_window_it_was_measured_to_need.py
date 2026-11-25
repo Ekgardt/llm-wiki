@@ -7,8 +7,6 @@ median 3.46 s and a p95 5.68 s, so about half the answers came back without it. 
 
 from __future__ import annotations
 
-import time
-
 import mcp_server
 import retrieval
 import settings
@@ -21,8 +19,11 @@ LEGS_BEFORE_RERANK_SECONDS = 0.5
 
 
 def _rerank_window(budget: float) -> float:
-    """What `_optional_stage_deadline` offers the rerank inside one MCP search."""
-    now = time.monotonic()
+    """What `_optional_stage_deadline` offers the rerank inside one MCP search.
+
+    The window is a difference of instants, so any origin gives the same answer.
+    """
+    now = 1000.0
     hybrid_deadline = now + budget - mcp_server.LEXICAL_FALLBACK_RESERVE_SECONDS
     started = now + LEGS_BEFORE_RERANK_SECONDS
     remaining = hybrid_deadline - started

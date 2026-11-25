@@ -17,6 +17,8 @@ from pathlib import Path
 
 import pytest
 
+from tests.clocks import VirtualClock
+
 SCRIPTS = Path(__file__).resolve().parents[1] / "scripts"
 if str(SCRIPTS) not in sys.path:
     sys.path.insert(0, str(SCRIPTS))
@@ -44,15 +46,16 @@ def _mark(state: dict) -> None:
 
 
 def test_the_state_lock_of_a_reused_pid_is_retired_without_waiting_out_its_age(
-    state_dir,
+    state_dir, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Our own PID, somebody else's process: the lock is not ours to wait for."""
     memory_state.LOCK_FILE.write_bytes(f"{os.getpid()}\n{FOREIGN}\n".encode())
-    started = time.monotonic()
+    clock = VirtualClock(time.time())
+    monkeypatch.setattr(memory_state, "time", clock)
 
     memory_state.update_state(_mark)
 
-    assert time.monotonic() - started < memory_state._STALE_LOCK_SECONDS
+    assert sum(clock.slept) < memory_state._STALE_LOCK_SECONDS
     assert not memory_state.LOCK_FILE.exists()
 
 

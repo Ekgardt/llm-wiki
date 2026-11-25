@@ -1112,7 +1112,7 @@ with coordinator.writer_gate():
         check=False,
         capture_output=True,
         text=True,
-        timeout=10,
+        timeout=SHORT_TIMEOUT,
     )
     database_path = state_root / "run/markdown-transactions.sqlite3"
     gate = (

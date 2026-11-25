@@ -5,6 +5,7 @@ See `docs/research/2026-09-17-a-trim-never-drops-a-line-it-did-not-read.md`.
 from __future__ import annotations
 
 import json
+import math
 import sys
 import threading
 from pathlib import Path
@@ -61,8 +62,14 @@ def test_a_line_appended_during_a_trim_is_not_erased_by_it(trail, monkeypatch):
     The writer starts after the trim has read the trail and before it replaces it —
     the window the whole-file rewrite used to lose a line in. The 0.05 s is the test's
     own pause, and it expects it to elapse: the writer is waiting for the trail's lock.
+
+    The writer's wait is stretched to the hang bound. The product's half-second wait
+    measured the trim's own speed: on a loaded Windows runner the replace took longer,
+    the wait ran out and the line went to the file being replaced (run 45547456425).
     """
     _oversize(trail)
+    attempts = math.ceil(SHORT_TIMEOUT / capture_diagnostics.TRAIL_LOCK_PAUSE_SECONDS)
+    monkeypatch.setattr(capture_diagnostics, "TRAIL_LOCK_ATTEMPTS", attempts)
     trimmed_tail = capture_diagnostics._trimmed_tail
     writers: list[threading.Thread] = []
     finished = threading.Event()

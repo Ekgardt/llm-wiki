@@ -10,18 +10,23 @@ import time
 import pytest
 import retrieval
 
+from tests.clocks import frozen_clock
+
 
 @pytest.fixture(autouse=True)
 def _no_observed_cost(monkeypatch) -> None:
     monkeypatch.setattr(retrieval, "_OPTIONAL_STAGE_OBSERVED", {})
 
 
-def test_an_unknown_cost_gets_the_ceiling_to_finish_and_be_measured() -> None:
-    window = time.monotonic() + 3.0
+def test_an_unknown_cost_gets_the_ceiling_to_finish_and_be_measured(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = 100.0
+    monkeypatch.setattr(retrieval, "time", frozen_clock(now))
 
-    worker = retrieval._rerank_worker_deadline(window)
+    worker = retrieval._rerank_worker_deadline(now + 3.0)
 
-    assert worker - time.monotonic() > retrieval.OPTIONAL_STAGE_MAX_SECONDS - 1
+    assert worker == now + retrieval.OPTIONAL_STAGE_MAX_SECONDS
 
 
 def test_a_cost_known_not_to_fit_is_not_started() -> None:

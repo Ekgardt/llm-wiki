@@ -29,6 +29,13 @@ TESTS_DIR = Path(__file__).resolve().parent
 WEIGHTS_PATH = TESTS_DIR / "shard_weights.json"
 # Only when the table is empty; otherwise an unweighted file costs the table's mean.
 DEFAULT_WEIGHT_SECONDS = 5.0
+# A shard is already the unit of parallelism, so it runs its files serially rather
+# than under the `-n auto` default. xdist workers on a hosted Windows runner left
+# its real-time concurrency tests without headroom: every PR run with them failed
+# two or three different Windows tests on a deadline or a stall (runs 45517849417,
+# 45547456425, 45579684686), while the serial shards of the base run 42269367434
+# passed all twenty. The weights are measured the same way.
+SERIAL = ["-n", "0"]
 
 
 def test_files() -> list[str]:
@@ -99,7 +106,8 @@ def weigh(paths: list[str]) -> dict[str, float]:
     """Run the given test files once here and return their measured seconds."""
     with tempfile.TemporaryDirectory() as directory:
         report = Path(directory) / "junit.xml"
-        command = [sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider", f"--junitxml={report}", *paths]
+        options = [*SERIAL, "-q", "-p", "no:cacheprovider", f"--junitxml={report}"]
+        command = [sys.executable, "-m", "pytest", *options, *paths]
         subprocess.call(command)
         return junit_seconds(report) if report.is_file() else {}
 
@@ -172,7 +180,8 @@ def main(argv: list[str] | None = None) -> int:
         print("\n".join(files))
         return 0
     paths = [str(TESTS_DIR / name) for name in files]
-    command = [sys.executable, "-m", "pytest", *_pytest_arguments(args.pytest_args), *paths]
+    options = [*SERIAL, *_pytest_arguments(args.pytest_args)]
+    command = [sys.executable, "-m", "pytest", *options, *paths]
     return subprocess.call(command)
 
 

@@ -771,12 +771,22 @@ class _SemanticServer:
         return _claim_marker(crash_marker)
 
     def _delay_response(self, method: str) -> None:
+        self._await_response_gate(method)
         response_delays = self.config.get("response_delays")
         if not isinstance(response_delays, dict):
             return
         delay = response_delays.get(method)
         if _positive_number(delay):
             time.sleep(delay)
+
+    def _await_response_gate(self, method: str) -> None:
+        """Hold the configured method's answer until the test creates its gate file."""
+        response_gates = self.config.get("response_gates")
+        if not isinstance(response_gates, dict):
+            return
+        gate = response_gates.get(method)
+        if isinstance(gate, str):
+            _await_gate(Path(gate))
 
     def _is_ready(self, method: str, request_uri: str | None) -> bool:
         if not self.config.get("require_initialized_open", True):
@@ -1027,7 +1037,7 @@ def _await_gate(gate: Path) -> None:
     deadline = time.monotonic() + 10
     while not gate.exists():
         if time.monotonic() >= deadline:
-            raise TimeoutError("idle exit gate was not released")
+            raise TimeoutError(f"gate {gate} was not released")
         time.sleep(0.01)
 
 
