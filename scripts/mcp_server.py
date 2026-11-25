@@ -643,6 +643,11 @@ RECALL_FILTER_SCHEMA_FIELDS = {
         "maxLength": 10,
         "description": "Rank pages dated from this day first, YYYY-MM-DD",
     },
+    "until": {
+        "type": "string",
+        "maxLength": 10,
+        "description": "Rank pages dated up to this day, inclusive, first, YYYY-MM-DD",
+    },
     "as_of": {
         "type": "string",
         "maxLength": 10,
@@ -663,11 +668,12 @@ RECALL_FILTER_SCHEMA_FIELDS = {
 RECALL_FILTER_ARGUMENTS = {
     "project": "project",
     "since": "since",
+    "until": "until",
     "as_of": "as_of",
     "page_type": "type",
     "path_prefix": "path_prefix",
 }
-RECALL_DATE_FILTERS = ("since", "as_of")
+RECALL_DATE_FILTERS = ("since", "until", "as_of")
 
 TOOL_INPUT_SCHEMAS = {
     "recall": {
@@ -5869,7 +5875,14 @@ def _recall_filters(arguments: Mapping[str, object]) -> dict[str, str]:
     }
     for keyword in RECALL_DATE_FILTERS:
         _require_day(keyword, filters.get(keyword))
+    _require_ordered_days(filters.get("since"), filters.get("until"))
     return filters
+
+
+def _require_ordered_days(since: str | None, until: str | None) -> None:
+    """An inverted range holds no day, so it is a mistake to say, not an empty answer."""
+    if since and until and since > until:
+        raise ValueError("argument 'since' must not be later than 'until'")
 
 
 def _require_day(name: str, value: str | None) -> None:

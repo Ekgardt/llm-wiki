@@ -3078,6 +3078,7 @@ def _generation_filters(
     *,
     scope: str,
     since: str | None,
+    until: str | None = None,
     as_of: str | None,
     page_type: str | None = None,
     path_prefix: str | None = None,
@@ -3086,7 +3087,7 @@ def _generation_filters(
     values: list[str] = []
     if scope in {"wiki", "memory", "knowledge"}:
         clauses.append("source_path LIKE 'knowledge/notes/%'")
-    _add_validity_clauses(clauses, values, as_of=as_of, since=since)
+    _add_validity_clauses(clauses, values, as_of=as_of, since=since, until=until)
     _add_page_clauses(clauses, values, page_type=page_type, path_prefix=path_prefix)
     return (" AND " + " AND ".join(clauses) if clauses else ""), values
 
@@ -3114,9 +3115,14 @@ def _add_page_clauses(
 
 
 def _add_validity_clauses(
-    clauses: list[str], values: list[str], *, as_of: str | None, since: str | None
+    clauses: list[str],
+    values: list[str],
+    *,
+    as_of: str | None,
+    since: str | None,
+    until: str | None = None,
 ) -> None:
-    """Either the as-of window or the current-status rule, then the since floor."""
+    """Either the as-of window or the current-status rule, then the days a page may be dated."""
     if as_of:
         clauses.extend(
             (
@@ -3127,11 +3133,18 @@ def _add_validity_clauses(
         values.extend((as_of[:10], as_of[:10]))
     else:
         clauses.append(current_status_sql())
-    if since:
-        clauses.append(
-            "(valid_from IS NULL OR valid_from = '' OR substr(valid_from, 1, 10) >= ?)"
-        )
-        values.append(since[:10])
+    for comparison, day in ((">=", since), ("<=", until)):
+        _add_day_bound(clauses, values, comparison, day)
+
+
+def _add_day_bound(clauses: list[str], values: list[str], comparison: str, day: str | None) -> None:
+    """An undated page passes either bound, as it always passed `since`."""
+    if not day:
+        return
+    clauses.append(
+        f"(valid_from IS NULL OR valid_from = '' OR substr(valid_from, 1, 10) {comparison} ?)"
+    )
+    values.append(day[:10])
 
 
 _NOTES_SCOPES = frozenset({"wiki", "memory", "knowledge"})
@@ -3158,10 +3171,14 @@ def _field_mismatch(row: Mapping[str, object], field: str, wanted: str | None) -
     return str(row.get(field) or "").casefold() != wanted.casefold()
 
 
-def _before_since(timestamp: str, since: str | None) -> bool:
-    if not since or not timestamp:
-        return False
-    return timestamp[:10] < since[:10]
+def _outside_days(timestamp: str, since: str | None, until: str | None) -> bool:
+    """Dated before `since` or after `until`; an undated row is inside every range."""
+    return _earlier(timestamp, since) or _earlier(until, timestamp)
+
+
+def _earlier(day: str | None, other: str | None) -> bool:
+    """`day` falls on an earlier day than `other`; False when either is missing."""
+    return bool(day and other) and str(day)[:10] < str(other)[:10]
 
 
 def _after(day: str, value: str) -> bool:
@@ -3188,9 +3205,11 @@ def _superseded_now(row: Mapping[str, object]) -> bool:
     return is_retired(row.get("status"))
 
 
-def _temporally_excluded(row: Mapping[str, object], since: str | None, as_of: str | None) -> bool:
+def _temporally_excluded(
+    row: Mapping[str, object], since: str | None, until: str | None, as_of: str | None
+) -> bool:
     timestamp = str(row.get("timestamp") or row.get("valid_from") or "")
-    if _before_since(timestamp, since):
+    if _outside_days(timestamp, since, until):
         return True
     if as_of:
         return _outside_as_of(row, timestamp, as_of)
@@ -3202,6 +3221,7 @@ def _passes_hard_filters(
     *,
     project: str | None,
     since: str | None,
+    until: str | None = None,
     as_of: str | None,
     scope: str,
     authority: str | None,
@@ -3214,7 +3234,7 @@ def _passes_hard_filters(
         _field_mismatch(row, "authority", authority),
         _field_mismatch(row, "type", page_type),
         _outside_prefix(row, path_prefix),
-        _temporally_excluded(row, since, as_of),
+        _temporally_excluded(row, since, until, as_of),
     )
     return not any(exclusions)
 
@@ -3240,6 +3260,7 @@ def apply_hard_filters(
     *,
     project: str | None = None,
     since: str | None = None,
+    until: str | None = None,
     as_of: str | None = None,
     scope: str = "all",
     authority: str | None = None,
@@ -3255,6 +3276,7 @@ def apply_hard_filters(
             row,
             project=project,
             since=since,
+            until=until,
             as_of=as_of,
             scope=scope,
             authority=authority,
@@ -3271,6 +3293,7 @@ def generation_eligible_paths(
     scope: str = "all",
     project: str | None = None,
     since: str | None = None,
+    until: str | None = None,
     as_of: str | None = None,
     page_type: str | None = None,
     path_prefix: str | None = None,
@@ -3284,7 +3307,7 @@ def generation_eligible_paths(
     if not paths:
         return set()
     filters, values = _generation_filters(
-        scope=scope, since=since, as_of=as_of, page_type=page_type, path_prefix=path_prefix
+        scope=scope, since=since, until=until, as_of=as_of, page_type=page_type, path_prefix=path_prefix
     )
     wanted = sorted(paths)
     placeholders = ", ".join("?" for _ in wanted)
@@ -3305,6 +3328,7 @@ def markdown_page_row(
     *,
     project: str | None = None,
     since: str | None = None,
+    until: str | None = None,
     as_of: str | None = None,
 ) -> dict[str, object] | None:
     """A page reached another way, as the Markdown leg reports it, if that leg would admit it.
@@ -3315,7 +3339,7 @@ def markdown_page_row(
     read = _walked_page_read(relative_path)
     if read is None or _is_retired_page(read.content):
         return None
-    if not _page_read_eligible(read, project=project, since=since, as_of=as_of):
+    if not _page_read_eligible(read, project=project, since=since, until=until, as_of=as_of):
         return None
     return _page_hit(read, score=0.0, bm25_score=0.0)
 
@@ -3537,6 +3561,7 @@ def _generation_fts_search(
     limit: int,
     project: str | None,
     since: str | None,
+    until: str | None = None,
     as_of: str | None,
     deadline: float | None = None,
     cancelled: Callable[[], bool] | None = None,
@@ -3547,7 +3572,7 @@ def _generation_fts_search(
     with _generation_sqlite_guard(connection, deadline, cancelled):
         connection.row_factory = sqlite3.Row
         filters, values = _generation_filters(
-            scope=scope, since=since, as_of=as_of, page_type=page_type, path_prefix=path_prefix
+            scope=scope, since=since, until=until, as_of=as_of, page_type=page_type, path_prefix=path_prefix
         )
         _register_filename_stem_function(connection)
         exact_rows = _exact_filename_rows(
@@ -3580,6 +3605,7 @@ def _generation_fts_search(
         results,
         project=project,
         since=since,
+        until=until,
         as_of=as_of,
         scope=scope,
         page_type=page_type,
@@ -3713,6 +3739,7 @@ def _vector_scored_rows(
     *,
     scope: str,
     since: str | None,
+    until: str | None = None,
     as_of: str | None,
     project: str | None,
     deadline,
@@ -3739,7 +3766,7 @@ def _vector_scored_rows(
     puts those same pages at 1-14.
     """
     filters, values = _generation_filters(
-        scope=scope, since=since, as_of=as_of, page_type=page_type, path_prefix=path_prefix
+        scope=scope, since=since, until=until, as_of=as_of, page_type=page_type, path_prefix=path_prefix
     )
     with _generation_sqlite_guard(connection, deadline, cancelled):
         rows = connection.execute(
@@ -3805,6 +3832,7 @@ def _generation_vector_rows(
     limit: int,
     project: str | None,
     since: str | None,
+    until: str | None = None,
     as_of: str | None,
     deadline: float | None,
     cancelled: Callable[[], bool] | None,
@@ -3845,6 +3873,7 @@ def _generation_vector_rows(
         generation_id,
         scope=scope,
         since=since,
+        until=until,
         as_of=as_of,
         project=project,
         deadline=deadline,
@@ -3869,6 +3898,7 @@ def _generation_vectors_search(
     limit: int,
     project: str | None,
     since: str | None,
+    until: str | None = None,
     as_of: str | None,
     deadline: float | None = None,
     cancelled: Callable[[], bool] | None = None,
@@ -3895,6 +3925,7 @@ def _generation_vectors_search(
             limit=limit,
             project=project,
             since=since,
+            until=until,
             as_of=as_of,
             deadline=deadline,
             cancelled=cancelled,
@@ -3913,6 +3944,7 @@ def search(
     limit: int = 10,
     project: str | None = None,
     since: str | None = None,
+    until: str | None = None,
     as_of: str | None = None,
     semantic: bool = True,
     page_paths: list[Path] | None = None,
@@ -3959,6 +3991,7 @@ def search(
         limit=limit,
         project=project,
         since=since,
+        until=until,
         as_of=as_of,
         semantic=semantic,
         page_paths=page_paths,
@@ -4042,7 +4075,7 @@ def _read_page(page: Path, label: str) -> _PageRead | None:
 
 
 def _page_read_eligible(
-    read: _PageRead, *, project: str | None, since: str | None, as_of: str | None
+    read: _PageRead, *, project: str | None, since: str | None, until: str | None, as_of: str | None
 ) -> bool:
     return _exact_page_eligible(
         read.relative_path,
@@ -4050,6 +4083,7 @@ def _page_read_eligible(
         timestamp=read.timestamp,
         project=project,
         since=since,
+        until=until,
         as_of=as_of,
     )
 
@@ -4078,6 +4112,7 @@ def _exact_page_hit(
     *,
     project: str | None,
     since: str | None,
+    until: str | None = None,
     as_of: str | None,
 ) -> dict | None:
     """A page whose filename is the query, read straight from Markdown.
@@ -4088,7 +4123,7 @@ def _exact_page_hit(
     read = _read_page(page, "exact filename search page")
     if read is None:
         return None
-    if not _page_read_eligible(read, project=project, since=since, as_of=as_of):
+    if not _page_read_eligible(read, project=project, since=since, until=until, as_of=as_of):
         return None
     score = round(10.0 * trust_weight(read.authority, read.page_type, read.relative_path), 2)
     return _page_hit(read, score=score, bm25_score=0.0)
@@ -4107,11 +4142,12 @@ def _exact_page_eligible(
     timestamp: str,
     project: str | None,
     since: str | None,
+    until: str | None = None,
     as_of: str | None,
 ) -> bool:
     if not _project_matches(page_project, project):
         return False
-    if _before_since(timestamp, since):
+    if _outside_days(timestamp, since, until):
         return False
     return not as_of or _valid_as_of(relative_path, as_of)
 
@@ -4152,12 +4188,12 @@ def _retired_page_named(normalized_stem: str) -> Path | None:
 
 
 def _recalled_retired_hit(
-    normalized_stem: str, *, project: str | None, since: str | None, as_of: str | None
+    normalized_stem: str, *, project: str | None, since: str | None, until: str | None, as_of: str | None
 ) -> dict | None:
     page = _retired_page_named(normalized_stem)
     if page is None:
         return None
-    hit = _exact_page_hit(page, project=project, since=since, as_of=as_of)
+    hit = _exact_page_hit(page, project=project, since=since, until=until, as_of=as_of)
     if hit is None:
         return None
     hit["retired"] = True
@@ -4171,17 +4207,18 @@ def _with_exact_page(
     *,
     project: str | None,
     since: str | None,
+    until: str | None = None,
     as_of: str | None,
 ) -> list[dict]:
     page = _matching_page(pages, normalized_stem)
     if page is None:
         return _with_recalled_page(
-            hits, normalized_stem, project=project, since=since, as_of=as_of
+            hits, normalized_stem, project=project, since=since, until=until, as_of=as_of
         )
     relative = page.relative_to(ROOT).as_posix()
     if any(hit["path"] == relative for hit in hits):
         return hits
-    extra = _exact_page_hit(page, project=project, since=since, as_of=as_of)
+    extra = _exact_page_hit(page, project=project, since=since, until=until, as_of=as_of)
     return hits if extra is None else [*hits, extra]
 
 
@@ -4191,11 +4228,12 @@ def _with_recalled_page(
     *,
     project: str | None,
     since: str | None,
+    until: str | None = None,
     as_of: str | None,
 ) -> list[dict]:
     """Nothing active bears this name; an archived page of that name may."""
     recalled = _recalled_retired_hit(
-        normalized_stem, project=project, since=since, as_of=as_of
+        normalized_stem, project=project, since=since, until=until, as_of=as_of
     )
     return hits if recalled is None else [*hits, recalled]
 
@@ -4253,6 +4291,7 @@ def _direct_page_hit(
     query_terms: set[str],
     project: str | None,
     since: str | None,
+    until: str | None = None,
     as_of: str | None,
 ) -> dict | None:
     """One literal Markdown match, or None when the page does not qualify."""
@@ -4262,7 +4301,7 @@ def _direct_page_hit(
     body = _strip_frontmatter(read.content)
     shared = query_terms & _document_terms(page, read.title, read.summary, body)
     if not shared or not _page_read_eligible(
-        read, project=project, since=since, as_of=as_of
+        read, project=project, since=since, until=until, as_of=as_of
     ):
         return None
     score = round(_direct_match_score(page, read, query_terms, shared), 2)
@@ -4280,6 +4319,7 @@ def _direct_markdown_hits(
     limit: int,
     project: str | None,
     since: str | None,
+    until: str | None = None,
     as_of: str | None,
     deadline: float | None,
     cancelled: Callable[[], bool] | None,
@@ -4303,6 +4343,7 @@ def _direct_markdown_hits(
             query_terms=query_terms,
             project=project,
             since=since,
+            until=until,
             as_of=as_of,
         )
         if hit is not None and _kept_by_page_filters(hit, page_filters):
@@ -4328,6 +4369,7 @@ def markdown_hits(
     limit: int = 10,
     project: str | None = None,
     since: str | None = None,
+    until: str | None = None,
     as_of: str | None = None,
     page_paths: list[Path] | None = None,
     deadline: float | None = None,
@@ -4353,13 +4395,16 @@ def markdown_hits(
         limit=limit,
         project=project,
         since=since,
+        until=until,
         as_of=as_of,
         deadline=deadline,
         cancelled=cancelled,
         page_filters={"page_type": page_type, "path_prefix": path_prefix},
     )
     normalized_stem = _normalized_filename_stem(query)
-    hits = _with_exact_page(hits, pages, normalized_stem, project=project, since=since, as_of=as_of)
+    hits = _with_exact_page(
+        hits, pages, normalized_stem, project=project, since=since, until=until, as_of=as_of
+    )
     return _promoted_filename_first(hits, normalized_stem)
 
 
@@ -4386,6 +4431,7 @@ def main() -> int:
     p.add_argument("--limit", type=_cli_search_limit, default=10)
     p.add_argument("--project", default=None, help="Boost results from this project slug")
     p.add_argument("--since", default=None, help="Only results since YYYY-MM-DD")
+    p.add_argument("--until", default=None, help="Only results up to YYYY-MM-DD, inclusive")
     p.add_argument("--as-of", dest="as_of", default=None, help="Only results valid on YYYY-MM-DD")
     # On by default: measured on this vault, "почему systemd таймер, а не cron"
     # returns nothing without it and four results with it. The dense leg costs
@@ -4498,6 +4544,7 @@ def _run_cli_search(args: argparse.Namespace) -> int:
         args.query, args.scope, args.limit,
         project=args.project,
         since=args.since,
+        until=args.until,
         as_of=args.as_of,
         semantic=args.semantic,
         profile=args.profile,

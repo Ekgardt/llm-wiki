@@ -304,3 +304,67 @@ def test_the_recall_schema_declares_every_filter_it_reads() -> None:
     properties = mcp_server.TOOL_INPUT_SCHEMAS["recall"]["properties"]
 
     assert set(mcp_server.RECALL_FILTER_ARGUMENTS.values()) <= set(properties)
+
+
+def test_an_until_ceiling_keeps_only_pages_up_to_that_day() -> None:
+    """The ceiling is inclusive: a page dated on the day itself is inside it."""
+    connection = _crowded_artifact()
+    connection.execute("UPDATE chunks SET valid_from = '2026-11-20'")
+    connection.execute(
+        "UPDATE chunks SET valid_from = '2026-03-01' "
+        "WHERE source_path = 'knowledge/notes/cache-decision.md'"
+    )
+
+    assert _paths(connection, until="2026-03-01") == ["knowledge/notes/cache-decision.md"]
+
+
+def test_since_and_until_together_keep_the_days_between() -> None:
+    connection = _artifact(
+        ("knowledge/notes/early.md", "qa", "cache"),
+        ("knowledge/notes/inside.md", "qa", "cache"),
+        ("knowledge/notes/late.md", "qa", "cache"),
+    )
+    for path, day in (("early", "2026-01-01"), ("inside", "2026-06-15"), ("late", "2026-12-01")):
+        connection.execute(
+            "UPDATE chunks SET valid_from = ? WHERE source_path = ?", [day, f"knowledge/notes/{path}.md"]
+        )
+
+    assert _paths(connection, since="2026-06-01", until="2026-06-30") == ["knowledge/notes/inside.md"]
+
+
+def test_every_leg_drops_a_hit_dated_after_until() -> None:
+    rows = [
+        {"path": "knowledge/notes/a.md", "timestamp": "2026-05-01", "score": 1.0},
+        {"path": "knowledge/notes/b.md", "timestamp": "2026-09-01", "score": 1.0},
+        {"path": "knowledge/notes/undated.md", "score": 1.0},
+    ]
+
+    hits = retrieval._filtered_hits(rows, {"scope": "all", "until": "2026-06-30"})
+
+    assert [hit["path"] for hit in hits] == ["knowledge/notes/a.md", "knowledge/notes/undated.md"]
+
+
+def test_without_a_generation_an_until_ceiling_leaves_out_later_pages(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(search_memory, "ROOT", tmp_path)
+    late = _markdown_page(tmp_path, "cache-late", "qa", "cache policy")
+    late.write_text("---\ntype: qa\ntimestamp: 2026-11-20\n---\n# cache-late\n\ncache policy\n", encoding="utf-8")
+    early = _markdown_page(tmp_path, "cache-early", "qa", "cache policy")
+    early.write_text("---\ntype: qa\ntimestamp: 2026-03-01\n---\n# cache-early\n\ncache policy\n", encoding="utf-8")
+
+    hits = search_memory.markdown_hits("cache", limit=5, page_paths=[late, early], until="2026-06-30")
+
+    assert [Path(hit["path"]).stem for hit in hits] == ["cache-early"]
+
+
+def test_recall_reads_until_as_a_date_that_orders_rather_than_cuts() -> None:
+    filters = mcp_server._recall_filters({"query": "q", "since": "2026-11-01", "until": "2026-11-30"})
+
+    assert filters == {"since": "2026-11-01", "until": "2026-11-30"}
+    assert mcp_server._without_dates(filters) == {}
+
+
+def test_recall_refuses_a_range_that_ends_before_it_starts() -> None:
+    with pytest.raises(ValueError, match="'since' must not be later than 'until'"):
+        mcp_server._recall_filters({"query": "q", "since": "2026-11-30", "until": "2026-11-01"})
