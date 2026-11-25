@@ -350,6 +350,7 @@
   "test_both_installers_read_the_claude_file_alike.py": 0.1,
   "test_both_recovery_passes_look_past_a_bad_head.py": 1.33,
   "test_bounded_io.py": 0.02,
+  "test_bounded_thread.py": 1.57,
   "test_build_tiers.py": 0.6,
   "test_capture_diagnostics.py": 1.23,
   "test_capture_failure_is_recorded.py": 0.03,
