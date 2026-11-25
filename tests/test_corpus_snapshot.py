@@ -1104,7 +1104,8 @@ def test_a_sealed_root_whose_identity_changed_before_it_was_opened_is_refused(
     tmp_path: Path,
 ) -> None:
     root = tmp_path / "corpus-root"
-    root.mkdir(mode=0o755)
+    root.mkdir()
+    root.chmod(0o755)
     sealed = corpus_snapshot._identity(root, root.stat())
     root.chmod(0o700)
 
