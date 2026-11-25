@@ -27,11 +27,14 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import bounded_thread
+from evidence_repeats import repeated  # noqa: E402
+from excerpt_stamps import ExcerptStamp, StampBook  # noqa: E402
 from markdown_transaction import mutate_knowledge, stable_operation_id  # noqa: E402
 from memory_state import ROOT  # noqa: E402
 from reply_json import object_with, reply_document  # noqa: E402
 from retrieval import PROFILES as QA_PROFILES  # noqa: E402
 from secret_redact import redact_secrets  # noqa: E402
+from tally_pass import with_computed  # noqa: E402
 from vault_log import LOG_NAME  # noqa: E402
 
 # A provider call: prompt, system prompt and the answer schema, or None for free text.
@@ -94,6 +97,8 @@ class GroundedEvidence:
     line_end: int
     span_sha256: str
     text: str
+    date: str = ""
+    session: str = ""
 
 
 @dataclass(frozen=True)
@@ -494,7 +499,17 @@ MANIFEST_FIELDS = ("citation_id", "relative_path", "text")
 
 
 def _manifest_entry(item: GroundedEvidence) -> dict[str, object]:
-    return {field: getattr(item, field) for field in MANIFEST_FIELDS}
+    """The span as the model reads it, with its date where the vault records one.
+
+    The reader compares dates and combines sessions, and the file name alone
+    named one day for every session in it. The entry's time tells its sessions
+    apart; the session id, a 36-character UUID in a real capture, stays ours.
+    See `excerpt_stamps`.
+    """
+    entry: dict[str, object] = {field: getattr(item, field) for field in MANIFEST_FIELDS}
+    if item.date:
+        entry["date"] = item.date
+    return entry
 
 
 def _render_evidence(evidence: Iterable[GroundedEvidence]) -> str:
@@ -822,9 +837,15 @@ def _is_quotable(item: object, source: object, seen: set) -> bool:
 
 
 def _evidence_for(
-    item: object, source: object, index: int, revision: str, span: tuple[int, int] | None = None
+    item: object,
+    source: object,
+    index: int,
+    revision: str,
+    span: tuple[int, int] | None = None,
+    stamp: ExcerptStamp | None = None,
 ) -> GroundedEvidence:
     start, end = span or (item.byte_start, item.byte_end)
+    stamp = stamp or ExcerptStamp()
     bytes_ = source.content[start:end]
     line_start, line_end = _line_span(source.content, start, end)
     return GroundedEvidence(
@@ -838,6 +859,8 @@ def _evidence_for(
         line_end=line_end,
         span_sha256=hashlib.sha256(bytes_).hexdigest(),
         text=bytes_.decode("utf-8", errors="strict"),
+        date=stamp.date,
+        session=stamp.session,
     )
 
 
@@ -951,22 +974,39 @@ def _authoritative_evidence(
     The packer orders mandatory items by their ids, which puts the pieces of
     one entry in hash order. With whole entries in the window that would hand
     the model a session shuffled; `order` puts each entry's pieces back in byte
-    order behind the entry retrieval ranked before it.
+    order behind the entry retrieval ranked before it. A span its own entry
+    already said is left out (`evidence_repeats`).
     """
     fresh = _FreshSources(vault)
     pairs = _quotable_pairs(compiled, sources, fresh)
     if order is not None:
         pairs.sort(key=lambda pair: order.rank(pair[0]))
-    spans = [
-        (item, source, span)
+    found = [
+        _evidence_for(item, source, index, revision, span, stamp)
+        for index, (item, source, span, stamp) in enumerate(_stamped_spans(pairs, pruner), start=1)
+    ]
+    return found, fresh.stale_paths
+
+
+def _stamped_spans(pairs: list[tuple], pruner: _Pruner | None) -> list[tuple]:
+    """Every span to quote with its entry's stamp, each passage of an entry once."""
+    spans = _every_span(pairs, pruner, StampBook())
+    dropped = repeated([_passage(*span) for span in spans])
+    return [entry for position, entry in enumerate(spans) if position not in dropped]
+
+
+def _every_span(pairs: list[tuple], pruner: _Pruner | None, book: StampBook) -> list[tuple]:
+    return [
+        (item, source, span, book.of(source, span[0]))
         for item, source in pairs
         for span in _spans_for(pruner, item, source)
     ]
-    found = [
-        _evidence_for(item, source, index, revision, span)
-        for index, (item, source, span) in enumerate(spans, start=1)
-    ]
-    return found, fresh.stale_paths
+
+
+def _passage(item: object, source: object, span: tuple[int, int], stamp: ExcerptStamp) -> tuple:
+    """The span's entry and its words, as `evidence_repeats` compares them."""
+    start, end = span
+    return (item.source, stamp), source.content[start:end].decode("utf-8", errors="replace")
 
 
 def _rendered_context(evidence: list[GroundedEvidence], index_text: str) -> str:
@@ -1067,6 +1107,10 @@ WORKING_KEY = "working"
 # What the shown evidence covered of the question, measured by the system and
 # published beside the answer. See `evidence_sufficiency`.
 SUFFICIENCY_KEY = "sufficiency"
+# A refusal is the reader's view, not the memory's: the excerpts it read go to
+# the answering agent, with a hint to search wider when they are weak.
+EXCERPTS_KEY = "excerpts"
+HINT_KEY = "hint"
 
 _FIGURE = re.compile(r"(?<![\w.])\d+(?:[.,]\d+)*(?!\w)(?!\.\d)|--[a-z][a-z0-9-]{2,}")
 
@@ -1792,13 +1836,35 @@ def grounded_qa(
     )
     answer, context = _calendar_look(single, first_candidates, (answer, context))
     answer, context = _refusal_look(single, first_candidates, (answer, context), seek)
+    # Code, not the model, computes what a count, a sum or a difference declared.
+    with_computed(answer)
     _record_cited_evidence(question, context, answer)
     _record_refused_evidence(question, context, answer)
     answer.pop(DROPPED_GATES_KEY, None)
     # The second signal beside the model's own: what the shown evidence covered
     # of the question, so a refusal can be told from evidence that was not there.
-    answer[SUFFICIENCY_KEY] = _measured_sufficiency(single, context).as_record()
+    measured = _measured_sufficiency(single, context)
+    answer[SUFFICIENCY_KEY] = measured.as_record()
+    _offer_excerpts(answer, context, measured)
     return _published(answer, keep_unverified)
+
+
+def _offer_excerpts(answer: dict[str, object], context: GroundedContext, measured: object) -> None:
+    """An answer the reader declined still hands the agent what it read.
+
+    The memory does not decide alone that it holds no answer (reading Б of
+    task 178's plan item 5, accepted 2026-11-17): the excerpts the reader was
+    shown, already bounded by the context budget, go to the answering agent
+    beside the measured coverage, and a hint to search wider when they are weak.
+    """
+    from evidence_sufficiency import search_wider_hint
+
+    if answer.get("status") == "answered":
+        return
+    answer[EXCERPTS_KEY] = [_manifest_entry(item) for item in context.evidence]
+    hint = search_wider_hint(measured)
+    if hint:
+        answer[HINT_KEY] = hint
 
 
 def _with_dated_leg(

@@ -4239,57 +4239,28 @@ def _code_directory_error(resolved: Path) -> str | None:
 TOOL_DESCRIPTIONS = {
     "recall": (
         "Call before answering anything that may depend on what the user or an earlier "
-        "session said, decided or did: preferences, past work, project history, earlier "
-        "fixes. Returns ranked excerpts with titles, paths, dates and matching text; "
-        "since and until rank a date range first."
+        "session said, decided or did. Returns ranked, dated excerpts."
     ),
-    "read_page": (
-        "Call when a recall hit is cut short or you need a whole page: pass its slug "
-        "(filename without .md). Returns the complete page."
-    ),
-    "wiki_overview": (
-        "Call once at the start of a session to learn what the memory holds: page count, "
-        "retrieval tier recommendation and vault root path."
-    ),
+    "read_page": "Call when a recall hit is cut short: returns the whole page by slug.",
+    "wiki_overview": "Call once per session to see what the memory holds.",
     "vault_status": (
         "Call when memory seems stale or before compile: returns compile status and the "
         "current daily-file backlog."
     ),
-    "get_decisions": (
-        "Call before changing a design, structure or contract, to see the decisions "
-        "already in force. Optionally filter by query."
-    ),
-    "get_context": (
-        "Call when you need several known pages at once: one call returns the text of "
-        "every slug given."
-    ),
-    "check_contradiction": (
-        "Call before recording or acting on a new claim, to find the pages that may "
-        "contradict it."
-    ),
-    "log_decision": (
-        "Call when the user makes or approves a durable decision, so later sessions find "
-        "it: writes it to the daily log for the next compile."
-    ),
-    "compile": (
-        "Call when vault_status shows a backlog the user wants processed now: compiles "
-        "pending daily logs into knowledge pages within the operation deadline."
-    ),
+    "get_decisions": "Call before changing a design or contract: the decisions in force.",
+    "get_context": "Call to read several known pages at once, by slug.",
+    "check_contradiction": "Call before acting on a new claim: pages that may contradict it.",
+    "log_decision": "Call when the user makes or approves a durable decision, to record it.",
+    "compile": "Call when the user wants the daily-log backlog compiled into pages now.",
     "find_dead_code": (
-        "Call when asked which code is unused, or before deleting a function: lists "
-        "functions with zero confirmed incoming calls. Results are conservative "
-        "candidates because static call graphs are incomplete."
+        "Call before deleting a function or when asked what code is unused: functions "
+        "with no confirmed caller."
     ),
     "get_architecture": (
-        "Call to understand a code repository before reading its files: statically "
-        "visible entry points, framework routes, incoming-caller hotspots, code "
-        "communities, and symbol, caller, callee and impact queries."
+        "Call before reading a repository's files: entry points, routes, hotspots, and "
+        "symbol, caller, callee and impact queries."
     ),
-    "doctor": (
-        "Call when a memory tool fails or answers degraded, or the user asks about "
-        "memory health: checks local vault health. Read-only unless repair is "
-        "explicitly true."
-    ),
+    "doctor": "Call when a memory tool fails or degrades: vault health, read-only unless repair.",
 }
 
 # What a client shows the agent about this server before any tool is listed;
@@ -5073,12 +5044,15 @@ def _grounded_answer_quality(data: dict) -> dict:
 
 
 def _grounded_abstention_quality(data) -> dict:
-    reason = data.get("reason") if isinstance(data, dict) else None
+    """A declined answer: its reason, and the hint to search wider when one came with it."""
+    if not isinstance(data, dict):
+        data = {}
+    hint = [str(data["hint"])] if data.get("hint") else []
     return {
         "coverage": 0.0,
         "confidence": 0.0,
         "partial": True,
-        "warnings": [str(reason or "Grounded QA abstained without a reason.")],
+        "warnings": [str(data.get("reason") or "Grounded QA abstained without a reason."), *hint],
     }
 
 

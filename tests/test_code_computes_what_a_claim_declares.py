@@ -1,0 +1,90 @@
+"""A count, a sum or a difference between quantities is computed by code from the claim's inputs."""
+
+from __future__ import annotations
+
+import sys
+from pathlib import Path
+
+SCRIPTS = Path(__file__).resolve().parents[1] / "scripts"
+BENCHMARK = Path(__file__).resolve().parents[1] / "benchmark"
+for folder in (SCRIPTS, BENCHMARK):
+    if str(folder) not in sys.path:
+        sys.path.insert(0, str(folder))
+
+from longmemeval_vault import hypothesis_of  # noqa: E402
+from tally_pass import with_computed  # noqa: E402
+
+
+def _marked(derivation: str, inputs: list[str], text: str) -> dict:
+    claim = {"text": text, "derivation": derivation, "inputs": inputs}
+    with_computed({"claims": [claim]})
+    return claim
+
+
+def test_a_count_is_the_number_of_distinct_entries_it_listed() -> None:
+    claim = _marked("count", ["road bike", "Mountain bike", "road  bike", "e-bike"], "You own two bikes.")
+
+    assert claim["computed"] == "3"
+    assert claim["computed_stated"] is False
+
+
+def test_a_count_stated_in_words_is_stated() -> None:
+    claim = _marked("count", ["guitar", "piano", "violin"], "You play three instruments.")
+
+    assert claim["computed_stated"] is True
+
+
+def test_a_sum_adds_one_figure_per_entry() -> None:
+    claim = _marked("sum", ["$1,200 for the bike", "$85.50 helmet", "$14.5 lights"], "You spent $1,300.")
+
+    assert claim["computed"] == "1300"
+    assert claim["computed_stated"] is True
+
+
+def test_a_sum_over_an_entry_without_one_figure_is_not_guessed() -> None:
+    claim = _marked("sum", ["$20 on 2 tickets", "$15"], "You spent $35.")
+
+    assert "computed" not in claim
+
+
+def test_gpt4_93159ced_the_gap_between_two_durations() -> None:
+    claim = _marked(
+        "difference",
+        ["working professionally for 9 years", "at NovaTech for about 4 years and 3 months"],
+        "You worked about 5 years before NovaTech.",
+    )
+
+    assert claim["computed"] == "4 years and 9 months (57 months)"
+    assert claim["computed_stated"] is False
+
+
+def test_a_gap_stated_in_months_alone_is_stated() -> None:
+    claim = _marked("difference", ["9 years", "4 years and 3 months"], "That is 57 months.")
+
+    assert claim["computed_stated"] is True
+
+
+def test_a_difference_between_dates_is_left_to_the_calendar() -> None:
+    claim = _marked("difference", ["2023-05-01", "2023-05-25"], "24 days.")
+
+    assert "computed" not in claim
+
+
+def test_durations_in_units_that_do_not_convert_give_no_figure() -> None:
+    claim = _marked("difference", ["3 years", "2 weeks"], "About three years.")
+
+    assert "computed" not in claim
+
+
+def test_a_lookup_claim_is_left_alone() -> None:
+    claim = {"text": "Your bike is red.", "inputs": []}
+    with_computed({"claims": [claim]})
+
+    assert claim == {"text": "Your bike is red.", "inputs": []}
+
+
+def test_the_stand_reads_a_figure_the_text_does_not_state() -> None:
+    claim = _marked("count", ["a", "b", "c"], "You own two.")
+
+    assert hypothesis_of({"claims": [claim]}) == "You own two. (computed from its inputs: 3)"
+    assert hypothesis_of({"claims": [_marked("count", ["a", "b"], "You own two.")]}) == "You own two."

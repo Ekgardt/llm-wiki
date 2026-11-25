@@ -1,0 +1,5 @@
+{"tests": ["test_retrieve_uses_identical_hard_filters_for_lexical_and_dense"],
+ "kinds": ["assertions"],
+ "reason": "Task 337 item 9 added an inclusive until date to recall, and retrieve hands it to both backends with the other hard filters. The test now passes until and expects both backends to receive it, so it still proves the lexical and dense legs get identical filters, now including the new one.",
+ "recorded": "2026-11-25",
+ "expires": "2027-02-23"}
