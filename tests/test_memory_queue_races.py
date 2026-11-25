@@ -464,29 +464,3 @@ def test_a_failed_snapshot_reports_unknown_rather_than_empty(monkeypatch):
     monkeypatch.setattr(memory_queue, "_windows_process_pairs", lambda: None)
 
     assert memory_queue._tracked_descendant_pids(5, "nt") is None
-
-
-def test_a_second_stop_after_a_failed_one_keeps_the_first_error_visible(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Run 45509749019: the first stop raised `process_cleanup_failed` after killing
-    the child; the cleanup pass in `finally` then rediscovered the tree of a dead
-    child and reported "child exited 1 before cleanup" instead."""
-    calls: list[object] = []
-
-    def terminate(
-        process: object, *, tracked_descendants: object = memory_queue._DISCOVER_DESCENDANTS
-    ) -> set[int]:
-        calls.append(tracked_descendants)
-        if len(calls) == 1:
-            raise memory_queue.QueueOperationError("process_cleanup_failed")
-        return set()
-
-    monkeypatch.setattr(memory_queue, "_terminate_processor_child", terminate)
-    run = memory_queue._ChildRun(process=object(), receiver=object(), deadline=0.0)
-
-    with pytest.raises(memory_queue.QueueOperationError, match="process_cleanup_failed"):
-        run.stop()
-    run.stop()
-
-    assert calls == [memory_queue._DISCOVER_DESCENDANTS, None]

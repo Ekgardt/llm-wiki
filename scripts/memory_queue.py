@@ -14277,7 +14277,6 @@ class _ChildRun:
     deadline: float
     tracked_descendants: set[int] | None = None
     lease_lost: Callable[[], bool] | None = None
-    stop_failed: bool = False
 
     def remaining(self) -> float:
         return self.deadline - time.monotonic()
@@ -14291,20 +14290,7 @@ class _ChildRun:
         Passing an explicit None means "there are no descendants"; only the
         default sentinel asks for discovery, and before the handshake that is
         what we want.
-
-        After a stop that raised, the child was already killed and its tree is
-        unknown: a second pass kills what is left without rediscovering it, so
-        it cannot replace the first error with "child exited before cleanup"
-        (run 45509749019).
         """
-        if self.stop_failed:
-            _terminate_processor_child(self.process, tracked_descendants=None)
-            return
-        self.stop_failed = True
-        self._terminate()
-        self.stop_failed = False
-
-    def _terminate(self) -> None:
         tracked = self.tracked_descendants
         if tracked is None:
             self.tracked_descendants = _terminate_processor_child(self.process)
