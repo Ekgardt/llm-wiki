@@ -20,31 +20,19 @@ concurrency:
   group: tests-${{ github.ref }}
   cancel-in-progress: true
 
-jobs:
-  gitleaks:
-    name: timing::focused::gitleaks
-    runs-on: ubuntu-24.04
-    timeout-minutes: 10
-    steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
-        with:
-          persist-credentials: false
-          # The action scans a commit range; a depth-1 clone can leave the
-          # earlier commits of a push unscanned. 81 MB of history, 10-minute job.
-          fetch-depth: 0
-      - uses: gitleaks/gitleaks-action@e0c47f4f8be36e29cdc102c57e68cb5cbf0e8d1e # v3.0.0
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          GITLEAKS_VERSION: 8.30.1
+# The platform's own checks are this repository's CI and run on Linux: secret
+# scanning, the lock's advisories, lint and the full suite on Python 3.14. This
+# workflow runs only what they cannot: Windows, macOS, and the Linux jobs that
+# check something they do not.
 
+jobs:
   # A vulnerable anyio and cryptography sat in the lock unseen: nothing read the
   # lock against advisories. pip-audit is pinned by hash in uv.lock (the `audit`
   # group, synced alone), and it reads every extra and group the lock resolves.
   # pip-audit skips a requirement whose marker does not match the interpreter it
-  # runs on, so one run reads one branch of a lock that forks by Python and
-  # platform: there is one leg per supported Python, plus Windows for its own pins.
-  # tests/test_the_audit_reads_every_locked_pin.py proves the legs together
-  # install every locked version. `accepted` names advisories with no fix for that
+  # runs on; the platform's dependencies check reads every package of uv.lock on
+  # Linux, and this leg audits the pins a Windows interpreter installs. `accepted`
+  # names advisories with no fix for that
   # interpreter: filelock's fixed releases need Python 3.11, and the lock keeps 3.10
   # on the 3.x line with the fewest. It lapses when 3.10 support ends.
   # See docs/research/2026-09-27-the-lock-is-audited.md and
@@ -55,29 +43,13 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - target: linux-py3.10
-            os: ubuntu-24.04
-            python: "3.10"
-            accepted: &filelock-without-a-python-3-10-fix >-
-              GHSA-567q-5qvw-pf92 GHSA-69hj-f68j-2879 GHSA-8mx5-7m5m-r77g
-              GHSA-9vhv-jxww-xfm5 GHSA-cwqr-hh33-gh44 GHSA-fq56-3cx3-fjxp
-              GHSA-j8f7-rjxc-mr56 GHSA-rfpc-qcw5-3pc4 GHSA-v4x8-3wr5-3wq8
-          - target: linux-py3.11
-            os: ubuntu-24.04
-            python: "3.11"
-          - target: linux-py3.12
-            os: ubuntu-24.04
-            python: "3.12"
-          - target: linux-py3.13
-            os: ubuntu-24.04
-            python: "3.13"
-          - target: linux-py3.14
-            os: ubuntu-24.04
-            python: "3.14"
           - target: windows-py3.10
             os: windows-2025
             python: "3.10"
-            accepted: *filelock-without-a-python-3-10-fix
+            accepted: >-
+              GHSA-567q-5qvw-pf92 GHSA-69hj-f68j-2879 GHSA-8mx5-7m5m-r77g
+              GHSA-9vhv-jxww-xfm5 GHSA-cwqr-hh33-gh44 GHSA-fq56-3cx3-fjxp
+              GHSA-j8f7-rjxc-mr56 GHSA-rfpc-qcw5-3pc4 GHSA-v4x8-3wr5-3wq8
     runs-on: ${{ matrix.os }}
     timeout-minutes: 10
     steps:
@@ -101,48 +73,6 @@ jobs:
           for advisory in ${ACCEPTED}; do accepted+=(--ignore-vuln "${advisory}"); done
           uv run --locked --no-sync pip-audit --requirement "${RUNNER_TEMP}/locked-requirements.txt" --disable-pip --progress-spinner off "${accepted[@]}"
 
-  lint:
-    name: timing::focused::lint
-    runs-on: ubuntu-24.04
-    timeout-minutes: 15
-    steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
-        with:
-          persist-credentials: false
-      - uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5.4.2
-        with:
-          version: "0.12.3"
-          enable-cache: true
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
-        with:
-          node-version: "22.23.1"
-      - run: uv sync --locked --python 3.14
-      - run: uv run --locked --no-sync ruff check scripts/ tests/ benchmark/
-      - run: uv run --locked --no-sync python -m compileall -q -x "tests[\\/]fixtures[\\/]code_kernel[\\/]python[\\/]pkg[\\/]broken[.]py" scripts tests benchmark
-      - run: uv run --locked --no-sync python scripts/lint_memory.py --scope all --fail-on-findings --allowed-categories orphan_daily_logs missing_backlinks missing_sources_section temporal_validity
-      - run: node --check scripts/llm-wiki-memory-opencode.js
-      - run: bash -n install.sh
-      # Nothing parsed PowerShell and nothing ran shellcheck: a syntax error in
-      # install.ps1 reached a release, and install.sh was never checked beyond
-      # `bash -n`. The owner's complexity gate stays out: it is machine-local
-      # tooling under ~/.claude, not part of this repository. The shell's own
-      # complexity is measured by tests/test_shell_functions_stay_simple.py.
-      # See docs/research/2026-09-17-the-remaining-ci-gaps-of-the-third-audit.md
-      # and docs/research/2026-09-27-shell-functions-are-measured-too.md.
-      - run: shellcheck install.sh
-      - name: Every tracked PowerShell file parses
-        shell: pwsh
-        run: |
-          $failed = $false
-          foreach ($file in (git ls-files '*.ps1')) {
-              $errors = $null
-              $tokens = $null
-              [System.Management.Automation.Language.Parser]::ParseFile(
-                  (Resolve-Path -LiteralPath $file).Path, [ref]$tokens, [ref]$errors) | Out-Null
-              if ($errors.Count) { $failed = $true; Write-Host "$file`n$($errors | Out-String)" }
-          }
-          if ($failed) { exit 1 }
-
   pytest-full:
     name: timing::${{ matrix.class }}::py${{ matrix.python }}-s${{ matrix.shard }}
     strategy:
@@ -155,7 +85,6 @@ jobs:
         # about half a minute, so the extra jobs cost almost nothing.
         target:
           - linux-py3.10
-          - linux-py3.14
           - windows-py3.10
           - windows-py3.11
           - windows-py3.12
@@ -168,11 +97,6 @@ jobs:
           - target: linux-py3.10
             os: ubuntu-24.04
             python: "3.10"
-            timeout: 20
-            class: linux_full
-          - target: linux-py3.14
-            os: ubuntu-24.04
-            python: "3.14"
             timeout: 20
             class: linux_full
           - target: windows-py3.10
@@ -400,8 +324,6 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: ubuntu-24.04
-            platform: linux
           - os: windows-2025
             platform: windows
           # The LaunchAgent path (install_control.py) had no CI evidence
@@ -441,7 +363,8 @@ jobs:
   # `--scheduler cron` is the explicit degraded fallback and the only backend a
   # hosted runner can register: ubuntu-24.04 has no systemd user manager, and the
   # macOS LaunchAgent domain needs an Aqua session. The native backends stay covered
-  # by the `installer` job above. macOS runs the installer with `/bin/bash`, which is
+  # by the `installer` job above and, for Linux, by the platform's full suite.
+  # macOS runs the installer with `/bin/bash`, which is
   # bash 3.2 — the shell the contract names.
   # See docs/research/2026-09-17-a-real-install-is-run-in-ci.md.
   install-end-to-end:
@@ -618,8 +541,8 @@ jobs:
         if: matrix.os == 'ubuntu-24.04'
         run: uv run --locked --no-sync python benchmark/run_code_navigation.py --fixture --qualification --require-gates
 
-  # Branch protection requires status checks by name. Naming all forty-nine
-  # matrix jobs by hand is both tedious and silently wrong the moment the
+  # Branch protection requires status checks by name. Naming every
+  # matrix job by hand is both tedious and silently wrong the moment the
   # matrix changes: a job added later is simply not required, and a red one
   # merges. This job depends on every other job, fails on any result that is
   # not `success`, and is the only name the protection rule has to know.
@@ -630,9 +553,7 @@ jobs:
     name: all-green
     if: always()
     needs:
-      - gitleaks
       - dependency-audit
-      - lint
       - pytest-full
       - clean-production
       - clean-hybrid
