@@ -51,11 +51,8 @@ def test_a_replacement_waits_for_the_first_backoff(repository: Path, state_root:
 
         session.definition(_anchor(repository, "pkg/service.py", 10, 20), deadline=time.monotonic() + SHORT_TIMEOUT)
 
-        assert (session._process, session._startup_retries, session._startup_retry_after >= before + _STARTUP_RETRY_BACKOFF[0]) == (
-            None,
-            1,
-            True,
-        )
+        waited = session._startup_retry_after >= before + _STARTUP_RETRY_BACKOFF[0]
+        assert (session._process, session._startup_retries, waited) == (None, 1, True)
     finally:
         session.close(deadline=time.monotonic() + SHORT_TIMEOUT)
 

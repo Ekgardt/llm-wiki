@@ -251,14 +251,23 @@ def _is_literal_margin(term: ast.AST) -> bool:
     return _is_number(term) and term.value != 0  # type: ignore[attr-defined]
 
 
-def _assigned_value(node: ast.AST) -> tuple[ast.AST, ast.AST] | None:
-    """`name = value` or `name.append(value)`: where a clock reading is kept."""
+def _assignment(node: ast.AST) -> tuple[ast.AST, ast.AST] | None:
     if isinstance(node, ast.Assign) and len(node.targets) == 1:
         return node.targets[0], node.value
-    is_append = isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
-    if is_append and node.func.attr == "append" and node.args:  # type: ignore[union-attr]
-        return node.func.value, node.args[0]  # type: ignore[union-attr]
     return None
+
+
+def _appended(node: ast.AST) -> tuple[ast.AST, ast.AST] | None:
+    if not isinstance(node, ast.Call) or not node.args:
+        return None
+    if isinstance(node.func, ast.Attribute) and node.func.attr == "append":
+        return node.func.value, node.args[0]
+    return None
+
+
+def _assigned_value(node: ast.AST) -> tuple[ast.AST, ast.AST] | None:
+    """`name = value` or `name.append(value)`: where a clock reading is kept."""
+    return _assignment(node) or _appended(node)
 
 
 def _clock_readings(function: ast.AST) -> set[str]:
@@ -270,35 +279,57 @@ def _clock_readings(function: ast.AST) -> set[str]:
     return readings
 
 
+def _is_ordering(compare: ast.Compare) -> bool:
+    return all(isinstance(op, _ORDERINGS) for op in compare.ops)
+
+
+def _has_literal_margin(operands: list[ast.expr]) -> bool:
+    return any(_is_literal_margin(term) for operand in operands for term in _terms(operand))
+
+
 def _is_stopwatch(compare: ast.Compare, readings: set[str]) -> bool:
-    if not all(isinstance(op, _ORDERINGS) for op in compare.ops):
+    if not _is_ordering(compare):
         return False
     operands = [compare.left, *compare.comparators]
     timed = any(_reads_clock(operand, readings) for operand in operands)
-    return timed and any(_is_literal_margin(term) for operand in operands for term in _terms(operand))
+    return timed and _has_literal_margin(operands)
+
+
+def _asserted(function: ast.AST) -> list[ast.expr]:
+    return [node.test for node in ast.walk(function) if isinstance(node, ast.Assert)]
+
+
+def _compares(node: ast.AST) -> list[ast.Compare]:
+    return [child for child in ast.walk(node) if isinstance(child, ast.Compare)]
 
 
 def _stopwatches(function: ast.AST) -> list[int]:
     readings = _clock_readings(function)
-    tests = [node.test for node in ast.walk(function) if isinstance(node, ast.Assert)]
-    compares = [node for test in tests for node in ast.walk(test) if isinstance(node, ast.Compare)]
+    compares = [compare for test in _asserted(function) for compare in _compares(test)]
     return sorted({compare.lineno for compare in compares if _is_stopwatch(compare, readings)})
+
+
+def _functions(tree: ast.AST) -> list[ast.AST]:
+    kinds = (ast.FunctionDef, ast.AsyncFunctionDef)
+    return [node for node in ast.walk(tree) if isinstance(node, kinds)]
 
 
 def _file_stopwatches(path: Path) -> list[int]:
     tree = ast.parse(path.read_text(encoding="utf-8"))
-    functions = [node for node in ast.walk(tree) if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))]
-    return sorted({line for function in functions for line in _stopwatches(function)})
+    return sorted({line for function in _functions(tree) for line in _stopwatches(function)})
 
 
 @pytest.mark.parametrize(
     "source",
     [
-        "def t():\n    started = time.monotonic()\n    work()\n    assert time.monotonic() - started < 0.2\n",
-        "def t():\n    elapsed = time.perf_counter() - started\n    assert (elapsed < 0.5, ok) == (True, True)\n",
+        "def t():\n    started = time.monotonic()\n    work()\n"
+        "    assert time.monotonic() - started < 0.2\n",
+        "def t():\n    elapsed = time.perf_counter() - started\n"
+        "    assert (elapsed < 0.5, ok) == (True, True)\n",
         "def t():\n    spent.append(time.monotonic() - begun)\n    assert spent[0] < 0.05\n",
         "def t():\n    started = time.monotonic()\n    assert started < seen <= started + 0.11\n",
-        "def t():\n    deadline = time.monotonic() + 1\n    assert time.monotonic() <= deadline + 0.2\n",
+        "def t():\n    deadline = time.monotonic() + 1\n"
+        "    assert time.monotonic() <= deadline + 0.2\n",
     ],
 )
 def test_the_stopwatch_guard_recognizes_a_literal_margin_on_the_real_clock(source: str) -> None:
@@ -316,13 +347,16 @@ def test_the_stopwatch_guard_recognizes_a_literal_margin_on_the_real_clock(sourc
         "def t():\n    clock = VirtualClock(100.0)\n    assert clock.now - 100.0 <= 0.1\n",
     ],
 )
-def test_the_stopwatch_guard_lets_named_waits_exact_values_and_controlled_clocks_pass(source: str) -> None:
+def test_the_stopwatch_guard_lets_named_waits_exact_values_and_controlled_clocks_pass(
+    source: str,
+) -> None:
     function = ast.parse(source).body[0]
 
     assert _stopwatches(function) == []
 
 
 def test_no_test_times_real_work_against_a_literal_margin() -> None:
-    offenders = {path.name: _file_stopwatches(path) for path in sorted((ROOT / "tests").glob("test_*.py"))}
+    paths = sorted((ROOT / "tests").glob("test_*.py"))
+    offenders = {path.name: _file_stopwatches(path) for path in paths}
 
     assert {name: lines for name, lines in offenders.items() if lines} == {}

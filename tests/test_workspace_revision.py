@@ -1320,7 +1320,7 @@ def test_private_index_checksum_cancellation_is_bounded_by_hash_chunks(
         def digest(self) -> bytes:
             return self.backing.digest()
 
-    def recording_new(hash_name: str, content=b""):
+    def recording_new(hash_name: str, content: bytes = b"") -> ChunkRecordingHash:
         result = ChunkRecordingHash(hash_name)
         if content:
             result.update(content)
@@ -2368,10 +2368,10 @@ def test_private_metadata_fifo_is_rejected_without_opening(
     real_open = workspace_revision.os.open
     target_opens: list[int] = []
 
-    def recording_open(path, flags, *args, **kwargs):
+    def recording_open(path: Any, flags: int, *args: Any, **kwargs: Any) -> int:
         if _opens_target_file(path, target.name, flags, kwargs):
             target_opens.append(flags)
-        return real_open(path, flags, *args, **kwargs)
+        return int(real_open(path, flags, *args, **kwargs))
 
     monkeypatch.setattr(workspace_revision.os, "open", recording_open)
     deadline = time.monotonic() + SHORT_TIMEOUT
@@ -3868,12 +3868,12 @@ def test_revision_checks_cancellation_between_hash_chunks(tmp_path: Path) -> Non
     assert calls == 5
 
 
-def _record_git_runs(monkeypatch: pytest.MonkeyPatch) -> list:
+def _record_git_runs(monkeypatch: pytest.MonkeyPatch) -> list[Any]:
     """Every Git run started, so the deadline it was given can be read back."""
-    runs = []
+    runs: list[Any] = []
 
-    class RecordedRun(workspace_revision._GitRun):
-        def __init__(self, *args) -> None:
+    class RecordedRun(workspace_revision._GitRun):  # type: ignore[misc]
+        def __init__(self, *args: object) -> None:
             super().__init__(*args)
             runs.append(self)
 

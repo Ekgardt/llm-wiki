@@ -27,7 +27,7 @@ def _long_processor(task: dict) -> bool:
     return True
 
 
-def test_the_child_is_stopped_soon_after_the_lease_is_lost(tmp_path: Path):
+def test_the_child_is_stopped_soon_after_the_lease_is_lost(tmp_path: Path) -> None:
     finished = tmp_path / "finished"
     payload = {"seconds": LONG_TIMEOUT, "finished": str(finished)}
     started = time.monotonic()
@@ -36,7 +36,9 @@ def test_the_child_is_stopped_soon_after_the_lease_is_lost(tmp_path: Path):
         return time.monotonic() - started > 3.0
 
     with pytest.raises(memory_queue.QueueOperationError, match="lease_lost"):
-        memory_queue._run_processor_child(_long_processor, {"payload": payload}, 90.0, lease_lost=lease_lost)
+        memory_queue._run_processor_child(
+            _long_processor, {"payload": payload}, 90.0, lease_lost=lease_lost
+        )
 
     assert not finished.exists()
 

@@ -18,7 +18,9 @@ def _no_observed_cost(monkeypatch) -> None:
     monkeypatch.setattr(retrieval, "_OPTIONAL_STAGE_OBSERVED", {})
 
 
-def test_an_unknown_cost_gets_the_ceiling_to_finish_and_be_measured(monkeypatch) -> None:
+def test_an_unknown_cost_gets_the_ceiling_to_finish_and_be_measured(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     now = 100.0
     monkeypatch.setattr(retrieval, "time", frozen_clock(now))
 

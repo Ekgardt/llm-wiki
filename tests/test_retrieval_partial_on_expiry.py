@@ -218,7 +218,7 @@ def test_salvage_starts_no_new_work_and_runs_no_reranker(monkeypatch):
     assert answer.trace.partial is True
 
 
-def test_salvage_is_bounded_in_memory_work(monkeypatch):
+def test_salvage_is_bounded_in_memory_work(monkeypatch: pytest.MonkeyPatch) -> None:
     """The unwinding must not cost anything like a leg: it starts nothing to wait on."""
     import retrieval
 

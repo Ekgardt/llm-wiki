@@ -1193,6 +1193,7 @@ def test_start_forwards_one_capped_deadline_without_shrinking_restart_budget(
             assert effective == caller_deadline
         assert captured["bootstrap_timeout"] == min(caller_seconds, STARTUP_SECONDS)
         assert start_invoked
+        assert clock.slept == [preflight_delay]
         invocation_remaining = effective - start_invoked[0]
         assert captured["bootstrap_timeout"] - invocation_remaining == pytest.approx(
             preflight_delay
@@ -3636,6 +3637,7 @@ def test_diagnostics_wait_for_current_notification_and_timeout_partial(
         # is one that waited for it (the silent server below answers partial).
         assert result.document_version == 1
         assert result.partial is False
+        assert [item.code for item in result.diagnostics] == ["reportUnknownMemberType"]
     finally:
         session.close(deadline=time.monotonic() + 5)
 
@@ -7127,6 +7129,18 @@ def test_manager_close_all_unwraps_earliest_interruption_without_cycle(
     assert all(session._closed for session in sessions)
 
 
+def _run_manager_operation(
+    manager: PyrightSessionManager,
+    operation: str,
+    scope: object,
+    deadline: float,
+) -> None:
+    if operation == "get":
+        manager.get(scope, deadline=deadline)
+        return
+    manager.close_all(deadline=deadline)
+
+
 @pytest.mark.parametrize("operation", ["get", "close_all"])
 def test_manager_global_lock_wait_obeys_absolute_deadline(
     tmp_path: Path,
@@ -7156,12 +7170,9 @@ def test_manager_global_lock_wait_obeys_absolute_deadline(
     manager._lock = recording
     started = time.monotonic()
     try:
+        deadline = started + 0.05
         with pytest.raises(TimeoutError, match="manager lock"):
-            deadline = started + 0.05
-            if operation == "get":
-                manager.get(scope, deadline=deadline)
-            else:
-                manager.close_all(deadline=deadline)
+            _run_manager_operation(manager, operation, scope, deadline)
         assert all(0 <= timeout <= deadline - started for timeout in recording.timeouts)
     finally:
         release.set()

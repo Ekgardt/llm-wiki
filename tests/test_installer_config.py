@@ -391,7 +391,8 @@ def test_hung_or_oversized_debug_probe_is_bounded_and_cleans_child(
     if mode == "hung":
         code = prefix + "time.sleep(30)" + suffix
     else:
-        code = prefix + "sys.stdout.write('x' * 1000000); sys.stdout.flush(); time.sleep(30)" + suffix
+        flood = "sys.stdout.write('x' * 1000000); sys.stdout.flush(); time.sleep(30)"
+        code = prefix + flood + suffix
 
     status = probe_effective_entry(
         [sys.executable, "-c", code],

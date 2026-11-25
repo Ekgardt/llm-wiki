@@ -196,7 +196,7 @@ def _state_lock_poll() -> float:
 
     import memory_state
 
-    return inspect.signature(memory_state._state_lock).parameters["poll"].default
+    return float(inspect.signature(memory_state._state_lock).parameters["poll"].default)
 
 
 _STATE_LOCK_POLL = _state_lock_poll()

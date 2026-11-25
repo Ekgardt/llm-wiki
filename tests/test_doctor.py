@@ -1611,7 +1611,9 @@ def _index_verdicts(index, contents, root, state_root, home) -> list:
     return verdicts
 
 
-def test_queue_scan_is_bounded_by_count_and_file_size(tmp_path, monkeypatch):
+def test_queue_scan_is_bounded_by_count_and_file_size(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     from doctor import run_doctor
 
     root, state_root, home = _build_root(tmp_path)

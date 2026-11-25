@@ -752,7 +752,7 @@ def test_setsid_escape_is_outside_posix_process_group_containment(
 def test_assignment_failure_kills_unassigned_suspended_child_within_budget(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    children: list[object] = []
+    children: list[subprocess.Popen[bytes]] = []
     jobs: list[int] = []
     closed: list[int] = []
     real_popen = lsp_process_tree.subprocess.Popen

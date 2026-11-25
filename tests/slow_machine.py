@@ -76,7 +76,7 @@ def run_within_hang_bound(call: Callable[[], _Result]) -> _Result:
     def run() -> None:
         try:
             outcome.append((True, call()))
-        except BaseException as error:  # noqa: BLE001 - re-raised on the test's thread
+        except BaseException as error:  # re-raised on the test's thread
             outcome.append((False, error))
 
     worker = threading.Thread(target=run, name="hang-bounded-call", daemon=True)

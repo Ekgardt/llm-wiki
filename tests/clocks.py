@@ -67,13 +67,13 @@ class TimeoutRecordingLock:
 
     def acquire(self, blocking: bool = True, timeout: float = -1) -> bool:
         self.timeouts.append(timeout)
-        return self.inner.acquire(blocking, timeout)
+        return bool(self.inner.acquire(blocking, timeout))
 
     def release(self) -> None:
         self.inner.release()
 
     def locked(self) -> bool:
-        return self.inner.locked()
+        return bool(self.inner.locked())
 
     def __enter__(self) -> bool:
         return self.acquire()

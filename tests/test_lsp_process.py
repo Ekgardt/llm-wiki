@@ -2896,6 +2896,7 @@ def test_protocol_callback_lifecycle_operations_fail_fast_without_mutation(
     instances: list[LspProcess] = []
     real_start_heartbeat = lsp_process._start_heartbeat_worker
     handler_errors: list[BaseException] = []
+    refused_before_deadline: list[bool] = []
     handler_threads: list[threading.Thread] = []
     lifecycle_snapshots: list[tuple[object, ...]] = []
 
@@ -2933,6 +2934,7 @@ def test_protocol_callback_lifecycle_operations_fail_fast_without_mutation(
             else:
                 instance._terminal_failure("handler_failure", deadline)
         except BaseException as error:
+            refused_before_deadline.append(time.monotonic() < deadline)
             handler_errors.append(error)
         finally:
             lifecycle_snapshots.append(snapshot(instance))
@@ -2953,6 +2955,7 @@ def test_protocol_callback_lifecycle_operations_fail_fast_without_mutation(
         assert str(handler_errors[0]) == (
             "LSP lifecycle operations are not reentrant from protocol callbacks"
         )
+        assert refused_before_deadline == [True]
         assert handler_threads == [process.protocol.reader_thread]
         assert lifecycle_snapshots[0] == lifecycle_snapshots[1]
         assert process.state is ProcessState.PROTOCOL_INITIALIZED
@@ -3016,6 +3019,7 @@ def test_startup_callback_rejects_own_lifecycle_before_protocol_constructor_retu
     marker = tmp_path / "enable-startup-callback"
     callback_finished = threading.Event()
     callback_errors: list[BaseException] = []
+    refused_before_deadline: list[bool] = []
     lifecycle_snapshots: list[tuple[object, ...]] = []
     process: LspProcess | None = None
 
@@ -3039,8 +3043,10 @@ def test_startup_callback_rejects_own_lifecycle_before_protocol_constructor_retu
         try:
             # A refusal that waited for this deadline would outlast the
             # restart's own deadline below, and the restart would fail.
-            getattr(process, operation)(time.monotonic() + PAUSE_TIMEOUT)
+            deadline = time.monotonic() + PAUSE_TIMEOUT
+            getattr(process, operation)(deadline)
         except BaseException as error:
+            refused_before_deadline.append(time.monotonic() < deadline)
             callback_errors.append(error)
         finally:
             lifecycle_snapshots.append(snapshot(process))
@@ -3077,6 +3083,7 @@ def test_startup_callback_rejects_own_lifecycle_before_protocol_constructor_retu
         process.restart(time.monotonic() + 5)
 
         assert callback_finished.is_set()
+        assert refused_before_deadline == [True]
         assert len(callback_errors) == 1
         assert type(callback_errors[0]) is RuntimeError
         assert str(callback_errors[0]) == (
@@ -3737,7 +3744,7 @@ def test_close_forces_stubborn_process_tree_within_caller_deadline(
 
     def recording_terminate(tree: object, *, deadline: float) -> None:
         terminate_deadlines.append(deadline)
-        terminate(tree, deadline=deadline)  # type: ignore[arg-type]
+        terminate(tree, deadline=deadline)
 
     monkeypatch.setattr(lsp_process.ProcessTree, "terminate", recording_terminate)
     deadline = time.monotonic() + 2.5
@@ -9016,6 +9023,18 @@ def test_caller_json_violation_is_not_retried_after_concurrent_restart(
     process.close(time.monotonic() + 5)
 
 
+def _restart_through_lock(
+    monkeypatch: pytest.MonkeyPatch,
+    process: LspProcess,
+    lock: TimeoutRecordingLock,
+    deadline: float,
+) -> None:
+    """Restart `process` while its lifecycle lock is `lock`, then put the real one back."""
+    with monkeypatch.context() as recorded:
+        recorded.setattr(process._coordinator, "lock", lock)
+        run_within_hang_bound(lambda: process.restart(deadline))
+
+
 def test_expired_deadline_waiting_for_transition_lock_changes_nothing(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -9050,10 +9069,8 @@ def test_expired_deadline_waiting_for_transition_lock_changes_nothing(
     deadline = started + 0.03
     recording = TimeoutRecordingLock(coordinator.lock)
     try:
-        with monkeypatch.context() as recorded:
-            recorded.setattr(coordinator, "lock", recording)
-            with pytest.raises(TimeoutError, match="lifecycle|transition"):
-                run_within_hang_bound(lambda: process.restart(deadline))
+        with pytest.raises(TimeoutError, match="lifecycle|transition"):
+            _restart_through_lock(monkeypatch, process, recording, deadline)
         assert recording.timeouts
         assert all(timeout <= deadline - started for timeout in recording.timeouts)
         assert (

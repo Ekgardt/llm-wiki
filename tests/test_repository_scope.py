@@ -9,6 +9,7 @@ import sys
 import threading
 import time
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -643,10 +644,10 @@ def test_git_probe_uses_only_remaining_caller_budget(tmp_path, monkeypatch):
             self.returncode = -9
             killed.set()
 
-    watches = []
+    watches: list[Any] = []
 
-    class RecordedWatch(repository_scope._GitWatch):
-        def __init__(self, *args):
+    class RecordedWatch(repository_scope._GitWatch):  # type: ignore[misc]
+        def __init__(self, *args: object) -> None:
             super().__init__(*args)
             watches.append(self)
 

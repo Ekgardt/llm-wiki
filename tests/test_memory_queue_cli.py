@@ -30,13 +30,13 @@ from tests.slow_machine import (  # noqa: E402
 )
 
 
-class _RecordingChildRun(memory_queue._ChildRun):
+class _RecordingChildRun(memory_queue._ChildRun):  # type: ignore[misc]
     """A processor child run that records every look at its remaining time."""
 
     readings: list[float]
 
     def remaining(self) -> float:
-        value = super().remaining()
+        value = float(super().remaining())
         self.__dict__.setdefault("readings", []).append(value)
         return value
 
@@ -359,7 +359,7 @@ def test_worker_child_process_is_terminated_at_deadline(
     runs: list[_RecordingChildRun] = []
 
     def child_run(*args: object, **kwargs: object) -> _RecordingChildRun:
-        run = _RecordingChildRun(*args, **kwargs)  # type: ignore[arg-type]
+        run = _RecordingChildRun(*args, **kwargs)
         runs.append(run)
         return run
 

@@ -19,6 +19,7 @@ import time
 import urllib.request
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 
 import install_pyright as installer_module
 import pyright_profile
@@ -586,7 +587,8 @@ def test_download_real_http_response_drip_feed_honors_absolute_deadline(
     response.begin()
     response.url = PYRIGHT_PACKAGE_URL
     events: list[tuple[str, float]] = []
-    response.fp.raw._sock = _TimeoutRecordingSocket(response.fp.raw._sock, events)
+    raw: Any = response.fp.raw
+    raw._sock = _TimeoutRecordingSocket(raw._sock, events)
 
     def open_url(*args: object, **kwargs: object) -> http.client.HTTPResponse:
         release_body.set()
@@ -2042,6 +2044,7 @@ def test_windows_5424_file_idempotence_enumerates_each_directory_once(
     assert sum(path.is_file() for path in _root(state_root).rglob("*")) == 5424
     real_list_directory = installer_module._windows_workspace.list_directory
     enumerations = {"root": 0, "package": 0}
+    entry_counts: dict[str, list[int]] = {}
 
     def enumeration_label(names: set[str]) -> str | None:
         if names == {"install-manifest.json", "package"}:
@@ -2056,6 +2059,7 @@ def test_windows_5424_file_idempotence_enumerates_each_directory_once(
         if label is None:
             return entries
         enumerations[label] += 1
+        entry_counts.setdefault(label, []).append(len(entries))
         if enumerations[label] > 1:
             pytest.fail(f"existing {label} directory was enumerated more than once")
         return entries
@@ -2073,6 +2077,7 @@ def test_windows_5424_file_idempotence_enumerates_each_directory_once(
 
     assert observed == expected
     assert enumerations == {"root": 1, "package": 1}
+    assert entry_counts["package"] == [sum(1 for _ in package.iterdir())]
 
 
 def test_existing_install_root_swap_before_return_fails_closed(

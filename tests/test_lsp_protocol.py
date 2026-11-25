@@ -591,7 +591,7 @@ def _record_completion_waits(
 
     def recording(pending: object, remaining: float, cancellation: object) -> None:
         waits.append(remaining)
-        wait_for_completion(pending, remaining, cancellation)  # type: ignore[arg-type]
+        wait_for_completion(pending, remaining, cancellation)
 
     monkeypatch.setattr(protocol, "_wait_for_completion", recording)
     return waits
@@ -2164,7 +2164,7 @@ def test_encode_frame_rejects_cycles_quickly(monkeypatch: pytest.MonkeyPatch) ->
 
     def recording(walk: object, current: object, parent_depth: int) -> int:
         entered.append(current)
-        return enter_container(walk, current, parent_depth)  # type: ignore[arg-type]
+        return int(enter_container(walk, current, parent_depth))
 
     monkeypatch.setattr(lsp_protocol._JsonWalk, "enter_container", recording)
     with pytest.raises(ProtocolViolation, match="cyclic"):

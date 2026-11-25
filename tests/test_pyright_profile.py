@@ -361,7 +361,7 @@ class _BoundedProbeRuns:
         self.cleanup_deadlines: list[float] = []
         recorder = self
 
-        class RecordingRun(pyright_profile._ProbeRun):
+        class RecordingRun(pyright_profile._ProbeRun):  # type: ignore[misc]
             def __init__(self, *args: object) -> None:
                 super().__init__(*args)
                 recorder.runs.append(self)
@@ -372,7 +372,7 @@ class _BoundedProbeRuns:
 
                 def recording(timeout: float) -> int:
                     recorder.parent_waits.append((reading, timeout))
-                    return wait(timeout=timeout)
+                    return int(wait(timeout=timeout))
 
                 self.process.wait = recording
                 try:
@@ -384,7 +384,7 @@ class _BoundedProbeRuns:
 
         def recording_terminate(tree: object, cleanup_deadline: float) -> bool:
             self.cleanup_deadlines.append(cleanup_deadline)
-            return terminate(tree, cleanup_deadline)
+            return bool(terminate(tree, cleanup_deadline))
 
         monkeypatch.setattr(pyright_profile, "_ProbeRun", RecordingRun)
         monkeypatch.setattr(
