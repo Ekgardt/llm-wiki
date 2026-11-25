@@ -29,6 +29,8 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal, NamedTuple
 
+import bounded_thread
+
 if TYPE_CHECKING:
     from operational_ownership import OwnerLease
 
@@ -8075,7 +8077,7 @@ class MarkdownCoordinator:
         self._local.gate_fence = fencing_epoch
         heartbeat_stop = threading.Event()
         heartbeat_lost = threading.Event()
-        heartbeat_thread = threading.Thread(
+        heartbeat_thread = bounded_thread.BoundedThread(
             target=self._heartbeat_writer_gate,
             args=(owner_token, fencing_epoch, heartbeat_stop, heartbeat_lost),
             name="markdown-writer-heartbeat",
@@ -8218,7 +8220,7 @@ class MarkdownCoordinator:
         lost: threading.Event,
     ) -> threading.Thread:
         # The gate is already taken; its expiry is counted from here.
-        heartbeat = threading.Thread(
+        heartbeat = bounded_thread.BoundedThread(
             target=self._heartbeat_canonical_writer_gate,
             args=(registry, lease, stop, lost, time.monotonic()),
             name="markdown-writer-heartbeat",
@@ -8260,7 +8262,7 @@ class MarkdownCoordinator:
         The registry reclaims only a dead owner, and this process is alive, so a
         release left undone shut every other writer out until it exited (A-13).
         """
-        threading.Thread(
+        bounded_thread.BoundedThread(
             target=self._retry_release,
             args=(registry, lease),
             name="markdown-writer-release",

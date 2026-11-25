@@ -1687,8 +1687,11 @@ def test_constructor_failure_retains_blocked_owner_for_cleanup_retry(
     ) -> None:
         raise RuntimeError("startup wait failed")
 
+    # The constructor's own budget starts its owners and then bounds their cleanup.
+    # Shrinking it to 20 ms let a loaded runner spend it before the first owner
+    # started (pyright-windows, run 45615510034); the reader below stays blocked
+    # past any cleanup bound until the test releases it.
     monkeypatch.setattr(LspProtocol, "_wait_owner_started", staticmethod(fail_wait))
-    monkeypatch.setattr(lsp_protocol, "_OWNER_JOIN_SECONDS", 0.02)
     try:
         with pytest.raises(RuntimeError) as raised:
             _protocol_with_streams(
@@ -1725,6 +1728,13 @@ class _BlockingReader:
 
 
 class _UninterruptibleReader(_BlockingReader):
+    """A read that neither close nor a clock ends; only the test's release does."""
+
+    def read(self, _size: int = -1) -> bytes:
+        self.started.set()
+        self.released.wait(SHORT_TIMEOUT)
+        return b""
+
     def close(self) -> None:
         self.closed = True
 

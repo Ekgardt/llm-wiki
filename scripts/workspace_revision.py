@@ -21,6 +21,8 @@ from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from types import MappingProxyType
 
+import bounded_thread
+
 try:
     import fcntl as _fcntl
 except ImportError:  # pragma: no cover - Windows has no fcntl module
@@ -785,7 +787,7 @@ class _GitRun:
         self._read_done = threading.Event()
         self._output: list[bytes] = []
         self._errors: list[BaseException] = []
-        self._reader = threading.Thread(target=self._read_output, daemon=True)
+        self._reader = bounded_thread.BoundedThread(target=self._read_output, daemon=True)
         self._reader.start()
 
     @property

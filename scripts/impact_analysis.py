@@ -18,6 +18,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import bounded_thread  # noqa: E402
 from bounded_io import read_stable_bytes  # noqa: E402
 from corpus_snapshot import (  # noqa: E402
     CorpusChanged,
@@ -210,7 +211,7 @@ def _git(
         process = _start_git(root, arguments, stderr)
         finished = threading.Event()
         stopped: list[str] = []
-        watcher = threading.Thread(
+        watcher = bounded_thread.BoundedThread(
             target=_watch_git, args=(process, finished, deadline, cancelled, stopped), daemon=True
         )
         try:

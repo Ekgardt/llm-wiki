@@ -17,6 +17,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+import bounded_thread
 from bounded_io import IO_CHUNK_BYTES  # the one read chunk, shared with every bounded reader
 from integration_hook_config import MAX_CONFIG_BYTES  # one bound for the hook configuration
 from lsp_process_tree import ProcessTree
@@ -550,7 +551,7 @@ def _close_stdin(process: object) -> None:
 
 def _started_readers(reader: _BoundedReader) -> list[threading.Thread]:
     threads = [
-        threading.Thread(target=reader.read, args=(name,), daemon=True)
+        bounded_thread.BoundedThread(target=reader.read, args=(name,), daemon=True)
         for name in ("stdout", "stderr")
     ]
     for thread in threads:

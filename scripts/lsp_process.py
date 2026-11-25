@@ -26,6 +26,7 @@ from pathlib import Path
 from types import MappingProxyType
 from typing import BinaryIO, NamedTuple, TypeVar
 
+import bounded_thread
 import lsp_process_tree as _lsp_process_tree
 import windows_workspace as _windows_workspace
 from compile_cache import _acl_output_text, _acl_principal, _windows_acl_identity
@@ -1203,10 +1204,12 @@ class _StderrWake:
 
     A server that left its process group keeps stderr's write end open, so
     end-of-file is not ours to wait for. The thread owns `read_fd`; cleanup
-    owns `write_fd`.
+    owns `write_fd`. Each end is closed once: a second `os.close` of a number the
+    kernel has already handed to another file closes that file (a lease write
+    failed with EBADF on macOS, runs 44812540936 and 45547456425).
     """
 
-    read_fd: int
+    read_fd: int | None
     write_fd: int | None
     lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
 
@@ -1217,11 +1220,17 @@ class _StderrWake:
         if descriptor is not None:
             os.close(descriptor)
 
+    def release_read_end(self) -> None:
+        with self.lock:
+            descriptor, self.read_fd = self.read_fd, None
+        if descriptor is not None:
+            os.close(descriptor)
+
     def abandon(self) -> None:
-        """Both ends, for a drain thread that was never started."""
+        """Both ends, for a drain thread that was never started or has ended."""
         self.request()
         with contextlib.suppress(OSError):
-            os.close(self.read_fd)
+            self.release_read_end()
 
 
 @dataclass(slots=True)
@@ -1934,7 +1943,7 @@ def _start_stderr_drain(
     generation: _Generation, process: object, generation_nonce: str, deadline: float
 ) -> None:
     generation.stderr_wake = _new_stderr_wake()
-    stderr_thread = threading.Thread(
+    stderr_thread = bounded_thread.BoundedThread(
         target=_drain_stderr,
         args=(
             process.stderr,
@@ -2022,7 +2031,7 @@ def _start_exit_monitor(
     generation_nonce: str,
     deadline: float,
 ) -> None:
-    exit_thread = threading.Thread(
+    exit_thread = bounded_thread.BoundedThread(
         target=_monitor_generation_exit,
         args=(coordinator, generation),
         name=f"lsp-exit-{generation_nonce}",
@@ -2725,14 +2734,14 @@ def _adopt_lifecycle_workers_locked(
 ) -> tuple[threading.Thread, threading.Thread]:
     """The recovery and heartbeat threads, created if they do not exist yet."""
     if coordinator.recovery_thread is None:
-        coordinator.recovery_thread = threading.Thread(
+        coordinator.recovery_thread = bounded_thread.BoundedThread(
             target=_recovery_loop,
             args=(instance,),
             name=f"lsp-recovery-{instance.owner_nonce}",
             daemon=True,
         )
     if coordinator.heartbeat_thread is None:
-        coordinator.heartbeat_thread = threading.Thread(
+        coordinator.heartbeat_thread = bounded_thread.BoundedThread(
             target=_heartbeat_loop,
             args=(instance,),
             name=f"lsp-heartbeat-{instance.owner_nonce}",
@@ -2772,7 +2781,7 @@ def _start_heartbeat_worker(instance: LspProcess, deadline: float) -> None:
     _acquire_lifecycle(coordinator, deadline)
     try:
         if coordinator.heartbeat_thread is None:
-            coordinator.heartbeat_thread = threading.Thread(
+            coordinator.heartbeat_thread = bounded_thread.BoundedThread(
                 target=_heartbeat_loop,
                 args=(instance,),
                 name=f"lsp-heartbeat-{instance.owner_nonce}",
@@ -2843,7 +2852,7 @@ def _adopt_recovery_thread_locked(
         return None
     coordinator.recovery_stop.clear()
     coordinator.recovery_wake.clear()
-    replacement = threading.Thread(
+    replacement = bounded_thread.BoundedThread(
         target=_recovery_loop,
         args=(instance,),
         name=f"lsp-recovery-{instance.owner_nonce}",
@@ -3398,7 +3407,7 @@ def _adopt_heartbeat_locked(
         return None
     coordinator.heartbeat_stop.clear()
     coordinator.heartbeat_wake.clear()
-    heartbeat = threading.Thread(
+    heartbeat = bounded_thread.BoundedThread(
         target=_heartbeat_loop,
         args=(instance,),
         name=f"lsp-heartbeat-{instance.owner_nonce}",
@@ -7106,7 +7115,7 @@ def _drain_stderr(
             stream.close()
         if wake is not None:
             with contextlib.suppress(OSError):
-                os.close(wake.read_fd)
+                wake.release_read_end()
 
 
 def _take_stderr_chunk(descriptor: int, ring: _StderrRing) -> bool:
@@ -7154,10 +7163,13 @@ def _read_stderr_forever(
         while _take_stderr_chunk(descriptor, ring):
             pass
         return
+    wake_fd = wake.read_fd
+    if wake_fd is None:
+        return
     with selectors.DefaultSelector() as selector:
         selector.register(descriptor, selectors.EVENT_READ)
-        selector.register(wake.read_fd, selectors.EVENT_READ)
-        _read_stderr_until_woken(selector, descriptor, wake.read_fd, ring)
+        selector.register(wake_fd, selectors.EVENT_READ)
+        _read_stderr_until_woken(selector, descriptor, wake_fd, ring)
 
 
 def _trim_stderr_chunks(chunks: deque[bytes], size: list[int]) -> None:

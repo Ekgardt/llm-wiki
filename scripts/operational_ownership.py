@@ -18,6 +18,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Literal, cast
 
+import bounded_thread
 import markdown_transaction
 import process_liveness
 from iso_time import utc_text
@@ -1459,7 +1460,7 @@ def heartbeat_owner(
             failure.append(ended)
             _signal_lost(lost)
 
-    thread = threading.Thread(
+    thread = bounded_thread.BoundedThread(
         target=heartbeat,
         name=f"{lease.role}-owner-heartbeat",
         daemon=True,

@@ -2123,7 +2123,7 @@ class TestHandleToolCall:
         workers = set()
         monkeypatch.setattr(mcp_server, "_MCP_WORKERS", workers)
         monkeypatch.setattr(mcp_server, "_MCP_WORKERS_LOCK", threading.Lock())
-        monkeypatch.setattr(mcp_server.threading, "Thread", BrokenThread)
+        monkeypatch.setattr(mcp_server.bounded_thread, "BoundedThread", BrokenThread)
 
         for _ in range(mcp_server.MCP_WORKER_SLOTS + 1):
             with pytest.raises(RuntimeError, match="cannot start"):

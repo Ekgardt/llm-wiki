@@ -44,6 +44,22 @@ def test_a_heartbeat_thread_that_ignores_stop_is_refused_by_name(monkeypatch):
     assert not heartbeat._thread.is_alive()
 
 
+def test_the_refusal_keeps_its_bound_when_the_interpreter_join_ignores_its_timeout(monkeypatch):
+    """CPython 3.13 can turn a timed join into an untimed one (python/cpython#161712).
+
+    A hosted Windows runner did: the stop waited 30 s for the deaf heartbeat to end
+    and then raised nothing (run 45638724158). The emulated join below waits for the
+    thread's end whatever timeout it is given.
+    """
+    real_join = threading.Thread.join
+
+    def join_ignoring_its_timeout(thread: threading.Thread, timeout: float | None = None) -> None:
+        real_join(thread)
+
+    monkeypatch.setattr(threading.Thread, "join", join_ignoring_its_timeout)
+    test_a_heartbeat_thread_that_ignores_stop_is_refused_by_name(monkeypatch)
+
+
 def test_a_heartbeat_thread_that_stops_is_joined_quietly():
     class _Queue:
         def _heartbeat_wait(self, stop: threading.Event, interval: float) -> bool:

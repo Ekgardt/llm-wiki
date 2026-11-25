@@ -13,6 +13,8 @@ import threading
 import time
 from collections.abc import Callable
 
+import bounded_thread
+
 _RUNNING: set[threading.Thread] = set()
 _LOCK = threading.Lock()
 stopping = threading.Event()
@@ -42,7 +44,7 @@ def _forget(thread: threading.Thread) -> None:
 
 def start(target: Callable[[], object], *, name: str) -> threading.Thread:
     """Start `target` on a daemon thread that `settle` will wait for."""
-    thread = threading.Thread(target=_tracked(target), name=name, daemon=True)
+    thread = bounded_thread.BoundedThread(target=_tracked(target), name=name, daemon=True)
     with _LOCK:
         _RUNNING.add(thread)
         _register_exit_settle()

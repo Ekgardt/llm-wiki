@@ -29,6 +29,8 @@ from pathlib import Path
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Any, Literal, NamedTuple, NoReturn
 
+import bounded_thread
+
 if TYPE_CHECKING:
     from markdown_transaction import IntentFence
     from operational_ownership import OwnerLease
@@ -13620,7 +13622,7 @@ class _SourceFenceHeartbeat:
         self._stop = threading.Event()
         self._lock = threading.Lock()
         self.error: Exception | None = None
-        self._thread = threading.Thread(
+        self._thread = bounded_thread.BoundedThread(
             target=self._run,
             name=f"memory-source-fence-heartbeat-{fence.daily_id}",
             daemon=True,
@@ -13699,7 +13701,7 @@ class _LeaseHeartbeat:
         self._held_since = time.monotonic()
         self._stop = threading.Event()
         self.error: Exception | None = None
-        self._thread = threading.Thread(
+        self._thread = bounded_thread.BoundedThread(
             target=self._run,
             name=f"memory-queue-heartbeat-{lease.id}",
             daemon=True,

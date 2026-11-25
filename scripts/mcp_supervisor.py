@@ -29,11 +29,12 @@ import os
 import queue
 import subprocess
 import sys
-import threading
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import BinaryIO
+
+import bounded_thread
 
 WORKER_ENV = "LLM_WIKI_MCP_WORKER"
 INIT_ID_PREFIX = "llm-wiki-supervisor:initialize:"
@@ -136,7 +137,7 @@ class Supervisor:
 
     def feed_client(self, stream: BinaryIO) -> None:
         """Read the client's lines on a thread; end of input ends the session."""
-        threading.Thread(target=self._read_client, args=(stream,), daemon=True).start()
+        bounded_thread.BoundedThread(target=self._read_client, args=(stream,), daemon=True).start()
 
     def _read_client(self, stream: BinaryIO) -> None:
         for line in iter(stream.readline, b""):
@@ -217,7 +218,7 @@ class Supervisor:
         )
         child = Child(process, self.session.generation, self._fingerprint(self._scripts))
         self.session.child = child
-        threading.Thread(target=self._read_child, args=(child,), daemon=True).start()
+        bounded_thread.BoundedThread(target=self._read_child, args=(child,), daemon=True).start()
 
     def _replay_initialisation(self) -> None:
         if self.session.initialize is None:
