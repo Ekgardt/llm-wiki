@@ -42,7 +42,7 @@ from reliable_memory import canonical_json_bytes, sha256_bytes
 from repository_scope import resolve_repository_scope
 
 from tests.code_kernel_helpers import create_pyright_fixture
-from tests.slow_machine import SHORT_TIMEOUT
+from tests.slow_machine import PAUSE_TIMEOUT, SHORT_TIMEOUT, run_within_hang_bound
 
 
 class _FakeNodeProcess:
@@ -350,6 +350,63 @@ def _assert_probe_gave_up(result, processes) -> None:
     assert result[2] is None
     assert result[3] & {"pyright_node_probe_timeout", "pyright_node_probe_failed"}
     assert all(process.returncode == 0 for process in processes)
+
+
+class _BoundedProbeRuns:
+    """Every probe run, and each wait for its parent with a clock read taken before it."""
+
+    def __init__(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        self.runs: list[pyright_profile._ProbeRun] = []
+        self.parent_waits: list[tuple[float, float]] = []
+        self.cleanup_deadlines: list[float] = []
+        recorder = self
+
+        class RecordingRun(pyright_profile._ProbeRun):
+            def __init__(self, *args: object) -> None:
+                super().__init__(*args)
+                recorder.runs.append(self)
+
+            def _wait_parent(self) -> None:
+                wait = self.process.wait
+                reading = time.monotonic()
+
+                def recording(timeout: float) -> int:
+                    recorder.parent_waits.append((reading, timeout))
+                    return wait(timeout=timeout)
+
+                self.process.wait = recording
+                try:
+                    super()._wait_parent()
+                finally:
+                    del self.process.wait
+
+        terminate = pyright_profile._terminate_node_probe_tree
+
+        def recording_terminate(tree: object, cleanup_deadline: float) -> bool:
+            self.cleanup_deadlines.append(cleanup_deadline)
+            return terminate(tree, cleanup_deadline)
+
+        monkeypatch.setattr(pyright_profile, "_ProbeRun", RecordingRun)
+        monkeypatch.setattr(
+            pyright_profile, "_terminate_node_probe_tree", recording_terminate
+        )
+
+    def assert_within(self, deadline: float) -> None:
+        """One probe, kept inside `deadline` plus a single cleanup allowance."""
+        [run] = self.runs
+        assert run.probe_deadline <= deadline
+        assert run.hard_cleanup_deadline == (
+            run.probe_deadline + pyright_profile.NODE_PROBE_CLEANUP_SECONDS
+        )
+        assert self.parent_waits
+        assert all(
+            timeout <= max(0.0, run.probe_deadline - reading)
+            for reading, timeout in self.parent_waits
+        )
+        assert self.cleanup_deadlines
+        assert all(
+            cleanup <= run.hard_cleanup_deadline for cleanup in self.cleanup_deadlines
+        )
 
 
 def _pid_exits_within(pid: int, seconds: float = 2.0) -> bool:
@@ -2655,15 +2712,12 @@ def test_node_probe_contains_descendant_inheriting_output_before_read(
         before_ready=_inheriting_descendant_spawn(pid_file, inherited_stream),
     )
     descendant_pid = int(pid_file.read_text(encoding="ascii"))
-    operation_seconds = 0.3
-    started = time.monotonic()
+    probes = _BoundedProbeRuns(monkeypatch)
+    deadline = time.monotonic() + 0.3
 
-    result = pyright_profile._probe_node(started + operation_seconds)
-    elapsed = time.monotonic() - started
+    result = run_within_hang_bound(lambda: pyright_profile._probe_node(deadline))
     try:
-        assert elapsed <= (
-            operation_seconds + pyright_profile.NODE_PROBE_CLEANUP_SECONDS + 0.25
-        )
+        probes.assert_within(deadline)
         _assert_probe_gave_up(result, processes)
         assert _pid_exits_within(descendant_pid)
         assert _trees_unowned(trees) or _trees_pending_cleanup(trees)
@@ -2726,7 +2780,8 @@ def test_node_probe_huge_output_kills_inheriting_descendant_within_bound(
     pid_file = tmp_path / "huge-output-descendant.pid"
     program = (
         "import subprocess,sys\n"
-        "child=subprocess.Popen([sys.executable,'-c','import time; time.sleep(2.5)'])\n"
+        "child=subprocess.Popen([sys.executable,'-c',"
+        f"'import time; time.sleep({PAUSE_TIMEOUT})'])\n"
         f"open({str(pid_file)!r},'w',encoding='ascii').write(str(child.pid))\n"
         "sys.stdout.buffer.write(b'x'*(2*1024*1024))\n"
         "sys.stdout.buffer.flush()\n"
@@ -2734,13 +2789,13 @@ def test_node_probe_huge_output_kills_inheriting_descendant_within_bound(
     _node, _processes, trees = _install_real_node_program(
         monkeypatch, tmp_path, program
     )
-    started = time.monotonic()
+    probes = _BoundedProbeRuns(monkeypatch)
+    deadline = time.monotonic() + 1.0
 
-    result = pyright_profile._probe_node(started + 1.0)
-    elapsed = time.monotonic() - started
+    result = run_within_hang_bound(lambda: pyright_profile._probe_node(deadline))
     descendant_pid = int(pid_file.read_text(encoding="ascii"))
     try:
-        assert elapsed <= 1.0 + pyright_profile.NODE_PROBE_CLEANUP_SECONDS + 0.25
+        probes.assert_within(deadline)
         assert result[1] is None
         assert result[2] is None
         assert result[3] & {"pyright_node_probe_timeout", "pyright_node_probe_failed"}

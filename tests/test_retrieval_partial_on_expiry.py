@@ -28,6 +28,8 @@ from pathlib import Path
 
 import pytest
 
+from tests.slow_machine import run_within_hang_bound
+
 ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT / "scripts") not in sys.path:
     sys.path.insert(0, str(ROOT / "scripts"))
@@ -216,27 +218,29 @@ def test_salvage_starts_no_new_work_and_runs_no_reranker(monkeypatch):
     assert answer.trace.partial is True
 
 
-def test_salvage_is_bounded_in_memory_work():
-    """The unwinding must not cost anything like a leg. Measured, not assumed."""
+def test_salvage_is_bounded_in_memory_work(monkeypatch):
+    """The unwinding must not cost anything like a leg: it starts nothing to wait on."""
     import retrieval
 
     deadline, lexical = _expire_after_lexical(
         [_hit(f"c{index}", f"p{index % 20}.md", 1.0 / (index + 1)) for index in range(400)]
     )
-
-    started = time.monotonic()
-    result = retrieval.retrieve(
-        "needle",
-        requested_profile="BASE",
-        lexical_backend=lexical,
-        rerank_enabled=False,
-        limit=5,
-        deadline_monotonic=deadline,
+    workers = []
+    monkeypatch.setattr(
+        retrieval, "_start_optional_worker", lambda *args, **_kwargs: workers.append(args)
     )
-    spent = time.monotonic() - started
+
+    result = run_within_hang_bound(
+        lambda: retrieval.retrieve(
+            "needle",
+            requested_profile="BASE",
+            lexical_backend=lexical,
+            rerank_enabled=False,
+            limit=5,
+            deadline_monotonic=deadline,
+        )
+    )
 
     assert result.trace.partial is True
     assert len(result.candidates) == 5
-    # 0.06 s of that is the backend's own sleep. The salvage itself is the rest,
-    # and a whole second of headroom is far above anything measured for it.
-    assert spent < 1.06
+    assert workers == []

@@ -31,7 +31,7 @@ from workspace_revision import (
 )
 
 from tests.code_kernel_helpers import copy_python_fixture
-from tests.slow_machine import SHORT_TIMEOUT
+from tests.slow_machine import PAUSE_TIMEOUT, SHORT_TIMEOUT, run_within_hang_bound
 
 
 def _indexed_git_config_variables() -> list[str]:
@@ -475,12 +475,6 @@ def _opens_target_file(path, target_name, flags, kwargs) -> bool:
     if path != target_name or kwargs.get("dir_fd") is None:
         return False
     return not flags & getattr(os, "O_DIRECTORY", 0)
-
-
-def _block_unless_nonblocking(flags: int) -> None:
-    if flags & os.O_NONBLOCK:
-        return
-    time.sleep(1.0)
 
 
 def _stop_condition(stop: str, started: float):
@@ -1312,41 +1306,37 @@ def test_private_index_checksum_cancellation_is_bounded_by_hash_chunks(
     raw = (repository / ".git/index").read_bytes()
     large = _append_index_extension(raw, b"TREE", b"x" * (4 * 1024 * 1024))
     real_new = hashlib.new
-    updates = 0
+    chunks: list[int] = []
 
-    class ThrottledHash:
+    class ChunkRecordingHash:
         def __init__(self, hash_name: str) -> None:
             self.backing = real_new(hash_name)
             self.digest_size = self.backing.digest_size
 
         def update(self, content) -> None:
-            nonlocal updates
-            time.sleep(len(content) / (8 * 1024 * 1024))
             self.backing.update(content)
-            updates += 1
+            chunks.append(len(content))
 
         def digest(self) -> bytes:
             return self.backing.digest()
 
-    def throttled_new(hash_name: str, content=b""):
-        result = ThrottledHash(hash_name)
+    def recording_new(hash_name: str, content=b""):
+        result = ChunkRecordingHash(hash_name)
         if content:
             result.update(content)
         return result
 
-    monkeypatch.setattr(workspace_revision.hashlib, "new", throttled_new)
-    started = time.monotonic()
+    monkeypatch.setattr(workspace_revision.hashlib, "new", recording_new)
     with pytest.raises(TimeoutError, match="cancelled"):
         workspace_revision._parse_git_index(
             large,
             hash_name="sha1",
             deadline=None,
-            cancelled=lambda: updates > 0,
+            cancelled=lambda: bool(chunks),
         )
-    elapsed = time.monotonic() - started
 
-    assert updates == 1
-    assert elapsed < 0.25
+    assert len(chunks) == 1
+    assert chunks[0] < len(large)
 
 
 def test_private_index_rebuild_honors_cancellation_before_cpu_loop(repository: Path) -> None:
@@ -2360,6 +2350,7 @@ def test_private_index_malformed_metadata_uses_exact_fallback(
 @pytest.mark.parametrize("metadata", ["config", "HEAD", "index", "ref"])
 def test_private_metadata_fifo_is_rejected_without_opening(
     repository: Path,
+    monkeypatch: pytest.MonkeyPatch,
     metadata: str,
 ) -> None:
     if metadata == "ref":
@@ -2374,22 +2365,32 @@ def test_private_metadata_fifo_is_rejected_without_opening(
     except OSError:
         target.write_bytes(original)
         pytest.skip("FIFO creation is unavailable")
+    real_open = workspace_revision.os.open
+    target_opens: list[int] = []
+
+    def recording_open(path, flags, *args, **kwargs):
+        if _opens_target_file(path, target.name, flags, kwargs):
+            target_opens.append(flags)
+        return real_open(path, flags, *args, **kwargs)
+
+    monkeypatch.setattr(workspace_revision.os, "open", recording_open)
+    deadline = time.monotonic() + SHORT_TIMEOUT
     try:
-        started = time.monotonic()
-        result = workspace_revision._read_owned_file(
-            repository,
-            target,
-            64 * 1024 * 1024,
-            deadline=started + 0.25,
-            cancelled=None,
+        result = run_within_hang_bound(
+            lambda: workspace_revision._read_owned_file(
+                repository,
+                target,
+                64 * 1024 * 1024,
+                deadline=deadline,
+                cancelled=None,
+            )
         )
-        elapsed = time.monotonic() - started
     finally:
         target.unlink()
         target.write_bytes(original)
 
     assert result is None
-    assert elapsed < 0.1
+    assert target_opens == []
 
 
 @pytest.mark.skipif(not _linux_memfd_available(), reason="Linux metadata descriptors")
@@ -2407,28 +2408,29 @@ def test_private_metadata_open_race_cannot_block_past_caller_deadline(
     else:
         target_name = metadata
     real_open = workspace_revision.os.open
-    fired = False
+    raced_flags: list[int] = []
 
     def simulate_fifo_race(path, flags, *args, **kwargs):
-        nonlocal fired
-        if not fired and _opens_target_file(path, target_name, flags, kwargs):
-            fired = True
-            _block_unless_nonblocking(flags)
+        if not raced_flags and _opens_target_file(path, target_name, flags, kwargs):
+            raced_flags.append(flags)
             raise BlockingIOError("injected FIFO replacement")
         return real_open(path, flags, *args, **kwargs)
 
     monkeypatch.setattr(workspace_revision.os, "open", simulate_fifo_race)
-    started = time.monotonic()
-    result = workspace_revision.verify_workspace_revision_unchanged(
-        scope,
-        expected,
-        deadline=started + 0.5,
+    deadline = time.monotonic() + SHORT_TIMEOUT
+    result = run_within_hang_bound(
+        lambda: workspace_revision.verify_workspace_revision_unchanged(
+            scope,
+            expected,
+            deadline=deadline,
+        )
     )
-    elapsed = time.monotonic() - started
 
-    assert fired
+    # A FIFO swapped in after the check would block an open without O_NONBLOCK
+    # until a writer appears, whatever the caller's deadline says.
+    assert len(raced_flags) == 1
+    assert raced_flags[0] & os.O_NONBLOCK
     assert result is True
-    assert elapsed < 0.5
 
 
 @pytest.mark.skipif(not _linux_memfd_available(), reason="Linux memfd optimization")
@@ -2741,10 +2743,12 @@ def test_private_index_blocked_status_is_bounded_and_leak_free(
     wrapper_root.mkdir()
     wrapper = wrapper_root / "git"
     pid_path = wrapper_root / "pid"
+    finished = wrapper_root / "finished"
     wrapper.write_text(
         "#!/bin/sh\n"
         "printf '%s' \"$$\" > \"$REVISION_TEST_PID\"\n"
-        "sleep 30\n",
+        f"sleep {PAUSE_TIMEOUT:g}\n"
+        f"touch '{finished}'\n",
         encoding="ascii",
     )
     wrapper.chmod(0o755)
@@ -2764,19 +2768,21 @@ def test_private_index_blocked_status_is_bounded_and_leak_free(
     deadline, cancelled = _stop_condition(stop, started)
 
     with pytest.raises(TimeoutError, match="deadline|cancel"):
-        workspace_revision.verify_workspace_revision_unchanged(
-            scope,
-            expected,
-            deadline=deadline,
-            cancelled=cancelled,
+        run_within_hang_bound(
+            lambda: workspace_revision.verify_workspace_revision_unchanged(
+                scope,
+                expected,
+                deadline=deadline,
+                cancelled=cancelled,
+            )
         )
 
-    assert time.monotonic() - started < 0.75
     assert descriptors
     for descriptor in descriptors:
         with pytest.raises(OSError):
             os.fstat(descriptor)
     _await_process_gone(int(pid_path.read_text(encoding="ascii")))
+    assert not finished.exists()
     assert not (repository / ".git/index.lock").exists()
 
 
@@ -3862,6 +3868,19 @@ def test_revision_checks_cancellation_between_hash_chunks(tmp_path: Path) -> Non
     assert calls == 5
 
 
+def _record_git_runs(monkeypatch: pytest.MonkeyPatch) -> list:
+    """Every Git run started, so the deadline it was given can be read back."""
+    runs = []
+
+    class RecordedRun(workspace_revision._GitRun):
+        def __init__(self, *args) -> None:
+            super().__init__(*args)
+            runs.append(self)
+
+    monkeypatch.setattr(workspace_revision, "_GitRun", RecordedRun)
+    return runs
+
+
 def test_git_status_uses_only_remaining_deadline_and_kills_blocked_process(
     repository: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -3872,7 +3891,7 @@ def test_git_status_uses_only_remaining_deadline_and_kills_blocked_process(
 
     class Output:
         def read(self, _size: int) -> bytes:
-            killed.wait(1)
+            killed.wait(PAUSE_TIMEOUT)
             return b""
 
         def close(self) -> None:
@@ -3900,23 +3919,27 @@ def test_git_status_uses_only_remaining_deadline_and_kills_blocked_process(
         lambda process: process.kill(),
         raising=False,
     )
-    started = time.monotonic()
+    runs = _record_git_runs(monkeypatch)
+    deadline = time.monotonic() + 0.03
 
     with pytest.raises(TimeoutError, match="deadline"):
-        compute_workspace_revision(scope, deadline=started + 0.03)
+        run_within_hang_bound(lambda: compute_workspace_revision(scope, deadline=deadline))
 
-    assert time.monotonic() - started < 0.5
+    assert [run.deadline for run in runs] == [deadline]
     assert killed.is_set()
 
 
 def test_git_pipe_reader_cannot_hold_caller_past_deadline(
     repository: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    import threading
+
     scope = resolve_repository_scope(repository)
+    pipe_released = threading.Event()
 
     class Output:
         def read(self, _size: int) -> bytes:
-            time.sleep(1)
+            pipe_released.wait(PAUSE_TIMEOUT)
             return b""
 
         def close(self) -> None:
@@ -3944,17 +3967,19 @@ def test_git_pipe_reader_cannot_hold_caller_past_deadline(
         "_terminate_process_tree",
         lambda process: process.kill(),
     )
-    started = time.monotonic()
+    runs = _record_git_runs(monkeypatch)
+    deadline = time.monotonic() + 0.03
 
-    with pytest.raises(TimeoutError, match="deadline"):
-        compute_workspace_revision(
-            scope, deadline=started + 0.03
-        )
-
-    # The fake pipe read blocks for a full second, so returning before it
-    # could finish is the whole claim; the exact margin is scheduler-
-    # dependent and measured 0.57 s on a macOS runner.
-    assert time.monotonic() - started < 0.9
+    try:
+        # The fake pipe read outlasts the hang bound until it is released, so
+        # returning at all means the caller did not wait for the reader.
+        with pytest.raises(TimeoutError, match="deadline"):
+            run_within_hang_bound(
+                lambda: compute_workspace_revision(scope, deadline=deadline)
+            )
+        assert [run.deadline for run in runs] == [deadline]
+    finally:
+        pipe_released.set()
 
 
 @pytest.mark.skipif(os.name == "nt", reason="distinct NFC-equivalent names require POSIX")

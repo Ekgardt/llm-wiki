@@ -16,7 +16,7 @@ import lsp_process_tree
 import pytest
 from lsp_process_tree import ProcessTree
 
-from tests.slow_machine import SHORT_TIMEOUT
+from tests.slow_machine import PAUSE_TIMEOUT, SHORT_TIMEOUT, run_within_hang_bound
 
 FAKE_SERVER = Path(__file__).with_name("fake_lsp_server.py").resolve()
 
@@ -781,16 +781,17 @@ def test_assignment_failure_kills_unassigned_suspended_child_within_budget(
         "_assign_windows_process",
         lambda _job, _process: (_ for _ in ()).throw(OSError("assignment failed")),
     )
-    started = time.monotonic()
-
     with pytest.raises(OSError, match="assignment failed"):
-        ProcessTree.spawn(
-            _command("--sleep-seconds", "30"), cwd=tmp_path, env=dict(os.environ)
+        run_within_hang_bound(
+            lambda: ProcessTree.spawn(
+                _command("--sleep-seconds", str(PAUSE_TIMEOUT)),
+                cwd=tmp_path,
+                env=dict(os.environ),
+            )
         )
 
-    assert time.monotonic() - started <= 2.25
     assert len(children) == 1
-    assert children[0].poll() is not None
+    assert children[0].poll() not in {None, 0}
     assert jobs and closed.count(jobs[0]) == 1
 
 

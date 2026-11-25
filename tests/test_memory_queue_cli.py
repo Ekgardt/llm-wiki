@@ -23,7 +23,22 @@ import memory_queue  # noqa: E402
 from memory_queue import MemoryQueue  # noqa: E402
 
 from tests.pid_files import read_pid, write_pid  # noqa: E402
-from tests.slow_machine import SHORT_TIMEOUT  # noqa: E402
+from tests.slow_machine import (  # noqa: E402
+    PAUSE_TIMEOUT,
+    SHORT_TIMEOUT,
+    run_within_hang_bound,
+)
+
+
+class _RecordingChildRun(memory_queue._ChildRun):
+    """A processor child run that records every look at its remaining time."""
+
+    readings: list[float]
+
+    def remaining(self) -> float:
+        value = super().remaining()
+        self.__dict__.setdefault("readings", []).append(value)
+        return value
 
 
 def _sleep_processor(task: dict) -> bool:
@@ -332,24 +347,38 @@ def test_worker_policy_overrides_claim_heartbeat_attempts_and_backoff(
     assert (task.available_at - now).total_seconds() == 7
 
 
-def test_worker_child_process_is_terminated_at_deadline() -> None:
+def test_worker_child_process_is_terminated_at_deadline(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     # The deadline has to outlast process creation. Spawning a Python child on
     # a hosted Windows runner takes about a second, and a 0.2 s deadline landed
     # while the child was still starting: the call then reported the wreckage
     # of a child that never ran (`process_cleanup_failed`) instead of the
     # deadline this case is about.
     deadline_seconds = 5.0
+    runs: list[_RecordingChildRun] = []
+
+    def child_run(*args: object, **kwargs: object) -> _RecordingChildRun:
+        run = _RecordingChildRun(*args, **kwargs)  # type: ignore[arg-type]
+        runs.append(run)
+        return run
+
+    monkeypatch.setattr(memory_queue, "_ChildRun", child_run)
     started = time.monotonic()
 
     with pytest.raises(TimeoutError):
-        memory_queue._run_processor_child(
-            _sleep_processor,
-            {"payload": {"seconds": 120}},
-            deadline_seconds,
+        run_within_hang_bound(
+            lambda: memory_queue._run_processor_child(
+                _sleep_processor,
+                {"payload": {"seconds": PAUSE_TIMEOUT}},
+                deadline_seconds,
+            )
         )
 
-    elapsed = time.monotonic() - started
-    assert deadline_seconds <= elapsed < deadline_seconds + 15
+    [run] = runs
+    assert started + deadline_seconds <= run.deadline
+    assert any(value <= 0 for value in run.readings)
+    assert run.process.exitcode not in {None, 0}
 
 
 def test_worker_timeout_kills_spawned_grandchild_tree(tmp_path: Path) -> None:

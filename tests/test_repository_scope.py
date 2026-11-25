@@ -12,6 +12,8 @@ from pathlib import Path
 
 import pytest
 
+from tests.slow_machine import PAUSE_TIMEOUT, run_within_hang_bound
+
 SCRIPTS = Path(__file__).resolve().parent.parent / "scripts"
 if str(SCRIPTS) not in sys.path:
     sys.path.insert(0, str(SCRIPTS))
@@ -624,7 +626,7 @@ def test_git_probe_uses_only_remaining_caller_budget(tmp_path, monkeypatch):
 
     class BlockingOutput:
         def read(self, size):
-            killed.wait(1)
+            killed.wait(PAUSE_TIMEOUT)
             return b""
 
     class BlockingProcess:
@@ -641,18 +643,24 @@ def test_git_probe_uses_only_remaining_caller_budget(tmp_path, monkeypatch):
             self.returncode = -9
             killed.set()
 
+    watches = []
+
+    class RecordedWatch(repository_scope._GitWatch):
+        def __init__(self, *args):
+            super().__init__(*args)
+            watches.append(self)
+
     process = BlockingProcess()
     monkeypatch.setattr(repository_scope.subprocess, "Popen", lambda *args, **kwargs: process)
-    started = time.monotonic()
+    monkeypatch.setattr(repository_scope, "_GitWatch", RecordedWatch)
+    deadline = time.monotonic() + 0.03
 
     with pytest.raises(TimeoutError):
-        repository_scope._git_value(
-            root,
-            "--show-toplevel",
-            deadline=started + 0.03,
+        run_within_hang_bound(
+            lambda: repository_scope._git_value(root, "--show-toplevel", deadline=deadline)
         )
 
-    assert time.monotonic() - started < 0.5
+    assert [watch.deadline for watch in watches] == [deadline]
     assert killed.is_set()
 
 

@@ -17,6 +17,7 @@ from pathlib import Path
 import pytest
 from lsp_profiles import PYRIGHT_PROFILE
 
+from tests.clocks import TimeoutRecordingLock, frozen_clock
 from tests.slow_machine import LONG_TIMEOUT, SHORT_TIMEOUT
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
@@ -4492,17 +4493,16 @@ def test_navigation_manager_singleton_lock_honors_remaining_deadline(
     monkeypatch.setattr(mcp_server, "_NAVIGATION_MANAGER", None)
     monkeypatch.setattr(mcp_server, "_NAVIGATION_MANAGER_CLOSING", None, raising=False)
     monkeypatch.setattr(mcp_server, "_NAVIGATION_MANAGER_EPOCH", 7, raising=False)
-    monkeypatch.setattr(mcp_server, "_NAVIGATION_MANAGER_LOCK", lock)
-    started = time.monotonic()
+    recording = TimeoutRecordingLock(lock)
+    monkeypatch.setattr(mcp_server, "_NAVIGATION_MANAGER_LOCK", recording)
+    started = 1000.0
+    deadline = started + 0.02
+    monkeypatch.setattr(mcp_server, "time", frozen_clock(started))
 
     with pytest.raises(TimeoutError, match="manager lock"):
-        mcp_server._navigation_session_manager(
-            started + 0.02,
-            7,
-            lambda: False,
-        )
+        mcp_server._navigation_session_manager(deadline, 7, lambda: False)
 
-    assert time.monotonic() - started < 0.2
+    assert recording.timeouts == [deadline - started]
     lock.release()
 
 
@@ -4519,17 +4519,16 @@ def test_navigation_manager_existing_lookup_still_honors_lock_deadline(
     monkeypatch.setattr(mcp_server, "_NAVIGATION_MANAGER", manager)
     monkeypatch.setattr(mcp_server, "_NAVIGATION_MANAGER_CLOSING", None, raising=False)
     monkeypatch.setattr(mcp_server, "_NAVIGATION_MANAGER_EPOCH", 7, raising=False)
-    monkeypatch.setattr(mcp_server, "_NAVIGATION_MANAGER_LOCK", lock)
-    started = time.monotonic()
+    recording = TimeoutRecordingLock(lock)
+    monkeypatch.setattr(mcp_server, "_NAVIGATION_MANAGER_LOCK", recording)
+    started = 1000.0
+    deadline = started + 0.02
+    monkeypatch.setattr(mcp_server, "time", frozen_clock(started))
 
     with pytest.raises(TimeoutError, match="manager lock"):
-        mcp_server._navigation_session_manager(
-            started + 0.02,
-            7,
-            lambda: False,
-        )
+        mcp_server._navigation_session_manager(deadline, 7, lambda: False)
 
-    assert time.monotonic() - started < 0.2
+    assert recording.timeouts == [deadline - started]
     lock.release()
 
 
