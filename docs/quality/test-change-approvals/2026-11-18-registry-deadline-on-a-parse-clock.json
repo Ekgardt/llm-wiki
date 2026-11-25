@@ -1,5 +1,0 @@
-{"tests": ["test_a_deadline_that_expires_mid_walk_stops_the_walk"],
- "kinds": ["assertions", "cases"],
- "reason": "It gave the walk a 50 ms wall-clock deadline and asserted that some but not all of 400 files were parsed, so the result depended on how fast the machine ran: the platform's test run of commit bf9f2877, which waited 70 s for memory, failed it while the base passed. The walk's clock now advances one second per parse and the deadline is 20.5, so the test still proves that a live deadline stops a walk already running, and it now asserts the exact stop point (21 parses) instead of a range.",
- "recorded": "2026-11-18",
- "expires": "2027-02-16"}

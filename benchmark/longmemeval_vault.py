@@ -129,8 +129,24 @@ def prepare_environment(work: Path) -> tuple[Path, Path]:
     )
     (root / "knowledge/notes").mkdir(parents=True, exist_ok=True)
     (root / "knowledge/daily").mkdir(parents=True, exist_ok=True)
+    _share_the_installed_models(state)
     _leave_the_repository(root)
     return root, state
+
+
+def _share_the_installed_models(state: Path) -> None:
+    """The stand reads the checkout's verified models instead of searching without them.
+
+    The read path opens models under the state root only (`model_files.models_root`),
+    and a throwaway state root holds none, so every question of a stand ran without
+    vectors or the reranker and reported itself degraded.
+    """
+    installed = REPO / "cache" / "models"
+    shared = state / "cache" / "models"
+    if not installed.is_dir() or shared.exists():
+        return
+    shared.parent.mkdir(parents=True, exist_ok=True)
+    shared.symlink_to(installed, target_is_directory=True)
 
 
 def _adopt(root: Path, state: Path) -> None:

@@ -31,7 +31,7 @@ Never improvise architectural decisions mid-task. When unsure, ask.
 
 ### Release / docs sync
 - Before any release or version bump: **update `README.md` in the same change**.
-  It is the only README; translations were removed on 2026-11-21 (law 10).
+  It is the only README; translations were removed at the owner's request on 2026-11-21.
 - Run `uv run pytest tests/test_readme_i18n.py -q` after README edits.
 - Update `CHANGELOG.md` (Keep-a-Changelog format) and `pyproject.toml`
   `version` in the same change.

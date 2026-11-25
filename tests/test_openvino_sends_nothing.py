@@ -101,9 +101,17 @@ def test_no_usable_thread_count_leaves_the_engine_its_default(
     monkeypatch: pytest.MonkeyPatch, threads: str
 ) -> None:
     monkeypatch.setenv(openvino_runtime.THREADS_ENV, threads)
-    monkeypatch.delenv(openvino_runtime.PRECISION_ENV, raising=False)
+    monkeypatch.setenv(openvino_runtime.PRECISION_ENV, "auto")
 
     assert (openvino_runtime.compile_config(), openvino_runtime.precision_name()) == ({}, "auto")
+
+
+def test_both_models_run_in_exact_f32_unless_told_auto(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv(openvino_runtime.THREADS_ENV, raising=False)
+    monkeypatch.delenv(openvino_runtime.PRECISION_ENV, raising=False)
+
+    assert openvino_runtime.compile_config() == {"INFERENCE_PRECISION_HINT": "f32"}
+    assert openvino_runtime.precision_name() == "f32"
 
 
 def test_the_real_import_finds_the_declining_consent(tmp_path: Path) -> None:

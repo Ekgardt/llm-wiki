@@ -1,5 +1,0 @@
-{"tests": ["test_the_temporary_and_job_directories_are_ephemeral", "test_hung_peer_is_killed_and_reaped_within_cleanup_budget"],
- "kinds": ["assertions", "cases"],
- "reason": "Both failed in the platform's test run of commit 5fc579b5 and passed in its earlier run of the same commit, for reasons outside the code under test. The first asserted that the repository checkout is not under the temporary directory, which is false when a checker checks the repository out under /tmp; it now asks the same question of a path beside the temporary directory, which no checkout location changes. The second bounded the whole probe by a 2 s stopwatch, which a run stalled 84 s on CPU broke; tests/slow_machine.py forbids such literal hang bounds. The peer now sleeps PAUSE_TIMEOUT and the probe must end within LONG_TIMEOUT, so a probe that waited for the peer instead of killing it still fails, and the peer must still be reaped.",
- "recorded": "2026-11-18",
- "expires": "2027-02-16"}
