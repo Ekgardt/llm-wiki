@@ -13907,16 +13907,67 @@ def _windows_process_pairs() -> list[tuple[int, int]] | None:
         return None
 
 
-def _descendants_of(root_pid: int, pairs: list[tuple[int, int]]) -> set[int]:
+ParentCheck = Callable[[int, int], bool]
+
+
+def _recorded_parent(_parent: int, _child: int) -> bool:
+    return True
+
+
+def _children_of(
+    parents: set[int],
+    pairs: list[tuple[int, int]],
+    seen: set[int],
+    is_parent: ParentCheck,
+) -> set[int]:
+    return {
+        pid
+        for pid, ppid in pairs
+        if ppid in parents and pid not in seen and is_parent(ppid, pid)
+    }
+
+
+def _descendants_of(
+    root_pid: int,
+    pairs: list[tuple[int, int]],
+    is_parent: ParentCheck = _recorded_parent,
+) -> set[int]:
     descendants: set[int] = set()
     frontier = {root_pid}
     while frontier:
-        children = {
-            pid for pid, ppid in pairs if ppid in frontier and pid not in descendants
-        }
-        descendants.update(children)
-        frontier = children
+        frontier = _children_of(frontier, pairs, descendants, is_parent)
+        descendants.update(frontier)
     return descendants
+
+
+def _created_before(created: int, reference: int | None) -> bool:
+    return reference is not None and created < reference
+
+
+def _windows_may_be_child(root_created: int | None, parent: int, child: int) -> bool:
+    """Whether `child` may be ours; only creation times that prove otherwise reject it.
+
+    Windows keeps the parent PID as it was when the child started; once that parent
+    exits, the number can go to a newer, unrelated process. A process created before
+    the root, or before the parent it names, was started by an earlier owner of that
+    PID and is not ours. A time that cannot be read proves nothing — a parent that
+    exited after the snapshot still leads to its running children — so the process
+    is claimed, as it was before this check.
+    """
+    import process_liveness
+
+    child_created: int | None = process_liveness.windows_creation_filetime(child)
+    if child_created is None:
+        return True
+    if _created_before(child_created, root_created):
+        return False
+    return not _created_before(child_created, process_liveness.windows_creation_filetime(parent))
+
+
+def _windows_parent_check(root_pid: int) -> ParentCheck:
+    import process_liveness
+
+    return partial(_windows_may_be_child, process_liveness.windows_creation_filetime(root_pid))
 
 
 def _posix_process_pairs() -> list[tuple[int, int]]:
@@ -13932,7 +13983,7 @@ def _tracked_descendant_pids(root_pid: int, platform_name: str) -> set[int] | No
     pairs = _windows_process_pairs()
     if pairs is None:
         return None
-    return _descendants_of(root_pid, pairs)
+    return _descendants_of(root_pid, pairs, _windows_parent_check(root_pid))
 
 
 def _process_group_alive_by_signal(group_id: int) -> bool:
@@ -14226,6 +14277,7 @@ class _ChildRun:
     deadline: float
     tracked_descendants: set[int] | None = None
     lease_lost: Callable[[], bool] | None = None
+    stop_failed: bool = False
 
     def remaining(self) -> float:
         return self.deadline - time.monotonic()
@@ -14239,7 +14291,20 @@ class _ChildRun:
         Passing an explicit None means "there are no descendants"; only the
         default sentinel asks for discovery, and before the handshake that is
         what we want.
+
+        After a stop that raised, the child was already killed and its tree is
+        unknown: a second pass kills what is left without rediscovering it, so
+        it cannot replace the first error with "child exited before cleanup"
+        (run 45509749019).
         """
+        if self.stop_failed:
+            _terminate_processor_child(self.process, tracked_descendants=None)
+            return
+        self.stop_failed = True
+        self._terminate()
+        self.stop_failed = False
+
+    def _terminate(self) -> None:
         tracked = self.tracked_descendants
         if tracked is None:
             self.tracked_descendants = _terminate_processor_child(self.process)
