@@ -36,7 +36,8 @@ from lsp_protocol import (
     RequestCancelled,
 )
 
-from tests.slow_machine import LONG_TIMEOUT, SHORT_TIMEOUT
+from tests.clocks import NeverSetEvent, TimeoutRecordingLock, VirtualClock, frozen_clock
+from tests.slow_machine import LONG_TIMEOUT, PAUSE_TIMEOUT, SHORT_TIMEOUT, run_within_hang_bound
 
 FAKE_SERVER = Path(__file__).with_name("fake_lsp_server.py").resolve()
 OWNER_NONCE = "a" * 32
@@ -1256,10 +1257,8 @@ def test_transparent_restart_bootstraps_fresh_generation_before_request_replay(
 BOOTSTRAP_BUDGET_SECONDS = 3.0
 
 
-# The live deadline a replacement generation is aimed at. It is a floor, not
-# the expected value: the wait that produces it can overshoot by a sizeable
-# fraction of a second on the slowest supported machine, and the measured
-# margin still has to stay clearly positive.
+# The live deadline a replacement generation is handed, at least: a real
+# server has to start and handshake within it on the slowest supported machine.
 _REPLACEMENT_MARGIN_FLOOR_SECONDS = 1.0
 
 
@@ -1286,32 +1285,30 @@ def test_delayed_crash_restart_commits_with_a_short_live_deadline(
         bootstraps.append((generation_nonce, deadline))
         return _initialize_generation(protocol, pid, generation_nonce, deadline)
 
-    # How much live deadline the replacement is left with. Starting a child
+    # How much live deadline the replacement is handed. Starting a child
     # interpreter costs far more on a loaded Windows runner than on a quiet
     # Linux one, so the target is derived from this machine's own measured
-    # startup instead of a number that only holds on a fast host.
-    #
-    # The floor also has to absorb the wait below overshooting: on a loaded
-    # macOS runner `Event().wait()` has been seen to return more than 150 ms
-    # late, which is what the measured margin loses.
+    # startup instead of a number that only holds on a fast host. The fresh
+    # deadline is shortened to it directly, so no wait of the test can
+    # overshoot it.
     target_margin = [_REPLACEMENT_MARGIN_FLOOR_SECONDS]
+    fresh_margins: list[float] = []
 
     def delayed_protocol(*args: object, **kwargs: object) -> lsp_protocol.LspProtocol:
         deadline = kwargs.get("_startup_deadline")
         assert isinstance(deadline, float)
         protocol_deadlines.append(deadline)
         if len(protocol_deadlines) == 2:
-            delay = deadline - time.monotonic() - target_margin[0]
-            if delay > 0:
-                threading.Event().wait(delay)
             replacement_margins.append(deadline - time.monotonic())
         return real_protocol(*args, **kwargs)  # type: ignore[arg-type]
 
     def fresh_deadline(
         coordinator: lsp_process._LifecycleCoordinator,
     ) -> float:
-        deadline = real_fresh_deadline(coordinator)
+        now = time.monotonic()
+        deadline = min(real_fresh_deadline(coordinator), now + target_margin[0])
         fresh_deadlines.append(deadline)
+        fresh_margins.append(deadline - now)
         return deadline
 
     def commit(
@@ -1360,8 +1357,9 @@ def test_delayed_crash_restart_commits_with_a_short_live_deadline(
         assert process.state is ProcessState.PROTOCOL_INITIALIZED
         assert len(fresh_deadlines) == 1
         replacement_deadline = fresh_deadlines[0]
-        assert 0.25 <= replacement_margins[0] <= target_margin[0] + 0.1
-        assert replacement_margins[0] < BOOTSTRAP_BUDGET_SECONDS
+        # Both read one clock forward from the fresh deadline, so neither races it.
+        assert replacement_margins[0] <= fresh_margins[0]
+        assert fresh_margins[0] > 0
         assert protocol_deadlines[1] == replacement_deadline
         assert bootstraps[1][1] == replacement_deadline
         assert commit_deadlines == [replacement_deadline]
@@ -2212,6 +2210,7 @@ def test_configured_start_passes_caller_deadline_to_tree_protocol_and_bootstrap(
 
 def test_configured_start_preserves_explicit_autonomous_bootstrap_budget(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     process = LspProcess.start_configured(
         _command("--lifecycle"),
@@ -2226,11 +2225,13 @@ def test_configured_start_preserves_explicit_autonomous_bootstrap_budget(
     try:
         configuration = process._coordinator.generation_configuration
         assert configuration.bootstrap_timeout_seconds == 1.25
-        started = time.monotonic()
-        restart_deadline = lsp_process._fresh_bootstrap_deadline(
-            process._coordinator
-        )
-        assert started + 1.20 <= restart_deadline <= started + 1.30
+        started = 1000.0
+        with monkeypatch.context() as frozen:
+            frozen.setattr(lsp_process, "time", frozen_clock(started))
+            restart_deadline = lsp_process._fresh_bootstrap_deadline(
+                process._coordinator
+            )
+        assert restart_deadline == started + configuration.bootstrap_timeout_seconds
     finally:
         process.close(time.monotonic() + 5)
 
@@ -2473,7 +2474,7 @@ def test_autonomous_bootstrap_uses_configured_budget_and_retains_cleanup_owner(
     write_failure_record = lsp_process._write_failure_record
     fresh_cleanup_deadline = lsp_process._fresh_cleanup_deadline
     failure_deadlines: list[float] = []
-    cleanup_deadline_margins: list[float] = []
+    cleanup_deadlines: list[float] = []
     replacement_terminate_calls = 0
 
     def record_failure_deadline() -> float:
@@ -2492,7 +2493,7 @@ def test_autonomous_bootstrap_uses_configured_budget_and_retains_cleanup_owner(
         nonlocal replacement_terminate_calls
         if _is_replacement_process(current, bootstraps):
             replacement_terminate_calls += 1
-            cleanup_deadline_margins.append(deadline - time.monotonic())
+            cleanup_deadlines.append(deadline)
             if replacement_terminate_calls == 1:
                 first_cleanup_failed.set()
                 raise OSError("transient replacement cleanup failure")
@@ -2518,7 +2519,7 @@ def test_autonomous_bootstrap_uses_configured_budget_and_retains_cleanup_owner(
 
         replacement_started, replacement_deadline, _pid = bootstraps[1]
         assert 0 < replacement_deadline - replacement_started <= configured_budget
-        assert cleanup_deadline_margins[0] >= 0.05
+        assert cleanup_deadlines[0] in failure_deadlines[1:]
         assert cleanup_retry_started.wait(SHORT_TIMEOUT)
         assert coordinator.phase in {
             lsp_process._LifecyclePhase.CLEANUP_PENDING,
@@ -2554,10 +2555,10 @@ def test_caller_restart_failure_keeps_deadline_and_retains_cleanup_owner(
     tmp_path: Path,
 ) -> None:
     # The point of the test is that the caller returns on its own deadline
-    # instead of waiting out the graceful cleanup. Both numbers are sized for
-    # the slowest supported machine and stay an order of magnitude apart, so a
-    # caller that wrongly waits still fails the bound below.
-    monkeypatch.setattr(lsp_process, "_GRACEFUL_CLEANUP_SECONDS", 60.0)
+    # instead of waiting out the graceful cleanup. The cleanup outlasts every
+    # wait of the test, so a caller that wrongly waits for it never finishes
+    # within `caller_finished.wait` below.
+    monkeypatch.setattr(lsp_process, "_GRACEFUL_CLEANUP_SECONDS", PAUSE_TIMEOUT)
     monkeypatch.setattr(lsp_process, "_RECOVERY_RETRY_SECONDS", 0.02)
     process = _start(tmp_path, "--lifecycle", "--sleep-seconds", "30")
     coordinator = process._coordinator
@@ -2572,7 +2573,6 @@ def test_caller_restart_failure_keeps_deadline_and_retains_cleanup_owner(
     cleanup_deadlines: list[float] = []
     cleanup_threads: list[threading.Thread] = []
     restart_errors: list[BaseException] = []
-    restart_elapsed: list[float] = []
     caller_deadline = time.monotonic() + 0.05
 
     def fail_restart_prepare(
@@ -2600,13 +2600,11 @@ def test_caller_restart_failure_keeps_deadline_and_retains_cleanup_owner(
         terminate(current, deadline=deadline)  # type: ignore[arg-type]
 
     def restart() -> None:
-        started = time.monotonic()
         try:
             process.restart(caller_deadline)
         except BaseException as error:
             restart_errors.append(error)
         finally:
-            restart_elapsed.append(time.monotonic() - started)
             caller_finished.set()
 
     monkeypatch.setattr(
@@ -2631,10 +2629,9 @@ def test_caller_restart_failure_keeps_deadline_and_retains_cleanup_owner(
         )
         assert (
             str(restart_errors[0]),
-            restart_elapsed[0] < 20,
             cleanup_threads[0] is caller,
             cleanup_deadlines[0] == caller_deadline,
-        ) == ("caller restart candidate failed", True, True, True)
+        ) == ("caller restart candidate failed", True, True)
 
         assert (
             autonomous_cleanup_started.wait(LONG_TIMEOUT),
@@ -2903,7 +2900,7 @@ def test_protocol_callback_lifecycle_operations_fail_fast_without_mutation(
     instances: list[LspProcess] = []
     real_start_heartbeat = lsp_process._start_heartbeat_worker
     handler_errors: list[BaseException] = []
-    handler_elapsed: list[float] = []
+    refused_before_deadline: list[bool] = []
     handler_threads: list[threading.Thread] = []
     lifecycle_snapshots: list[tuple[object, ...]] = []
 
@@ -2930,9 +2927,10 @@ def test_protocol_callback_lifecycle_operations_fail_fast_without_mutation(
         instance = instances[0]
         handler_threads.append(threading.current_thread())
         lifecycle_snapshots.append(snapshot(instance))
-        started = time.monotonic()
         try:
-            deadline = time.monotonic() + 1
+            # A refusal that waited for its deadline would hold the reader
+            # thread past every wait of the test, so the start below would fail.
+            deadline = time.monotonic() + PAUSE_TIMEOUT
             if operation == "close":
                 instance.close(deadline)
             elif operation == "restart":
@@ -2940,9 +2938,9 @@ def test_protocol_callback_lifecycle_operations_fail_fast_without_mutation(
             else:
                 instance._terminal_failure("handler_failure", deadline)
         except BaseException as error:
+            refused_before_deadline.append(time.monotonic() < deadline)
             handler_errors.append(error)
         finally:
-            handler_elapsed.append(time.monotonic() - started)
             lifecycle_snapshots.append(snapshot(instance))
 
     monkeypatch.setattr(lsp_process, "_start_heartbeat_worker", capture_instance)
@@ -2961,7 +2959,7 @@ def test_protocol_callback_lifecycle_operations_fail_fast_without_mutation(
         assert str(handler_errors[0]) == (
             "LSP lifecycle operations are not reentrant from protocol callbacks"
         )
-        assert handler_elapsed[0] < 0.2
+        assert refused_before_deadline == [True]
         assert handler_threads == [process.protocol.reader_thread]
         assert lifecycle_snapshots[0] == lifecycle_snapshots[1]
         assert process.state is ProcessState.PROTOCOL_INITIALIZED
@@ -3025,7 +3023,7 @@ def test_startup_callback_rejects_own_lifecycle_before_protocol_constructor_retu
     marker = tmp_path / "enable-startup-callback"
     callback_finished = threading.Event()
     callback_errors: list[BaseException] = []
-    callback_elapsed: list[float] = []
+    refused_before_deadline: list[bool] = []
     lifecycle_snapshots: list[tuple[object, ...]] = []
     process: LspProcess | None = None
 
@@ -3046,13 +3044,15 @@ def test_startup_callback_rejects_own_lifecycle_before_protocol_constructor_retu
     def invoke_lifecycle() -> None:
         assert process is not None
         lifecycle_snapshots.append(snapshot(process))
-        started = time.monotonic()
         try:
-            getattr(process, operation)(time.monotonic() + 0.2)
+            # A refusal that waited for this deadline would outlast the
+            # restart's own deadline below, and the restart would fail.
+            deadline = time.monotonic() + PAUSE_TIMEOUT
+            getattr(process, operation)(deadline)
         except BaseException as error:
+            refused_before_deadline.append(time.monotonic() < deadline)
             callback_errors.append(error)
         finally:
-            callback_elapsed.append(time.monotonic() - started)
             lifecycle_snapshots.append(snapshot(process))
             callback_finished.set()
 
@@ -3087,12 +3087,12 @@ def test_startup_callback_rejects_own_lifecycle_before_protocol_constructor_retu
         process.restart(time.monotonic() + 5)
 
         assert callback_finished.is_set()
+        assert refused_before_deadline == [True]
         assert len(callback_errors) == 1
         assert type(callback_errors[0]) is RuntimeError
         assert str(callback_errors[0]) == (
             "LSP lifecycle operations are not reentrant from protocol callbacks"
         )
-        assert callback_elapsed[0] < 0.05
         assert lifecycle_snapshots[0] == lifecycle_snapshots[1]
         assert process.restart_count == 1
         assert process.state is ProcessState.PROTOCOL_INITIALIZED
@@ -3446,7 +3446,37 @@ def test_restart_lease_names_candidate_before_bootstrap_commit_without_activatio
         process.close(time.monotonic() + 5)
 
 
-def test_legacy_start_signature_budget_and_state_are_unchanged(tmp_path: Path) -> None:
+def _record_deadlines(
+    monkeypatch: pytest.MonkeyPatch, name: str
+) -> list[tuple[float, float, float]]:
+    """`(before, deadline, after)` for each deadline `lsp_process.<name>` computes.
+
+    `deadline - after` bounds a budget from above and `deadline - before` from
+    below, each read on the same clock as the deadline: no run speed moves them.
+    """
+    budgets: list[tuple[float, float, float]] = []
+    compute = getattr(lsp_process, name)
+
+    def recording(*args: object) -> float:
+        before = time.monotonic()
+        deadline = float(compute(*args))
+        budgets.append((before, deadline, time.monotonic()))
+        return deadline
+
+    monkeypatch.setattr(lsp_process, name, recording)
+    return budgets
+
+
+def _within_cleanup_budget(budgets: list[tuple[float, float, float]]) -> bool:
+    """A startup failure got its cleanup deadline, and no more than one startup ceiling."""
+    return bool(budgets) and all(
+        deadline - after <= _STARTUP_CEILING_SECONDS for _before, deadline, after in budgets
+    )
+
+
+def test_legacy_start_signature_budget_and_state_are_unchanged(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     signature = inspect.signature(LspProcess.start)
     assert tuple(signature.parameters) == ("command", "cwd", "owner_root")
     assert signature.parameters["cwd"].kind is inspect.Parameter.KEYWORD_ONLY
@@ -3464,11 +3494,15 @@ def test_legacy_start_signature_budget_and_state_are_unchanged(tmp_path: Path) -
         "generation_guard",
     )
 
-    started = time.monotonic()
+    budgets = _record_deadlines(monkeypatch, "_resolved_startup_deadline")
     process = _start(tmp_path, "--lifecycle")
     try:
         assert process.state is ProcessState.PROCESS_RUNNING
-        assert time.monotonic() - started < lsp_process._STARTUP_WAIT_SECONDS
+        [(before, deadline, after)] = budgets
+        # Rounding moves with the clock: `t + budget` lies between the two sums,
+        # whereas `(t + budget) - t` may land one ulp either side of the budget.
+        wait = lsp_process._STARTUP_WAIT_SECONDS
+        assert before + wait <= deadline <= after + wait
         assert process._coordinator.generation_configuration.generation_bootstrap is None
         assert process._coordinator.generation_configuration.generation_guard is None
     finally:
@@ -3729,6 +3763,7 @@ _OS_INJECTED_ENVIRONMENT = frozenset({"__CF_USER_TEXT_ENCODING"})
 
 def test_close_forces_stubborn_process_tree_within_caller_deadline(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     pid_file = tmp_path / "descendant.pid"
     process = _start(
@@ -3739,15 +3774,24 @@ def test_close_forces_stubborn_process_tree_within_caller_deadline(
         "--descendant-pid-file",
         str(pid_file),
         "--sleep-seconds",
-        "30",
+        str(PAUSE_TIMEOUT),
     )
     descendant = _await_descendant_pid(pid_file)
+    terminate = lsp_process.ProcessTree.terminate
+    terminate_deadlines: list[float] = []
+
+    def recording_terminate(tree: object, *, deadline: float) -> None:
+        terminate_deadlines.append(deadline)
+        terminate(tree, deadline=deadline)
+
+    monkeypatch.setattr(lsp_process.ProcessTree, "terminate", recording_terminate)
     deadline = time.monotonic() + 2.5
 
-    process.close(deadline)
+    run_within_hang_bound(lambda: process.close(deadline))
 
-    assert time.monotonic() <= deadline + 0.2
-    assert process.process.poll() is not None
+    assert terminate_deadlines
+    assert all(given <= deadline for given in terminate_deadlines)
+    assert process.process.poll() not in {None, 0}
     _await_pid_exit(descendant)
     assert not _pid_alive(descendant)
 
@@ -4500,7 +4544,7 @@ def test_normal_interpreter_exit_runs_bounded_atexit_tree_cleanup(tmp_path: Path
         shell=False,
         check=False,
         capture_output=True,
-        timeout=10,
+        timeout=SHORT_TIMEOUT,
     )
 
     assert completed.returncode == 0, completed.stderr.decode(errors="replace")
@@ -4714,7 +4758,7 @@ def test_owner_json_is_canonical_redacted_restricted_and_has_only_schema(
     environment_secret = "allowlisted-environment-secret-7f31"
     monkeypatch.setenv("TMP", environment_secret)
     process = _start(
-        tmp_path, "--ignored-secret", secret_argument, "--sleep-seconds", "2"
+        tmp_path, "--ignored-secret", secret_argument, "--sleep-seconds", "30"
     )
     owner_file = process.owner_root / "owner.json"
     raw = owner_file.read_bytes()
@@ -5745,15 +5789,19 @@ def test_startup_heartbeat_stop_timeout_still_runs_all_other_cleanup(
     )
     monkeypatch.setattr(lsp_process, "_stop_heartbeat_owner", fail_heartbeat_stop)
     owner = tmp_path / OWNER_NONCE
-    started = time.monotonic()
+    cleanup = _record_deadlines(monkeypatch, "_fresh_cleanup_deadline")
 
     try:
         with pytest.raises(lsp_process.StartupCleanupError) as raised:
-            LspProcess.start(
-                _command("--sleep-seconds", "30"), cwd=tmp_path, owner_root=owner
+            run_within_hang_bound(
+                lambda: LspProcess.start(
+                    _command("--sleep-seconds", str(PAUSE_TIMEOUT)),
+                    cwd=tmp_path,
+                    owner_root=owner,
+                )
             )
 
-        assert time.monotonic() - started <= _STARTUP_CEILING_SECONDS
+        assert _within_cleanup_budget(cleanup), cleanup
         assert len(captured) == 1
         assert isinstance(raised.value.__cause__, RuntimeError)
         coordinator = captured[0]
@@ -6183,15 +6231,17 @@ def test_real_sleeping_child_startup_failure_is_cleaned_within_one_budget(
 
     monkeypatch.setattr(lsp_process.subprocess, "Popen", popen_spy)
     monkeypatch.setattr(lsp_process, "LspProtocol", BrokenProtocol)
-    started = time.monotonic()
+    cleanup = _record_deadlines(monkeypatch, "_fresh_cleanup_deadline")
     with pytest.raises(RuntimeError, match="protocol startup failed"):
-        LspProcess.start(
-            _command("--sleep-seconds", "30"),
-            cwd=tmp_path,
-            owner_root=tmp_path / OWNER_NONCE,
+        # The child outsleeps the hang bound: only cleanup can end it in time.
+        run_within_hang_bound(
+            lambda: LspProcess.start(
+                _command("--sleep-seconds", str(PAUSE_TIMEOUT)),
+                cwd=tmp_path,
+                owner_root=tmp_path / OWNER_NONCE,
+            )
         )
-    elapsed = time.monotonic() - started
-    assert elapsed < _STARTUP_CEILING_SECONDS
+    assert _within_cleanup_budget(cleanup), cleanup
     assert len(children) == 1
     assert children[0].poll() is not None
 
@@ -6206,6 +6256,8 @@ def test_permanently_alive_child_preserves_evidence_without_pipe_close_or_join(
             if not self.cleanup_allowed:
                 raise AssertionError("pipe close must not run while child is alive")
             super().close()
+
+    child_waits: list[float] = []
 
     class PermanentlyAliveProcess:
         args = _command("--ignored-secret", "secret")
@@ -6223,6 +6275,7 @@ def test_permanently_alive_child_preserves_evidence_without_pipe_close_or_join(
             if not self.alive:
                 return 1
             assert timeout is not None
+            child_waits.append(timeout)
             time.sleep(timeout)
             raise subprocess.TimeoutExpired(self.args, timeout)
 
@@ -6255,11 +6308,15 @@ def test_permanently_alive_child_preserves_evidence_without_pipe_close_or_join(
         lsp_process, "_secure_windows_owner_root", lambda _path, _deadline: None
     )
     owner = tmp_path / OWNER_NONCE
-    started = time.monotonic()
+    cleanup = _record_deadlines(monkeypatch, "_fresh_cleanup_deadline")
     with pytest.raises(lsp_process.StartupCleanupError) as raised:
-        LspProcess.start(_command(), cwd=tmp_path, owner_root=owner)
-    elapsed = time.monotonic() - started
-    assert elapsed < _STARTUP_CEILING_SECONDS
+        run_within_hang_bound(lambda: LspProcess.start(_command(), cwd=tmp_path, owner_root=owner))
+    # Every wait on the child that never exits fits inside the one cleanup budget.
+    assert _within_cleanup_budget(cleanup) and all(
+        timeout <= deadline - before
+        for timeout in child_waits
+        for before, deadline, _after in cleanup
+    ), (cleanup, child_waits)
     assert (owner / "failure.json").is_file()
     assert (owner / "owner.json").is_file()
     child.cleanup_allowed = True
@@ -7192,31 +7249,32 @@ def test_parallel_real_startup_failures_stay_bounded_secure_and_leak_free(
             children.append(child)
         return child
 
-    def fail_start(index: int) -> tuple[float, Path]:
+    def fail_start(index: int) -> Path:
         owner = tmp_path / f"{index + 100:032x}"
-        started = time.monotonic()
         with pytest.raises(RuntimeError) as raised:
             LspProcess.start(
-                _command("--sleep-seconds", "30"), cwd=tmp_path, owner_root=owner
+                _command("--sleep-seconds", str(PAUSE_TIMEOUT)), cwd=tmp_path, owner_root=owner
             )
-        elapsed = time.monotonic() - started
         _assert_protocol_startup_failure(raised.value)
-        return elapsed, owner
+        return owner
 
     monkeypatch.setattr(lsp_process.subprocess, "Popen", popen_spy)
     monkeypatch.setattr(lsp_process, "LspProtocol", BrokenProtocol)
+    cleanup = _record_deadlines(monkeypatch, "_fresh_cleanup_deadline")
     with ThreadPoolExecutor(max_workers=4) as pool:
-        results = list(pool.map(fail_start, range(20)))
+        results = run_within_hang_bound(lambda: list(pool.map(fail_start, range(20))))
 
-    assert max(elapsed for elapsed, _owner in results) <= (
-        _STARTUP_CEILING_SECONDS
-    )
+    assert len(cleanup) == 20 and _within_cleanup_budget(cleanup)
     assert len(children) == 20
     assert all(child.poll() is not None for child in children)
-    for _elapsed, owner in results:
+    for owner in results:
         _assert_startup_failure_evidence(owner, tmp_path)
 
     assert _await_thread_names(initial_threads) == initial_threads
+
+
+def _largest_grant(startup: list[tuple[float, float, float]]) -> float:
+    return max(deadline - before for before, deadline, _after in startup)
 
 
 @pytest.mark.skipif(os.name != "nt", reason="Windows ACL subprocess contract")
@@ -7225,34 +7283,38 @@ def test_four_delayed_owner_acl_starts_share_deadline_and_leave_no_leaks(
 ) -> None:
     initial_threads = _lsp_thread_names()
 
+    acl_timeouts: list[float] = []
+
     def delayed_run(
         command: list[str], **kwargs: object
     ) -> subprocess.CompletedProcess[bytes]:
         timeout = float(kwargs["timeout"])
+        acl_timeouts.append(timeout)
         time.sleep(timeout)
         raise subprocess.TimeoutExpired(command, timeout)
 
-    def fail_start(index: int) -> tuple[float, Path]:
+    def fail_start(index: int) -> Path:
         owner = tmp_path / f"{index + 200:032x}"
-        started = time.monotonic()
         with pytest.raises(
             (PermissionError, lsp_process.StartupCleanupError)
         ) as raised:
             LspProcess.start(_command(), cwd=tmp_path, owner_root=owner)
-        elapsed = time.monotonic() - started
         if isinstance(raised.value, lsp_process.StartupCleanupError):
             raised.value.retry_cleanup(time.monotonic() + 5)
-        return elapsed, owner
+        return owner
 
     monkeypatch.setattr(subprocess, "run", delayed_run)
+    startup = _record_deadlines(monkeypatch, "_resolved_startup_deadline")
     with ThreadPoolExecutor(max_workers=4) as pool:
-        results = list(pool.map(fail_start, range(4)))
+        results = run_within_hang_bound(lambda: list(pool.map(fail_start, range(4))))
 
-    assert max(elapsed for elapsed, _owner in results) <= (
-        _STARTUP_CEILING_SECONDS
-    )
-    assert all(owner.is_dir() and not any(owner.iterdir()) for _elapsed, owner in results)
-    for _elapsed, owner in results:
+    # No ACL wait outlives what a start was granted, read on the start's own clock:
+    # a later reading only shrinks `deadline - now`, so the bound holds exactly.
+    granted = _largest_grant(startup)
+    assert acl_timeouts
+    assert all(0 < timeout <= granted for timeout in acl_timeouts)
+    assert all(owner.is_dir() and not any(owner.iterdir()) for owner in results)
+    for owner in results:
         owner.rmdir()
     assert _lsp_thread_names() == initial_threads
 
@@ -8203,7 +8265,9 @@ def test_windows_lease_retry_cannot_outlive_the_published_lease(
         tmp_path,
         lambda _handle: None,
     )
-    now = time.monotonic()
+    clock = VirtualClock(1000.0)
+    monkeypatch.setattr(lsp_process, "time", clock)
+    now = clock.now
     previous_expiry = now + 0.08
     owner.write_lease(
         {"generation": "old"},
@@ -8223,19 +8287,20 @@ def test_windows_lease_retry_cannot_outlive_the_published_lease(
         "replace_file",
         sharing_violation,
     )
-    started = time.monotonic()
+    retry_stop = NeverSetEvent(clock)
 
     with pytest.raises(OSError) as raised:
         owner.write_lease(
             {"generation": "new"},
-            deadline=started + 1,
-            expires_monotonic=started + 30,
-            retry_stop=threading.Event(),
+            deadline=now + 1,
+            expires_monotonic=now + 30,
+            retry_stop=retry_stop,
         )
 
     assert raised.value.errno == 32
     assert attempts >= 2
-    assert time.monotonic() <= previous_expiry + 0.15
+    assert retry_stop.waits
+    assert all(timeout <= previous_expiry - at for at, timeout in retry_stop.waits)
 
 
 def test_successful_failure_evidence_is_published_once(
@@ -9014,8 +9079,21 @@ def test_caller_json_violation_is_not_retried_after_concurrent_restart(
     process.close(time.monotonic() + 5)
 
 
+def _restart_through_lock(
+    monkeypatch: pytest.MonkeyPatch,
+    process: LspProcess,
+    lock: TimeoutRecordingLock,
+    deadline: float,
+) -> None:
+    """Restart `process` while its lifecycle lock is `lock`, then put the real one back."""
+    with monkeypatch.context() as recorded:
+        recorded.setattr(process._coordinator, "lock", lock)
+        run_within_hang_bound(lambda: process.restart(deadline))
+
+
 def test_expired_deadline_waiting_for_transition_lock_changes_nothing(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     process = _start(tmp_path, "--lifecycle")
     coordinator = process._coordinator
@@ -9043,11 +9121,14 @@ def test_expired_deadline_waiting_for_transition_lock_changes_nothing(
     holder = threading.Thread(target=hold_transition)
     holder.start()
     assert acquired.wait(SHORT_TIMEOUT)
-    deadline = time.monotonic() + 0.03
+    started = time.monotonic()
+    deadline = started + 0.03
+    recording = TimeoutRecordingLock(coordinator.lock)
     try:
         with pytest.raises(TimeoutError, match="lifecycle|transition"):
-            process.restart(deadline)
-        assert time.monotonic() <= deadline + 0.2
+            _restart_through_lock(monkeypatch, process, recording, deadline)
+        assert recording.timeouts
+        assert all(timeout <= deadline - started for timeout in recording.timeouts)
         assert (
             process.process,
             process.protocol,
@@ -9448,6 +9529,13 @@ def test_terminal_intent_lock_respects_deadline_and_cannot_commit_success(
     assert (process.owner_root / "failure.json").is_file()
 
 
+def _sleep_past(deadline: float) -> bool:
+    """Sleep on the clock, not on a duration: a timer may wake early."""
+    while time.monotonic() <= deadline:
+        time.sleep(max(0.0, deadline - time.monotonic()) + 0.01)
+    return time.monotonic() > deadline
+
+
 @pytest.mark.parametrize("worker_prefix", ["lsp-recovery-", "lsp-heartbeat-"])
 def test_startup_worker_start_past_original_deadline_never_returns_success(
     monkeypatch: pytest.MonkeyPatch,
@@ -9465,14 +9553,16 @@ def test_startup_worker_start_past_original_deadline_never_returns_success(
         children.append(child)
         return child
 
+    startup = _record_deadlines(monkeypatch, "_resolved_startup_deadline")
+    late_starts: list[bool] = []
+
     def delayed_start(thread: threading.Thread) -> None:
         if thread.name.startswith(worker_prefix):
-            time.sleep(lsp_process._STARTUP_WAIT_SECONDS + 0.05)
+            late_starts.append(_sleep_past(startup[-1][1]))
         real_start(thread)
 
     monkeypatch.setattr(lsp_process.subprocess, "Popen", popen)
     monkeypatch.setattr(threading.Thread, "start", delayed_start)
-    started = time.monotonic()
     try:
         error = _capture_start_error(returned, tmp_path)
     finally:
@@ -9480,7 +9570,8 @@ def test_startup_worker_start_past_original_deadline_never_returns_success(
             process.close(time.monotonic() + 5)
         _drive_retained_cleanup(error)
 
-    assert time.monotonic() - started >= lsp_process._STARTUP_WAIT_SECONDS
+    assert late_starts
+    assert all(late_starts)
     assert returned == []
     assert error is not None
     assert any(isinstance(item, TimeoutError) for item in _cause_chain(error))
@@ -9707,6 +9798,27 @@ def test_autonomous_restart_failure_with_expired_transition_lock_is_sticky(
     )
 
 
+class _WaitCountingEvent:
+    """The recovery worker's wake event, counting the waits it is asked for."""
+
+    def __init__(self, inner: threading.Event) -> None:
+        self.inner = inner
+        self.waits: list[float | None] = []
+
+    def wait(self, timeout: float | None = None) -> bool:
+        self.waits.append(timeout)
+        return self.inner.wait(timeout)
+
+    def set(self) -> None:
+        self.inner.set()
+
+    def clear(self) -> None:
+        self.inner.clear()
+
+    def is_set(self) -> bool:
+        return self.inner.is_set()
+
+
 def test_persistent_autonomous_cleanup_fault_retries_with_fresh_bounded_budgets(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -9753,21 +9865,19 @@ def test_persistent_autonomous_cleanup_fault_retries_with_fresh_bounded_budgets(
         "_terminal_failure_lsp_process",
         observe_terminal_failure,
     )
+    wake = _WaitCountingEvent(coordinator.recovery_wake)
+    monkeypatch.setattr(coordinator, "recovery_wake", wake)
 
     try:
         assert lsp_process._queue_generation_failure(
             coordinator, generation, "injected persistent restart failure"
         )
         assert first_cleanup.wait(SHORT_TIMEOUT)
-        # Retries are spaced by the recovery interval, so a fixed wait counts
-        # how fast the machine is rather than how the retry behaves. Wait for
-        # the second attempt instead, and bound the count by the time actually
-        # spent waiting, which still catches a runaway loop.
-        waiting_since = time.monotonic()
+        # A runaway loop retries without waiting; a spaced one waits on its wake
+        # event between attempts. Counting those waits needs no clock.
         assert _poll_until(lambda: len(terminal_attempts) >= 2, 5)
-        elapsed = time.monotonic() - waiting_since
         attempts = list(terminal_attempts)
-        assert len(attempts) <= int(elapsed / lsp_process._RECOVERY_RETRY_SECONDS) + 3
+        assert len(attempts) <= len(wake.waits) + 1, (attempts, wake.waits)
         assert _all_deadlines_ahead(attempts)
         assert recovery.is_alive()
         assert heartbeat.is_alive()

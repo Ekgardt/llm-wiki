@@ -22,6 +22,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 
 import evidence_reader_cache  # noqa: E402
 
+from tests.slow_machine import SHORT_TIMEOUT
 from tests.test_code_graph import _activate_graph  # noqa: E402
 
 
@@ -51,7 +52,7 @@ def _counting_opener(monkeypatch) -> list:
 
 def _git(root: Path, *arguments: str) -> None:
     subprocess.run(
-        ["git", "-C", str(root), *arguments], check=True, capture_output=True, timeout=30
+        ["git", "-C", str(root), *arguments], check=True, capture_output=True, timeout=SHORT_TIMEOUT
     )
 
 
@@ -72,7 +73,7 @@ def _head(root: Path) -> str:
         check=True,
         capture_output=True,
         text=True,
-        timeout=30,
+        timeout=SHORT_TIMEOUT,
     ).stdout.strip()
 
 

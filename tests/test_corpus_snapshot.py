@@ -676,6 +676,19 @@ def test_writer_gate_receives_remaining_deadline_and_releases_on_error(
     assert coordinator.released is True
 
 
+def test_writer_wait_never_exceeds_its_seconds_when_the_deadline_rounds_up(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # At this reading `(reading + 5.0) - reading` is 5.000000000000114.
+    reading = 1019.0000000009003
+    monkeypatch.setattr(corpus_snapshot.time, "monotonic", lambda: reading)
+    deadline = reading + 5.0
+    assert deadline - reading > 5.0
+
+    assert corpus_snapshot._writer_wait_seconds(deadline, None, 5.0) == 5.0
+    assert corpus_snapshot._writer_wait_seconds(deadline, deadline, None) == deadline - reading
+
+
 def test_rejects_unsafe_paths_and_enforces_file_total_depth_and_deadline(vault: Path, monkeypatch):
     write(vault / "knowledge/notes/one.md", "# One\n1234\n")
     write(vault / "knowledge/notes/deep/two.md", "# Two\n5678\n")
@@ -1084,3 +1097,17 @@ def test_a_doc_ranks_below_a_compiled_page_and_below_code() -> None:
 
     assert provenance.type_weight("doc") < provenance.DEFAULT_TYPE_WEIGHT
     assert provenance.type_weight("doc") < provenance.type_weight("decision")
+
+
+@pytest.mark.skipif(os.name != "posix", reason="descriptor chains are verified on POSIX")
+def test_a_sealed_root_whose_identity_changed_before_it_was_opened_is_refused(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "corpus-root"
+    root.mkdir()
+    root.chmod(0o755)
+    sealed = corpus_snapshot._identity(root, root.stat())
+    root.chmod(0o700)
+
+    with pytest.raises(CorpusChanged, match=f"corpus ancestor changed: {root}$"):
+        corpus_snapshot._verify_descriptor_chain((sealed,), changed_error=CorpusChanged)

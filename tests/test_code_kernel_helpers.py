@@ -8,6 +8,7 @@ from pathlib import Path
 from repository_scope import resolve_repository_scope
 
 from tests.code_kernel_helpers import create_python_repository, fixture_digest
+from tests.slow_machine import SHORT_TIMEOUT
 
 
 def test_fixture_copy_is_git_scoped_and_deterministic(tmp_path: Path, monkeypatch) -> None:
@@ -25,7 +26,7 @@ def test_fixture_copy_is_git_scoped_and_deterministic(tmp_path: Path, monkeypatc
         stdin=subprocess.DEVNULL,
         capture_output=True,
         text=True,
-        timeout=10,
+        timeout=SHORT_TIMEOUT,
     ).stdout.strip()
     second_head = subprocess.run(
         ["git", "rev-parse", "HEAD"],
@@ -34,7 +35,7 @@ def test_fixture_copy_is_git_scoped_and_deterministic(tmp_path: Path, monkeypatc
         stdin=subprocess.DEVNULL,
         capture_output=True,
         text=True,
-        timeout=10,
+        timeout=SHORT_TIMEOUT,
     ).stdout.strip()
 
     assert fixture_digest(first) == fixture_digest(second)
@@ -100,7 +101,7 @@ def test_fixture_repository_ignores_ambient_default_hash(tmp_path: Path, monkeyp
         stdin=subprocess.DEVNULL,
         capture_output=True,
         text=True,
-        timeout=10,
+        timeout=SHORT_TIMEOUT,
     ).stdout.strip()
     overridden_head = subprocess.run(
         ["git", "rev-parse", "HEAD"],
@@ -109,7 +110,7 @@ def test_fixture_repository_ignores_ambient_default_hash(tmp_path: Path, monkeyp
         stdin=subprocess.DEVNULL,
         capture_output=True,
         text=True,
-        timeout=10,
+        timeout=SHORT_TIMEOUT,
     ).stdout.strip()
 
     assert baseline_head == overridden_head

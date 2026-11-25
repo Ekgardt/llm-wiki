@@ -5854,9 +5854,19 @@ def _send_codex_payload(process, payload: bytes) -> None:
     process.stdin.flush()
 
 
+def _codex_wait_seconds(probe_deadline: float) -> float:
+    """The time left to the deadline, never above the probe's budget.
+
+    `started + budget - now` can round one float spacing above `budget`
+    (2.000000000000057 on a Windows runner, run 45482419969).
+    """
+    remaining = probe_deadline - time.monotonic()
+    return min(max(0.0, remaining), CODEX_HOOK_PROBE_SECONDS)
+
+
 def _finish_codex_process(tree: Any, probe_deadline: float) -> bool:
     try:
-        tree.process.wait(timeout=max(0.0, probe_deadline - time.monotonic()))
+        tree.process.wait(timeout=_codex_wait_seconds(probe_deadline))
     except subprocess.TimeoutExpired:
         _kill_and_reap(tree)
         return False

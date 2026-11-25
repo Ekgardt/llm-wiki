@@ -16,6 +16,8 @@ from pathlib import Path
 import integration_adapter
 import pytest
 
+from tests.slow_machine import SHORT_TIMEOUT
+
 ROOT = Path(__file__).resolve().parent.parent
 
 
@@ -45,7 +47,12 @@ def _run_plugin(tmp_path: Path, body: str) -> str:
         {body}
         """
     )
-    result = subprocess.run([node, "--input-type=module", "-e", harness], capture_output=True, text=True, timeout=30)
+    result = subprocess.run(
+        [node, "--input-type=module", "-e", harness],
+        capture_output=True,
+        text=True,
+        timeout=SHORT_TIMEOUT,
+    )
     assert result.returncode == 0, result.stderr
     return result.stdout.strip()
 

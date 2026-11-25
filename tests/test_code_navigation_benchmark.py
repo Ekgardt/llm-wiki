@@ -3181,7 +3181,7 @@ def test_every_benchmark_operation_receives_a_run_capped_deadline(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    started = time.monotonic()
+    started = 1000.0
     deadlines: list[tuple[str, float]] = []
 
     class RecordingRuntime(BehavioralNavigationRuntime):
@@ -3221,7 +3221,8 @@ def test_every_benchmark_operation_receives_a_run_capped_deadline(
             "errors": 0,
         }
 
-    monkeypatch.setattr(benchmark_runner, "RUN_TIMEOUT_SECONDS", 300.0)
+    run_timeout = 300.0
+    monkeypatch.setattr(benchmark_runner, "RUN_TIMEOUT_SECONDS", run_timeout)
     operator_root = tmp_path / "deadline-operator"
     operator_root.mkdir()
     run_fixture_benchmark(
@@ -3249,7 +3250,7 @@ def test_every_benchmark_operation_receives_a_run_capped_deadline(
         "ownership",
         "operator",
     }
-    assert all(deadline <= started + 300.0 for _phase, deadline in measured)
+    assert all(deadline <= started + run_timeout for _phase, deadline in measured)
 
 
 def test_cleanup_terminal_stops_crash_cycles_and_skips_ownership(
@@ -3808,7 +3809,7 @@ def test_parse_and_traversal_reject_operator_root_windows_junction(
         check=False,
         capture_output=True,
         shell=False,
-        timeout=10,
+        timeout=SHORT_TIMEOUT,
     )
     if created.returncode != 0:
         pytest.skip("junction creation is unavailable")
@@ -4167,7 +4168,7 @@ def test_operator_probe_never_descends_into_windows_junction(
         check=False,
         capture_output=True,
         shell=False,
-        timeout=10,
+        timeout=SHORT_TIMEOUT,
     )
     if created.returncode != 0:
         pytest.skip("junction creation is unavailable")

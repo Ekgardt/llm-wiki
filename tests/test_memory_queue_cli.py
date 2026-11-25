@@ -23,7 +23,22 @@ import memory_queue  # noqa: E402
 from memory_queue import MemoryQueue  # noqa: E402
 
 from tests.pid_files import read_pid, write_pid  # noqa: E402
-from tests.slow_machine import SHORT_TIMEOUT  # noqa: E402
+from tests.slow_machine import (  # noqa: E402
+    PAUSE_TIMEOUT,
+    SHORT_TIMEOUT,
+    run_within_hang_bound,
+)
+
+
+class _RecordingChildRun(memory_queue._ChildRun):  # type: ignore[misc]
+    """A processor child run that records every look at its remaining time."""
+
+    readings: list[float]
+
+    def remaining(self) -> float:
+        value = float(super().remaining())
+        self.__dict__.setdefault("readings", []).append(value)
+        return value
 
 
 def _sleep_processor(task: dict) -> bool:
@@ -140,6 +155,11 @@ def _crashing_grandchild_processor(task: dict) -> bool:
     )
     write_pid(task["payload"]["pid_path"], child.pid)
     raise RuntimeError("processor crash")
+
+
+def _is_gone(pid: int) -> bool:
+    """Exited, as the queue judges it: a zombie its reaper has not collected yet is gone."""
+    return not memory_queue._descendant_alive({pid}, platform_name=os.name)
 
 
 def _kill_test_process(pid: int) -> None:
@@ -327,24 +347,38 @@ def test_worker_policy_overrides_claim_heartbeat_attempts_and_backoff(
     assert (task.available_at - now).total_seconds() == 7
 
 
-def test_worker_child_process_is_terminated_at_deadline() -> None:
+def test_worker_child_process_is_terminated_at_deadline(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     # The deadline has to outlast process creation. Spawning a Python child on
     # a hosted Windows runner takes about a second, and a 0.2 s deadline landed
     # while the child was still starting: the call then reported the wreckage
     # of a child that never ran (`process_cleanup_failed`) instead of the
     # deadline this case is about.
     deadline_seconds = 5.0
+    runs: list[_RecordingChildRun] = []
+
+    def child_run(*args: object, **kwargs: object) -> _RecordingChildRun:
+        run = _RecordingChildRun(*args, **kwargs)
+        runs.append(run)
+        return run
+
+    monkeypatch.setattr(memory_queue, "_ChildRun", child_run)
     started = time.monotonic()
 
     with pytest.raises(TimeoutError):
-        memory_queue._run_processor_child(
-            _sleep_processor,
-            {"payload": {"seconds": 120}},
-            deadline_seconds,
+        run_within_hang_bound(
+            lambda: memory_queue._run_processor_child(
+                _sleep_processor,
+                {"payload": {"seconds": PAUSE_TIMEOUT}},
+                deadline_seconds,
+            )
         )
 
-    elapsed = time.monotonic() - started
-    assert deadline_seconds <= elapsed < deadline_seconds + 15
+    [run] = runs
+    assert started + deadline_seconds <= run.deadline
+    assert any(value <= 0 for value in run.readings)
+    assert run.process.exitcode not in {None, 0}
 
 
 def test_worker_timeout_kills_spawned_grandchild_tree(tmp_path: Path) -> None:
@@ -357,7 +391,7 @@ def test_worker_timeout_kills_spawned_grandchild_tree(tmp_path: Path) -> None:
         )
     pid = read_pid(pid_path, SHORT_TIMEOUT)
     try:
-        assert not memory_queue._pid_is_alive(pid)
+        assert _is_gone(pid)
     finally:
         _kill_test_process(pid)
 
@@ -373,7 +407,7 @@ def test_worker_cleans_grandchild_before_returning_normal_result(tmp_path: Path)
         )
         pid = read_pid(pid_path, SHORT_TIMEOUT)
         assert result is True
-        assert not memory_queue._pid_is_alive(pid)
+        assert _is_gone(pid)
     finally:
         if pid_path.exists():
             _kill_test_process(int(pid_path.read_text(encoding="ascii")))
@@ -393,7 +427,7 @@ def test_worker_cleans_grandchild_before_reporting_malformed_result(
             )
         pid = read_pid(pid_path, SHORT_TIMEOUT)
         assert raised.value.code == "processor_result_malformed"
-        assert not memory_queue._pid_is_alive(pid)
+        assert _is_gone(pid)
     finally:
         if pid_path.exists():
             _kill_test_process(int(pid_path.read_text(encoding="ascii")))
@@ -413,7 +447,7 @@ def test_worker_cleans_grandchild_before_reporting_processor_crash(
             )
         pid = read_pid(pid_path, SHORT_TIMEOUT)
         assert raised.value.code == "processor_exception"
-        assert not memory_queue._pid_is_alive(pid)
+        assert _is_gone(pid)
     finally:
         if pid_path.exists():
             _kill_test_process(int(pid_path.read_text(encoding="ascii")))
@@ -454,7 +488,7 @@ def test_deferred_compile_completes_before_queue_ack(
     assert summary.succeeded == 1
     assert queue.get(task_id).state == "succeeded"
     assert done_path.read_text(encoding="ascii") == "done"
-    assert not memory_queue._pid_is_alive(compiler_pid)
+    assert _is_gone(compiler_pid)
 
 
 def test_deferred_compile_timeout_kills_compiler_tree(
@@ -490,7 +524,7 @@ def test_deferred_compile_timeout_kills_compiler_tree(
     compiler_pid = read_pid(pid_path, SHORT_TIMEOUT)
     task = queue.get(task_id)
     # The subject is the kill, so it is asserted first and unconditionally.
-    assert not memory_queue._pid_is_alive(compiler_pid)
+    assert _is_gone(compiler_pid)
     assert summary.failed == 1
     _assert_timed_out_task(task)
 

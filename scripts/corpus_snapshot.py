@@ -477,8 +477,24 @@ def _deadline_value(deadline: float | None, deadline_seconds: float | None) -> f
         raise ValueError("deadline and deadline_seconds are mutually exclusive")
     if deadline is not None:
         return _require_monotonic(deadline)
-    seconds = DEFAULT_DEADLINE_SECONDS if deadline_seconds is None else deadline_seconds
-    return time.monotonic() + _require_seconds(seconds)
+    return time.monotonic() + _require_seconds(_seconds_or_default(deadline_seconds))
+
+
+def _seconds_or_default(deadline_seconds: float | None) -> float:
+    return DEFAULT_DEADLINE_SECONDS if deadline_seconds is None else deadline_seconds
+
+
+def _writer_wait_seconds(
+    selected: float, deadline: float | None, deadline_seconds: float | None
+) -> float:
+    """Time left to `selected`, never above the seconds it was built from.
+
+    `now + seconds - now` can round one float spacing above `seconds`.
+    """
+    remaining = max(0.0, selected - time.monotonic())
+    if deadline is not None:
+        return remaining
+    return min(remaining, _seconds_or_default(deadline_seconds))
 
 
 def _check_deadline(deadline: float) -> None:
@@ -2735,7 +2751,7 @@ def collect_corpus(
     selected_deadline = _deadline_value(deadline, deadline_seconds)
     if coordinator is not None:
         _check_deadline(selected_deadline)
-        remaining = max(0.0, selected_deadline - time.monotonic())
+        remaining = _writer_wait_seconds(selected_deadline, deadline, deadline_seconds)
         gate = coordinator.writer_gate(wait_seconds=remaining)
     else:
         gate = contextlib.nullcontext()

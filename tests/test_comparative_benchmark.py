@@ -15,6 +15,8 @@ from reliable_memory import (
     validate_schema,
 )
 
+from tests.slow_machine import LONG_TIMEOUT, SHORT_TIMEOUT
+
 ROOT = Path(__file__).resolve().parent.parent
 BENCHMARK = ROOT / "benchmark"
 CONTRACT = BENCHMARK / "comparative-v1.json"
@@ -616,7 +618,7 @@ def test_cli_smoke_is_json_offline_and_real_mode_is_unavailable():
         capture_output=True,
         text=True,
         check=False,
-        timeout=10,
+        timeout=SHORT_TIMEOUT,
     )
     assert smoke.returncode == 0, smoke.stderr
     report = json.loads(smoke.stdout)
@@ -629,7 +631,7 @@ def test_cli_smoke_is_json_offline_and_real_mode_is_unavailable():
         capture_output=True,
         text=True,
         check=False,
-        timeout=10,
+        timeout=SHORT_TIMEOUT,
     )
     assert real.returncode == 2
     assert not real.stdout
@@ -1041,7 +1043,7 @@ def test_cli_fixture_runs_protocol_and_writes_evidence(tmp_path):
         capture_output=True,
         text=True,
         check=False,
-        timeout=60,
+        timeout=LONG_TIMEOUT,
     )
 
     assert completed.returncode == 0, completed.stderr

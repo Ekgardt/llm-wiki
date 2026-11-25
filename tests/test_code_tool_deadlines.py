@@ -13,18 +13,19 @@ from __future__ import annotations
 import sys
 import threading
 import time
+from collections.abc import Callable
 from pathlib import Path
+from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 
-# The injected slow step sleeps this long; the budget below cuts it off far
-# earlier. The gap between the two is what distinguishes a bounded return
-# from simply waiting the step out.
-_SLOW_STEP_SECONDS = 5.0
+from tests.slow_machine import PAUSE_TIMEOUT, run_within_hang_bound
+
+# The injected slow step blocks until the test releases it, and never on its
+# own before the hang bound. A call that returns while the step is still
+# blocked was cut off at the budget; one that waited the step out never returns
+# inside the hang bound at all.
 _BUDGET_SECONDS = 0.5
-# Generous ceiling for a loaded machine: well under the slow step, well over
-# the budget. A bounded return passes at any load; waiting out the step fails.
-_CUTOFF_CEILING_SECONDS = 4.0
 
 
 def _dispatch(name: str, arguments: dict, deadline: float) -> dict:
@@ -105,45 +106,54 @@ class TestExhaustedWorkersRefuseByName:
         assert "busy" in data["detail"]
 
 
-def _slow_step(release: threading.Event):
-    def slow(directory, **options):
-        release.wait(_SLOW_STEP_SECONDS)
+def _slow_step(
+    release: threading.Event, finished: threading.Event
+) -> Callable[..., dict[str, list[object]]]:
+    def slow(directory: str, **options: object) -> dict[str, list[object]]:
+        release.wait(PAUSE_TIMEOUT)
+        finished.set()
         return {"entry_points": [], "routes": [], "hotspots": [], "communities": []}
 
     return slow
 
 
-def _bounded_elapsed(name: str, tmp_path) -> tuple[dict, float]:
-    started = time.monotonic()
-    data = _dispatch(name, {"directory": str(tmp_path)}, started + _BUDGET_SECONDS)
-    return data, time.monotonic() - started
+def _bounded_return(
+    name: str, tmp_path: Path, finished: threading.Event
+) -> tuple[dict[str, Any], bool]:
+    """The answer, and whether the slow step was still blocked when it came."""
+    data = run_within_hang_bound(
+        lambda: _dispatch(
+            name, {"directory": str(tmp_path)}, time.monotonic() + _BUDGET_SECONDS
+        )
+    )
+    return data, not finished.is_set()
 
 
 class TestSlowWorkIsCutOffAtTheBudget:
     def test_a_slow_dead_code_step_returns_at_the_budget(self, tmp_path, monkeypatch):
         release = threading.Event()
-        monkeypatch.setattr("code_graph.find_dead_code", _slow_step(release))
+        finished = threading.Event()
+        monkeypatch.setattr("code_graph.find_dead_code", _slow_step(release, finished))
 
-        data, elapsed = _bounded_elapsed("find_dead_code", tmp_path)
-        release.set()
+        try:
+            data, step_still_blocked = _bounded_return("find_dead_code", tmp_path, finished)
+        finally:
+            release.set()
 
         assert data["status"] == "timeout", data
         assert data["completed"] == ["directory_validation"]
-        assert elapsed < _CUTOFF_CEILING_SECONDS, (
-            f"returned after {elapsed:.2f}s for a {_BUDGET_SECONDS}s budget "
-            f"against a {_SLOW_STEP_SECONDS}s step"
-        )
+        assert step_still_blocked, "the call waited the slow step out"
 
     def test_a_slow_architecture_step_returns_at_the_budget(self, tmp_path, monkeypatch):
         release = threading.Event()
-        monkeypatch.setattr("code_graph.get_architecture", _slow_step(release))
+        finished = threading.Event()
+        monkeypatch.setattr("code_graph.get_architecture", _slow_step(release, finished))
 
-        data, elapsed = _bounded_elapsed("get_architecture", tmp_path)
-        release.set()
+        try:
+            data, step_still_blocked = _bounded_return("get_architecture", tmp_path, finished)
+        finally:
+            release.set()
 
         assert data["status"] == "timeout", data
         assert data["completed"] == ["directory_validation"]
-        assert elapsed < _CUTOFF_CEILING_SECONDS, (
-            f"returned after {elapsed:.2f}s for a {_BUDGET_SECONDS}s budget "
-            f"against a {_SLOW_STEP_SECONDS}s step"
-        )
+        assert step_still_blocked, "the call waited the slow step out"

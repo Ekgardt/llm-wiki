@@ -8,9 +8,11 @@ import sqlite3
 import subprocess
 import time
 from pathlib import Path
-from types import SimpleNamespace
+from types import ModuleType, SimpleNamespace
 
 import pytest
+
+from tests.slow_machine import LONG_TIMEOUT
 
 ROOT = Path(__file__).resolve().parent.parent
 SYNC_SCRIPT = ROOT / "scripts" / "sync_memory.py"
@@ -25,7 +27,7 @@ EXPECTED_ACTIONS = (
 )
 
 
-def _load_sync_memory():
+def _load_sync_memory() -> ModuleType:
     spec = importlib.util.spec_from_file_location("sync_memory_under_test", SYNC_SCRIPT)
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
@@ -244,6 +246,20 @@ def test_dependency_action_checks_lock_and_baseline_environment(tmp_path):
     assert result["details"] == {"lock": "current", "environment": "current"}
     assert commands[0][0][:3] == ["uv", "lock", "--check"]
     assert commands[0][1]["timeout"] <= sync_memory.DEPENDENCY_TIMEOUT_SECONDS
+
+
+def test_dependency_time_left_never_exceeds_its_budget_when_the_deadline_rounds_up(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sync_memory = _load_sync_memory()
+    budget = sync_memory.DEPENDENCY_TIMEOUT_SECONDS
+    # At this reading `(reading + 30.0) - reading` is 30.000000000000114.
+    reading = 994.0000000009003
+    monkeypatch.setattr(sync_memory.time, "monotonic", lambda: reading)
+    deadline = reading + budget
+    assert deadline - reading > budget
+
+    assert sync_memory._remaining_clock(deadline, budget)() == budget
 
 
 def test_production_baseline_declares_python310_tomli_parser():
@@ -964,7 +980,7 @@ $syncWarning = $false
         errors="replace",
         # A hang guard, not a budget: pwsh startup alone exceeded ten seconds
         # on a loaded hosted Linux runner.
-        timeout=120,
+        timeout=LONG_TIMEOUT,
         check=False,
     )
 
@@ -1009,7 +1025,7 @@ $syncWarning = $false
         errors="replace",
         # A hang guard, not a budget: pwsh startup alone exceeded ten seconds
         # on a loaded hosted Linux runner.
-        timeout=120,
+        timeout=LONG_TIMEOUT,
         check=False,
     )
 
@@ -1103,7 +1119,7 @@ $agents = @()
         errors="replace",
         # A hang guard, not a budget: pwsh startup alone exceeded ten seconds
         # on a loaded hosted Linux runner.
-        timeout=120,
+        timeout=LONG_TIMEOUT,
         check=False,
     )
 

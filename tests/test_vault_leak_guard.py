@@ -13,9 +13,13 @@ hold the watch in place.
 """
 from __future__ import annotations
 
+import os
+import subprocess
+import sys
 from pathlib import Path
 
 from tests import conftest
+from tests.slow_machine import LONG_TIMEOUT
 
 
 def _posix(entries: list[str]) -> list[str]:
@@ -79,3 +83,54 @@ def test_the_daily_log_of_the_live_vault_is_not_watched(tmp_path, monkeypatch):
 def test_the_daily_log_of_any_other_checkout_is_watched(tmp_path, monkeypatch):
     """Nothing but a test appends there (docs/research/2026-09-25-a-test-that-writes-a-daily-log-is-caught.md)."""
     assert _daily_leak(tmp_path, monkeypatch, None) == [str(Path("knowledge/daily/2026-08-26.md"))]
+
+
+def test_the_host_vault_is_read_before_the_checkout_pins_it() -> None:
+    environ = {"LLM_WIKI_ROOT": "/live-vault"}
+
+    assert conftest._host_vault(environ) == "/live-vault"
+    assert environ[conftest.HOST_VAULT_VARIABLE] == '"/live-vault"'
+
+
+def test_no_host_vault_is_recorded_as_a_value_windows_keeps() -> None:
+    """Windows drops an empty environment variable, so "no vault" must not be empty."""
+    environ: dict[str, str] = {}
+
+    assert conftest._host_vault(environ) is None
+    assert environ[conftest.HOST_VAULT_VARIABLE]
+
+
+def test_a_worker_inherits_the_host_vault_not_the_pinned_checkout() -> None:
+    """xdist workers inherit the pinned `LLM_WIKI_ROOT`; the recorded host value wins."""
+    environ = {"LLM_WIKI_ROOT": str(conftest.VAULT_ROOT), conftest.HOST_VAULT_VARIABLE: "null"}
+
+    assert conftest._host_vault(environ) is None
+
+
+_CONTROLLER = (
+    "import subprocess, sys\n"
+    "from tests import conftest\n"
+    "worker = [sys.executable, '-c', 'from tests import conftest; print(conftest._HOST_VAULT)']\n"
+    "print(subprocess.run(worker, capture_output=True, text=True, check=True).stdout.strip())\n"
+)
+
+
+def test_a_child_of_a_pytest_process_still_watches_the_daily_logs(tmp_path: Path) -> None:
+    """The leak guard must not switch itself off in the processes pytest starts."""
+    hidden = {"LLM_WIKI_ROOT", conftest.HOST_VAULT_VARIABLE, "PYTEST_XDIST_WORKER"}
+    environ = {name: value for name, value in os.environ.items() if name not in hidden}
+    environ.update(
+        LLM_WIKI_TEST_USE_EXTERNAL_STATE="1", LLM_WIKI_STATE_ROOT=str(tmp_path / "state")
+    )
+
+    child = subprocess.run(
+        [sys.executable, "-c", _CONTROLLER],
+        cwd=conftest.VAULT_ROOT,
+        env=environ,
+        capture_output=True,
+        text=True,
+        check=True,
+        timeout=LONG_TIMEOUT,
+    )
+
+    assert child.stdout.strip() == "None"

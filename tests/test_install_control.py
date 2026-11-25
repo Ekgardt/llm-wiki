@@ -34,6 +34,8 @@ from install_control import (
     windows_task_scheduler_resource,
 )
 
+from tests.slow_machine import SHORT_TIMEOUT
+
 
 def test_status_is_read_only_when_install_state_is_absent(tmp_path: Path) -> None:
     state_root = tmp_path / "state"
@@ -567,7 +569,7 @@ def test_crash_after_external_write_resumes_original_transaction(tmp_path: Path)
     crashed = subprocess.run(
         [sys.executable, "-c", script],
         env=environment,
-        timeout=30,
+        timeout=SHORT_TIMEOUT,
         check=False,
     )
     transaction_path = state_root / "run" / "install" / "transaction.json"
@@ -642,7 +644,7 @@ def test_explicit_rollback_finishes_interrupted_install(tmp_path: Path) -> None:
     environment = os.environ.copy()
     environment["PYTHONPATH"] = str(Path(__file__).parents[1] / "scripts")
     crashed = subprocess.run(
-        [sys.executable, "-c", script], env=environment, timeout=30, check=False
+        [sys.executable, "-c", script], env=environment, timeout=SHORT_TIMEOUT, check=False
     )
     assert crashed.returncode == 92
 

@@ -225,9 +225,11 @@ def _dependency_deadline(deadline: float | None, timeout: float) -> float:
     return time.monotonic() + timeout
 
 
-def _remaining_clock(deadline: float) -> Callable[[], float]:
+def _remaining_clock(deadline: float, budget: float) -> Callable[[], float]:
+    """Time left to `deadline`, never above `budget`: `now + budget - now` can round above it."""
+
     def remaining() -> float:
-        return max(0.0, deadline - time.monotonic())
+        return min(max(0.0, deadline - time.monotonic()), budget)
 
     return remaining
 
@@ -240,7 +242,7 @@ def _dependency_action(
     timeout: float = DEPENDENCY_TIMEOUT_SECONDS,
     deadline: float | None = None,
 ) -> dict:
-    remaining = _remaining_clock(_dependency_deadline(deadline, timeout))
+    remaining = _remaining_clock(_dependency_deadline(deadline, timeout), timeout)
     changes, error = _checked_dependency_plan(run_uv, root, remaining)
     if error is not None:
         return error

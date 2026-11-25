@@ -40,7 +40,7 @@ from lsp_protocol import (
 )
 
 from tests.fake_lsp_server import FakeLspPeer, FakeLspServer
-from tests.slow_machine import LONG_TIMEOUT, SHORT_TIMEOUT
+from tests.slow_machine import LONG_TIMEOUT, SHORT_TIMEOUT, run_within_hang_bound
 
 
 @pytest.fixture(autouse=True, params=[False, True], ids=["posix-close", "windows-close"])
@@ -582,8 +582,24 @@ def test_immediate_responses_preserve_monotonic_dispatch_evidence(
     assert protocol._sent_request_evidence() == (request_count, "immediate")
 
 
+def _record_completion_waits(
+    monkeypatch: pytest.MonkeyPatch, protocol: LspProtocol
+) -> list[float]:
+    """Every wait a requester takes for its response, as the time it was handed."""
+    waits: list[float] = []
+    wait_for_completion = protocol._wait_for_completion
+
+    def recording(pending: object, remaining: float, cancellation: object) -> None:
+        waits.append(remaining)
+        wait_for_completion(pending, remaining, cancellation)
+
+    monkeypatch.setattr(protocol, "_wait_for_completion", recording)
+    return waits
+
+
 def test_timeout_keeps_sent_drain_without_waiting_past_original_deadline(
     fake_server: FakeLspServer,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     cancel_seen = threading.Event()
 
@@ -598,10 +614,13 @@ def test_timeout_keeps_sent_drain_without_waiting_past_original_deadline(
         cancel_seen.set()
 
     protocol = fake_server.start(handler)
+    waits = _record_completion_waits(monkeypatch, protocol)
     started = time.monotonic()
+    deadline = started + 0.05
     with pytest.raises(TimeoutError):
-        protocol.request("slow", {}, deadline=started + 0.05)
-    assert time.monotonic() - started < 0.25
+        run_within_hang_bound(lambda: protocol.request("slow", {}, deadline=deadline))
+    assert waits
+    assert all(remaining <= deadline - started for remaining in waits)
     assert protocol.pending_count == 1
     assert cancel_seen.wait(SHORT_TIMEOUT)
 
@@ -1911,17 +1930,22 @@ def _raw_frame(message: object) -> bytes:
     return f"Content-Length: {len(body)}\r\n\r\n".encode() + body
 
 
-def test_initial_blocked_write_is_bounded_by_request_deadline_and_fatal() -> None:
+def test_initial_blocked_write_is_bounded_by_request_deadline_and_fatal(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     reader = _BlockingReader()
     writer = _BlockingWriter()
     callbacks: list[str] = []
     protocol = _protocol_with_streams(reader, writer, fatal_callback=callbacks.append)
-    deadline = time.monotonic() + 0.05
+    waits = _record_completion_waits(monkeypatch, protocol)
+    started = time.monotonic()
+    deadline = started + 0.05
 
     with pytest.raises((TimeoutError, ProtocolViolation)):
-        protocol.request("blocked", {}, deadline=deadline)
+        run_within_hang_bound(lambda: protocol.request("blocked", {}, deadline=deadline))
 
-    assert time.monotonic() < deadline + 0.2
+    assert waits
+    assert all(remaining <= deadline - started for remaining in waits)
     assert writer.started.wait(SHORT_TIMEOUT)
     assert protocol.fatal is True
     assert protocol.pending_count == 0
@@ -1931,22 +1955,29 @@ def test_initial_blocked_write_is_bounded_by_request_deadline_and_fatal() -> Non
     protocol.close()
 
 
-def test_blocked_cancellation_write_never_extends_original_deadline() -> None:
+def test_blocked_cancellation_write_never_extends_original_deadline(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     reader = _BlockingReader()
     writer = _BlockingWriter(block_after=1)
     protocol = _protocol_with_streams(reader, writer)
+    waits = _record_completion_waits(monkeypatch, protocol)
     source = CancellationSource()
     timer = threading.Timer(0.02, source.cancel)
     # The cancellation has to win the race with the deadline for the test to
     # measure anything; 0.08 s left the timer competing with the scheduler and
     # a macOS runner timed out instead of cancelling.
-    deadline = time.monotonic() + 0.5
+    started = time.monotonic()
+    deadline = started + 0.5
     timer.start()
 
     with pytest.raises(RequestCancelled):
-        protocol.request("cancel", {}, deadline=deadline, cancellation=source.token)
+        run_within_hang_bound(
+            lambda: protocol.request("cancel", {}, deadline=deadline, cancellation=source.token)
+        )
 
-    assert time.monotonic() < deadline + 0.2
+    assert waits
+    assert all(remaining <= deadline - started for remaining in waits)
     assert writer.started.wait(SHORT_TIMEOUT)
     assert protocol.pending_count == 1
     writer.released.set()
@@ -2033,21 +2064,28 @@ def test_close_unblocks_native_pipe_reader_and_stops_owners() -> None:
         peer_writer.close()
 
 
-def test_native_pipe_write_is_bounded_by_deadline_on_every_platform() -> None:
+def test_native_pipe_write_is_bounded_by_deadline_on_every_platform(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     peer_read_fd, write_fd = os.pipe()
     peer_reader = os.fdopen(peer_read_fd, "rb", buffering=0)
     writer = os.fdopen(write_fd, "wb", buffering=0)
     reader = _BlockingReader()
     protocol = _protocol_with_streams(reader, writer)
-    deadline = time.monotonic() + 0.1
+    waits = _record_completion_waits(monkeypatch, protocol)
+    started = time.monotonic()
+    deadline = started + 0.1
     try:
         with pytest.raises((TimeoutError, ProtocolViolation)):
-            protocol.request(
-                "pipe-block",
-                {"payload": "x" * (1024 * 1024)},
-                deadline=deadline,
+            run_within_hang_bound(
+                lambda: protocol.request(
+                    "pipe-block",
+                    {"payload": "x" * (1024 * 1024)},
+                    deadline=deadline,
+                )
             )
-        assert time.monotonic() < deadline + 0.3
+        assert waits
+        assert all(remaining <= deadline - started for remaining in waits)
         assert protocol.fatal is True
         assert protocol.pending_count == 0
     finally:
@@ -2118,13 +2156,22 @@ def test_close_from_reader_handler_does_not_deadlock(fake_server: FakeLspServer)
     assert not protocol.writer_thread.is_alive()
 
 
-def test_encode_frame_rejects_cycles_quickly() -> None:
+def test_encode_frame_rejects_cycles_quickly(monkeypatch: pytest.MonkeyPatch) -> None:
     cyclic: list[object] = []
     cyclic.append(cyclic)
-    started = time.monotonic()
+    entered: list[object] = []
+    enter_container = lsp_protocol._JsonWalk.enter_container
+
+    def recording(walk: object, current: object, parent_depth: int) -> int:
+        entered.append(current)
+        return int(enter_container(walk, current, parent_depth))
+
+    monkeypatch.setattr(lsp_protocol._JsonWalk, "enter_container", recording)
     with pytest.raises(ProtocolViolation, match="cyclic"):
         encode_frame({"jsonrpc": "2.0", "method": "x", "params": cyclic})
-    assert time.monotonic() - started < 0.2
+    # The frame, the list, and the list again: the first revisit is refused.
+    assert [type(value) for value in entered] == [dict, list, list]
+    assert entered[1] is entered[2] is cyclic
 
 
 @pytest.mark.parametrize("number", [float("nan"), float("inf"), float("-inf")])

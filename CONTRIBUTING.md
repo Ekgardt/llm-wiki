@@ -27,7 +27,8 @@ installers and every CI job pin.
 git clone git@github.com:Ekgardt/llm-wiki.git
 cd llm-wiki
 uv sync --locked                                      # install the development group
-uv run --locked --no-sync pytest -q                   # full regression suite
+uv run --locked --no-sync pytest -q                   # full suite, one xdist worker per CPU
+uv run --locked --no-sync pytest -q -n 0              # the same, serially
 uv run --locked --no-sync pytest tests/test_xxx.py -v # run a specific test file
 uv run --locked --no-sync python scripts/repair_installed_memory.py --check --json
 ```
@@ -94,8 +95,11 @@ The principles below summarize the non-negotiable invariants.
 ## Test commands
 
 ```bash
-# Fast subset (pre-commit)
+# Full suite in parallel (`-n auto` is the default in pyproject.toml)
 uv run --locked --no-sync pytest -q
+
+# Serially (debugging, --pdb)
+uv run --locked --no-sync pytest -q -n 0
 
 # Full suite
 uv run --locked --no-sync pytest -v

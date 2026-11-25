@@ -14,7 +14,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from tests.slow_machine import LONG_TIMEOUT, PAUSE_TIMEOUT
+from tests.slow_machine import LONG_TIMEOUT, PAUSE_TIMEOUT, SHORT_TIMEOUT
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 
@@ -66,7 +66,7 @@ def _activate_nested_repository_graph(tmp_path, monkeypatch):
         check=True,
         capture_output=True,
         text=True,
-        timeout=10,
+        timeout=SHORT_TIMEOUT,
     )
     source = repository / "app.py"
     source.write_text("def caller():\n    callee()\n", encoding="utf-8")
@@ -81,7 +81,7 @@ def test_code_graph_importable_as_package():
         cwd=Path(__file__).resolve().parent.parent,
         capture_output=True,
         text=True,
-        timeout=10,
+        timeout=SHORT_TIMEOUT,
     )
 
     assert result.returncode == 0, result.stderr
@@ -93,7 +93,7 @@ def test_code_extractor_importable_as_package():
         cwd=Path(__file__).resolve().parent.parent,
         capture_output=True,
         text=True,
-        timeout=10,
+        timeout=SHORT_TIMEOUT,
     )
 
     assert result.returncode == 0, result.stderr

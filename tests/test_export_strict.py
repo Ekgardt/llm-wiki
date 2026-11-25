@@ -7,6 +7,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+from tests.slow_machine import SHORT_TIMEOUT
+
 ROOT = Path(__file__).resolve().parent.parent
 SCRIPTS = ROOT / "scripts"
 if str(SCRIPTS) not in sys.path:
@@ -39,7 +41,7 @@ def _isolated_git(repo: Path):
             cwd=repo,
             check=True,
             capture_output=True,
-            timeout=30,
+            timeout=SHORT_TIMEOUT,
             env=environment,
         )
 

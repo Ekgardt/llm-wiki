@@ -29,6 +29,11 @@ and `docs/research/2026-09-18-a-deadline-a-test-expects-to-be-kept-is-a-hang-bou
 from __future__ import annotations
 
 import os
+import threading
+from collections.abc import Callable
+from typing import TypeVar
+
+_Result = TypeVar("_Result")
 
 # Bazel's `--test_timeout`, CPython's `--timeout`: a machine known to be
 # loaded scales every wait at the invocation instead of in the tests.
@@ -56,3 +61,29 @@ LONG_TIMEOUT = 300.0 * _scale()
 # wait of the test, so the worker can never time out first and turn "the
 # test was slow" into "the worker failed".
 PAUSE_TIMEOUT = 2 * LONG_TIMEOUT
+
+
+def run_within_hang_bound(call: Callable[[], _Result]) -> _Result:
+    """Run `call` on a daemon thread and return its result or raise its error.
+
+    A call still running after LONG_TIMEOUT is a hang and fails the test. A test
+    that holds what a wrong implementation would wait for until PAUSE_TIMEOUT,
+    or freezes the clock its deadline is read from, turns "returned in time"
+    into this: a correct call finishes, a waiting one never does.
+    """
+    outcome: list[tuple[bool, object]] = []
+
+    def run() -> None:
+        try:
+            outcome.append((True, call()))
+        except BaseException as error:  # re-raised on the test's thread
+            outcome.append((False, error))
+
+    worker = threading.Thread(target=run, name="hang-bounded-call", daemon=True)
+    worker.start()
+    worker.join(LONG_TIMEOUT)
+    assert outcome, f"{call!r} was still running after LONG_TIMEOUT ({LONG_TIMEOUT} s)"
+    returned, value = outcome[0]
+    if not returned:
+        raise value  # type: ignore[misc]
+    return value  # type: ignore[return-value]

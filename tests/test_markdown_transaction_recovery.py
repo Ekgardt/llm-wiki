@@ -82,7 +82,7 @@ def _crash_process(
         capture_output=True,
         text=True,
         env=env,
-        timeout=20,
+        timeout=SHORT_TIMEOUT,
     )
 
 
@@ -1730,7 +1730,7 @@ print(json.dumps([record.state for record in records]))
         )
         for number in range(2)
     ]
-    outputs = [process.communicate(timeout=20) for process in processes]
+    outputs = [process.communicate(timeout=SHORT_TIMEOUT) for process in processes]
 
     assert [process.returncode for process in processes] == [0, 0], outputs
     states = [json.loads(stdout) for stdout, _ in outputs]
