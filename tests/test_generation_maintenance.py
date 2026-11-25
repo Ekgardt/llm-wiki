@@ -13,7 +13,7 @@ from pathlib import Path
 
 import pytest
 
-from tests.slow_machine import LONG_TIMEOUT
+from tests.slow_machine import LONG_TIMEOUT, SHORT_TIMEOUT
 
 
 def _generation_directory(state_root: Path, result: dict) -> Path:
@@ -1973,7 +1973,7 @@ def test_edited_wikilink_is_visible_after_nightly_in_fresh_processes(
             capture_output=True,
             text=True,
             check=True,
-            timeout=30,
+            timeout=SHORT_TIMEOUT,
         )
         return json.loads(completed.stdout)
 

@@ -3381,7 +3381,7 @@ pyright_profile._retain_node_probe_owner(owner, Tree())
         env=environment,
         capture_output=True,
         text=True,
-        timeout=10,
+        timeout=SHORT_TIMEOUT,
         check=False,
     )
 

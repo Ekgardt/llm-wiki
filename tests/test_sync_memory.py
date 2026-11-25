@@ -12,6 +12,8 @@ from types import ModuleType, SimpleNamespace
 
 import pytest
 
+from tests.slow_machine import LONG_TIMEOUT
+
 ROOT = Path(__file__).resolve().parent.parent
 SYNC_SCRIPT = ROOT / "scripts" / "sync_memory.py"
 EXPECTED_ACTIONS = (
@@ -978,7 +980,7 @@ $syncWarning = $false
         errors="replace",
         # A hang guard, not a budget: pwsh startup alone exceeded ten seconds
         # on a loaded hosted Linux runner.
-        timeout=120,
+        timeout=LONG_TIMEOUT,
         check=False,
     )
 
@@ -1023,7 +1025,7 @@ $syncWarning = $false
         errors="replace",
         # A hang guard, not a budget: pwsh startup alone exceeded ten seconds
         # on a loaded hosted Linux runner.
-        timeout=120,
+        timeout=LONG_TIMEOUT,
         check=False,
     )
 
@@ -1117,7 +1119,7 @@ $agents = @()
         errors="replace",
         # A hang guard, not a budget: pwsh startup alone exceeded ten seconds
         # on a loaded hosted Linux runner.
-        timeout=120,
+        timeout=LONG_TIMEOUT,
         check=False,
     )
 

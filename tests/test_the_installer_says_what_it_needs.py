@@ -24,6 +24,8 @@ from test_installer_bootstrap import (  # noqa: E402
     _shell_function,
 )
 
+from tests.slow_machine import LONG_TIMEOUT  # noqa: E402
+
 ROOT = TESTS.parent
 INSTALL_SH = (ROOT / "install.sh").read_text(encoding="utf-8")
 INSTALL_PS1 = (ROOT / "install.ps1").read_text(encoding="utf-8")
@@ -159,7 +161,7 @@ def test_the_windows_installer_says_the_same(checkout: Path, tmp_path: Path) -> 
 
     result = subprocess.run(
         [_pwsh(), "-NoProfile", "-NonInteractive", "-Command", command],
-        capture_output=True, text=True, timeout=120, check=False, env=STUB_ENV,
+        capture_output=True, text=True, timeout=LONG_TIMEOUT, check=False, env=STUB_ENV,
     )
 
     assert result.returncode == 0, result.stderr

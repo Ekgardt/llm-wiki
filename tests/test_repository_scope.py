@@ -13,7 +13,7 @@ from typing import Any
 
 import pytest
 
-from tests.slow_machine import PAUSE_TIMEOUT, run_within_hang_bound
+from tests.slow_machine import PAUSE_TIMEOUT, SHORT_TIMEOUT, run_within_hang_bound
 
 SCRIPTS = Path(__file__).resolve().parent.parent / "scripts"
 if str(SCRIPTS) not in sys.path:
@@ -93,7 +93,7 @@ def _git(*args: str, cwd: Path) -> None:
         check=True,
         stdin=subprocess.DEVNULL,
         capture_output=True,
-        timeout=10,
+        timeout=SHORT_TIMEOUT,
         env=environment,
     )
 

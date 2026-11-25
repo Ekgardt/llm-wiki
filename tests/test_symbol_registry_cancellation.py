@@ -24,6 +24,8 @@ if str(SCRIPTS) not in sys.path:
 
 import import_resolver  # noqa: E402  (needs the scripts/ path above)
 
+from tests.clocks import VirtualClock  # noqa: E402
+
 _BODY = "\n".join(f"def handler_{index:03d}(argument): return argument" for index in range(60))
 
 
@@ -106,14 +108,26 @@ def test_an_expired_deadline_stops_the_walk_before_any_file_is_parsed(tmp_path, 
 
 
 def test_a_deadline_that_expires_mid_walk_stops_the_walk(tmp_path, monkeypatch):
-    """A live deadline stops a walk that is already running."""
+    """A live deadline stops a walk that is already running.
+
+    Each parse advances a virtual clock by one second, so the deadline falls due
+    after the twentieth file however fast the machine is. On the real clock a
+    0.05 s deadline ran out before the first parse on a loaded runner.
+    """
     _workspace(tmp_path, 400)
     counter = _CancelAfter(monkeypatch, 10**9)
+    clock = VirtualClock(1000.0)
+    monkeypatch.setattr(import_resolver, "time", clock)
+    counting_parse = import_resolver.ast.parse
+
+    def parse_taking_a_second(*args: object, **kwargs: object) -> object:
+        clock.sleep(1.0)
+        return counting_parse(*args, **kwargs)
+
+    monkeypatch.setattr(import_resolver.ast, "parse", parse_taking_a_second)
 
     with pytest.raises(TimeoutError, match="deadline"):
-        import_resolver.build_python_symbol_registry(
-            tmp_path, deadline=time.monotonic() + 0.05
-        )
+        import_resolver.build_python_symbol_registry(tmp_path, deadline=clock.now + 20.0)
 
     assert 0 < counter.parsed < 400
 

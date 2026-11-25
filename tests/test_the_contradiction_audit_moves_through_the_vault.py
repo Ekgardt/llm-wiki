@@ -10,6 +10,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+from tests.slow_machine import LONG_TIMEOUT
+
 SCRIPTS = Path(__file__).resolve().parents[1] / "scripts"
 CLEAN = "NO_CONTRADICTIONS"
 SILENT = ""
@@ -50,7 +52,7 @@ def _runs(tmp_path: Path, sizes: dict[str, int], replies: list[str]) -> list[lis
         env=environment,
         capture_output=True,
         text=True,
-        timeout=120,
+        timeout=LONG_TIMEOUT,
         check=True,
     )
     return json.loads(done.stdout.strip().splitlines()[-1])

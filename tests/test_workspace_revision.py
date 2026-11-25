@@ -118,7 +118,7 @@ def _junction_or_skip(link: Path, target: Path) -> None:
         [str(system_root / "System32" / "cmd.exe"), "/d", "/c", "mklink", "/J", str(link), str(target)],
         check=False,
         capture_output=True,
-        timeout=10,
+        timeout=SHORT_TIMEOUT,
     )
     if completed.returncode != 0:
         pytest.skip("junction creation is unavailable")
@@ -151,7 +151,7 @@ def _run_git(root: Path, *arguments: str, input_bytes: bytes | None = None) -> b
         input=input_bytes,
         check=True,
         capture_output=True,
-        timeout=10,
+        timeout=SHORT_TIMEOUT,
     ).stdout
 
 
@@ -836,7 +836,7 @@ def test_private_index_verifier_matches_sha256_fallback_when_supported(
         cwd=root,
         check=False,
         capture_output=True,
-        timeout=10,
+        timeout=SHORT_TIMEOUT,
     )
     if initialized.returncode != 0:
         pytest.skip("Git SHA-256 repositories are unavailable")
@@ -3099,7 +3099,7 @@ def test_reused_scope_observes_live_head_after_empty_commit(repository: Path) ->
         cwd=repository,
         check=True,
         capture_output=True,
-        timeout=10,
+        timeout=SHORT_TIMEOUT,
     )
     current_head = subprocess.run(
         ["git", "rev-parse", "--verify", "HEAD^{commit}"],
@@ -3107,7 +3107,7 @@ def test_reused_scope_observes_live_head_after_empty_commit(repository: Path) ->
         check=True,
         capture_output=True,
         text=True,
-        timeout=10,
+        timeout=SHORT_TIMEOUT,
     ).stdout.strip()
 
     after = compute_workspace_revision(scope)
@@ -3455,7 +3455,7 @@ def test_final_status_rejects_index_only_transition(
                 cwd=repository,
                 check=True,
                 capture_output=True,
-                timeout=10,
+                timeout=SHORT_TIMEOUT,
             )
         return real_state(*args, **kwargs)
 

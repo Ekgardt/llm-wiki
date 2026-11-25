@@ -10,6 +10,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+from tests.slow_machine import LONG_TIMEOUT
+
 SCRIPTS = Path(__file__).resolve().parents[1] / "scripts"
 if str(SCRIPTS) not in sys.path:
     sys.path.insert(0, str(SCRIPTS))
@@ -47,7 +49,7 @@ def _exit_code(tmp_path: Path, script: str, arguments: list[str], provider: dict
         env=environment,
         capture_output=True,
         text=True,
-        timeout=180,
+        timeout=LONG_TIMEOUT,
         check=False,
     )
     return done.returncode

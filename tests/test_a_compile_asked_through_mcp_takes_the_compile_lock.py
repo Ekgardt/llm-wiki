@@ -10,6 +10,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+from tests.slow_machine import LONG_TIMEOUT
+
 SCRIPTS = Path(__file__).resolve().parents[1] / "scripts"
 
 # Runs in its own interpreter so the module-level paths come from the
@@ -56,7 +58,7 @@ def _in_a_fresh_vault(tmp_path: Path, program: str) -> list:
         env=environment,
         capture_output=True,
         text=True,
-        timeout=120,
+        timeout=LONG_TIMEOUT,
         check=True,
     )
     return json.loads(done.stdout.strip().splitlines()[-1])

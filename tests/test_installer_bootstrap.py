@@ -12,6 +12,7 @@ from pathlib import Path
 import pytest
 
 from tests.powershell_literal import ps_literal
+from tests.slow_machine import SHORT_TIMEOUT
 
 ROOT = Path(__file__).resolve().parent.parent
 REPOSITORY_URL = "https://github.com/Ekgardt/llm-wiki.git"
@@ -34,7 +35,7 @@ def _run(command: list[str], *, cwd: Path, env: dict[str, str] | None = None):
         text=True,
         encoding="utf-8",
         errors="replace",
-        timeout=30,
+        timeout=SHORT_TIMEOUT,
         check=False,
     )
 
@@ -223,7 +224,7 @@ def test_remote_bootstrap_rejects_non_full_oid(
         env=environment,
         capture_output=True,
         text=True,
-        timeout=30,
+        timeout=SHORT_TIMEOUT,
         check=False,
     )
 
@@ -278,7 +279,7 @@ def test_pipe_mode_ignores_caller_checkout_and_verifies_exact_head(
         env=environment,
         capture_output=True,
         text=True,
-        timeout=30,
+        timeout=SHORT_TIMEOUT,
         check=False,
     )
 
@@ -309,7 +310,7 @@ def test_remote_bootstrap_rejects_missing_required_file(
     command = _STDIN_COMMANDS[shell]()
     result = subprocess.run(
         command, input=_REMOTE_SOURCES[shell](remote), cwd=tmp_path, env=environment,
-        capture_output=True, text=True, timeout=30, check=False,
+        capture_output=True, text=True, timeout=SHORT_TIMEOUT, check=False,
     )
 
     assert result.returncode != 0

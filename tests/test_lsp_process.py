@@ -4544,7 +4544,7 @@ def test_normal_interpreter_exit_runs_bounded_atexit_tree_cleanup(tmp_path: Path
         shell=False,
         check=False,
         capture_output=True,
-        timeout=10,
+        timeout=SHORT_TIMEOUT,
     )
 
     assert completed.returncode == 0, completed.stderr.decode(errors="replace")

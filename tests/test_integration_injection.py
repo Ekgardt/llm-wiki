@@ -30,7 +30,7 @@ from typing import Any
 import pytest
 
 from tests.powershell_literal import ps_literal
-from tests.slow_machine import PAUSE_TIMEOUT, SHORT_TIMEOUT, run_within_hang_bound
+from tests.slow_machine import LONG_TIMEOUT, PAUSE_TIMEOUT, SHORT_TIMEOUT, run_within_hang_bound
 
 ROOT = Path(__file__).resolve().parent.parent
 # Session start must answer from the projection instead of recomputing the
@@ -220,7 +220,7 @@ def test_opencode_roleless_user_message_is_forwarded_once(opencode_plugin_url: s
         [require_tool("node"), "--input-type=module", "-e", script],
         capture_output=True,
         text=True,
-        timeout=180,
+        timeout=LONG_TIMEOUT,
         check=False,
     )
 
@@ -282,7 +282,7 @@ def test_installed_plugin_captures_without_an_inherited_environment(tmp_path: Pa
         [require_tool("node"), "--input-type=module", "-e", script],
         capture_output=True,
         text=True,
-        timeout=120,
+        timeout=LONG_TIMEOUT,
         check=False,
     )
 
@@ -1664,7 +1664,7 @@ def test_opencode_node_injects_shared_bounded_legacy_handoff_for_unicode_slug(
         text=True,
         encoding="utf-8",
         check=False,
-        timeout=180,
+        timeout=LONG_TIMEOUT,
     )
     assert node.returncode == 0, node.stderr
     assert json.loads(node.stdout) == [result["context"]]
@@ -1844,7 +1844,7 @@ def test_claude_and_codex_project_state_are_bounded_under_writer_contention(host
                 text=True,
                 encoding="utf-8",
                 errors="replace",
-                timeout=5,
+                timeout=SHORT_TIMEOUT,
                 check=False,
             )
         finally:
@@ -2540,7 +2540,7 @@ def _compiled_fake_uv(compiler: str, source: Path, executable: Path) -> Path:
             ],
             capture_output=True,
             text=True,
-            timeout=120,
+            timeout=LONG_TIMEOUT,
             check=False,
         )
     except subprocess.TimeoutExpired:
@@ -2641,7 +2641,9 @@ def _bash_search_paths() -> list[str | None]:
 
 def _bash_runs(bash: str) -> bool:
     try:
-        result = subprocess.run([bash, "--version"], capture_output=True, timeout=5, check=False)
+        result = subprocess.run(
+            [bash, "--version"], capture_output=True, timeout=SHORT_TIMEOUT, check=False
+        )
     except OSError:
         return False
     return result.returncode == 0
@@ -2717,7 +2719,7 @@ def test_unix_installer_trusts_smoke_exit_status(
         text=True,
         encoding="utf-8",
         errors="replace",
-        timeout=20,
+        timeout=SHORT_TIMEOUT,
         check=False,
     )
 
@@ -2764,7 +2766,7 @@ def test_unix_installer_timeout_stops_tests_and_aborts(tmp_path):
         text=True,
         encoding="utf-8",
         errors="replace",
-        timeout=120,
+        timeout=LONG_TIMEOUT,
         check=False,
     )
     elapsed = time.monotonic() - started
@@ -2873,7 +2875,7 @@ def test_unix_installer_signal_traps_cleanup_and_exit(tmp_path, signal_name, exp
         text=True,
         encoding="utf-8",
         errors="replace",
-        timeout=10,
+        timeout=SHORT_TIMEOUT,
         check=False,
     )
 
@@ -2959,7 +2961,7 @@ def test_unix_installer_signal_kills_complete_stubborn_test_tree(tmp_path):
         text=True,
         encoding="utf-8",
         errors="replace",
-        timeout=15,
+        timeout=SHORT_TIMEOUT,
         check=False,
     )
 
@@ -3042,7 +3044,7 @@ def test_unix_installer_initial_monitor_mode_cleans_stopped_test_tree(tmp_path):
         text=True,
         encoding="utf-8",
         errors="replace",
-        timeout=15,
+        timeout=SHORT_TIMEOUT,
         check=False,
     )
 
@@ -3156,7 +3158,7 @@ def test_unix_installer_initial_monitor_off_cleans_stopped_test_tree(tmp_path, s
         text=True,
         encoding="utf-8",
         errors="replace",
-        timeout=20,
+        timeout=SHORT_TIMEOUT,
         check=False,
     )
 
@@ -3247,7 +3249,7 @@ def test_unix_installer_sigttin_wait_status_enters_bounded_group_cleanup(tmp_pat
         text=True,
         encoding="utf-8",
         errors="replace",
-        timeout=10,
+        timeout=SHORT_TIMEOUT,
         check=False,
     )
 
@@ -3323,7 +3325,7 @@ def test_unix_installer_signal_trap_restores_initial_monitor_mode(tmp_path):
         text=True,
         encoding="utf-8",
         errors="replace",
-        timeout=10,
+        timeout=SHORT_TIMEOUT,
         check=False,
     )
 
@@ -3376,7 +3378,7 @@ def test_unix_installer_cleanup_targets_group_with_term_then_kill(tmp_path):
         text=True,
         encoding="utf-8",
         errors="replace",
-        timeout=10,
+        timeout=SHORT_TIMEOUT,
         check=False,
     )
 
@@ -3456,7 +3458,7 @@ def test_windows_installer_trusts_smoke_exit_status(
         text=True,
         encoding="utf-8",
         errors="replace",
-        timeout=20,
+        timeout=SHORT_TIMEOUT,
         check=False,
     )
 
@@ -3568,7 +3570,7 @@ def test_windows_installer_error_stops_native_child_and_later_steps(
             env=env,
             stdout=subprocess.DEVNULL,
             stderr=stderr,
-            timeout=180,
+            timeout=LONG_TIMEOUT,
             check=False,
         )
 
@@ -3651,7 +3653,7 @@ def test_unix_installer_mcp_function_uses_parser_in_temp_home(tmp_path, scenario
         env=env,
         capture_output=True,
         text=True,
-        timeout=20,
+        timeout=SHORT_TIMEOUT,
         check=False,
     )
 
@@ -3707,7 +3709,7 @@ def test_windows_installer_mcp_function_uses_parser_in_temp_home(tmp_path, scena
         [require_tool("pwsh"), "-NoProfile", "-NonInteractive", "-Command", command],
         capture_output=True,
         text=True,
-        timeout=20,
+        timeout=SHORT_TIMEOUT,
         check=False,
     )
 
@@ -3757,7 +3759,7 @@ def test_unix_installer_probe_reports_absent_without_touching_the_file(tmp_path)
         env=env,
         capture_output=True,
         text=True,
-        timeout=20,
+        timeout=SHORT_TIMEOUT,
         check=False,
     )
 
@@ -3800,7 +3802,7 @@ def test_unix_installer_probe_reports_conflict_for_unrelated_inline_hooks(tmp_pa
         env=env,
         capture_output=True,
         text=True,
-        timeout=20,
+        timeout=SHORT_TIMEOUT,
         check=False,
     )
 
@@ -3848,7 +3850,7 @@ def test_windows_installer_probe_reports_absent_without_touching_the_file(tmp_pa
         [require_tool("pwsh"), "-NoProfile", "-NonInteractive", "-Command", command],
         capture_output=True,
         text=True,
-        timeout=20,
+        timeout=SHORT_TIMEOUT,
         check=False,
     )
 
@@ -3895,7 +3897,7 @@ def test_windows_installer_probe_reports_conflict_for_partial_inline_hooks(tmp_p
         [require_tool("pwsh"), "-NoProfile", "-NonInteractive", "-Command", command],
         capture_output=True,
         text=True,
-        timeout=20,
+        timeout=SHORT_TIMEOUT,
         check=False,
     )
 
@@ -3935,7 +3937,7 @@ def test_unix_installer_probe_reports_disabled_when_the_feature_is_off(tmp_path)
         env=env,
         capture_output=True,
         text=True,
-        timeout=20,
+        timeout=SHORT_TIMEOUT,
         check=False,
     )
 
@@ -3980,7 +3982,7 @@ def test_windows_installer_probe_reports_disabled_when_the_feature_is_off(tmp_pa
         [require_tool("pwsh"), "-NoProfile", "-NonInteractive", "-Command", command],
         capture_output=True,
         text=True,
-        timeout=20,
+        timeout=SHORT_TIMEOUT,
         check=False,
     )
 
@@ -4086,7 +4088,7 @@ def test_opencode_node_harness_forwards_bounded_tail_and_escaped_paths(
         [require_tool("node"), "--input-type=module", "-e", script],
         capture_output=True,
         text=True,
-        timeout=10,
+        timeout=SHORT_TIMEOUT,
         check=False,
     )
     assert result.returncode == 0, result.stderr
@@ -4218,7 +4220,7 @@ def test_opencode_forwards_known_mutation_and_dirty_idle_without_fake_progress_s
         [require_tool("node"), "--input-type=module", "-e", script],
         capture_output=True,
         text=True,
-        timeout=30,
+        timeout=SHORT_TIMEOUT,
         check=False,
     )
 
@@ -4300,7 +4302,7 @@ def test_opencode_forwards_sessions_inside_and_beside_the_vault(opencode_plugin_
         [require_tool("node"), "--input-type=module", "-e", script],
         capture_output=True,
         text=True,
-        timeout=30,
+        timeout=SHORT_TIMEOUT,
         check=False,
     )
 
@@ -4506,7 +4508,7 @@ def test_windows_installer_resolves_one_external_state_root(tmp_path):
         capture_output=True,
         text=True,
         # pwsh startup alone can take ten seconds on a loaded hosted runner.
-        timeout=120,
+        timeout=LONG_TIMEOUT,
         check=False,
     )
 
@@ -4558,7 +4560,7 @@ def test_windows_scheduler_payload_carries_exact_roots_and_uv(tmp_path):
         capture_output=True,
         text=True,
         # pwsh startup alone can take ten seconds on a loaded hosted runner.
-        timeout=120,
+        timeout=LONG_TIMEOUT,
         check=False,
     )
 
@@ -4672,7 +4674,7 @@ def test_windows_scheduler_status_accepts_only_the_registered_contract(tmp_path)
         capture_output=True,
         text=True,
         # pwsh startup alone can take ten seconds on a loaded hosted runner.
-        timeout=120,
+        timeout=LONG_TIMEOUT,
         check=False,
     )
 

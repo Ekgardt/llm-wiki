@@ -52,7 +52,8 @@ def test_a_scale_that_is_not_positive_is_refused(monkeypatch: pytest.MonkeyPatch
 
 # --- no test carries a literal hang bound -----------------------------------
 
-_BOUNDED_CALLS = frozenset({"join", "result", "get", "wait", "acquire"})
+_SUBPROCESS_CALLS = frozenset({"run", "communicate", "check_output", "check_call", "call"})
+_BOUNDED_CALLS = frozenset({"join", "result", "get", "wait", "acquire"}) | _SUBPROCESS_CALLS
 _POSITIONAL_BOUND = frozenset({"join", "wait", "acquire"})
 
 
@@ -147,6 +148,29 @@ def _literal_hang_bounds(path: Path) -> list[str]:
         if bound is not None and _is_hang_bound(node, parents):
             found.append(f"{path.name}:{node.lineno} {node.func.attr}({bound.value})")
     return found
+
+
+@pytest.mark.parametrize(
+    ("source", "expected"),
+    [
+        ("subprocess.run(command, timeout=20)\n", ["probe.py:1 run(20)"]),
+        ("process.communicate(timeout=20)\n", ["probe.py:1 communicate(20)"]),
+        (
+            "with pytest.raises(subprocess.TimeoutExpired):\n"
+            "    subprocess.run(command, timeout=0.1)\n",
+            [],
+        ),
+        ("subprocess.run(command, timeout=SHORT_TIMEOUT)\n", []),
+    ],
+)
+def test_a_child_process_bound_is_a_hang_bound_too(
+    tmp_path: Path, source: str, expected: list[str]
+) -> None:
+    """A 20 s bound on a child failed a loaded Windows runner (run 45547456425)."""
+    probe = tmp_path / "probe.py"
+    probe.write_text(source, encoding="utf-8")
+
+    assert _literal_hang_bounds(probe) == expected
 
 
 def test_no_test_carries_a_literal_hang_bound() -> None:

@@ -3809,7 +3809,7 @@ def test_parse_and_traversal_reject_operator_root_windows_junction(
         check=False,
         capture_output=True,
         shell=False,
-        timeout=10,
+        timeout=SHORT_TIMEOUT,
     )
     if created.returncode != 0:
         pytest.skip("junction creation is unavailable")
@@ -4168,7 +4168,7 @@ def test_operator_probe_never_descends_into_windows_junction(
         check=False,
         capture_output=True,
         shell=False,
-        timeout=10,
+        timeout=SHORT_TIMEOUT,
     )
     if created.returncode != 0:
         pytest.skip("junction creation is unavailable")

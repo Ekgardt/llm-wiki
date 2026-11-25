@@ -25,6 +25,8 @@ from installer_config import (
     verify_effective_entry,
 )
 
+from tests.slow_machine import SHORT_TIMEOUT
+
 
 @pytest.mark.parametrize("xdg", [None, "", "relative/config"])
 def test_posix_xdg_unset_empty_or_relative_falls_back(
@@ -245,7 +247,7 @@ def test_cron_command_round_trips_exact_paths_without_cwd_dependency(
         env=environment,
         capture_output=True,
         text=True,
-        timeout=5,
+        timeout=SHORT_TIMEOUT,
         check=False,
     )
     assert probe.returncode == 0, probe.stderr

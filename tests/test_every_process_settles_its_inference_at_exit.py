@@ -10,6 +10,8 @@ import sys
 import textwrap
 from pathlib import Path
 
+from tests.slow_machine import LONG_TIMEOUT
+
 SCRIPTS = Path(__file__).resolve().parent.parent / "scripts"
 
 
@@ -24,6 +26,6 @@ def test_the_process_does_not_leave_while_inference_runs(tmp_path: Path) -> None
         """
     )
 
-    subprocess.run([sys.executable, "-c", program], check=True, timeout=60)
+    subprocess.run([sys.executable, "-c", program], check=True, timeout=LONG_TIMEOUT)
 
     assert marker.exists()

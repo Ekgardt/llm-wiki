@@ -593,7 +593,7 @@ def _create_windows_junction(link: Path, target: Path) -> None:
         stdin=subprocess.DEVNULL,
         capture_output=True,
         check=False,
-        timeout=10,
+        timeout=SHORT_TIMEOUT,
     )
     if created.returncode == 0:
         return
@@ -717,7 +717,7 @@ def test_windows_junction_parent_is_rejected(
         stdin=subprocess.DEVNULL,
         capture_output=True,
         check=False,
-        timeout=10,
+        timeout=SHORT_TIMEOUT,
     )
     _require_junction_created(created)
     assert junction.exists()
@@ -2896,7 +2896,7 @@ def test_windows_short_junction_alias_is_rejected_without_leaking_handles(
         stdin=subprocess.DEVNULL,
         capture_output=True,
         check=False,
-        timeout=10,
+        timeout=SHORT_TIMEOUT,
     )
     if created.returncode != 0:
         pytest.skip("junction creation is unavailable")

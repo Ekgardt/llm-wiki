@@ -8,6 +8,7 @@ import json
 import re
 import subprocess
 
+from tests.slow_machine import LONG_TIMEOUT
 from tests.test_the_installer_says_what_it_needs import (
     INSTALL_PS1,
     INSTALL_SH,
@@ -47,7 +48,7 @@ def test_each_entry_state_reads_the_same_in_both_installers() -> None:
 
     result = subprocess.run(
         [_pwsh(), "-NoProfile", "-NonInteractive", "-Command", script],
-        capture_output=True, text=True, timeout=120, check=False,
+        capture_output=True, text=True, timeout=LONG_TIMEOUT, check=False,
     )
 
     assert json.loads(result.stdout.splitlines()[-1]) == sh_lines

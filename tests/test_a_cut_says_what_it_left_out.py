@@ -22,6 +22,8 @@ import provenance_join  # noqa: E402
 import repository_worktrees  # noqa: E402
 import retrieval_disposition  # noqa: E402
 
+from tests.slow_machine import LONG_TIMEOUT  # noqa: E402
+
 NINE = range(9)
 
 
@@ -78,7 +80,12 @@ def test_a_provenance_answer_says_how_many_pages_it_left_out(tmp_path: Path) -> 
 
 
 def _git(root: Path, *arguments: str) -> None:
-    subprocess.run(["git", "-C", str(root), *arguments], check=True, capture_output=True, timeout=60)
+    subprocess.run(
+        ["git", "-C", str(root), *arguments],
+        check=True,
+        capture_output=True,
+        timeout=LONG_TIMEOUT,
+    )
 
 
 def test_a_worktree_past_the_sixty_fourth_is_discovered(tmp_path: Path) -> None:

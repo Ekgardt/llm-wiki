@@ -19,13 +19,19 @@ SCRIPTS_DIR = Path(__file__).resolve().parent.parent / "scripts"
 if str(SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_DIR))
 
+from tests.slow_machine import LONG_TIMEOUT  # noqa: E402
 from tests.test_flow_and_service_edges import _service, indexed_flows  # noqa: E402,F401
 
 SHARED_NAME_MODULES = 7
 
 
 def _git(root: Path, *arguments: str) -> None:
-    subprocess.run(["git", "-C", str(root), *arguments], check=True, capture_output=True, timeout=60)
+    subprocess.run(
+        ["git", "-C", str(root), *arguments],
+        check=True,
+        capture_output=True,
+        timeout=LONG_TIMEOUT,
+    )
 
 
 def _shared_name_repository(root: Path) -> Path:

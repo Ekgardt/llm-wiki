@@ -10,6 +10,8 @@ from pathlib import Path
 import pytest
 from impact_analysis import _changed_ranges, analyze_impact
 
+from tests.slow_machine import LONG_TIMEOUT
+
 
 @pytest.fixture(autouse=True)
 def _windows_line_ending_setting(tmp_path_factory, monkeypatch) -> None:
@@ -28,7 +30,12 @@ CHECKED_OUT = COMMITTED.replace(b"\n", b"\r\n")
 
 
 def _git(root: Path, *arguments: str) -> None:
-    subprocess.run(["git", "-C", str(root), *arguments], check=True, capture_output=True, timeout=60)
+    subprocess.run(
+        ["git", "-C", str(root), *arguments],
+        check=True,
+        capture_output=True,
+        timeout=LONG_TIMEOUT,
+    )
 
 
 def _crlf_checkout(tmp_path: Path) -> Path:
