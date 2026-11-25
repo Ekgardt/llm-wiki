@@ -497,7 +497,8 @@ def _assert_degraded_search_budget(calls) -> None:
 
 
 def _assert_degraded_result_row(row) -> None:
-    assert row["requested_mode"] == "HYBRID"
+    # The semantic run that timed out planned every leg, so that is what was requested.
+    assert row["requested_mode"] == "GLOBAL"
     assert row["effective_mode"] == "BASE"
     assert row["signals_used"] == ["lexical"]
     assert row["fallback_reason"] == "retrieval_deadline_exceeded"
@@ -1022,7 +1023,7 @@ class TestHelperFunctions:
         _assert_degraded_search_budget(calls)
         _assert_degraded_result_row(results[0])
         _assert_degraded_trace(
-            results[0], mcp_server._retrieval_trace("test", results)
+            results[0], mcp_server._retrieval_trace(results)
         )
 
     def test_search_vault_reuses_caller_operation_deadline(self, monkeypatch):
@@ -1676,12 +1677,16 @@ class TestHandleToolCall:
         import mcp_server
         import query_memory
 
-        searches = []
-        monkeypatch.setattr(
-            mcp_server,
-            "_search_vault",
-            lambda query, *, limit, trace_sink=None: searches.append((query, limit)) or [],
-        )
+        searches: list[tuple[str, int, object]] = []
+
+        def search(
+            query: str, *, limit: int, trace_sink: object = None, **filtered: object
+        ) -> list[dict[str, object]]:
+            filters = filtered.get("filters")
+            searches.append((query, limit, filters))
+            return []
+
+        monkeypatch.setattr(mcp_server, "_search_vault", search)
         monkeypatch.setattr(
             query_memory,
             "grounded_qa",
@@ -1691,7 +1696,7 @@ class TestHandleToolCall:
 
         envelope = json.loads(self._run("recall", arguments))
 
-        assert searches == [("auth", 8)]
+        assert searches == [("auth", 8, {})]
         assert "results" in envelope["data"]
 
     def test_grounded_recall_calls_direct_api_with_root_profile_and_mcp_deadline(
@@ -2883,9 +2888,11 @@ class TestHandleToolCall:
     ):
         import mcp_server
 
-        received = []
+        received: list[int] = []
 
-        def search(query, *, limit, trace_sink=None):
+        def search(
+            query: str, *, limit: int, trace_sink: object = None, **_routing: object
+        ) -> list[dict[str, object]]:
             received.append(limit)
             return [{"path": "page.md", "fused_score": 0.1}]
 

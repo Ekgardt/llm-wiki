@@ -401,9 +401,8 @@ CLAUDE_ENV_KEYS = ("LLM_WIKI_ROOT", "LLM_WIKI_STATE_ROOT", "MEMORY_LLM_PROVIDER"
 # code runs unattended: the hooks' env block and the scheduler units. Issue #22:
 # an install run with MEMORY_LLM_PROVIDER=claude left the nightly unit to
 # auto-detect OpenCode and compile on a different account. Persisting the
-# provider alone had the same shape of fault: an install made with
-# `OLLAMA_NO_CLOUD=1` and a loopback endpoint left every scheduled run without
-# the local-only requirement, on the default endpoint and the default model. See
+# provider alone had the same shape of fault: an install made with a local
+# endpoint left every scheduled run on the default endpoint and the default model. See
 # `docs/research/2026-09-18-the-installed-choice-of-provider-travels-whole.md`.
 #
 # `MEMORY_LLM_API_KEY` and `OPENAI_API_KEY` are deliberately absent: a secret
@@ -417,7 +416,6 @@ PROVIDER_ENV_KEYS = (
     "MEMORY_CODEX_REASONING",
     "MEMORY_LLM_MODEL",
     "MEMORY_LLM_BASE_URL",
-    "OLLAMA_NO_CLOUD",
 )
 
 

@@ -1,0 +1,5 @@
+{"tests": ["test_graph_only_proximity_cannot_beat_weak_text_except_direct_graph_query"],
+ "kinds": ["assertions"],
+ "reason": "It asserted that a graph neighbour sharing no word with the query is dropped from an ordinary search. Since every unnamed search runs the graph leg (docs/research/2026-11-17-every-search-runs-every-leg.md), that gate dropped the neighbours a relation question asks for, which the review of commit b98f68a7 found to be a regression. Text overlap now orders graph rows instead of admitting them, so the test asserts the exact order: the weak text hit first and the neighbour after it. The neighbour still cannot beat the text hit, which is what the test name claims; the direct graph query keeps its assertion unchanged.",
+ "recorded": "2026-11-18",
+ "expires": "2027-02-16"}

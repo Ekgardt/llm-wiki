@@ -1,23 +1,21 @@
 #!/usr/bin/env python3
 """Fetch the two pinned models the memory reads, verify them, and stop.
 
-The read path loads weights from the local Hugging Face cache only, so a
-vault whose cache is empty answers by words alone and says so in the trace
+The read path loads weights from `cache/models/<repo>/<revision>/` only, so a
+vault without them answers by words alone and says so in the trace
 (`model_unavailable`, `reranker_unavailable`). This is the one place the
-product goes to the network for a model: each pinned commit is fetched with
-the file list limited to what is read, and the weights file is checked against
-the size and SHA-256 recorded beside the revision. A file that does not match is
-removed and the run fails. Present and verified files are not fetched again, so
-the nightly can run this every night.
+product goes to the network for a model: each pinned commit is fetched with the
+file list limited to what is read, written there as ordinary files (OpenVINO
+refuses external weights reached through the Hugging Face cache's links), and
+the weights file is checked against the size and SHA-256 recorded beside the
+revision. A file that does not match is removed and the run fails. Present and
+verified files are not fetched again, so the nightly can run this every night.
 
-The encoder is read through ONNX Runtime (`onnx/model.onnx`); once those
-weights are verified, the `model.safetensors` it was read from before is removed
-from the cache, since nothing reads it any more. The reranker still reads
-`model.safetensors`.
-
-Owner's decisions 2026-09-10 and 2026-09-25; see
-`docs/research/2026-09-10-the-weights-arrive-with-the-install.md` and
-`docs/research/2026-09-25-the-encoder-runs-without-torch.md`.
+Once a model is verified, the pinned revision it replaced
+(`intfloat/multilingual-e5-small` and `BAAI/bge-reranker-v2-m3`, about 2.8 GB) is
+deleted from the Hugging Face cache, but only when this vault's verification
+record shows that this installer fetched it there: the cache is shared with
+other tools, and a revision they fetched is theirs.
 """
 from __future__ import annotations
 
@@ -29,6 +27,7 @@ import time
 from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
@@ -36,28 +35,21 @@ from embedding_model import (  # noqa: E402
     EMBEDDING_MODEL,
     EMBEDDING_MODEL_REVISION,
     EMBEDDING_READ_FILES,
-    EMBEDDING_RETIRED_FILES,
     EMBEDDING_WEIGHTS_BYTES,
     EMBEDDING_WEIGHTS_FILE,
     EMBEDDING_WEIGHTS_SHA256,
 )
+from model_files import model_directory
+from openvino_runtime import decline_telemetry
 from reranker import (  # noqa: E402
     DEFAULT_RERANKER_MODEL,
     DEFAULT_RERANKER_REVISION,
     DEFAULT_RERANKER_WEIGHTS_BYTES,
     DEFAULT_RERANKER_WEIGHTS_SHA256,
+    RERANKER_READ_FILES,
+    RERANKER_WEIGHTS_FILE,
 )
 
-RERANKER_WEIGHTS_FILE = "model.safetensors"
-# Everything the reranker's `transformers` loader reads, and nothing else: no
-# README, no ONNX or `.bin` duplicates, no scripts.
-RERANKER_ALLOW_PATTERNS = (
-    "config.json",
-    RERANKER_WEIGHTS_FILE,
-    "tokenizer*",
-    "sentencepiece*",
-    "special_tokens*",
-)
 # One read while hashing model weights (hundreds of MB); 8 MiB trades a little memory for fewer
 # reads. Performance trade-off, not measured.
 HASH_CHUNK_BYTES = 8 * 1024 * 1024
@@ -68,6 +60,7 @@ STATE_MISMATCH = "mismatch"
 STATE_UNREACHABLE = "unreachable"
 EXIT_INCOMPLETE = 1
 EXIT_NO_LIBRARY = 2
+RUNTIME = ("openvino", "tokenizers")
 
 
 @dataclass(frozen=True)
@@ -77,11 +70,18 @@ class PinnedModel:
     weights_file: str
     weights_sha256: str
     weights_bytes: int
-    allow_patterns: tuple[str, ...]
-    # Files an earlier loader read at this revision and nothing reads now.
-    retired_files: tuple[str, ...] = ()
+    read_files: tuple[str, ...]
+    # The pinned (repository, revision) this model replaced in the Hugging Face cache.
+    # Kept while a vault may still hold a verification record of that revision; remove
+    # once no supported release fetches into the Hugging Face cache any more.
+    replaces: tuple[str, str] | None = None
     # The modules that load this model; without them its weights are not wanted.
-    runtime: tuple[str, ...] = ()
+    runtime: tuple[str, ...] = RUNTIME
+
+    @property
+    def directory(self) -> Path:
+        directory: Path = model_directory(self.repo_id, self.revision)
+        return directory
 
 
 def pinned_models() -> tuple[PinnedModel, ...]:
@@ -94,8 +94,7 @@ def pinned_models() -> tuple[PinnedModel, ...]:
             EMBEDDING_WEIGHTS_SHA256,
             EMBEDDING_WEIGHTS_BYTES,
             EMBEDDING_READ_FILES,
-            EMBEDDING_RETIRED_FILES,
-            ("onnxruntime", "tokenizers"),
+            ("intfloat/multilingual-e5-small", "614241f622f53c4eeff9890bdc4f31cfecc418b3"),
         ),
         PinnedModel(
             DEFAULT_RERANKER_MODEL,
@@ -103,9 +102,8 @@ def pinned_models() -> tuple[PinnedModel, ...]:
             RERANKER_WEIGHTS_FILE,
             DEFAULT_RERANKER_WEIGHTS_SHA256,
             DEFAULT_RERANKER_WEIGHTS_BYTES,
-            RERANKER_ALLOW_PATTERNS,
-            (),
-            ("torch", "transformers"),
+            RERANKER_READ_FILES,
+            ("BAAI/bge-reranker-v2-m3", "953dc6f6f85a1b2dbfca4c34a2796e7dde08d41e"),
         ),
     )
 
@@ -119,12 +117,9 @@ def hub_library():
     return huggingface_hub
 
 
-def cached_weights(model: PinnedModel, hub) -> Path | None:
-    """The cached weights file at the pinned revision, without the network."""
-    found = hub.try_to_load_from_cache(model.repo_id, model.weights_file, revision=model.revision)
-    if not isinstance(found, str):
-        return None
-    return Path(found)
+def installed(model: PinnedModel) -> bool:
+    """Every file the read path opens is on disk, the weights unverified."""
+    return all((model.directory / name).is_file() for name in model.read_files)
 
 
 def _digest(path: Path, ceiling: int) -> tuple[int, str]:
@@ -145,8 +140,7 @@ def mismatch_reason(path: Path, model: PinnedModel) -> str | None:
 
     A file already verified and unchanged since (same size, modification time and
     inode) is not read again: the nightly re-hashed 2.3 GB each night to learn
-    nothing (audit C-28,
-    docs/research/2026-09-25-a-bad-model-file-is-fetched-again-and-a-good-one-is-not-reread.md).
+    nothing (audit C-28).
     """
     if _remembered_as_verified(path, model):
         return None
@@ -210,9 +204,16 @@ def _settled_before(modified_ns: object, verified_ns: object) -> bool:
 def _remember_verified(path: Path, model: PinnedModel) -> None:
     """One entry per pinned model; a write that fails only costs a re-hash."""
     try:
-        record = _verification_record()
         entry = [*_file_identity(path), model.weights_sha256, time.time_ns()]
-        verified = {**_read_verifications(), model.repo_id: entry}
+    except OSError:
+        return
+    _write_verifications({**_read_verifications(), model.repo_id: entry})
+
+
+def _write_verifications(verified: dict[str, object]) -> None:
+    """Staged then renamed, so a write that fails leaves the previous record whole."""
+    record = _verification_record()
+    try:
         record.parent.mkdir(parents=True, exist_ok=True)
         staged = record.with_suffix(".tmp")
         staged.write_text(json.dumps(verified, sort_keys=True), encoding="utf-8")
@@ -222,11 +223,14 @@ def _remember_verified(path: Path, model: PinnedModel) -> None:
 
 
 def fetch(model: PinnedModel, hub) -> Path:
-    """One pinned commit, the read files only; returns the weights path."""
-    snapshot = hub.snapshot_download(
-        model.repo_id, revision=model.revision, allow_patterns=list(model.allow_patterns)
+    """One pinned commit, the read files only, as ordinary files; returns the weights path."""
+    hub.snapshot_download(
+        model.repo_id,
+        revision=model.revision,
+        allow_patterns=list(model.read_files),
+        local_dir=str(model.directory),
     )
-    return Path(snapshot) / model.weights_file
+    return model.directory / model.weights_file
 
 
 def _outcome(model: PinnedModel, state: str, path: Path | None, reason: str | None) -> dict:
@@ -245,23 +249,13 @@ def _verified_download(model: PinnedModel, hub) -> dict:
     reason = mismatch_reason(path, model)
     if reason is None:
         return _outcome(model, STATE_FETCHED, path, None)
-    # The blob goes with the link: the Hub re-links a cached blob with the same
-    # name, so removing the link alone kept the bad bytes for the next fetch.
-    _retire_cached(model, hub, model.weights_file)
+    path.unlink(missing_ok=True)
     return _outcome(model, STATE_MISMATCH, None, reason)
 
 
-def _companions_cached(model: PinnedModel, hub) -> bool:
-    """Every file the loader reads by name is cached, not the weights alone."""
-    names = [pattern for pattern in model.allow_patterns if "*" not in pattern]
-    return all(_cached_path(model, hub, name) is not None for name in names)
-
-
-def _cached_and_verified(model: PinnedModel, hub) -> Path | None:
-    path = cached_weights(model, hub)
-    if path is None or not _companions_cached(model, hub):
-        return None
-    if mismatch_reason(path, model) is not None:
+def _installed_and_verified(model: PinnedModel) -> Path | None:
+    path = model.directory / model.weights_file
+    if not installed(model) or mismatch_reason(path, model) is not None:
         return None
     return path
 
@@ -269,74 +263,81 @@ def _cached_and_verified(model: PinnedModel, hub) -> Path | None:
 def ensure(model: PinnedModel, hub, *, download: bool) -> dict:
     """Present and verified, fetched and verified, missing, or a named mismatch.
 
-    A cached file that does not match is removed, blob and all, before the fetch,
-    so the fetch brings the pinned bytes rather than re-linking the bad ones.
+    A weights file on disk that does not match is removed before the fetch, so
+    the fetch writes the pinned bytes rather than keeping the bad ones.
     """
-    path = _cached_and_verified(model, hub)
+    path = _installed_and_verified(model)
     if path is not None:
         return _outcome(model, STATE_PRESENT, path, None)
     if not download:
-        return _outcome(model, STATE_MISSING, None, "not in the local cache")
-    _drop_mismatched(model, hub)
+        return _outcome(model, STATE_MISSING, None, "not installed under cache/models")
+    _drop_mismatched_weights(model)
     return _verified_download(model, hub)
 
 
-def _drop_mismatched(model: PinnedModel, hub) -> None:
-    path = cached_weights(model, hub)
-    if path is not None and mismatch_reason(path, model) is not None:
-        _retire_cached(model, hub, model.weights_file)
+def _drop_mismatched_weights(model: PinnedModel) -> None:
+    """Remove weights on disk that differ from the pin; verified ones stay for the fetch to keep."""
+    path = model.directory / model.weights_file
+    if path.is_file() and mismatch_reason(path, model) is not None:
+        path.unlink()
 
 
-def _cached_path(model: PinnedModel, hub, filename: str) -> Path | None:
-    found = hub.try_to_load_from_cache(model.repo_id, filename, revision=model.revision)
-    if not isinstance(found, str):
-        return None
-    return Path(found)
-
-
-def _snapshots_directory(link: Path) -> Path | None:
-    """The repository's `snapshots/` directory the cached file lives under."""
-    return next((parent for parent in link.parents if parent.name == "snapshots"), None)
-
-
-def _blob_still_used(target: Path, link: Path) -> bool:
-    """Whether any other cached file of the repository resolves to this blob."""
-    snapshots = _snapshots_directory(link)
-    if snapshots is None:
-        return True
-    return any(path.resolve() == target for path in snapshots.rglob("*") if path.is_file())
-
-
-def _retire_cached(model: PinnedModel, hub, filename: str) -> bool:
-    """Remove one retired file; its blob goes when no other cached file uses it."""
-    link = _cached_path(model, hub, filename)
-    if link is None:
+def _holds(repo: Any, repo_id: str, revision: str) -> bool:
+    if repo.repo_id != repo_id or repo.repo_type != "model":
         return False
-    target = link.resolve()
-    link.unlink()
-    if target != link and not _blob_still_used(target, link):
-        target.unlink(missing_ok=True)
-    return True
+    return any(entry.commit_hash == revision for entry in repo.revisions)
 
 
-def retire_superseded(model: PinnedModel, hub) -> list[str]:
-    """The retired files removed from the cache at the pinned revision."""
-    return [name for name in model.retired_files if _retire_cached(model, hub, name)]
+def _fetched_here(repo: Any) -> bool:
+    """This vault's verification record names a file inside that cached repository."""
+    entry = _read_verifications().get(repo.repo_id)
+    if not isinstance(entry, list) or not entry or not isinstance(entry[0], str):
+        return False
+    return Path(entry[0]).is_relative_to(Path(repo.repo_path).resolve())
+
+
+def _cache_holding(hub: Any, repo_id: str, revision: str) -> Any:
+    """The Hugging Face cache when it holds that revision as this vault fetched it, else None."""
+    try:
+        cache = hub.scan_cache_dir()
+    except hub.CacheNotFound:
+        return None
+    if any(_holds(repo, repo_id, revision) and _fetched_here(repo) for repo in cache.repos):
+        return cache
+    return None
+
+
+def retire_replaced(model: PinnedModel, hub: Any) -> list[str]:
+    """Delete the revision this model replaced from the Hugging Face cache."""
+    if model.replaces is None:
+        return []
+    repo_id, revision = model.replaces
+    cache = _cache_holding(hub, repo_id, revision)
+    if cache is None:
+        return []
+    cache.delete_revisions(revision).execute()
+    _forget_verification(repo_id)
+    return [f"{repo_id}@{revision[:12]}"]
+
+
+def _forget_verification(repo_id: str) -> None:
+    """Drop the record of a deleted revision."""
+    remaining = {key: entry for key, entry in _read_verifications().items() if key != repo_id}
+    _write_verifications(remaining)
 
 
 def _settled_and_retired(model: PinnedModel, hub, *, download: bool) -> dict:
     """Ensure the weights; only verified weights retire what they replace.
 
     A fetch that fails (offline, a server error) is this model's outcome, not the
-    run's end: the next model is still tried (audit C-29 class,
-    docs/research/2026-09-25-one-bad-generation-does-not-stop-the-prune.md).
+    run's end: the next model is still tried (audit C-29 class).
     """
     try:
         outcome = ensure(model, hub, download=download)
     except _fetch_failures() as error:
         return _outcome(model, STATE_UNREACHABLE, None, f"{type(error).__name__}: fetch failed")
     if download and outcome["state"] in {STATE_PRESENT, STATE_FETCHED}:
-        outcome["retired"] = retire_superseded(model, hub)
+        outcome["retired"] = retire_replaced(model, hub)
     return outcome
 
 
@@ -356,20 +357,13 @@ def _runtime_installed(model: PinnedModel) -> bool:
 
 
 def wanted_models() -> list[PinnedModel]:
-    """The pinned models whose runtime is installed: a vault fetches what it can load.
-
-    See `docs/research/2026-09-25-an-update-brings-the-extras-the-operator-chose.md`.
-    """
+    """The pinned models whose runtime is installed: a vault fetches what it can load."""
     return [model for model in pinned_models() if _runtime_installed(model)]
 
 
-def missing_models(hub) -> list[PinnedModel]:
-    """The wanted models whose weights are not in the cache; a cheap probe."""
-    return [
-        model
-        for model in wanted_models()
-        if cached_weights(model, hub) is None or not _companions_cached(model, hub)
-    ]
+def missing_models() -> list[PinnedModel]:
+    """The wanted models whose files are not installed; a cheap probe."""
+    return [model for model in wanted_models() if not installed(model)]
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -388,7 +382,7 @@ def _print(outcomes: list[dict], as_json: bool) -> None:
 
 
 def _line(item: dict) -> str:
-    """One model's outcome, naming any retired file it removed from the cache."""
+    """One model's outcome, naming the cached revision it removed."""
     reason = f" ({item['reason']})" if item["reason"] else ""
     retired = item.get("retired") or []
     removed = f"; removed {', '.join(retired)}" if retired else ""
@@ -416,6 +410,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             file=sys.stderr,
         )
         return EXIT_NO_LIBRARY
+    decline_telemetry()
     outcomes = [
         _settled_and_retired(model, hub, download=not args.check) for model in wanted
     ]

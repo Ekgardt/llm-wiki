@@ -29,20 +29,19 @@ def _project() -> dict:
     return tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
 
 
-def test_reranker_extra_owns_every_direct_import() -> None:
-    reranker = _project()["project"]["optional-dependencies"]["reranker"]
-    names = {re.split(r"[<>=!~;\s\[]", value, maxsplit=1)[0].casefold() for value in reranker}
+def test_search_is_the_model_runtime_plus_the_vectors_numpy() -> None:
+    optional = _project()["project"]["optional-dependencies"]
 
-    assert names == {"tokenizers", "torch", "transformers"}
+    assert optional["hybrid"] == ["numpy>=2.2.6,<3", "llm-wiki[semantic]"]
+    assert "reranker" not in optional
 
 
-def test_semantic_extra_owns_every_import_of_the_encoder() -> None:
-    """The encoder runs through ONNX Runtime; torch belongs to the reranker alone."""
+def test_semantic_extra_owns_every_import_of_both_models() -> None:
+    """Both models run through OpenVINO; nothing in the search extras pulls torch."""
     semantic = _project()["project"]["optional-dependencies"]["semantic"]
     names = {re.split(r"[<>=!~;\s\[]", value, maxsplit=1)[0].casefold() for value in semantic}
 
-    assert names == {"huggingface-hub", "numpy", "onnxruntime", "tokenizers"}
-    assert sum(value.startswith("onnxruntime") for value in semantic) == 2
+    assert names == {"huggingface-hub", "numpy", "openvino", "tokenizers"}
 
 
 @pytest.mark.parametrize("override", [None, "relative environment"])
@@ -160,7 +159,8 @@ def test_generated_mcp_entries_use_exact_arguments(tmp_path: Path) -> None:
     config.write_text(
         '[mcp_servers.llm-wiki]\ncommand = "uv"\n'
         f"args = {args_literal}\n"
-        "enabled = true\n",
+        "enabled = true\n"
+        'omit_tools_from = ["deferred"]\n',
         encoding="utf-8",
     )
     assert codex_memory.codex_mcp_config_state(config, root) == "equivalent"
@@ -169,7 +169,7 @@ def test_generated_mcp_entries_use_exact_arguments(tmp_path: Path) -> None:
 def test_installer_optional_commands_are_additive() -> None:
     expected = {
         f"uv sync --locked --no-default-groups --inexact --extra {extra}"
-        for extra in ("hybrid", "code-graph", "reranker")
+        for extra in ("hybrid", "code-graph")
     }
     for installer in ("install.sh", "install.ps1"):
         source = (ROOT / installer).read_text(encoding="utf-8")

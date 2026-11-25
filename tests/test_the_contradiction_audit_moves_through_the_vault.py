@@ -19,7 +19,7 @@ NOT_RUN = "(contradiction check did not run: no provider answered)"
 
 # Own interpreter: the cursor lives in runtime state, which this test must own.
 # One run per reply. An empty reply stands for a provider that does not answer:
-# a local Ollama on a closed loopback port, refused at once, nothing leaves the host.
+# a local server on a closed loopback port, refused at once, nothing leaves the host.
 RUNS = """
 import json, os, sys
 sys.path.insert(0, sys.argv[1])
@@ -28,7 +28,7 @@ pages = sorted((lint_memory.ROOT / "knowledge" / "notes").glob("*.md"))
 os.environ["MEMORY_LLM_BASE_URL"] = "http://127.0.0.1:9/v1"
 runs = []
 for reply in json.loads(sys.argv[3]):
-    os.environ["MEMORY_LLM_PROVIDER"] = "fake" if reply else "ollama"
+    os.environ["MEMORY_LLM_PROVIDER"] = "fake" if reply else "openai"
     os.environ["MEMORY_LLM_FAKE_RESPONSE"] = reply
     runs.append(lint_memory.check_contradictions(pages, max_bytes=int(sys.argv[2])))
 print(json.dumps(runs))

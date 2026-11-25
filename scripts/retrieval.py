@@ -392,6 +392,10 @@ PROFILE_SIGNALS: dict[str, tuple[str, ...]] = {
     "CACHED_FULL": ("lexical",),
 }
 
+# The profile a search runs when its caller names none: lexical, dense and
+# graph, then the cross-encoder. See `planned_request`.
+PLANNED_PROFILE = "GLOBAL"
+
 RRF_K = 60
 # A short answer needs a long candidate pool: several chunks of one page are
 # one answer repeated, and only a pool wider than the answer can hold the
@@ -399,12 +403,16 @@ RRF_K = 60
 CANDIDATE_FANOUT = 8
 MIN_CANDIDATE_POOL = 40
 MAX_CANDIDATE_POOL = 200
-BM25_WEIGHT = 2.0
-DENSE_WEIGHT = 1.0
+# Dense counts twice the lexical rank: with bge-m3, 1:2 put the answer first on
+# 52.8 % of 996 questions across the four language crossings, against 42.7 %
+# at 2:1; words do not cross languages, the vectors do (owner message 17933).
+BM25_WEIGHT = 1.0
+DENSE_WEIGHT = 2.0
 GRAPH_WEIGHT = 0.5
 
 # The graph lane walks one hop from its seeds (docs/research/2026-09-22-the-walk-has-nothing-to-
-# walk.md): memory questions never route to it, so no measurement justifies more.
+# walk.md). Every search walks it since 2026-11-17 (docs/research/2026-11-17-every-search-runs-
+# every-leg.md); one hop stays until a rank evaluation measures recall at more.
 GRAPH_MAX_HOPS = 1
 # The graph lane's shape: the top-ranked hits a one-hop walk starts from, the
 # neighbours taken per seed and in all. Ranking parameters of the hybrid design, not
@@ -488,83 +496,13 @@ _FILENAME_RE = re.compile(
     r"(?![A-Za-z0-9_/.-])"
 )
 _SLUG_RE = re.compile(r"\b(?P<slug>[a-z0-9]+(?:-[a-z0-9]+){1,12})\b")
-_SNAKE_RE = re.compile(r"\b(?P<snake>[a-z][a-z0-9]*(?:_[a-z0-9]+)+)\b")
+_SNAKE_RE = re.compile(r"\b(?P<snake>_*[a-z][a-z0-9]*(?:_[a-z0-9]+)+)\b")
 _CAMEL_RE = re.compile(r"\b(?P<camel>[A-Z][a-z0-9]+(?:[A-Z][a-z0-9]+)+)\b")
-_QUESTION_RE = re.compile(
-    r"(?:"
-    r"^(?P<q_en>who|what|when|where|why|how|which|does|do|is|are|can|should)\b"
-    r"|^(?P<q_ru>кто|что|когда|где|почему|зачем|как|какой|какая|какие|какое)\b"
-    r"|^(?P<q_zh>谁|什么|何时|哪里|哪儿|为什么|怎么|如何|哪)"
-    r"|[?？]"
-    r")",
-    re.IGNORECASE,
-)
-# What may follow a relational preposition and make it about time.
-_WHEN = (
-    r"(?:\d{4}(?:-\d{2}(?:-\d{2})?)?"
-    r"|yesterday|today|tomorrow|now"
-    r"|вчера|сегодня|завтра|сейчас)"
-)
-# A relational preposition is temporal only when something temporal follows it.
-# `после` and `after` are ordinary sequence words, and reading them alone as a
-# time window costs the answer: measured on this vault, "как устроен повтор
-# после карантина" was routed to TEMPORAL, TEMPORAL declares no dense signal,
-# so the grounded answer never asked the vectors. Retrieval returned six lexical
-# rows — four of them the same status document, none of them the decision page
-# the vault holds — and the provider honestly reported insufficient evidence.
-# Every other alternative in this group was already anchored to a real time
-# expression; these prepositions were the ones that were not.
-_TEMPORAL_RE = re.compile(
-    r"(?:"
-    r"\b(?P<t_en_anchored>since|before|after|until|as of|from)\s+" + _WHEN + r"\b"
-    r"|\b(?P<t_en>yesterday|today|last week|last month|last year"
-    r"|in \d{4}|from \d{4}|between \d{4})\b"
-    r"|(?P<t_ru_anchored>(?:с|со|после|до|от)\s+" + _WHEN + r")"
-    r"|(?P<t_ru>вчера|сегодня|на этой неделе)"
-    r"|(?P<t_zh>自\s*\d{4}|以来|自从)"
-    r")",
-    re.IGNORECASE,
-)
-_GRAPH_RE = re.compile(
-    r"(?:"
-    r"\b(?P<g_en>depends on|depended on|dependency|dependencies|calls|callers|"
-    r"callees|related to|linked to|neighbors?|imports?|imported by)\b"
-    r"|(?P<g_ru>зависит|зависимости|связан)"
-    r"|(?P<g_zh>依赖|什么依赖|相关联)"
-    r")",
-    re.IGNORECASE,
-)
-_REPO_MAP_RE = re.compile(
-    r"(?:"
-    r"\b(?P<r_en>repo map|repository map|codebase map|architecture overview|"
-    r"project structure|directory structure)\b"
-    r"|(?P<r_ru>карт[ауи]\s+репозитори[яию]|структур[аыу]\s+проекта)"
-    r"|(?P<r_zh>仓库地图|显示仓库地图|项目结构)"
-    r")",
-    re.IGNORECASE,
-)
-_IMPACT_RE = re.compile(
-    r"(?:"
-    r"\b(?P<i_en>impact of|what breaks|affected by|blast radius|stale wiki|"
-    r"downstream impact)\b"
-    r"|(?P<i_ru>влияние|что сломается)"
-    r"|(?P<i_zh>影响|的影响)"
-    r")",
-    re.IGNORECASE,
-)
-_GLOBAL_RE = re.compile(
-    r"(?:"
-    r"\b(?P<s_en>synthesize|synthesis|across all projects|across projects|"
-    r"overall architecture|compare across|global overview)\b"
-    r"|(?P<s_ru>синтез|глобальный обзор)"
-    r"|(?P<s_zh>跨项目|综合架构|全局概览)"
-    r")",
-    re.IGNORECASE,
-)
-_CROSS_LANG_RE = re.compile(
-    r"(?:[\u0400-\u04FF].*[A-Za-z]|[A-Za-z].*[\u0400-\u04FF]|"
-    r"[\u4e00-\u9fff].*[A-Za-z]|[A-Za-z].*[\u4e00-\u9fff])"
-)
+# What is left of a lookup once its names are taken out: `.run`, `::run`,
+# `->run` and `#L120` after a name are a member or an anchor of it, and any
+# other letter is a word of a sentence.
+_MEMBER_RE = re.compile(r"(?<!\w)(?:\.|::|->|#)\w+")
+_SENTENCE_WORD_RE = re.compile(r"[^\W\d_]")
 
 
 @dataclass(frozen=True)
@@ -574,7 +512,6 @@ class QueryAnalysis:
     intents: tuple[str, ...]
     exact_identifiers: tuple[str, ...]
     quoted_phrases: tuple[str, ...]
-    recommended_profile: str
 
 
 @dataclass(frozen=True)
@@ -591,8 +528,8 @@ class RetrievalTrace:
     reranker_depth: int | None = None
     reranker_duration_ms: int | None = None
     reranker_fallback_reason: str | None = None
-    # The signals the run asked for. A planned GRAPH run adds dense to what its
-    # profile declares, so the profile alone cannot say a dense leg went missing
+    # The signals the run asked for: a caller may plan other signals than its
+    # profile declares, so the profile alone cannot say a leg went missing
     # (audit 2026-09-26 C-10).
     signals_requested: tuple[str, ...] = ()
 
@@ -648,27 +585,6 @@ def _normalize_profile(value: str | None) -> str | None:
     return normalized
 
 
-_INTENT_PATTERNS = (
-    ("temporal", _TEMPORAL_RE),
-    ("graph_relation", _GRAPH_RE),
-    ("repo_map", _REPO_MAP_RE),
-    ("impact", _IMPACT_RE),
-    ("global_synthesis", _GLOBAL_RE),
-)
-
-# First match wins; the order is the priority the planner promises.
-_PROFILE_BY_INTENT = (
-    ("global_synthesis", "GLOBAL"),
-    ("impact", "IMPACT"),
-    ("repo_map", "REPO_MAP"),
-    ("graph_relation", "GRAPH"),
-    ("temporal", "TEMPORAL"),
-    ("quoted_phrase", "EXACT"),
-    ("exact_identifier", "EXACT"),
-    ("question", "HYBRID"),
-)
-
-
 def _quoted_phrases(stripped: str) -> tuple[str, ...]:
     return tuple(
         match.group(1).strip()
@@ -700,42 +616,47 @@ def _exact_identifiers(stripped: str) -> tuple[str, ...]:
     return tuple(dict.fromkeys(identifiers))
 
 
-def _is_question(stripped: str, normalized: str) -> bool:
-    if _QUESTION_RE.search(normalized):
-        return True
-    return stripped.endswith("?") or stripped.endswith("？")
+def _without_names(normalized: str, identifiers: tuple[str, ...]) -> str:
+    """The query with every name taken out, longest first so a path goes whole."""
+    rest = normalized
+    for name in sorted(identifiers, key=len, reverse=True):
+        rest = rest.replace(name, " ")
+    return rest
 
 
-def _shape_intents(
-    stripped: str, normalized: str, phrases: tuple[str, ...], identifiers: tuple[str, ...]
-) -> list[str]:
-    """Intents that come from the query's shape rather than its wording."""
-    present = (
-        (bool(phrases), "quoted_phrase"),
-        (bool(identifiers), "exact_identifier"),
-        (_is_question(stripped, normalized), "question"),
-    )
-    return [intent for found, intent in present if found]
+def _is_identifier_lookup(normalized: str, identifiers: tuple[str, ...]) -> bool:
+    """The query is names and their decoration, and no word of a sentence.
+
+    Backticks, quotes, brackets, a question mark, a `:120` line, a `#L120`
+    anchor or a `.member`, `::member` or `->member` after a name are decoration:
+    `` `QueueWorker` ``, `QueueWorker::run` and `file.py::_private` are lookups.
+    A name inside a sentence is a hint the lexical leg rewards; it does not make
+    the sentence a lookup. Before 2026-11-17 it did, and 40 of
+    LongMemEval's 500 questions ran without the cross-encoder because they held a
+    hyphenated word such as "5-day"
+    (docs/research/2026-11-17-a-name-inside-a-question-keeps-every-leg.md).
+    """
+    if not identifiers:
+        return False
+    rest = _MEMBER_RE.sub(" ", _without_names(normalized, identifiers))
+    return _SENTENCE_WORD_RE.search(rest) is None
 
 
 def _query_intents(
-    stripped: str, normalized: str, phrases: tuple[str, ...], identifiers: tuple[str, ...]
+    normalized: str, phrases: tuple[str, ...], identifiers: tuple[str, ...]
 ) -> tuple[str, ...]:
-    intents = _shape_intents(stripped, normalized, phrases, identifiers)
-    intents.extend(
-        name for name, pattern in _INTENT_PATTERNS if pattern.search(normalized)
+    """What the query's shape says: a quoted phrase, a name, or nothing but names.
+
+    The wording never decides anything: every search runs every leg it has, and
+    the cross-encoder orders what they found
+    (docs/research/2026-11-17-every-search-runs-every-leg.md).
+    """
+    present = (
+        (bool(phrases), "quoted_phrase"),
+        (bool(identifiers), "exact_identifier"),
+        (_is_identifier_lookup(normalized, identifiers), "identifier_lookup"),
     )
-    if _CROSS_LANG_RE.search(stripped):
-        intents.append("cross_language")
-    return tuple(intents)
-
-
-def _recommended_profile(intents: tuple[str, ...]) -> str:
-    intent_set = set(intents)
-    for intent, profile in _PROFILE_BY_INTENT:
-        if intent in intent_set:
-            return profile
-    return "BASE"
+    return tuple(intent for found, intent in present if found)
 
 
 def analyze_query(query: str) -> QueryAnalysis:
@@ -746,14 +667,12 @@ def analyze_query(query: str) -> QueryAnalysis:
     normalized = " ".join(stripped.split())
     phrases = _quoted_phrases(stripped)
     identifiers = _exact_identifiers(stripped)
-    intents = _query_intents(stripped, normalized, phrases, identifiers)
     return QueryAnalysis(
         query=stripped,
         normalized_query=normalized,
-        intents=intents,
+        intents=_query_intents(normalized, phrases, identifiers),
         exact_identifiers=identifiers,
         quoted_phrases=phrases,
-        recommended_profile=_recommended_profile(intents),
     )
 
 
@@ -913,13 +832,17 @@ def _scored_graph_row(
     row: dict[str, Any],
     *,
     query: str,
-    direct_graph_query: bool,
     path: tuple[dict[str, Any], ...],
-) -> tuple[tuple[object, ...], dict[str, Any]] | None:
-    """Rank key and enriched row, or None when the text says it is unrelated."""
+) -> tuple[tuple[object, ...], dict[str, Any]]:
+    """Rank key and enriched row; text overlap orders the rows, it admits none.
+
+    A neighbour that shares no word with the question ranks after every one that
+    does, at the graph's fusion weight, and the cross-encoder reads it. Until
+    2026-11-17 only a question routed by its words to GRAPH kept it; with every
+    search planned the same way, the gate would have taken a relation question's
+    answer away (docs/research/2026-11-17-every-search-runs-every-leg.md).
+    """
     overlap, full_match = _graph_text_relevance(query, row)
-    if overlap == 0 and not direct_graph_query:
-        return None
     hop = _as_int(row.get("hop"), 0)
     decay = GRAPH_EDGE_DECAY[str(row.get("edge_type"))] ** hop
     row.update(
@@ -937,7 +860,6 @@ def _prepared_graph_row(
     backend_rank: int,
     *,
     query: str,
-    direct_graph_query: bool,
     seed_ids: set[str],
     allowed_directions: set[str],
     allowed_edges: set[str],
@@ -952,7 +874,6 @@ def _prepared_graph_row(
     return _validated_graph_row(
         row,
         query=query,
-        direct_graph_query=direct_graph_query,
         allowed_directions=allowed_directions,
         allowed_edges=allowed_edges,
     )
@@ -962,7 +883,6 @@ def _validated_graph_row(
     row: dict[str, Any],
     *,
     query: str,
-    direct_graph_query: bool,
     allowed_directions: set[str],
     allowed_edges: set[str],
 ) -> tuple[tuple[object, ...], dict[str, Any]] | None:
@@ -970,9 +890,7 @@ def _validated_graph_row(
     path = _assertion_path(row)
     if not _graph_row_is_valid(row, path, allowed_directions, allowed_edges):
         return None
-    return _scored_graph_row(
-        row, query=query, direct_graph_query=direct_graph_query, path=path
-    )
+    return _scored_graph_row(row, query=query, path=path)
 
 
 def _merged_assertion_path(
@@ -1052,7 +970,6 @@ def _prepare_graph_hits(
     rows: Sequence[Mapping[str, Any]],
     *,
     query: str,
-    requested_profile: str,
     seeds: Sequence[Mapping[str, Any]],
     directions: Sequence[str],
     edge_types: Sequence[str],
@@ -1066,7 +983,6 @@ def _prepare_graph_hits(
             raw,
             backend_rank,
             query=query,
-            direct_graph_query=requested_profile == "GRAPH",
             seed_ids={_candidate_key(seed) for seed in seeds},
             allowed_directions=set(directions),
             allowed_edges=set(edge_types),
@@ -1761,7 +1677,7 @@ def _effective_for_hybrid(signals: set[str], requested: str) -> str:
 
 
 def _effective_for_graph(signals: set[str], requested: str) -> str:
-    """A planned GRAPH run also asks for dense, so without the graph it is HYBRID."""
+    """A GRAPH run that also asked for dense is HYBRID without the graph."""
     if "graph" in signals:
         return "GRAPH"
     return _effective_for_hybrid(signals, requested)
@@ -2038,7 +1954,6 @@ def _run_graph_backend(
     return _prepared_graph_outcome(
         raw_hits,
         analysis=analysis,
-        requested=requested,
         seeds=seeds,
         directions=directions,
         edge_types=edge_types,
@@ -2051,7 +1966,6 @@ def _prepared_graph_outcome(
     raw_hits: Sequence[Mapping[str, Any]] | None,
     *,
     analysis: QueryAnalysis,
-    requested: str,
     seeds: Sequence[Mapping[str, Any]],
     directions: Sequence[str],
     edge_types: Sequence[str],
@@ -2063,7 +1977,6 @@ def _prepared_graph_outcome(
     hits = _prepare_graph_hits(
         raw_hits,
         query=analysis.normalized_query or analysis.query,
-        requested_profile=requested,
         seeds=seeds,
         directions=directions,
         edge_types=edge_types,
@@ -2650,6 +2563,8 @@ def _filtered_hits(
         since=filters.get("since"),
         as_of=filters.get("as_of"),
         scope=filters.get("scope", "all"),
+        page_type=filters.get("page_type"),
+        path_prefix=filters.get("path_prefix"),
     )
 
 
@@ -2740,35 +2655,69 @@ def _generation_graph_hits(
         deadline_monotonic=filters["deadline_monotonic"],
         cancelled=cancelled,
     )
+    admitted = _graph_rows_admitted(rows, filters, context["connection"])
     _require_seal(catalog, context, stop)
-    return rows
+    return admitted
 
 
-def _neighbour_boost_hits(
-    lexical_backend: BackendFn, filters: Mapping[str, Any]
-) -> Sequence[Mapping[str, Any]]:
-    """Legacy path: neighbours of the lexical hits, scored by their boost."""
+def _graph_rows_admitted(
+    rows: Sequence[Mapping[str, Any]], filters: Mapping[str, Any], connection: Any
+) -> list[Mapping[str, Any]]:
+    """Graph rows whose page passes the caller's hard filters, as a lexical hit must."""
+    import search_memory
+
+    eligible = search_memory.generation_eligible_paths(
+        connection,
+        {str(row["relative_path"]) for row in rows},
+        scope=filters.get("scope", "all"),
+        project=filters.get("project"),
+        since=filters.get("since"),
+        as_of=filters.get("as_of"),
+        page_type=filters.get("page_type"),
+        path_prefix=filters.get("path_prefix"),
+    )
+    return [row for row in rows if str(row["relative_path"]) in eligible]
+
+
+def _neighbour_boost_hits(filters: Mapping[str, Any]) -> Sequence[Mapping[str, Any]]:
+    """Legacy path: wikilink neighbours of the seeds already found, scored by their boost.
+
+    The seeds are the hits the run already holds, so the Markdown is not scanned
+    twice; the link graph is built under the run's deadline; a neighbour is kept
+    only when the Markdown leg would admit its page under the caller's filters.
+    """
     from graph_neighbors import boost_graph_neighbors
 
-    seed_filters = {
-        key: filters[key]
-        for key in ("query", "scope", "limit", "project", "since", "as_of")
-    }
-    seeds = list(lexical_backend(**seed_filters))
-    boosts = boost_graph_neighbors(
-        [{"path": hit["path"], "score": hit.get("score", 0)} for hit in seeds], None
-    )
-    return [
-        _backend_hit_from_legacy(
-            {
-                "path": item["path"],
-                "candidate_id": item["path"],
-                "score": item.get("graph_boost", 0.0),
-                "graph_boost": item.get("graph_boost", 0.0),
-            }
-        )
-        for item in boosts
+    seeds = [
+        {"path": _seed_path(seed), "score": seed.get("score", 0)}
+        for seed in filters["seeds"]
     ]
+    boosts = boost_graph_neighbors(
+        seeds, None, deadline=filters.get("deadline_monotonic")
+    )
+    rows = [_neighbour_page_row(item, filters) for item in boosts]
+    return _filtered_hits([row for row in rows if row is not None], filters)
+
+
+def _seed_path(seed: Mapping[str, Any]) -> str:
+    return str(_first_present(seed, ("path", "relative_path"), ""))
+
+
+def _neighbour_page_row(
+    item: Mapping[str, Any], filters: Mapping[str, Any]
+) -> dict[str, Any] | None:
+    import search_memory
+
+    page = search_memory.markdown_page_row(
+        str(item["path"]),
+        project=filters.get("project"),
+        since=filters.get("since"),
+        as_of=filters.get("as_of"),
+    )
+    if page is None:
+        return None
+    boost = item.get("graph_boost", 0.0)
+    return {**page, "score": boost, "graph_boost": boost}
 
 
 def _drop_generation_connection(context: dict[str, Any], connection: Any) -> None:
@@ -3072,6 +3021,8 @@ def _dense_hits_or_none(
         project=filters["project"],
         since=filters["since"],
         as_of=filters["as_of"],
+        page_type=filters.get("page_type"),
+        path_prefix=filters.get("path_prefix"),
         **stop,
     )
     require_seal()
@@ -3100,14 +3051,16 @@ def _generation_lexical_hits(
         project=filters["project"],
         since=filters["since"],
         as_of=filters["as_of"],
+        page_type=filters.get("page_type"),
+        path_prefix=filters.get("path_prefix"),
         **stop,
     )
     _require_unchanged_generation(catalog, context, stop)
     return _filtered_hits(rows, filters)
 
 
-def _requested_or_recommended(requested_profile: object, analysis: QueryAnalysis) -> str:
-    return _normalize_profile(requested_profile) or analysis.recommended_profile
+def _requested_or_planned(requested_profile: str | None, graph_enabled: bool) -> str:
+    return planned_request(requested_profile, semantic=True, graph=graph_enabled)[0]
 
 
 def _exact_query(analysis: QueryAnalysis) -> str:
@@ -3507,12 +3460,11 @@ def _complete_from_pages(
             _admit_pointed(source, by_source, state)
 
 
-def _may_displace(
-    chunk: RetrievalCandidate, admitted: frozenset[str], inside_count: Mapping[SourceKey, int]
-) -> bool:
-    if chunk.candidate_id in admitted:
-        return False
-    return inside_count.get(_source_key(chunk), 0) >= 2
+def _lane_best_ids(chunks: Sequence[RetrievalCandidate]) -> frozenset[str]:
+    first: dict[SourceKey, str] = {}
+    for chunk in chunks:
+        first.setdefault(_source_key(chunk), chunk.candidate_id)
+    return frozenset(first.values())
 
 
 def _displaceable(
@@ -3520,20 +3472,14 @@ def _displaceable(
 ) -> list[RetrievalCandidate]:
     """The last chunks of the window a pulled chunk may take the place of.
 
-    Never an admitted chunk, and never a source's only chunk in the window: a
-    chunk is displaced only while its source keeps another chunk inside.
+    Never an admitted chunk, and never a source's best chunk in the window:
+    the chunk admitted for coverage may be a later one of its source, and the
+    lane-best it would otherwise leave unprotected is the one the lanes agree on.
     """
-    inside_count: dict[SourceKey, int] = {}
-    for chunk in inside:
-        inside_count[_source_key(chunk)] = inside_count.get(_source_key(chunk), 0) + 1
-    chosen: list[RetrievalCandidate] = []
-    for chunk in reversed(inside):
-        if len(chosen) >= wanted:
-            break
-        if _may_displace(chunk, admitted, inside_count):
-            chosen.append(chunk)
-            inside_count[_source_key(chunk)] -= 1
-    return list(reversed(chosen))
+    if wanted <= 0:
+        return []
+    kept = admitted | _lane_best_ids(inside)
+    return [chunk for chunk in inside if chunk.candidate_id not in kept][-wanted:]
 
 
 def _pulled_into_window(
@@ -3583,7 +3529,7 @@ def _cover_then_fill(
     """One chunk from every source that covers a distinct part of the question, then the fill.
 
     Four properties, each pinned by a test: a pool holding one source comes out
-    unchanged; a pool that fits the window comes out unchanged; a source's only
+    unchanged; a pool that fits the window comes out unchanged; a source's best
     chunk inside the window is never displaced; a source's chunks keep their
     order, except the one chunk admitted for coverage, which is the lane-best
     whenever the lane-best covers as much.
@@ -4058,6 +4004,8 @@ def retrieve(
     graph_global_limit: int = GRAPH_GLOBAL_LIMIT,
     graph_edge_families: Mapping[str, bool] | None = None,
     signals: Sequence[str] | None = None,
+    page_type: str | None = None,
+    path_prefix: str | None = None,
 ) -> RetrievalResult:
     """Plan and execute retrieval with truthful mode/signal reporting.
 
@@ -4076,7 +4024,7 @@ def retrieve(
     """
     _check_stopped(deadline_monotonic, cancelled)
     analysis = analyze_query(query)
-    requested = _requested_or_recommended(requested_profile, analysis)
+    requested = _requested_or_planned(requested_profile, graph_enabled)
     backend_limit = _backend_limit(limit, max_candidates)
     filters = {
         "query": analysis.normalized_query or analysis.query,
@@ -4085,6 +4033,8 @@ def retrieve(
         "project": project,
         "since": since,
         "as_of": as_of,
+        "page_type": page_type,
+        "path_prefix": path_prefix,
     }
 
     wanted = _planned_signals(requested, signals)
@@ -4361,30 +4311,22 @@ def _planned_signals(requested: str, signals: Sequence[str] | None) -> tuple[str
 
 
 def planned_request(
-    profile: str | None, analysis: QueryAnalysis, *, semantic: bool
+    profile: str | None, *, semantic: bool, graph: bool = True
 ) -> tuple[str, tuple[str, ...]]:
     """The profile a search runs and the signals it asks for.
 
-    `semantic=False` forces the lexical profile whatever the planner says, and an
-    explicit profile runs as declared. Otherwise a question the planner reads as
-    one about relations (a profile that declares the graph) keeps that profile
-    and adds dense; every other question runs HYBRID. Before 2026-09-25 every
-    semantic search ran HYBRID, so the evidence graph never answered `recall`
-    (audit C-22, docs/research/2026-09-25-recall-asks-the-graph-about-relations.md).
+    `semantic=False` forces the lexical profile, and an explicit profile runs as
+    declared. Otherwise the search runs `PLANNED_PROFILE`: every leg, whatever the
+    query says, except a graph its caller switched off. Until 2026-11-17 words of
+    the query picked the profile, and a reading that was wrong was never
+    recovered downstream (docs/research/2026-11-17-every-search-runs-every-leg.md).
     """
     if not semantic:
         return "BASE", ("lexical",)
     requested = _normalize_profile(profile)
-    if requested is not None:
-        return requested, PROFILE_SIGNALS[requested]
-    return _planned_semantic_request(analysis.recommended_profile)
-
-
-def _planned_semantic_request(recommended: str) -> tuple[str, tuple[str, ...]]:
-    declared = PROFILE_SIGNALS[recommended]
-    if "graph" not in declared:
-        return "HYBRID", PROFILE_SIGNALS["HYBRID"]
-    return recommended, tuple(dict.fromkeys(("lexical", "dense", *declared)))
+    if requested is None:
+        requested = PLANNED_PROFILE if graph else "HYBRID"
+    return requested, PROFILE_SIGNALS[requested]
 
 
 def _selected_catalog(catalog: Any, search_memory: Any) -> Any:
@@ -4555,12 +4497,14 @@ def _generation_graph_backend_hits(
 
 
 def _neighbour_boost_or_none(
-    lexical_backend: Callable[..., Sequence[Mapping[str, Any]]],
     filters: Mapping[str, Any],
 ) -> Sequence[Mapping[str, Any]] | None:
     try:
-        return _neighbour_boost_hits(lexical_backend, filters)
+        return _neighbour_boost_hits(filters)
     except TimeoutError:
+        # The link scan stops at the run's own deadline: that is the run stopping,
+        # and the legs already finished stay in hand.
+        _check_stopped(filters.get("deadline_monotonic"), None)
         raise
     except Exception:  # noqa: BLE001 - the graph signal degrades on its own
         return None
@@ -4619,6 +4563,8 @@ class _SearchRun:
     cancelled: Callable[[], bool] | None
     requested: Any
     wanted: tuple[str, ...]
+    page_type: str | None = None
+    path_prefix: str | None = None
     generation_ctx: dict[str, Any] = dataclass_field(
         default_factory=lambda: {
             "manifest": None,
@@ -4756,6 +4702,8 @@ class _SearchRun:
             page_paths=self.page_paths,
             deadline=self.deadline,
             cancelled=self.cancelled,
+            page_type=filters.get("page_type"),
+            path_prefix=filters.get("path_prefix"),
         )
         self.legacy_fallback = _first_fallback_reason(rows, self.legacy_fallback)
         return _filtered_hits(rows, filters)
@@ -4796,7 +4744,7 @@ class _SearchRun:
                 stop=self.generation_stop,
                 cancelled=self.cancelled,
             )
-        return _neighbour_boost_or_none(self.lexical_backend, filters)
+        return _neighbour_boost_or_none(filters)
 
     # --- the run ----------------------------------------------------------------
 
@@ -4809,6 +4757,8 @@ class _SearchRun:
             project=self.project,
             since=self.since,
             as_of=self.as_of,
+            page_type=self.page_type,
+            path_prefix=self.path_prefix,
             lexical_backend=_wanted_backend(self.lexical_backend, "lexical" in self.wanted),
             dense_backend=_wanted_backend(
                 self.dense_backend, "dense" in self.wanted and self.semantic
@@ -4887,6 +4837,8 @@ def retrieve_via_search_memory(
     max_candidates: int | None = None,
     cancelled: Callable[[], bool] | None = None,
     trace_sink: dict[str, object] | None = None,
+    page_type: str | None = None,
+    path_prefix: str | None = None,
 ) -> list[dict[str, Any]]:
     """Public search path: independent backends → retrieve() → rows."""
     import search_memory
@@ -4899,8 +4851,7 @@ def retrieve_via_search_memory(
         model_id=generation_model_id,
         model_revision=generation_model_revision,
     )
-    analysis = analyze_query(query)
-    requested, wanted = planned_request(profile, analysis, semantic=semantic)
+    requested, wanted = planned_request(profile, semantic=semantic, graph=graph)
     run = _SearchRun(
         search_memory,
         query,
@@ -4922,6 +4873,8 @@ def retrieve_via_search_memory(
         cancelled,
         requested,
         wanted,
+        page_type=page_type,
+        path_prefix=path_prefix,
     )
     run.open()
     result = run.reported(run.run())

@@ -94,7 +94,12 @@ pinned by a test:
 - a pool whose sources all hold a place already comes out unchanged, the sharpest case
   being a pool that fits the window;
 - a source's only chunk is never deferred by the rule's own choice: only a chunk of a
-  source that keeps another chunk inside the window is ever displaced;
+  source that keeps another chunk inside the window is ever displaced. Amended 2026-11-17:
+  that kept one chunk per source, the admitted one when the source had one inside, so a
+  session whose later chunk was admitted lost its first, lane-best chunk (LongMemEval
+  `3fe836c9`, place 2 to 49);
+  a source's first chunk inside the window is now never displaced
+  (docs/research/2026-11-17-a-name-inside-a-question-keeps-every-leg.md);
 - a source's chunks keep their order, except the one chunk admitted for coverage, which
   is its lane-best whenever the lane-best covers as much — so with equal coverage the
   order is exactly the lane's.

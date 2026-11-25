@@ -2,9 +2,11 @@
 from __future__ import annotations
 
 import hashlib
+import sqlite3
 import sys
 import time
 from pathlib import Path
+from types import ModuleType
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -33,6 +35,7 @@ def test_resolve_wikilink_exact_match(fake_graph):
         fake_file.read_text.return_value = "# Some Page\n\nBody text."
         fake_file.relative_to.return_value.as_posix.return_value = "some-page.md"
         fake_file.resolve.return_value = fake_file
+        fake_file.stem = "some-page"
         knowledge.rglob.return_value = [fake_file]
         result = fake_graph._resolve_wikilink("some-page")
         assert result == "some-page.md"
@@ -237,3 +240,199 @@ def test_shared_state_generation_for_another_repository_uses_honest_fallback(
     monkeypatch.setattr(fake_graph, "_build_link_graph", lambda **_kwargs: fallback)
 
     assert fake_graph.get_link_graph(catalog=catalog) == fallback
+
+
+class _ActiveGraph:
+    """An active generation whose LINKS_TO rows are given, and which records its close."""
+
+    def __init__(self, rows: list[dict[str, str]]) -> None:
+        self.rows = rows
+        self.closed = False
+
+    def _execute(self, *_args: object, **_kwargs: object) -> list[dict[str, str]]:
+        return self.rows
+
+    def close(self) -> None:
+        self.closed = True
+
+
+def _open_returns(monkeypatch: pytest.MonkeyPatch, graph: _ActiveGraph | None) -> None:
+    import evidence_graph
+
+    monkeypatch.setattr(
+        evidence_graph.EvidenceGraph,
+        "open_active_for_repository",
+        classmethod(lambda _cls, *_args, **_kwargs: graph),
+    )
+
+
+def test_active_links_become_a_sorted_deduplicated_adjacency(
+    fake_graph: ModuleType, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    graph = _ActiveGraph(
+        [
+            {"source_path": "b.md", "target_path": "c.md"},
+            {"source_path": "a.md", "target_path": "z.md"},
+            {"source_path": "a.md", "target_path": "y.md"},
+            {"source_path": "a.md", "target_path": "z.md"},
+        ]
+    )
+    _open_returns(monkeypatch, graph)
+
+    assert fake_graph.get_link_graph(catalog=object()) == {
+        "a.md": ["y.md", "z.md"],
+        "b.md": ["c.md"],
+    }
+    assert graph.closed
+
+
+def test_no_active_generation_scans_the_sources(
+    fake_graph: ModuleType, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _open_returns(monkeypatch, None)
+    fallback = {"scanned.md": ["target.md"]}
+    monkeypatch.setattr(fake_graph, "_build_link_graph", lambda **_kwargs: fallback)
+
+    assert fake_graph.get_link_graph(catalog=object()) == fallback
+
+
+def test_an_unreadable_generation_scans_the_sources(
+    fake_graph: ModuleType, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def broken(*_args: object, **_kwargs: object) -> None:
+        raise sqlite3.OperationalError("database disk image is malformed")
+
+    monkeypatch.setattr(fake_graph, "_query_links", broken)
+    fallback = {"scanned.md": ["target.md"]}
+    monkeypatch.setattr(fake_graph, "_build_link_graph", lambda **_kwargs: fallback)
+
+    assert fake_graph.get_link_graph(catalog=object()) == fallback
+
+
+def test_a_generation_read_past_its_deadline_is_not_hidden(
+    fake_graph: ModuleType, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def late(*_args: object, **_kwargs: object) -> None:
+        raise TimeoutError("graph deadline reached")
+
+    monkeypatch.setattr(fake_graph, "_query_links", late)
+
+    with pytest.raises(TimeoutError, match="deadline"):
+        fake_graph.get_link_graph(catalog=object())
+
+
+def test_a_state_root_without_a_catalog_has_no_active_graph(
+    fake_graph: ModuleType, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(fake_graph, "STATE_ROOT", tmp_path)
+
+    assert fake_graph._read_active_link_graph(None) is None
+
+
+def test_the_state_root_catalog_is_read_when_none_is_given(
+    fake_graph: ModuleType, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from generation_catalog import GenerationCatalog
+
+    catalog_path = tmp_path / "cache" / "evidence-graph" / "catalog.sqlite3"
+    catalog_path.parent.mkdir(parents=True)
+    catalog_path.touch()
+    monkeypatch.setattr(fake_graph, "STATE_ROOT", tmp_path)
+
+    assert isinstance(fake_graph._catalog_or_default(None), GenerationCatalog)
+
+
+def _run_cli(
+    fake_graph: ModuleType,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    *arguments: str,
+) -> str:
+    links = {"a.md": ["b.md", "c.md"], "d.md": ["a.md"]}
+    monkeypatch.setattr(fake_graph, "_link_graph_cache", links)
+    monkeypatch.setattr(fake_graph, "_read_active_link_graph", lambda *_a, **_k: None)
+    monkeypatch.setattr(sys, "argv", ["graph_neighbors.py", *arguments])
+
+    assert fake_graph.main() == 0
+    printed: str = capsys.readouterr().out
+    return printed
+
+
+def test_cli_stats_count_pages_and_edges(
+    fake_graph: ModuleType, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    out = _run_cli(fake_graph, monkeypatch, capsys, "--stats")
+
+    assert "Pages with outbound links: 2" in out
+    assert "Total edges: 3" in out
+    assert "a.md: 2 links" in out
+
+
+def test_cli_neighbors_name_both_directions(
+    fake_graph: ModuleType, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    out = _run_cli(fake_graph, monkeypatch, capsys, "--neighbors", "a.md")
+
+    assert "→ b.md" in out
+    assert "→ c.md" in out
+    assert "← d.md" in out
+
+
+def test_cli_without_a_request_prints_nothing(
+    fake_graph: ModuleType, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    assert _run_cli(fake_graph, monkeypatch, capsys) == ""
+
+
+def _notes(tmp_path: Path) -> Path:
+    notes = tmp_path / "knowledge" / "notes"
+    (notes / "sub").mkdir(parents=True)
+    (notes / "seed.md").write_text("# Seed\n\nSee [[token-refresh]].\n", encoding="utf-8")
+    (notes / "other.md").write_text("# Other\n\nSee [[seed]].\n", encoding="utf-8")
+    (notes / "sub" / "token-refresh.md").write_text("# Refresh\n", encoding="utf-8")
+    return notes
+
+
+def test_a_bare_link_follows_the_platform_case_rule(
+    fake_graph: ModuleType, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    import ntpath
+
+    notes = _notes(tmp_path)
+    monkeypatch.setattr(fake_graph, "ROOT", tmp_path)
+    monkeypatch.setattr(fake_graph, "KNOWLEDGE_DIR", notes)
+    monkeypatch.setattr(fake_graph.os.path, "normcase", ntpath.normcase)
+
+    assert fake_graph._resolve_wikilink("Token-Refresh") == "knowledge/notes/sub/token-refresh.md"
+
+
+def test_the_source_scan_reads_only_the_seeds_and_walks_the_names_once(
+    fake_graph: ModuleType, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    notes = _notes(tmp_path)
+    monkeypatch.setattr(fake_graph, "ROOT", tmp_path)
+    monkeypatch.setattr(fake_graph, "KNOWLEDGE_DIR", notes)
+    monkeypatch.setattr(fake_graph, "_read_active_link_graph", lambda *_a, **_k: None)
+    walks: list[str] = []
+    read: list[str] = []
+    rglob, read_text = Path.rglob, Path.read_text
+
+    def counted_rglob(self: Path, pattern: str) -> object:
+        walks.append(pattern)
+        return rglob(self, pattern)
+
+    def counted_read(self: Path, *args: object, **kwargs: object) -> str:
+        read.append(self.name)
+        return read_text(self, *args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(Path, "rglob", counted_rglob)
+    monkeypatch.setattr(Path, "read_text", counted_read)
+
+    (tmp_path / "outside.md").write_text("[[other]]\n", encoding="utf-8")
+    seeds = [{"path": "knowledge/notes/seed.md"}, {"path": "outside.md"}]
+    boosts = fake_graph.boost_graph_neighbors(seeds, None)
+
+    assert [item["path"] for item in boosts] == ["knowledge/notes/sub/token-refresh.md"]
+    assert walks == ["*.md"]
+    assert "other.md" not in read
+    assert "outside.md" not in read

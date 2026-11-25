@@ -95,6 +95,42 @@ def test_a_package_another_extra_pulled_in_chooses_nothing(checkout, monkeypatch
     assert outcome["extras"] == ("reranker",)
 
 
+def test_a_vault_from_before_openvino_keeps_its_model_choice() -> None:
+    """torch and transformers stay installed after the models moved to OpenVINO; what the
+    current project no longer declares pulls nothing in, so the update still brings the
+    runtime both models read."""
+    leftovers = {
+        "torch": {"numpy"},
+        "transformers": {"huggingface-hub", "tokenizers", "numpy"},
+        "onnxruntime": {"numpy"},
+        "huggingface-hub": set(),
+        "tokenizers": {"huggingface-hub"},
+        "numpy": set(),
+    }
+    project = self_update._project(Path(__file__).resolve().parent.parent)
+    own = self_update._own_names(project)
+    exclusive = self_update._exclusive_names(project)
+
+    chosen = [
+        extra
+        for extra, names in exclusive.items()
+        if self_update._chosen_by_itself(
+            names, self_update._declared_outside(project, own, extra), leftovers
+        )
+    ]
+
+    assert chosen == ["semantic"]
+
+
+def test_what_another_extra_requires_deep_down_chooses_nothing() -> None:
+    installed = {"sentence-transformers": {"transformers"}, "transformers": {"huggingface-hub"},
+                 "huggingface-hub": set()}
+
+    assert not self_update._chosen_by_itself(
+        {"huggingface-hub"}, {"sentence-transformers"}, installed
+    )
+
+
 def test_a_shared_package_alone_chooses_nothing(checkout, monkeypatch) -> None:
     """`numpy` belongs to more than one extra, so it says nothing about the choice."""
     monkeypatch.setattr(self_update, "_installed_distributions", lambda: {"numpy": set()})

@@ -2,16 +2,11 @@
 from __future__ import annotations
 
 import dataclasses
-import sys
 from pathlib import Path
 from unittest.mock import patch
 
-import pytest
-
 SCRIPTS = Path(__file__).resolve().parents[1] / "scripts"
 SCHEMAS = SCRIPTS / "schemas"
-if str(SCRIPTS) not in sys.path:
-    sys.path.insert(0, str(SCRIPTS))
 
 
 def _hit(candidate_id: str, path: str, score: float, **extra):
@@ -274,30 +269,6 @@ def test_should_rerank_refuses_only_for_a_named_reason(monkeypatch):
         False,
         "tiny_result_set",
     )
-
-
-@pytest.mark.parametrize(
-    ("query", "intent", "profile"),
-    [
-        ("Что зависит от search_memory?", "graph_relation", "GRAPH"),
-        ("Покажи карту репозитория scripts", "repo_map", "REPO_MAP"),
-        ("Влияние изменения search_memory.py", "impact", "IMPACT"),
-        ("Синтез архитектуры across all projects", "global_synthesis", "GLOBAL"),
-        ("решения с 2025-01-01", "temporal", "TEMPORAL"),
-        ("什么依赖 search_memory", "graph_relation", "GRAPH"),
-        ("显示仓库地图 scripts", "repo_map", "REPO_MAP"),
-        ("更改 search_memory.py 的影响", "impact", "IMPACT"),
-        ("跨项目综合架构", "global_synthesis", "GLOBAL"),
-        ("自 2025-01-01 以来的决策", "temporal", "TEMPORAL"),
-        ("为什么选择 auth？", "question", "HYBRID"),
-    ],
-)
-def test_ru_zh_analyzer_covers_all_intents(query, intent, profile):
-    import retrieval
-
-    analysis = retrieval.analyze_query(query)
-    assert intent in analysis.intents
-    assert analysis.recommended_profile == profile
 
 
 def test_hard_filter_contract_parity_across_backends():

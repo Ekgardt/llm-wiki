@@ -1,0 +1,5 @@
+{"tests": ["test_analyze_query_is_deterministic"],
+ "kinds": ["assertions", "cases"],
+ "reason": "Its third parameter and one assertion were the profile a word list chose per query (QueryAnalysis.recommended_profile), and its intent parameter could name an intent read from words (question, temporal, graph_relation, repo_map, impact, global_synthesis); this change removes both on purpose (docs/research/2026-11-17-every-search-runs-every-leg.md), so no query carries a profile or a word intent to assert. The test keeps every English and Chinese query, still asserts determinism and the normalized query, and now asserts the exact intent tuple of each, which is stricter than the old 'intent in intents'. One case is dropped: the Russian wording of 'What is the auth decision?', which law 10 forbids in the repository; its Chinese twin stays.",
+ "recorded": "2026-11-18",
+ "expires": "2027-02-16"}

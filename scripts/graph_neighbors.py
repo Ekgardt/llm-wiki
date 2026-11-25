@@ -12,10 +12,12 @@ Feeds retrieval.py's fuse_rrf() as a third signal.
 """
 from __future__ import annotations
 
+import os
 import re
 import sqlite3
 import sys
 import time
+from collections.abc import Iterable
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -45,29 +47,61 @@ def _read_text_or_none(path: Path) -> str | None:
         return None
 
 
-def _build_link_graph(*, deadline: float | None = None) -> dict[str, list[str]]:
-    """Build adjacency: page_path → [linked_page_paths].
+def _build_link_graph(
+    *, deadline: float | None = None, sources: Iterable[str] | None = None
+) -> dict[str, list[str]]:
+    """Adjacency page path → resolved link targets, of `sources` or of every page.
 
-    Scans all knowledge markdown files for [[wikilinks]].
-    Resolves links to actual file paths.
+    The pages' names are listed once per build, so a bare [[link]] costs a
+    lookup, not a walk of the notes tree.
     """
     graph: dict[str, list[str]] = {}
     if not KNOWLEDGE_DIR.exists():
         return graph
-    for md in sorted(KNOWLEDGE_DIR.rglob("*.md")):
+    names = _page_names(deadline)
+    for md in _scanned_pages(sources):
         _require_before(deadline, "graph neighbor source-scan deadline reached")
-        entry = _page_links(md, deadline)
+        entry = _page_links(md, names, deadline)
         if entry is not None:
             graph[entry[0]] = entry[1]
     return graph
 
 
-def _page_links(md: Path, deadline: float | None) -> tuple[str, list[str]] | None:
+def _page_names(deadline: float | None) -> dict[str, list[Path]]:
+    """Every note under the notes tree, by the name a bare [[link]] gives it."""
+    names: dict[str, list[Path]] = {}
+    if not KNOWLEDGE_DIR.exists():
+        return names
+    for md in sorted(KNOWLEDGE_DIR.rglob("*.md")):
+        _require_before(deadline, "graph neighbor source-scan deadline reached")
+        names.setdefault(os.path.normcase(md.stem), []).append(md)
+    return names
+
+
+def _scanned_pages(sources: Iterable[str] | None) -> list[Path]:
+    if sources is None:
+        return sorted(KNOWLEDGE_DIR.rglob("*.md"))
+    pages = (_source_page(source) for source in sorted(set(sources)))
+    return [page for page in pages if page is not None]
+
+
+def _source_page(source: str) -> Path | None:
+    """The seed's file when the full scan would read it: a note inside the notes tree."""
+    path: Path = ROOT / source
+    inside = path.is_relative_to(KNOWLEDGE_DIR) and ".." not in Path(source).parts
+    if not inside or path.suffix != ".md":
+        return None
+    return path
+
+
+def _page_links(
+    md: Path, names: dict[str, list[Path]], deadline: float | None
+) -> tuple[str, list[str]] | None:
     """(vault path, resolved link targets) of one active page that links somewhere."""
     page = _active_page(md)
     if page is None:
         return None
-    links = _resolved_links(page[1], deadline)
+    links = _resolved_links(page[1], names, deadline)
     if not links:
         return None
     return page[0], sorted(dict.fromkeys(links))
@@ -94,25 +128,35 @@ def _active_text(md: Path) -> str | None:
     return content
 
 
-def _resolved_links(content: str, deadline: float | None) -> list[str]:
+def _resolved_links(
+    content: str, names: dict[str, list[Path]], deadline: float | None
+) -> list[str]:
     links = []
     for target in WIKILINK_RE.findall(content):
-        resolved = _resolve_target(target.strip(), deadline)
+        resolved = _resolve_target(target.strip(), names, deadline)
         if resolved:
             links.append(resolved)
     return links
 
 
-def _resolve_target(target: str, deadline: float | None) -> str | None:
+def _resolve_target(
+    target: str, names: dict[str, list[Path]], deadline: float | None
+) -> str | None:
     if not target:
         return None
-    return _resolve_wikilink(target, deadline=deadline)
+    return _resolve_wikilink(target, deadline=deadline, names=names)
 
 
-def _resolve_wikilink(target: str, *, deadline: float | None = None) -> str | None:
-    """Resolve a [[wikilink]] target to a relative file path."""
+def _resolve_wikilink(
+    target: str,
+    *,
+    deadline: float | None = None,
+    names: dict[str, list[Path]] | None = None,
+) -> str | None:
+    """None when the link names no page, or more than one."""
+    known = _page_names(deadline) if names is None else names
     valid: list[str] = []
-    for candidate in _wikilink_candidates(target.strip()):
+    for candidate in _wikilink_candidates(target.strip(), known):
         _require_before(deadline, "graph neighbor source-scan deadline reached")
         path = _active_vault_file(candidate)
         if path is not None:
@@ -121,14 +165,12 @@ def _resolve_wikilink(target: str, *, deadline: float | None = None) -> str | No
     return unique[0] if len(unique) == 1 else None
 
 
-def _wikilink_candidates(target: str) -> list[Path]:
+def _wikilink_candidates(target: str, names: dict[str, list[Path]]) -> list[Path]:
     if "/" in target:
         # Path-style: try as-is and with .md
         return [ROOT / (target + ".md"), ROOT / target]
-    # Bare name: search for <name>.md in wiki + knowledge
-    if not KNOWLEDGE_DIR.exists():
-        return []
-    return sorted(KNOWLEDGE_DIR.rglob(f"{target}.md"))
+    # The platform's own case rule, as a glob for the name would apply it.
+    return names.get(os.path.normcase(target), [])
 
 
 def _active_vault_file(candidate: Path) -> str | None:
@@ -243,8 +285,9 @@ def get_link_graph(
     *,
     catalog: object | None = None,
     deadline: float | None = None,
+    sources: Iterable[str] | None = None,
 ) -> dict[str, list[str]]:
-    """Prefer the active immutable graph and honestly source-scan if absent."""
+    """Prefer the active immutable graph; else honestly source-scan `sources`, or every page."""
     global _link_graph_cache
     active = _read_active_link_graph(catalog, deadline=deadline)
     if active is not None:
@@ -252,7 +295,7 @@ def get_link_graph(
         return active
     if _link_graph_cache is not None:
         return _link_graph_cache
-    return _build_link_graph(deadline=deadline)
+    return _build_link_graph(deadline=deadline, sources=sources)
 
 
 def get_neighbor_records(
@@ -308,6 +351,8 @@ def boost_graph_neighbors(
     bm25_results: list[dict],
     vector_results: list[dict] | None,
     boost_weight: float = 0.15,
+    *,
+    deadline: float | None = None,
 ) -> list[dict]:
     """Add graph-neighbor boost to existing results.
 
@@ -316,12 +361,14 @@ def boost_graph_neighbors(
     through the link graph even if their text doesn't match the query.
 
     The boost is added to the 'graph_score' field and combined
-    into the final fused_score via RRF.
+    into the final fused_score via RRF. A source scan stops at `deadline`.
     """
-    graph = get_link_graph()
+    # Only the top-10 of each list seed the boost, BM25 first, then vector; a
+    # source scan reads only their links.
+    seeds = [*bm25_results[:10], *(vector_results or [])[:10]]
+    graph = get_link_graph(deadline=deadline, sources=[str(r["path"]) for r in seeds])
     boost_paths: dict[str, float] = {}
-    # Only the top-10 of each list seed the boost, BM25 first, then vector.
-    for r in [*bm25_results[:10], *(vector_results or [])[:10]]:
+    for r in seeds:
         _add_neighbor_boosts(boost_paths, graph.get(r["path"], []), boost_weight)
     return [
         {"path": path, "graph_boost": round(boost, 4)}

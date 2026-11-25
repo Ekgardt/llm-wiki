@@ -92,12 +92,12 @@ DEFAULT_TYPE_WEIGHT = 1.0
 
 # What the question asks for decides whether the vault's own retrieval rule —
 # answer from the compiled pages, read the commentary after — applies at all.
-# These intents say the question is about code: it names a path, a filename or a
-# symbol, or it asks about dependencies, structure, or impact. For those a file
-# that lives with the code is the answer, not commentary on someone's decision.
-CODE_SHAPED_INTENTS = frozenset(
-    {"exact_identifier", "graph_relation", "repo_map", "impact"}
-)
+# The question names a path, a filename or a symbol: it is about code, and a
+# file that lives with the code is the answer, not commentary on someone's
+# decision. Read from the query's shape only; until 2026-11-17 words such as
+# "depends on" or "impact" counted too
+# (docs/research/2026-11-17-every-search-runs-every-leg.md).
+CODE_SHAPED_INTENTS = frozenset({"exact_identifier"})
 
 
 def curated_pages_first(intents: object) -> bool:

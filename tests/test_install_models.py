@@ -5,9 +5,11 @@ See `docs/research/2026-09-10-the-weights-arrive-with-the-install.md`.
 from __future__ import annotations
 
 import hashlib
+import json
 import sys
 from pathlib import Path
-from types import ModuleType
+from types import ModuleType, SimpleNamespace
+from typing import Any
 
 import pytest
 
@@ -16,76 +18,141 @@ if str(SCRIPTS) not in sys.path:
     sys.path.insert(0, str(SCRIPTS))
 
 import install_models  # noqa: E402
-
-
-class _FakeHub(ModuleType):
-    """A Hub whose cache and downloads are directories under tmp_path."""
-
-    def __init__(self, root: Path, contents: dict[str, bytes]) -> None:
-        super().__init__("huggingface_hub")
-        self.root = root
-        self.contents = contents
-        self.downloads: list[tuple[str, str, list[str]]] = []
-
-    def _snapshot(self, repo_id: str, revision: str) -> Path:
-        return self.root / repo_id.replace("/", "--") / "snapshots" / revision
-
-    def try_to_load_from_cache(self, repo_id, filename, *, revision):
-        path = self._snapshot(repo_id, revision) / filename
-        if path.is_file():
-            return str(path)
-        return None
-
-    def snapshot_download(self, repo_id, *, revision, allow_patterns):
-        self.downloads.append((repo_id, revision, list(allow_patterns)))
-        snapshot = self._snapshot(repo_id, revision)
-        for name in allow_patterns:
-            (snapshot / name).parent.mkdir(parents=True, exist_ok=True)
-            (snapshot / name).write_bytes(self.contents[repo_id] if name == WEIGHTS else b"companion")
-        return str(snapshot)
-
+import model_files  # noqa: E402
+import openvino_runtime  # noqa: E402
 
 WEIGHTS = "onnx/model.onnx"
 COMPANION = "tokenizer.json"
+REVISION = "f" * 40
+RETIRED = ("org/old-encoder", "e" * 40)
+
+
+class _CacheNotFound(Exception):
+    pass
+
+
+class _FakeCache:
+    """`scan_cache_dir()`'s answer: the revisions held, and the deletions asked for."""
+
+    def __init__(self, held: list[tuple[str, str]]) -> None:
+        self.held = held
+        self.deleted: list[str] = []
+        self.root = Path("hub")
+
+    def repo_path(self, repo: str) -> Path:
+        return self.root / ("models--" + repo.replace("/", "--"))
+
+    @property
+    def repos(self) -> list[SimpleNamespace]:
+        return [
+            SimpleNamespace(repo_id=repo, repo_type="model", repo_path=self.repo_path(repo),
+                            revisions=[SimpleNamespace(commit_hash=revision)])
+            for repo, revision in self.held
+        ]
+
+    def delete_revisions(self, revision: str) -> SimpleNamespace:
+        def execute() -> None:
+            self.deleted.append(revision)
+            self.held = [entry for entry in self.held if entry[1] != revision]
+
+        return SimpleNamespace(execute=execute)
+
+
+class _FakeHub(ModuleType):
+    """A Hub whose downloads write the pinned files into `local_dir`."""
+
+    CacheNotFound = _CacheNotFound
+
+    def __init__(self, contents: dict[str, bytes]) -> None:
+        super().__init__("huggingface_hub")
+        self.contents = contents
+        self.downloads: list[tuple[str, str, list[str]]] = []
+        self.cache = _FakeCache([])
+
+    def snapshot_download(
+        self, repo_id: str, *, revision: str, allow_patterns: list[str], local_dir: str
+    ) -> str:
+        self.downloads.append((repo_id, revision, list(allow_patterns)))
+        for name in allow_patterns:
+            target = Path(local_dir) / name
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(self.contents[repo_id] if name == WEIGHTS else b"companion")
+        return local_dir
+
+    def scan_cache_dir(self) -> Any:
+        return self.cache
 
 
 def _pinned_to(contents: dict[str, bytes]) -> tuple[install_models.PinnedModel, ...]:
     return tuple(
         install_models.PinnedModel(
             repo_id,
-            "f" * 40,
+            REVISION,
             WEIGHTS,
             hashlib.sha256(blob).hexdigest(),
             len(blob),
             (WEIGHTS, COMPANION),
-            ("model.safetensors",),
+            RETIRED if repo_id == "org/encoder" else None,
         )
         for repo_id, blob in contents.items()
     )
 
 
 @pytest.fixture
-def two_models(tmp_path, monkeypatch):
+def two_models(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> _FakeHub:
     contents = {"org/encoder": b"encoder weights", "org/reranker": b"reranker weights"}
-    hub = _FakeHub(tmp_path / "hub", contents)
+    hub = _FakeHub(contents)
     pins = _pinned_to(contents)
+    monkeypatch.setattr(model_files, "models_root", lambda: tmp_path / "models")
+    monkeypatch.setattr(install_models, "_verification_record", lambda: tmp_path / "verified.json")
     monkeypatch.setattr(install_models, "hub_library", lambda: hub)
     monkeypatch.setattr(install_models, "pinned_models", lambda: pins)
+    monkeypatch.setattr(install_models, "_runtime_installed", lambda _model: True)
+    monkeypatch.setattr(
+        openvino_runtime, "telemetry_consent_file", lambda: tmp_path / "openvino_telemetry"
+    )
     return hub
 
 
-def test_missing_weights_are_fetched_at_the_pinned_commit_and_verified(two_models, capsys):
+def _installed_path(repo_id: str, name: str) -> Path:
+    path: Path = model_files.model_directory(repo_id, REVISION) / name
+    return path
+
+
+def test_the_install_declines_openvino_telemetry_before_any_load(
+    two_models: _FakeHub, tmp_path: Path
+) -> None:
+    install_models.main(["--check"])
+
+    assert (tmp_path / "openvino_telemetry").read_text(encoding="utf-8").strip() == "0"
+
+
+def test_missing_weights_are_fetched_at_the_pinned_commit_and_verified(
+    two_models: _FakeHub, capsys: pytest.CaptureFixture[str]
+) -> None:
     assert install_models.main([]) == 0
 
     assert [(repo, rev) for repo, rev, _ in two_models.downloads] == [
-        ("org/encoder", "f" * 40),
-        ("org/reranker", "f" * 40),
+        ("org/encoder", REVISION),
+        ("org/reranker", REVISION),
     ]
     assert all(patterns == [WEIGHTS, COMPANION] for _, _, patterns in two_models.downloads)
+    assert _installed_path("org/encoder", WEIGHTS).read_bytes() == b"encoder weights"
     assert capsys.readouterr().out.count("fetched") == 2
 
 
-def test_present_verified_weights_are_not_fetched_again(two_models, capsys):
+def test_the_files_are_ordinary_files_under_the_pinned_revision(
+    two_models: _FakeHub, tmp_path: Path
+) -> None:
+    install_models.main([])
+
+    weights = tmp_path / "models" / "org--reranker" / REVISION / WEIGHTS
+    assert (weights.is_file(), weights.is_symlink()) == (True, False)
+
+
+def test_present_verified_weights_are_not_fetched_again(
+    two_models: _FakeHub, capsys: pytest.CaptureFixture[str]
+) -> None:
     install_models.main([])
     two_models.downloads.clear()
 
@@ -95,25 +162,27 @@ def test_present_verified_weights_are_not_fetched_again(two_models, capsys):
 
 
 def test_a_file_that_does_not_match_its_pin_is_removed_and_the_run_fails(
-    two_models, monkeypatch, capsys
-):
+    two_models: _FakeHub, capsys: pytest.CaptureFixture[str]
+) -> None:
     two_models.contents["org/reranker"] = b"not the pinned bytes"
 
     assert install_models.main([]) == install_models.EXIT_INCOMPLETE
-    assert two_models.try_to_load_from_cache(
-        "org/reranker", WEIGHTS, revision="f" * 40
-    ) is None
+    assert not _installed_path("org/reranker", WEIGHTS).exists()
     out = capsys.readouterr().out
     assert "mismatch org/reranker" in out and "fetched org/encoder" in out
 
 
-def test_check_reports_without_downloading(two_models, capsys):
+def test_check_reports_without_downloading(
+    two_models: _FakeHub, capsys: pytest.CaptureFixture[str]
+) -> None:
     assert install_models.main(["--check", "--json"]) == install_models.EXIT_INCOMPLETE
     assert two_models.downloads == []
     assert '"state": "missing"' in capsys.readouterr().out
 
 
-def test_without_the_library_the_command_says_which_extra_to_install(monkeypatch, capsys):
+def test_without_the_library_the_command_says_which_extra_to_install(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
     monkeypatch.setattr(install_models, "hub_library", lambda: None)
     # A runtime is installed but the hub library is not: the vault the test runs
     # in may have neither, and then the command has nothing to fetch at all.
@@ -123,135 +192,166 @@ def test_without_the_library_the_command_says_which_extra_to_install(monkeypatch
     assert "uv sync --locked --inexact --extra semantic" in capsys.readouterr().err
 
 
-def test_the_pins_name_the_two_models_the_read_path_loads():
+def test_the_pins_name_the_two_models_the_read_path_loads() -> None:
     import embedding_model
     import reranker
 
     encoder, cross_encoder = install_models.pinned_models()
-    assert (encoder.repo_id, encoder.revision) == (
+    assert (encoder.repo_id, encoder.revision, encoder.read_files) == (
         embedding_model.EMBEDDING_MODEL,
         embedding_model.EMBEDDING_MODEL_REVISION,
+        embedding_model.EMBEDDING_READ_FILES,
     )
-    assert (cross_encoder.repo_id, cross_encoder.revision) == (
+    assert (cross_encoder.repo_id, cross_encoder.revision, cross_encoder.read_files) == (
         reranker.DEFAULT_RERANKER_MODEL,
         reranker.DEFAULT_RERANKER_REVISION,
+        reranker.RERANKER_READ_FILES,
     )
-    assert all(len(model.weights_sha256) == 64 and model.weights_bytes > 0 for model in (encoder, cross_encoder))
+    assert all(
+        len(model.weights_sha256) == 64 and model.weights_bytes > 0
+        for model in (encoder, cross_encoder)
+    )
 
 
-def test_doctor_names_the_missing_weights_and_the_command(monkeypatch):
+def test_doctor_names_the_missing_weights_and_the_command(monkeypatch: pytest.MonkeyPatch) -> None:
     import doctor
 
-    hub = object()
-    monkeypatch.setattr(install_models, "hub_library", lambda: hub)
+    monkeypatch.setattr(install_models, "wanted_models", install_models.pinned_models)
     monkeypatch.setattr(
-        install_models, "missing_models", lambda _hub: [install_models.pinned_models()[1]]
+        install_models, "missing_models", lambda: [install_models.pinned_models()[1]]
     )
 
     finding = doctor._models_check()
 
     assert finding["status"] == "degraded"
-    assert "BAAI/bge-reranker-v2-m3@953dc6f6f85a" in finding["message"]
+    assert "Horizon-Labs/multilingual-reranker-base@7330f6d0b3f5" in finding["message"]
     assert "install_models.py" in finding["message"]
     assert finding["details"]["command"] == "uv run python scripts/install_models.py"
 
 
-def test_doctor_expects_no_weights_without_the_semantic_extra(monkeypatch):
+def test_doctor_expects_no_weights_without_a_model_runtime(monkeypatch: pytest.MonkeyPatch) -> None:
     import doctor
 
-    monkeypatch.setattr(install_models, "hub_library", lambda: None)
+    monkeypatch.setattr(install_models, "wanted_models", lambda: [])
 
     assert doctor._models_check()["status"] == "ok"
 
 
-def test_the_nightly_fetches_missing_weights_after_its_index_work():
+def test_the_nightly_fetches_missing_weights_after_its_index_work() -> None:
     import scheduled_nightly
 
     steps = {step.label: step for step in scheduled_nightly._post_compile_steps()}
     labels = list(steps)
 
-    assert (labels.index("models") > labels.index("lint"), steps["models"].command[-1].endswith("install_models.py")) == (
-        True,
-        True,
-    )
+    assert labels.index("models") > labels.index("lint")
+    assert steps["models"].command[-1].endswith("install_models.py")
 
 
-def test_weights_without_their_companion_file_are_fetched_again(two_models):
+def test_weights_without_their_companion_file_are_fetched_again(two_models: _FakeHub) -> None:
     install_models.main([])
-    (two_models._snapshot("org/encoder", "f" * 40) / COMPANION).unlink()
+    _installed_path("org/encoder", COMPANION).unlink()
     two_models.downloads.clear()
 
     assert install_models.main([]) == 0
     assert [repo for repo, _, _ in two_models.downloads] == ["org/encoder"]
 
 
-def _retired_link(hub: _FakeHub, repo_id: str) -> tuple[Path, Path]:
-    """A retired file as the Hub cache holds it: a snapshot link to a blob."""
-    blob = hub.root / repo_id.replace("/", "--") / "blobs" / "old-weights"  # the Hub's layout
-    blob.parent.mkdir(parents=True, exist_ok=True)
-    blob.write_bytes(b"torch weights")
-    link = hub._snapshot(repo_id, "f" * 40) / "model.safetensors"
-    link.parent.mkdir(parents=True, exist_ok=True)
-    link.symlink_to(blob)
-    return link, blob
+def _fetched_by_this_vault(hub: _FakeHub, tmp_path: Path, repo: str) -> None:
+    """The record the earlier installer left when it verified a file it fetched there."""
+    hub.cache.root = tmp_path / "hub"
+    blob = str((hub.cache.repo_path(repo) / "blobs" / "00000000").resolve())
+    (tmp_path / "verified.json").write_text(json.dumps({repo: [blob, 1, 1, 1, "x", 1]}))
 
 
-@pytest.mark.skipif(sys.platform == "win32", reason="the Hub cache links files only where symlinks work")
-def test_verified_weights_retire_the_file_they_replace_and_its_blob(two_models, capsys):
-    link, blob = _retired_link(two_models, "org/encoder")
+def test_verified_weights_delete_the_revision_they_replace_from_the_hub_cache(
+    two_models: _FakeHub, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    two_models.cache.held = [RETIRED, ("org/unrelated", "d" * 40)]
+    _fetched_by_this_vault(two_models, tmp_path, RETIRED[0])
 
     assert install_models.main(["--json"]) == 0
-    assert (link.exists(), link.is_symlink(), blob.exists()) == (False, False, False)
-    assert '"retired": ["model.safetensors"]' in capsys.readouterr().out
+    assert two_models.cache.deleted == [RETIRED[1]]
+    assert '"retired": ["org/old-encoder@eeeeeeeeeeee"]' in capsys.readouterr().out
+    assert RETIRED[0] not in json.loads((tmp_path / "verified.json").read_text())
 
 
-def test_a_check_or_a_failed_fetch_retires_nothing(two_models):
-    link = two_models._snapshot("org/reranker", "f" * 40) / "model.safetensors"
-    link.parent.mkdir(parents=True, exist_ok=True)
-    link.write_bytes(b"torch weights")
-    two_models.contents["org/reranker"] = b"not the pinned bytes"
+def test_a_replaced_revision_another_tool_fetched_stays_in_the_shared_cache(
+    two_models: _FakeHub, tmp_path: Path
+) -> None:
+    two_models.cache.held = [RETIRED]
+    two_models.cache.root = tmp_path / "hub"
+
+    assert install_models.main([]) == 0
+    assert two_models.cache.deleted == []
+
+
+def test_a_check_or_a_failed_fetch_retires_nothing(two_models: _FakeHub) -> None:
+    two_models.cache.held = [RETIRED]
+    two_models.contents["org/encoder"] = b"not the pinned bytes"
 
     install_models.main(["--check"])
     install_models.main([])
 
-    assert link.exists()
+    assert two_models.cache.deleted == []
 
 
-@pytest.mark.skipif(sys.platform == "win32", reason="the Hub cache links files only where symlinks work")
-def test_the_text_report_names_the_file_it_removed(two_models, capsys):
-    _retired_link(two_models, "org/encoder")
+def test_no_hub_cache_at_all_retires_nothing_and_does_not_fail(
+    two_models: _FakeHub, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def no_cache() -> Any:
+        raise _CacheNotFound("no cache directory")
+
+    monkeypatch.setattr(two_models, "scan_cache_dir", no_cache)
+
+    assert install_models.main([]) == 0
+
+
+def test_the_text_report_names_the_revision_it_removed(
+    two_models: _FakeHub, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    two_models.cache.held = [RETIRED]
+    _fetched_by_this_vault(two_models, tmp_path, RETIRED[0])
 
     install_models.main([])
 
-    assert "fetched org/encoder@ffffffffffff; removed model.safetensors" in capsys.readouterr().out
-
-
-def _without_runtime(model: install_models.PinnedModel) -> install_models.PinnedModel:
-    return install_models.PinnedModel(
-        model.repo_id,
-        model.revision,
-        model.weights_file,
-        model.weights_sha256,
-        model.weights_bytes,
-        model.allow_patterns,
-        model.retired_files,
-        ("a_module_nobody_installed",),
+    assert "fetched org/encoder@ffffffffffff; removed org/old-encoder@eeeeeeeeeeee" in (
+        capsys.readouterr().out
     )
 
 
-def test_a_model_whose_runtime_is_absent_is_not_fetched(two_models, monkeypatch):
-    encoder, reranker = _pinned_to({"org/encoder": b"encoder weights", "org/reranker": b"reranker weights"})
-    monkeypatch.setattr(install_models, "pinned_models", lambda: (encoder, _without_runtime(reranker)))
+def test_a_model_whose_runtime_is_absent_is_not_fetched(
+    two_models: _FakeHub, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(
+        install_models, "_runtime_installed", lambda model: model.repo_id == "org/encoder"
+    )
 
     assert install_models.main([]) == 0
     assert [repo for repo, _, _ in two_models.downloads] == ["org/encoder"]
 
 
-def test_with_no_runtime_installed_there_is_nothing_to_fetch_and_no_failure(monkeypatch, capsys):
+def test_with_no_runtime_installed_there_is_nothing_to_fetch_and_no_failure(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
     """A base install's nightly `models` step is not a failed night."""
-    pins = tuple(_without_runtime(model) for model in install_models.pinned_models())
-    monkeypatch.setattr(install_models, "pinned_models", lambda: pins)
+    monkeypatch.setattr(install_models, "_runtime_installed", lambda _model: False)
     monkeypatch.setattr(install_models, "hub_library", lambda: None)
 
     assert install_models.main([]) == 0
     assert "nothing to fetch" in capsys.readouterr().out
+
+
+def test_forgetting_a_revision_that_cannot_be_written_keeps_the_previous_record(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    record = tmp_path / "verified.json"
+    record.write_text(json.dumps({"kept/model": [1], "gone/model": [2]}), encoding="utf-8")
+    monkeypatch.setattr(install_models, "_verification_record", lambda: record)
+
+    def refuse(_self: Path, _target: Path) -> Path:
+        raise OSError("disk full")
+
+    monkeypatch.setattr(Path, "replace", refuse)
+    install_models._forget_verification("gone/model")
+
+    assert json.loads(record.read_text(encoding="utf-8")) == {"kept/model": [1], "gone/model": [2]}

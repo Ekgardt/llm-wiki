@@ -329,21 +329,20 @@ jobs:
       - run: uv sync --locked --no-default-groups --extra hybrid
       - run: uv run --locked --no-sync python -c "import importlib.util; assert importlib.util.find_spec('pytest') is None"
       - run: uv run --locked --no-sync python -c "import os; from pathlib import Path; import numpy as np; path=Path(os.environ['LLM_WIKI_STATE_ROOT'])/'vector.npy'; path.parent.mkdir(parents=True, exist_ok=True); np.save(path, np.array([1,2,3])); assert np.load(path).tolist()==[1,2,3]"
-      # The extra is search: the encoder on ONNX Runtime and the reranker on torch
+      # The extra is search: the encoder and the reranker on OpenVINO
       # (docs/research/2026-09-25-an-update-brings-the-extras-the-operator-chose.md).
       # Model weights are not fetched here: the read path is local-only and says
       # so when they are absent.
-      - run: uv run --locked --no-sync python -c "import onnxruntime, tokenizers, huggingface_hub"
-      - run: uv run --locked --no-sync python -c "import torch, transformers"
+      - run: uv run --locked --no-sync python -c "import openvino, tokenizers, huggingface_hub"
       - run: uv run --locked --no-sync python scripts/search_memory.py "installation"
-      # The real encoder, end to end: fetch the pinned ONNX weights (470 MB, cached;
-      # the 2.3 GB reranker stays out of CI), build a generation with vectors, and
+      # The real encoder, end to end: fetch the pinned weights (2.3 GB, cached;
+      # the 0.6 GB reranker stays out of CI), build a generation with vectors, and
       # require the search to answer with the dense signal. Before this nothing in CI
       # reached the model session (audit B-28,
       # docs/research/2026-09-25-ci-runs-the-real-encoder.md).
       - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
-          path: ~/.cache/huggingface/hub/models--intfloat--multilingual-e5-small
+          path: ${{ env.LLM_WIKI_STATE_ROOT }}/cache/models/BAAI--bge-m3
           key: hf-encoder-${{ hashFiles('scripts/embedding_model.py') }}
       - name: Fetch the pinned encoder
         run: >-

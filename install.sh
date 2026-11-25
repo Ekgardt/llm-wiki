@@ -147,13 +147,20 @@ add_codex_mcp_block() {
   block="$(printf '%s\n' \
     '[mcp_servers.llm-wiki]' \
     'command = "uv"' \
-    "args = [\"run\", \"--locked\", \"--no-sync\", \"--directory\", $vault_json, \"python\", \"scripts/mcp_server.py\"]")"
+    "args = [\"run\", \"--locked\", \"--no-sync\", \"--directory\", $vault_json, \"python\", \"scripts/mcp_server.py\"]" \
+    'omit_tools_from = ["deferred"]')"
   write_codex_mcp_block "$block" "$config"
 }
 
 codex_mcp_state_status() {
   case "$1" in
     equivalent) return 0 ;;
+    deferred)
+      # config.toml is never rewritten in place. The entry may already list other surfaces,
+      # and TOML refuses a second omit_tools_from key, so the advice covers both cases.
+      warn 'Codex hides the llm-wiki tools behind tool search. In [mcp_servers.llm-wiki], add "deferred" to its omit_tools_from list,'
+      warn '  or, when the entry has no omit_tools_from, add the line: omit_tools_from = ["deferred"]'
+      return 0 ;;
     conflict|invalid) return 2 ;;
     *) return 1 ;;
   esac
@@ -824,7 +831,6 @@ esac
 info "Optional: install hybrid search (BM25 + vector + reranker)?"
 info "  uv sync --locked --no-default-groups --inexact --extra hybrid"
 info "  uv sync --locked --no-default-groups --inexact --extra code-graph"
-info "  uv sync --locked --no-default-groups --inexact --extra reranker"
 
 # ─── 10. Print summary ─────────────────────────────────────────────
 
@@ -866,5 +872,4 @@ echo "MCP baseline: 12 local task-shaped tools (installed)"
 echo "Optional enhancements:"
 echo "  uv sync --locked --no-default-groups --inexact --extra hybrid"
 echo "  uv sync --locked --no-default-groups --inexact --extra code-graph"
-echo "  uv sync --locked --no-default-groups --inexact --extra reranker"
 echo ""

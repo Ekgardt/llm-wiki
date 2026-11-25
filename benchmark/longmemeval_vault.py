@@ -33,6 +33,7 @@ import tempfile
 import time
 from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
+from typing import Any
 
 REPO = Path(__file__).resolve().parent.parent
 BUILD_DEADLINE_SECONDS = 900.0
@@ -357,10 +358,12 @@ def _key_the_haystack(
         store.close()
 
 
-def profile_for(question_text: str) -> str:
-    from retrieval import analyze_query
+def planned_profile() -> str:
+    """The profile retrieval runs for a question, as the row reports it."""
+    from retrieval import PLANNED_PROFILE
 
-    return analyze_query(question_text).recommended_profile.upper()
+    planned: str = PLANNED_PROFILE
+    return planned
 
 
 def _searchable(question_text: str, question_date: str) -> str:
@@ -380,14 +383,18 @@ def _searchable(question_text: str, question_date: str) -> str:
 
 def _retrieved_rows(
     question_text: str,
-    profile: str,
     limit: int | None = None,
     *,
     rerank: bool = True,
     since: str | None = None,
     as_of: str | None = None,
 ) -> list[dict]:
-    """The candidates for one query; a sub-query skips the cross-encoder; a dated leg bounds the days."""
+    """The candidates for one query.
+
+    A sub-query skips the cross-encoder; a dated leg bounds the days.
+
+    No profile is passed: retrieval plans the legs as it does for the product.
+    """
     from retrieval import retrieve_via_search_memory
 
     return list(
@@ -395,7 +402,6 @@ def _retrieved_rows(
             question_text,
             limit=limit or _qa_candidates(),
             semantic=True,
-            profile=profile,
             rerank=rerank,
             since=since,
             as_of=as_of,
@@ -591,16 +597,17 @@ def _instrumented_generator(metrics: dict, gold: str = "", evidence: Sequence = 
     for 2 of 50 questions, including 0 of the 17 the system answered, so it
     measured nothing. These read the prompt the model actually received.
     """
-    from llm_client import call_llm
+    from llm_client import call_llm, system_with_schema
 
     needle = " ".join(str(gold).split()).casefold()
     windows = list(evidence)
 
-    def generate(prompt: str, system_prompt: str, max_tokens: int) -> str | None:
+    def generate(prompt: str, system_prompt: str, schema: dict[str, object] | None) -> str | None:
         _count_call(metrics, system_prompt)
+        sent_system = system_with_schema(system_prompt, schema)
         metrics["prompt_chars"] = len(prompt)
         metrics["prompt_bytes"] = len(prompt.encode("utf-8"))
-        metrics["system_chars"] = len(system_prompt)
+        metrics["system_chars"] = len(sent_system)
         metrics["est_prompt_tokens"] = round(len(prompt) / 4)
         # What the model is actually charged for. `est_prompt_tokens` counts the
         # user prompt only, so every token-cost figure this stand has produced
@@ -613,12 +620,12 @@ def _instrumented_generator(metrics: dict, gold: str = "", evidence: Sequence = 
         # second look pays for its answer prompt again, and a per-call figure
         # would hide exactly the cost the second look must justify.
         metrics["est_total_prompt_tokens"] = metrics.get("est_total_prompt_tokens", 0) + round(
-            (len(prompt) + len(system_prompt)) / 4
+            (len(prompt) + len(sent_system)) / 4
         )
         _record_prompt_evidence(metrics, prompt, needle, windows)
         started = time.monotonic()
         try:
-            reply = call_llm(prompt, system_prompt, max_tokens)
+            reply = call_llm(prompt, system_prompt, schema=schema)
             # What the citation gates may be about to destroy. Measured
             # 2026-09-01: 28 of 200 answers were produced and then thrown away
             # by `verify_grounded_answer`, and the row kept only the gate's
@@ -738,7 +745,7 @@ def _compile_trace_metrics(context: object) -> dict[str, object]:
 def _measured_compile(root: Path, snapshot: object, rows: list[dict], profile: str) -> dict:
     """One extra compile, for its trace only. No provider call, no effect on the answer."""
     from context_budget import ContextBudget
-    from query_memory import QA_MAX_OUTPUT_TOKENS, build_grounded_context
+    from query_memory import QA_OUTPUT_RESERVE_BYTES, build_grounded_context
 
     try:
         context = build_grounded_context(
@@ -746,7 +753,7 @@ def _measured_compile(root: Path, snapshot: object, rows: list[dict], profile: s
             rows,
             vault=root,
             profile=profile,
-            budget=ContextBudget(None, _answer_budget(), QA_MAX_OUTPUT_TOKENS, 512),
+            budget=ContextBudget(None, _answer_budget(), QA_OUTPUT_RESERVE_BYTES, 512),
         )
     except Exception:  # noqa: BLE001 - a measurement never fails the question
         return {}
@@ -767,7 +774,7 @@ def _answer_outcome(
     chosen: str = "refuse",
 ) -> dict:
     from context_budget import ContextBudget
-    from query_memory import QA_MAX_OUTPUT_TOKENS, grounded_qa
+    from query_memory import QA_OUTPUT_RESERVE_BYTES, grounded_qa
 
     try:
         document = grounded_qa(
@@ -780,7 +787,7 @@ def _answer_outcome(
             keep_unverified=chosen == "answer",
             generator=_instrumented_generator(metrics, gold, evidence),
             profile=profile,
-            budget=ContextBudget(None, _answer_budget(), QA_MAX_OUTPUT_TOKENS, 512),
+            budget=ContextBudget(None, _answer_budget(), QA_OUTPUT_RESERVE_BYTES, 512),
             deadline=time.monotonic() + ANSWER_DEADLINE_SECONDS,
         )
     except Exception as exc:  # noqa: BLE001 - every failure is a scored outcome
@@ -818,11 +825,11 @@ def retrieval_only() -> bool:
     return os.environ.get(RETRIEVAL_ONLY_VARIABLE, "").strip() == "1"
 
 
-def _retrieval_only_outcome(question: dict, searchable: str, profile: str) -> dict:
+def _retrieval_only_outcome(question: dict[str, Any], searchable: str) -> dict[str, Any]:
     """Coverage at 12, 24 and 48 from one deeper ranking, and no answer."""
     from longmemeval_coverage import coverage_at_depths
 
-    deep = _retrieved_rows(searchable, profile, DEEPEST_DEPTH)
+    deep = _retrieved_rows(searchable, DEEPEST_DEPTH)
     return {
         "status": "retrieval_only",
         "coverage_depths": coverage_at_depths(question, deep),
@@ -838,10 +845,18 @@ def _evidence_windows(question: Mapping[str, object]) -> list[tuple[str, ...]]:
     return evidence_turns(question)
 
 
-def _answer_or_coverage(question, root, snapshot, rows, metrics, profile, searchable):
+def _answer_or_coverage(
+    question: dict[str, Any],
+    root: Path,
+    snapshot: object,
+    rows: list[dict[str, Any]],
+    metrics: dict[str, Any],
+    profile: str,
+    searchable: str,
+) -> dict[str, Any]:
     """The reader's outcome, or — in a retrieval-only run — coverage in its place."""
     if retrieval_only():
-        return _retrieval_only_outcome(question, searchable, profile)
+        return _retrieval_only_outcome(question, searchable)
     return _answer_outcome(
         dated_question(question), root, snapshot, rows, metrics, profile,
         str(question.get("answer", "")),
@@ -851,9 +866,9 @@ def _answer_or_coverage(question, root, snapshot, rows, metrics, profile, search
         evidence=_evidence_windows(question),
         # The second look's way of asking for more than the first twelve, and
         # for what a fanned-out sub-query finds, without the cross-encoder.
-        retrieve=lambda limit: _retrieved_rows(searchable, profile, limit),
+        retrieve=lambda limit: _retrieved_rows(searchable, limit),
         search=lambda query, limit, **window: _retrieved_rows(
-            query, profile, limit, rerank=False, **window
+            query, limit, rerank=False, **window
         ),
         chosen=policy(),
     )
@@ -872,10 +887,10 @@ def run_question(question: dict, work: Path) -> dict:
     snapshot, build_info = build_generation(root, state, daily_files)
     _warm_reranker()
     plain = str(question["question"])
-    profile = profile_for(plain)
+    profile = planned_profile()
     retrieve_started = time.monotonic()
     searchable = _searchable(plain, str(question["question_date"]))
-    rows = _retrieved_rows(searchable, profile)
+    rows = _retrieved_rows(searchable)
     answer_started = time.monotonic()
     metrics: dict = {}
     outcome = _answer_or_coverage(

@@ -48,7 +48,7 @@ import sys
 import threading
 import time
 from collections import OrderedDict
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from contextvars import ContextVar
 from dataclasses import asdict
 from pathlib import Path, PureWindowsPath
@@ -628,6 +628,46 @@ ANSWER_BUDGET_SCHEMA_FIELDS = {
     },
 }
 
+# Filters of a plain recall: every leg of the search obeys them, so the answer
+# is filled from matching pages instead of being cut down afterwards. The dates
+# order the answer rather than cut it: pages outside them follow the ones inside.
+RECALL_FILTER_SCHEMA_FIELDS = {
+    "project": {
+        "type": "string",
+        "maxLength": MAX_MCP_SLUG_LENGTH,
+        "description": "Only pages of this project, any case",
+    },
+    "since": {
+        "type": "string",
+        "maxLength": 10,
+        "description": "Rank pages dated from this day first, YYYY-MM-DD",
+    },
+    "as_of": {
+        "type": "string",
+        "maxLength": 10,
+        "description": "Rank pages valid this day first, YYYY-MM-DD",
+    },
+    "type": {
+        "type": "string",
+        "maxLength": MAX_MCP_SLUG_LENGTH,
+        "description": "Only pages of this frontmatter type, e.g. decision",
+    },
+    "path_prefix": {
+        "type": "string",
+        "maxLength": MAX_MCP_SLUG_LENGTH,
+        "description": "Only paths under this prefix, e.g. knowledge/notes/",
+    },
+}
+# The recall argument each filter is read from, by its search keyword.
+RECALL_FILTER_ARGUMENTS = {
+    "project": "project",
+    "since": "since",
+    "as_of": "as_of",
+    "page_type": "type",
+    "path_prefix": "path_prefix",
+}
+RECALL_DATE_FILTERS = ("since", "as_of")
+
 TOOL_INPUT_SCHEMAS = {
     "recall": {
         "type": "object",
@@ -652,6 +692,7 @@ TOOL_INPUT_SCHEMAS = {
                 "enum": list(QA_PROFILES),
                 "description": "Grounded QA retrieval profile",
             },
+            **RECALL_FILTER_SCHEMA_FIELDS,
         },
         "required": ["query"],
         "allOf": [
@@ -904,6 +945,7 @@ def _search_vault(
     deadline: float | None = None,
     trace_sink: dict[str, object] | None = None,
     caller: SearchCaller = RECALL_CALLER,
+    filters: Mapping[str, str] | None = None,
 ) -> list[dict]:
     """Run hybrid search on the vault; the planner trace lands in `trace_sink`.
 
@@ -920,10 +962,18 @@ def _search_vault(
     try:
         _check_deadline(hybrid_deadline)
         return _run_vault_search(
-            query, limit, hybrid_deadline, semantic=True, trace_sink=trace_sink, caller=caller
+            query,
+            limit,
+            hybrid_deadline,
+            semantic=True,
+            trace_sink=trace_sink,
+            caller=caller,
+            filters=filters,
         )
     except TimeoutError:
-        return _lexical_after_deadline(query, limit, operation_deadline, trace_sink, caller)
+        return _lexical_after_deadline(
+            query, limit, operation_deadline, trace_sink, caller, filters
+        )
 
 
 def _lexical_after_deadline(
@@ -932,6 +982,7 @@ def _lexical_after_deadline(
     operation_deadline: float,
     trace_sink: dict[str, object] | None,
     caller: SearchCaller = RECALL_CALLER,
+    filters: Mapping[str, str] | None = None,
 ) -> list[dict]:
     """The hybrid run hit its deadline: one lexical pass, marked as the fallback it is."""
     lexical = _run_vault_search(
@@ -943,6 +994,7 @@ def _lexical_after_deadline(
         rerank=False,
         trace_sink=trace_sink,
         caller=caller,
+        filters=filters,
     )
     if trace_sink is not None:
         trace_sink.update(_lexical_fallback_row({}))
@@ -968,6 +1020,7 @@ def _run_vault_search(
     rerank: bool = True,
     trace_sink: dict[str, object] | None = None,
     caller: SearchCaller = RECALL_CALLER,
+    filters: Mapping[str, str] | None = None,
 ) -> list[dict]:
     from search_memory import search
 
@@ -986,13 +1039,21 @@ def _run_vault_search(
         emit_telemetry=caller.emit_telemetry,
         deadline_monotonic=operation_deadline,
         trace_sink=trace_sink,
+        **(filters or {}),
     )
+
+
+def _semantic_plan() -> str:
+    """The profile the semantic run a fallback replaces had planned."""
+    from retrieval import planned_request
+
+    return str(planned_request(None, semantic=True)[0])
 
 
 def _lexical_fallback_row(row: dict) -> dict:
     return {
         **row,
-        "requested_mode": "HYBRID",
+        "requested_mode": _semantic_plan(),
         "fallback_reason": "retrieval_deadline_exceeded",
         "partial": True,
     }
@@ -1026,14 +1087,11 @@ def _row_trace(row: Mapping[str, object]) -> dict[str, object]:
     return _reported_trace({**row, "corpus_generation": row.get("generation")})
 
 
-def _unreported_trace(query: str) -> dict[str, object]:
+def _unreported_trace() -> dict[str, object]:
     """Nothing reported a trace: say so, and never guess a generation."""
-    from retrieval import analyze_query, planned_request
-
-    requested, _signals = planned_request(None, analyze_query(query), semantic=True)
     return _reported_trace(
         {
-            "requested_mode": requested,
+            "requested_mode": _semantic_plan(),
             "effective_mode": "BASE",
             "fallback_reason": "trace_unavailable",
             "partial": True,
@@ -1048,7 +1106,7 @@ def _carries_trace(mapping: object, *, generation_key: str) -> bool:
 
 
 def _retrieval_trace(
-    query: str, results: list[dict], reported: Mapping[str, object] | None = None
+    results: list[dict[str, object]], reported: Mapping[str, object] | None = None
 ) -> dict[str, object]:
     """The planner trace: reported by the search itself, else recovered from rows.
 
@@ -1061,7 +1119,7 @@ def _retrieval_trace(
     elif results and _carries_trace(results[0], generation_key="generation"):
         trace = _row_trace(results[0])
     else:
-        trace = _unreported_trace(query)
+        trace = _unreported_trace()
     from reliable_memory import validate_schema
 
     validate_schema(trace, RETRIEVAL_TRACE_SCHEMA)
@@ -4236,11 +4294,17 @@ def _build_tool_definitions() -> list:
     ]
 
 
+# Claude Code defers MCP tools behind its tool search by default; a tool that
+# carries this key is loaded with the session instead
+# (docs/research/2026-11-17-every-memory-tool-is-visible.md).
+ALWAYS_LOAD_META = {"anthropic/alwaysLoad": True}
+
+
 def _make_tool(**kwargs):
-    """Create a tool with structured output metadata when the SDK supports it."""
+    """Create a tool that loads with the session, with structured output when supported."""
     if MCP_STRUCTURED_OUTPUT_AVAILABLE:
         kwargs["outputSchema"] = envelope_schema()
-    return Tool(**kwargs)
+    return Tool(**kwargs, _meta=ALWAYS_LOAD_META)
 
 
 def _meta(*, deadline: float | None = None) -> dict:
@@ -5599,8 +5663,8 @@ def _is_memory_path(relative: str) -> bool:
 def _requested_signals(trace: dict) -> tuple[str, ...]:
     """The signals the requested mode declares, and any that ran besides.
 
-    Graph is not 'missing' when never asked for; dense that a planned GRAPH run
-    added is reported, not dropped.
+    Graph is not 'missing' when never asked for; a signal a caller planned beside
+    its profile is reported, not dropped.
     """
     from retrieval import PROFILE_SIGNALS
 
@@ -5777,6 +5841,12 @@ def _components_for(name: str, data) -> dict[str, dict[str, object]]:
     return builder(data)
 
 
+def _require_no_grounded_filters(filters: Mapping[str, str]) -> None:
+    """The grounded answer plans its own retrieval and takes no filters."""
+    if filters:
+        raise ValueError("filters apply to a plain recall, not a grounded one")
+
+
 def _grounded_recall(arguments: dict, deadline: float):
     from memory_state import ROOT
     from query_memory import grounded_qa
@@ -5789,25 +5859,157 @@ def _grounded_recall(arguments: dict, deadline: float):
     )
 
 
+def _recall_filters(arguments: Mapping[str, object]) -> dict[str, str]:
+    """The filters a recall asked for, by their search keyword; dates must be days."""
+    filters = {
+        keyword: str(arguments[name])
+        for keyword, name in RECALL_FILTER_ARGUMENTS.items()
+        if arguments.get(name)
+    }
+    for keyword in RECALL_DATE_FILTERS:
+        _require_day(keyword, filters.get(keyword))
+    return filters
+
+
+def _require_day(name: str, value: str | None) -> None:
+    if value is None:
+        return
+    if _parsed_day(value) != value:
+        raise ValueError(f"argument '{name}' must be a day as YYYY-MM-DD")
+
+
+def _parsed_day(value: str) -> str | None:
+    """The day `value` names in the exact YYYY-MM-DD form the search compares as text."""
+    try:
+        return dt.datetime.strptime(value, "%Y-%m-%d").date().isoformat()
+    except ValueError:
+        return None
+
+
 def _tool_recall(arguments: dict, deadline: float):
+    filters = _recall_filters(arguments)
     if arguments.get("grounded", False):
+        _require_no_grounded_filters(filters)
         return _grounded_recall(arguments, deadline), False
     effective_limit, limit_clamped = _clamped_limit(arguments.get("limit", 8))
     reported: dict[str, object] = {}
-    results = _call_with_deadline(
-        _search_vault,
-        arguments["query"],
-        limit=effective_limit,
-        deadline=deadline,
-        trace_sink=reported,
-    )
-    trace = _retrieval_trace(arguments["query"], results, reported)
+    results = _recall_results(arguments["query"], filters, effective_limit, deadline, reported)
+    trace = _retrieval_trace(results, reported)
     data = {
         "results": [_agent_row(row) for row in results],
         "retrieval_trace": trace,
         "_meta": _call_with_deadline(_meta, deadline=deadline),
     }
     return data, limit_clamped
+
+
+Rows = list[dict[str, object]]
+RecallSearch = Callable[[Mapping[str, str], dict[str, object]], Rows]
+# A dated recall merges two searches, so it logs its impressions once, for the rows it shows.
+DATED_RECALL_CALLER = SearchCaller(RECALL_CALLER.source_tool, False)
+
+
+def _recall_results(
+    query: str,
+    filters: Mapping[str, str],
+    limit: int,
+    deadline: float,
+    reported: dict[str, object],
+) -> Rows:
+    undated = _without_dates(filters)
+    if len(undated) == len(filters):
+        return _recall_search(query, limit, deadline, filters, reported)
+    search = functools.partial(
+        _recall_search, query, limit, deadline, caller=DATED_RECALL_CALLER
+    )
+    rows = _dated_first(search(filters, reported), search, undated, limit, reported)
+    _record_shown_impressions(query, rows, reported)
+    return rows
+
+
+def _recall_search(
+    query: str,
+    limit: int,
+    deadline: float,
+    filters: Mapping[str, str],
+    reported: dict[str, object],
+    caller: SearchCaller = RECALL_CALLER,
+) -> Rows:
+    rows: Rows = _call_with_deadline(
+        _search_vault,
+        query,
+        limit=limit,
+        deadline=deadline,
+        trace_sink=reported,
+        caller=caller,
+        filters=filters,
+    )
+    return rows
+
+
+def _dated_first(
+    dated: Rows,
+    search: RecallSearch,
+    undated: Mapping[str, str],
+    limit: int,
+    reported: dict[str, object],
+) -> Rows:
+    """The pages inside the asked dates, then the best pages outside them up to the limit."""
+    if len(dated) >= limit:
+        return dated
+    return [*dated, *_rows_not_in(_fill_rows(search, undated, reported), dated)][:limit]
+
+
+def _fill_rows(
+    search: RecallSearch, undated: Mapping[str, str], reported: dict[str, object]
+) -> Rows:
+    """The best pages outside the dates; a fill that runs out of time keeps the dated answer."""
+    filled: dict[str, object] = {}
+    try:
+        rows = search(undated, filled)
+    except TimeoutError:
+        filled = _lexical_fallback_row({})
+        rows = []
+    _merge_fill_trace(reported, filled)
+    return rows
+
+
+def _merge_fill_trace(reported: dict[str, object], filled: Mapping[str, object]) -> None:
+    """The answer is partial when either search was, and names every signal either used."""
+    signals = [*_signals(reported), *_signals(filled)]
+    reported["signals_used"] = list(dict.fromkeys(signals))
+    if not filled.get("partial"):
+        return
+    reported["partial"] = True
+    reported["fallback_reason"] = reported.get("fallback_reason") or filled.get("fallback_reason")
+
+
+def _signals(trace: Mapping[str, object]) -> list[object]:
+    signals = trace.get("signals_used")
+    return list(signals) if isinstance(signals, (list, tuple)) else []
+
+
+def _record_shown_impressions(query: str, rows: Rows, reported: Mapping[str, object]) -> None:
+    from retrieval import _record_impressions
+
+    generation = str(reported.get("corpus_generation") or "legacy")
+    _record_impressions(
+        rows, query=query, corpus_generation=generation, source_tool=RECALL_CALLER.source_tool
+    )
+
+
+def _without_dates(filters: Mapping[str, str]) -> dict[str, str]:
+    """The filters a date-free fill search keeps: project, type and path still narrow it."""
+    return {key: value for key, value in filters.items() if key not in RECALL_DATE_FILTERS}
+
+
+def _rows_not_in(rows: Rows, kept: Rows) -> Rows:
+    seen = {_row_identity(row) for row in kept}
+    return [row for row in rows if _row_identity(row) not in seen]
+
+
+def _row_identity(row: Mapping[str, object]) -> object:
+    return row.get("candidate_id") or row.get("path")
 
 
 # What an agent reads from a recall row: the page and its score. The trace is
@@ -5861,7 +6063,7 @@ def _tool_get_decisions(arguments: dict, deadline: float):
     )
     data = {
         "results": results,
-        "retrieval_trace": _retrieval_trace(query or "decision", results, reported),
+        "retrieval_trace": _retrieval_trace(results, reported),
         "_meta": _call_with_deadline(_meta, deadline=deadline),
     }
     return data, limit_clamped

@@ -1,0 +1,5 @@
+{"tests": ["test_a_name_that_is_no_provider_yields_none", "test_forced_invalid_http_provider_returns_none_without_secret_log", "test_real_http_provider_descriptors_are_float_free"],
+ "kinds": ["cases"],
+ "reason": "Each dropped only its 'ollama' case because 'ollama' is no longer a provider since 2026-11-21 (owner message 263016509/16398). test_a_name_that_is_no_provider_yields_none keeps its other cases and now asserts that 'ollama' yields no provider, beside a new 'openai' case; test_forced_invalid_http_provider_returns_none_without_secret_log keeps its 'openai' case, the one HTTP provider left. test_real_http_provider_descriptors_are_float_free keeps its 'openai' case and drops 'ollama' for the same reason.",
+ "recorded": "2026-11-21",
+ "expires": "2027-02-19"}

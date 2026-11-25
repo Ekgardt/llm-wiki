@@ -13,11 +13,10 @@ pages, and gives the next session — in any of those agents — the decisions, 
 and project state it needs. You stop explaining the same thing twice.
 
 Storage, capture, search and the MCP server run locally. Turning sessions into pages
-needs a language model: the one you configure, or the first one found among OpenCode,
-Codex, Claude, OpenAI and Ollama. Only Ollama is local; the others are cloud services,
-so auto-detection is not a local-only guarantee. Current version: **5.0.0**.
-
-**Languages:** [English](README.md) | [Русский](README.ru.md) | [简体中文](README.zh-CN.md)
+needs a language model: an agent CLI you already have (OpenCode, Codex, Claude), or any
+OpenAI-compatible API by its address — a cloud one, or a local server such as Ollama,
+LM Studio or vLLM. Only a local server keeps prompts on the machine, so auto-detection
+is not a local-only guarantee. Current version: **5.0.0**.
 
 ---
 
@@ -198,8 +197,10 @@ are in: a page compiled from one project's sessions carries `project:` and does 
 reach another project's sessions.
 
 **Search that says how it answered.** Lexical search (BM25) is the base; the `hybrid`
-extra adds multilingual vectors (`intfloat/multilingual-e5-small` on ONNX Runtime)
-and a cross-encoder reranker (`BAAI/bge-reranker-v2-m3`), and relation questions add
+extra adds multilingual vectors (`BAAI/bge-m3`) and a cross-encoder reranker
+(`Horizon-Labs/multilingual-reranker-base`), both on OpenVINO on the CPU with Intel's
+usage telemetry declined before the first load, so a question in one language finds a
+page written in another; every search also asks
 the evidence graph. Ranking weighs where a claim came from (you, the web, a model, a
 guess) and what kind of page holds it. Every answer reports the mode it asked for, the
 signals it actually used, and why it fell back. Until the first index is built, search
@@ -333,7 +334,7 @@ different datasets.
 
 Contributions are welcome. The bar is "does this survive a real multi-agent
 workflow?". See [CONTRIBUTING.md](CONTRIBUTING.md) for setup, coding standards and the
-release checklist (the three READMEs, CHANGELOG and version change together).
+release checklist (the README, CHANGELOG and version change together).
 
 ---
 
