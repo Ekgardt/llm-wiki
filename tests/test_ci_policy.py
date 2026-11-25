@@ -202,6 +202,20 @@ def test_the_shards_cover_every_test_file_exactly_once() -> None:
     assert all(shard for shard in shards)
 
 
+def test_a_shard_runs_its_files_serially(monkeypatch) -> None:
+    """The `-n auto` default must not reach a shard: the shards are the parallelism."""
+    from tests import shard_plan
+
+    commands: list[list[str]] = []
+    monkeypatch.setattr(
+        shard_plan.subprocess, "call", lambda command: commands.append(command) or 0
+    )
+
+    shard_plan.main(["--shard", "1", "--of", str(SHARD_COUNT), "--", "-q"])
+
+    assert commands[0][1:5] == ["-m", "pytest", "-n", "0"]
+
+
 CLEAN_PROFILES = (
     ("clean-hybrid", "hybrid"),
     ("clean-code-graph", "code-graph"),
