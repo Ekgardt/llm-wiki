@@ -1,0 +1,7 @@
+{"tests": ["test_unix_installer_trusts_smoke_exit_status",
+           "::tests.test_integration_injection::test_unix_installer_trusts_smoke_exit_status[smoke_exit_0_failure_output]",
+           "::tests.test_integration_injection::test_unix_installer_trusts_smoke_exit_status[smoke_exit_1_success_output]"],
+ "kinds": ["assertions"],
+ "reason": "The test checks that the installer trusts the smoke's exit status, not its timer, yet it gave the fake smoke only 5 s. On a loaded checker host the timer fired after the fake had printed everything ('Production smoke timed out after 5s'), so it failed for the machine being busy. It now uses the module's _SMOKE_TIMEOUT_SECONDS (15 s, still below SHORT_TIMEOUT), the bound the timeout test beside it already chose for the same race; the assertions are unchanged.",
+ "recorded": "2026-11-26",
+ "expires": "2027-02-24"}
