@@ -1,4 +1,4 @@
-{"tests": ["test_both_models_run_in_exact_f32_unless_told_auto"],
+{"tests": ["test_both_models_run_in_exact_f32_unless_told_auto", "::tests.test_openvino_sends_nothing::test_both_models_run_in_exact_f32_unless_told_auto"],
  "kinds": ["removed"],
  "reason": "Owner message 263016509/19895 (task 352, item 3): if f32 does not win significantly on Russian and cross-language questions, make `auto` the default again. On 4 760 paired XQuAD searches f32 ranked no better (MRR difference at most 0.001, sign test p >= 0.69 in every crossing) and searched 1.26-1.43x slower. The test pinned f32 as the default and is replaced, under a name that says what it now asserts, by test_both_models_leave_the_precision_to_the_engine_unless_told_f32, which asserts the engine's choice; test_the_stand_thread_count_and_the_f32_switch_reach_the_compiler still asserts that f32 reaches the compiler when asked.",
  "recorded": "2026-11-27",
