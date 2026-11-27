@@ -24,7 +24,9 @@ from tests.slow_machine import LONG_TIMEOUT, SHORT_TIMEOUT
 PAGE = "knowledge/notes/auth.md"
 
 
-def test_impressions_are_written_after_the_search_returns(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_impressions_are_written_after_the_search_returns(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     disk = threading.Event()
     written: list[RetrievalEvent] = []
 
