@@ -2,14 +2,17 @@
 from __future__ import annotations
 
 import hashlib
+import queue
 import re
 import sqlite3
+import threading
 import uuid
 from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+from bounded_thread import BoundedThread
 from iso_time import utc_text
 from memory_state import STATE_ROOT
 from reliable_memory import (
@@ -463,6 +466,52 @@ def best_effort_record_event(
     max_rows: int = DEFAULT_MAX_ROWS,
 ) -> bool:
     return best_effort_record_events([event], db_path=db_path, max_rows=max_rows)
+
+
+# Batches a request handed over, each with the database it was meant for. A
+# write commits with `synchronous=FULL`, the setting SQLite requires for a
+# rollback journal to survive a power loss without corruption; its flushes took
+# 40-220 ms per search on the vault disk (measured 2026-11-27) while the search
+# waited. The writer thread does that wait instead. It is not a daemon, so the
+# interpreter finishes the queue before it exits; it ends when the queue is empty.
+_WAITING: queue.SimpleQueue[tuple[list[RetrievalEvent], Path]] = queue.SimpleQueue()
+_WRITER_LOCK = threading.Lock()
+_writer: BoundedThread | None = None
+
+
+def record_events_later(events: Sequence[RetrievalEvent]) -> None:
+    """Hand a batch to the writer thread and return without waiting for the disk."""
+    global _writer
+    if not events:
+        return
+    with _WRITER_LOCK:
+        _WAITING.put((list(events), Path(TELEMETRY_DB)))
+        if _writer is None or not _writer.is_alive():
+            _writer = BoundedThread(target=_write_waiting, name="llm-wiki-telemetry")
+            _writer.start()
+
+
+def _next_waiting() -> tuple[list[RetrievalEvent], Path] | None:
+    global _writer
+    with _WRITER_LOCK:
+        try:
+            return _WAITING.get_nowait()
+        except queue.Empty:
+            _writer = None
+            return None
+
+
+def _write_waiting() -> None:
+    while (waiting := _next_waiting()) is not None:
+        best_effort_record_events(waiting[0], db_path=waiting[1])
+
+
+def flush_events_later() -> None:
+    """Wait until every batch handed to `record_events_later` is written or recorded as dropped."""
+    with _WRITER_LOCK:
+        writer = _writer
+    if writer is not None:
+        writer.join()
 
 
 def _readonly_database(path: Path) -> sqlite3.Connection | None:

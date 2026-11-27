@@ -1281,11 +1281,11 @@ def _without_empty_claim_fields(document: object) -> object:
     """
     if not isinstance(document, dict):
         return document
-    stray = {
-        name for name in _claim_only_fields()
-        if name in document and document[name] in _EMPTY_VALUES
-    }
-    return {name: value for name, value in document.items() if name not in stray}
+    return {name: value for name, value in document.items() if not _states_nothing(name, value)}
+
+
+def _states_nothing(name: str, value: object) -> bool:
+    return name in _claim_only_fields() and value in _EMPTY_VALUES
 
 
 @functools.lru_cache(maxsize=1)
@@ -2504,7 +2504,7 @@ def _write_refused_events(
 
 
 def _write_outcome_events(question: str, context: GroundedContext, outcome: str) -> None:
-    from retrieval_telemetry import best_effort_make_event, best_effort_record_events
+    from retrieval_telemetry import best_effort_make_event, record_events_later
 
     paths = sorted({item.relative_path for item in context.evidence})
     events = [
@@ -2519,7 +2519,7 @@ def _write_outcome_events(question: str, context: GroundedContext, outcome: str)
         )
         for path in paths
     ]
-    best_effort_record_events([event for event in events if event is not None])
+    record_events_later([event for event in events if event is not None])
 
 
 def _record_cited_evidence(
@@ -2552,7 +2552,7 @@ def _record_cited_evidence(
 
 
 def _write_cited_events(question: str, profile: str, paths: Sequence[str]) -> None:
-    from retrieval_telemetry import best_effort_make_event, best_effort_record_events
+    from retrieval_telemetry import best_effort_make_event, record_events_later
 
     events = [
         best_effort_make_event(
@@ -2566,7 +2566,7 @@ def _write_cited_events(question: str, profile: str, paths: Sequence[str]) -> No
         )
         for path in paths
     ]
-    best_effort_record_events([event for event in events if event is not None])
+    record_events_later([event for event in events if event is not None])
 
 
 def _require_bounded_question(question: object) -> None:

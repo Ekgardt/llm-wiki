@@ -1306,7 +1306,7 @@ def _record_page_reads(page_path: str, evidence: list) -> None:
     try:
         from retrieval_telemetry import (
             best_effort_make_event,
-            best_effort_record_events,
+            record_events_later,
         )
 
         kinds = [
@@ -1315,7 +1315,7 @@ def _record_page_reads(page_path: str, evidence: list) -> None:
         ]
         events = _page_read_events(best_effort_make_event, kinds)
         if events:
-            best_effort_record_events(events)
+            record_events_later(events)
     except Exception as exc:  # noqa: BLE001 - counted, never silent (audit OPS-21)
         _count_dropped_telemetry(exc)
 
@@ -1489,14 +1489,14 @@ def _record_decision_impressions(effective_query: str, results: list) -> None:
     try:
         from retrieval_telemetry import (
             best_effort_make_event,
-            best_effort_record_events,
+            record_events_later,
         )
 
         events = _decision_impression_events(
             best_effort_make_event, effective_query, results
         )
         if events:
-            best_effort_record_events(events)
+            record_events_later(events)
     except Exception as exc:  # noqa: BLE001 - counted, never silent (audit OPS-21)
         _count_dropped_telemetry(exc)
 
@@ -1754,12 +1754,12 @@ def _record_context_injections(selected_paths: set) -> None:
     try:
         from retrieval_telemetry import (
             best_effort_make_event,
-            best_effort_record_events,
+            record_events_later,
         )
 
         events = _context_injection_events(best_effort_make_event, selected_paths)
         if events:
-            best_effort_record_events(events)
+            record_events_later(events)
     except Exception as exc:  # noqa: BLE001 - counted, never silent (audit OPS-21)
         _count_dropped_telemetry(exc)
 

@@ -38,7 +38,7 @@ def _recorded(monkeypatch, rows: list[dict]) -> list:
     import retrieval_telemetry
 
     monkeypatch.setattr(
-        retrieval_telemetry, "best_effort_record_events", lambda events: written.extend(events)
+        retrieval_telemetry, "record_events_later", lambda events: written.extend(events)
     )
     retrieval._record_impressions(
         rows, query="who signs in", corpus_generation="g1", source_tool="search_memory"
