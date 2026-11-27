@@ -65,7 +65,7 @@ def test_an_answer_without_its_list_gets_the_ids_its_claims_carry():
     assert validated["citations"] == [{"citation_id": "E4"}, {"citation_id": "E2"}]
 
 
-def test_an_abstention_with_empty_claim_fields_beside_it_is_an_abstention():
+def test_an_abstention_with_empty_claim_fields_beside_it_is_an_abstention() -> None:
     # The reply of 0862e8bf_abs (task 337): a correct refusal that also wrote a
     # claim's `derivation: null` and `inputs: []` at the top level.
     refusal = _document(
@@ -81,7 +81,7 @@ def test_an_abstention_with_empty_claim_fields_beside_it_is_an_abstention():
     assert "derivation" not in validated and "inputs" not in validated
 
 
-def test_a_claim_field_with_content_beside_the_claims_is_still_refused():
+def test_a_claim_field_with_content_beside_the_claims_is_still_refused() -> None:
     from evidence_resolver import EvidenceResolutionError
 
     stray = _document(status="answered", claims=[], citations=[], derivation="sum")
@@ -90,22 +90,24 @@ def test_a_claim_field_with_content_beside_the_claims_is_still_refused():
         query_memory._validated_answer_document(stray)
 
 
-def test_an_answer_without_the_schema_version_gets_the_only_one_there_is():
+def test_an_answer_without_the_schema_version_gets_the_only_one_there_is() -> None:
     # 88432d0a and ef9cf60a (task 337): cited claims, no `schema_version`.
-    answer = _document(status="answered", claims=[{"text": "It has four bays.", "citation_ids": ["E4"]}])
+    answer = _document(
+        status="answered", claims=[{"text": "It has four bays.", "citation_ids": ["E4"]}]
+    )
     del answer["schema_version"]
 
     assert query_memory._validated_answer_document(answer)["schema_version"] == "grounded-answer/v1"
 
 
-def test_claims_without_a_status_are_an_answer():
+def test_claims_without_a_status_are_an_answer() -> None:
     # ed4ddc30 (task 337): cited claims, no `status`; an abstention carries no claim.
     answer = _document(claims=[{"text": "It has four bays.", "citation_ids": ["E4"]}])
 
     assert query_memory._validated_answer_document(answer)["status"] == "answered"
 
 
-def test_no_claims_and_no_status_is_still_refused():
+def test_no_claims_and_no_status_is_still_refused() -> None:
     from evidence_resolver import EvidenceResolutionError
 
     with pytest.raises(EvidenceResolutionError, match="schema validation failed"):
