@@ -7,11 +7,11 @@ event to Intel unless the consent file says no; a missing file counts as consent
 disk is left as it is. A consent that cannot be written stops the load: the
 memory sends nothing anywhere (owner message 17943).
 
-Both models run in exact f32 by default, the reference row the owner chose
-(owner messages 17943 and 18979): on the reranker it scored MRR@10 0.958 on the
-English set and 0.920 on the Russian one, against 0.958 and 0.911 for the
-engine's accelerated choice (bf16 where the CPU has it), which was 1.8x faster.
-`LLMWIKI_INFERENCE_PRECISION=auto` hands the choice back to the engine.
+Both models let the engine choose their precision (bf16 where the CPU has it).
+On 4 760 paired XQuAD searches over Russian and English questions and pages
+(2026-11-27), exact f32 ranked no better (MRR difference at most 0.001, sign
+test p >= 0.69 in every crossing) and searched 1.26-1.43x slower.
+`LLMWIKI_INFERENCE_PRECISION=f32` asks for exact f32.
 """
 from __future__ import annotations
 
@@ -74,6 +74,6 @@ def compiled_model(path: Path) -> Any:
 
 
 def precision_name() -> str:
-    """What the operator asked for: exact f32 unless told `auto`."""
+    """What the operator asked for: the engine's choice unless told `f32`."""
     asked = os.environ.get(PRECISION_ENV, "").strip().lower()
-    return ENGINE_CHOICE if asked == ENGINE_CHOICE else F32
+    return F32 if asked == F32 else ENGINE_CHOICE

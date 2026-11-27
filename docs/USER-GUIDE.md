@@ -812,8 +812,9 @@ on Windows) when no choice is recorded there, keep a choice that is, and
 do not load a model when it cannot write the file. `doctor` names the file
 when it holds anything but `0`.
 
-Both models run in exact f32; `LLMWIKI_INFERENCE_PRECISION=auto` lets OpenVINO
-pick a faster precision for the CPU (bf16 where the CPU has it). `OMP_NUM_THREADS`
+Both models let OpenVINO pick the precision for the CPU (bf16 where the CPU has
+it); `LLMWIKI_INFERENCE_PRECISION=f32` asks for exact f32, which ranked no better
+on Russian and English questions and searched about 1.3x slower (2026-11-27). `OMP_NUM_THREADS`
 sets how many threads each model uses.
 Vectors live inside the active evidence generation
 (`cache/evidence-graph/generations/<id>/`, beside its search index), and
