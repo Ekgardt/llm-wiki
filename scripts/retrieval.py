@@ -2905,7 +2905,7 @@ def _emit_impressions(
     corpus_generation: str,
     source_tool: str,
 ) -> None:
-    from retrieval_telemetry import best_effort_record_events
+    from retrieval_telemetry import record_events_later
 
     events = [
         _impression_event(
@@ -2917,7 +2917,7 @@ def _emit_impressions(
         )
         for rank, item in enumerate(rows, start=1)
     ]
-    best_effort_record_events([event for event in events if event is not None])
+    record_events_later([event for event in events if event is not None])
 
 
 def _generation_dense_hits(

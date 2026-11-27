@@ -223,6 +223,7 @@
   "test_a_rubric_gold_is_never_scored_as_a_miss.py": 0.01,
   "test_a_scheduled_run_keeps_the_uv_link.py": 0.01,
   "test_a_sealed_bag_carries_its_own_parts.py": 9.5,
+  "test_a_search_does_not_wait_for_its_telemetry.py": 0.02,
   "test_a_secret_in_json_is_still_a_secret.py": 0.01,
   "test_a_secret_in_structure_is_redacted_as_structure.py": 1.83,
   "test_a_secret_is_redacted_before_it_is_cut.py": 5.07,

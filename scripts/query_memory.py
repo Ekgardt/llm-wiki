@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import argparse
 import contextvars
+import functools
 import hashlib
 import json
 import math
@@ -1260,11 +1261,62 @@ def _with_claimed_citations(document: object) -> object:
     return {**document, "citations": [{"citation_id": name} for name in ids]}
 
 
+@functools.lru_cache(maxsize=1)
+def _claim_only_fields() -> frozenset[str]:
+    schema: dict[str, Any] = _answer_schema()
+    claim = set(schema["properties"]["claims"]["items"]["properties"])
+    return frozenset(claim - set(schema["properties"]))
+
+
+_EMPTY_VALUES: tuple[object, ...] = (None, [], "")
+
+
+def _without_empty_claim_fields(document: object) -> object:
+    """A claim's field written empty beside the claims states nothing and is dropped.
+
+    Task 337's stand lost three correct refusals, two of the hamster question and
+    one more, because the model added a claim's `derivation: null` and
+    `inputs: []` at the top level. A field with content there is left for the
+    schema to refuse.
+    """
+    if not isinstance(document, dict):
+        return document
+    return {name: value for name, value in document.items() if not _states_nothing(name, value)}
+
+
+def _states_nothing(name: str, value: object) -> bool:
+    return name in _claim_only_fields() and value in _EMPTY_VALUES
+
+
+@functools.lru_cache(maxsize=1)
+def _schema_version() -> str:
+    schema: dict[str, Any] = _answer_schema()
+    return str(schema["properties"]["schema_version"]["const"])
+
+
+def _with_implied_header(document: object) -> object:
+    """A header the schema allows only one value for is filled when the model left it out.
+
+    `schema_version` is a constant, and a reply with claims can only be an answer:
+    an abstention carries none (`_require_abstention_shape`). Task 337's stand lost
+    four answers and the second look of `gpt4_2f8be40d` to a reply without one of
+    the two (`ed4ddc30`, `88432d0a`, `ef9cf60a`, `2a1811e2`). A reply with no
+    claims and no status is left for the schema to refuse: its status is unknown.
+    """
+    if not isinstance(document, dict):
+        return document
+    implied: dict[str, object] = {"schema_version": _schema_version()}
+    if document.get("claims"):
+        implied["status"] = "answered"
+    return {**implied, **document}
+
+
 def _validated_answer_document(document: object) -> dict:
     from evidence_resolver import EvidenceResolutionError
     from reliable_memory import SchemaValidationError, validate_schema
 
-    document = _with_claimed_citations(document)
+    document = _with_implied_header(document)
+    document = _with_claimed_citations(_without_empty_claim_fields(document))
     try:
         validate_schema(document, ANSWER_SCHEMA)
     except SchemaValidationError as exc:
@@ -2452,7 +2504,7 @@ def _write_refused_events(
 
 
 def _write_outcome_events(question: str, context: GroundedContext, outcome: str) -> None:
-    from retrieval_telemetry import best_effort_make_event, best_effort_record_events
+    from retrieval_telemetry import best_effort_make_event, record_events_later
 
     paths = sorted({item.relative_path for item in context.evidence})
     events = [
@@ -2467,7 +2519,7 @@ def _write_outcome_events(question: str, context: GroundedContext, outcome: str)
         )
         for path in paths
     ]
-    best_effort_record_events([event for event in events if event is not None])
+    record_events_later([event for event in events if event is not None])
 
 
 def _record_cited_evidence(
@@ -2500,7 +2552,7 @@ def _record_cited_evidence(
 
 
 def _write_cited_events(question: str, profile: str, paths: Sequence[str]) -> None:
-    from retrieval_telemetry import best_effort_make_event, best_effort_record_events
+    from retrieval_telemetry import best_effort_make_event, record_events_later
 
     events = [
         best_effort_make_event(
@@ -2514,7 +2566,7 @@ def _write_cited_events(question: str, profile: str, paths: Sequence[str]) -> No
         )
         for path in paths
     ]
-    best_effort_record_events([event for event in events if event is not None])
+    record_events_later([event for event in events if event is not None])
 
 
 def _require_bounded_question(question: object) -> None:

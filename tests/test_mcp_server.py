@@ -1250,6 +1250,7 @@ class TestHelperFunctions:
         results = mcp_server._get_decisions("private decision query", 10)
 
         _assert_decision_filter_results(results)
+        retrieval_telemetry.flush_events_later()
         _assert_decision_filter_rows(
             list(reversed(retrieval_telemetry.read_events(limit=10, db_path=database)))
         )
@@ -1265,6 +1266,7 @@ class TestHelperFunctions:
         monkeypatch.setattr(search_memory, "search", lambda query, **kwargs: [])
 
         assert mcp_server._get_decisions("none", 10) == []
+        retrieval_telemetry.flush_events_later()
         assert retrieval_telemetry.read_events(limit=10, db_path=database) == []
 
     def test_read_page_emits_page_and_evidence_events_without_content(self, tmp_path, monkeypatch):
@@ -1294,6 +1296,7 @@ class TestHelperFunctions:
         result = mcp_server._read_page("page")
 
         assert result["slug"] == "page"
+        retrieval_telemetry.flush_events_later()
         rows = retrieval_telemetry.read_events(limit=10, db_path=database)
         _assert_read_page_events(rows)
         _assert_evidence_event(rows, sha256_bytes(quote))
@@ -1315,6 +1318,7 @@ class TestHelperFunctions:
         package = mcp_server._get_context(["page"])
         assert "knowledge/notes/page.md" in package["repo_map"]
 
+        retrieval_telemetry.flush_events_later()
         rows = retrieval_telemetry.read_events(limit=10, db_path=database)
         # The injected page is named by its vault-relative path, the one
         # identity this column carries.
@@ -1332,6 +1336,7 @@ class TestHelperFunctions:
         monkeypatch.setattr(retrieval_telemetry, "TELEMETRY_DB", database)
 
         assert "error" in mcp_server._read_page("missing")
+        retrieval_telemetry.flush_events_later()
         assert retrieval_telemetry.read_events(limit=10, db_path=database) == []
 
     def test_trigger_compile_returns_dict(self, monkeypatch):

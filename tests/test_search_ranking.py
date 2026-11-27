@@ -163,6 +163,7 @@ def test_exact_filename_short_circuit_emits_final_impressions_once(tmp_path, mon
         source_tool="test.search",
     )
 
+    retrieval_telemetry.flush_events_later()
     rows = retrieval_telemetry.read_events(limit=10, db_path=database)
     assert len(rows) == len(results) == 1
     # One column, one identity: the page's vault-relative path. See
@@ -183,6 +184,7 @@ def test_empty_search_emits_no_impressions(tmp_path, monkeypatch):
     database = tmp_path / "cache/evidence-graph/telemetry.sqlite3"
     monkeypatch.setattr(retrieval_telemetry, "TELEMETRY_DB", database)
     assert search_memory.search("", source_tool="test.search") == []
+    retrieval_telemetry.flush_events_later()
     assert retrieval_telemetry.read_events(limit=10, db_path=database) == []
 
 
@@ -241,6 +243,7 @@ def test_search_can_defer_telemetry_to_post_filter_caller(tmp_path, monkeypatch)
         "exact page", graph=False, rerank=False,
         emit_telemetry=False,
     )
+    retrieval_telemetry.flush_events_later()
     assert retrieval_telemetry.read_events(limit=10, db_path=database) == []
 
 
@@ -869,7 +872,7 @@ def test_generation_search_reports_generation_to_telemetry(tmp_path, monkeypatch
     )
     monkeypatch.setattr(
         retrieval_telemetry,
-        "best_effort_record_events",
+        "record_events_later",
         lambda values: events.extend(values),
     )
 
