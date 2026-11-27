@@ -472,8 +472,10 @@ def best_effort_record_event(
 # write commits with `synchronous=FULL`, the setting SQLite requires for a
 # rollback journal to survive a power loss without corruption; its flushes took
 # 40-220 ms per search on the vault disk (measured 2026-11-27) while the search
-# waited. The writer thread does that wait instead. It is not a daemon, so the
-# interpreter finishes the queue before it exits; it ends when the queue is empty.
+# waited. The writer thread does that wait instead. It is never a daemon, even
+# when a daemon MCP worker starts it, so a normal interpreter exit finishes the
+# queue; it ends when the queue is empty. A process killed by a signal loses the
+# batches still queued, a window of one commit.
 _WAITING: queue.SimpleQueue[tuple[list[RetrievalEvent], Path]] = queue.SimpleQueue()
 _WRITER_LOCK = threading.Lock()
 _writer: BoundedThread | None = None
@@ -487,7 +489,9 @@ def record_events_later(events: Sequence[RetrievalEvent]) -> None:
     with _WRITER_LOCK:
         _WAITING.put((list(events), Path(TELEMETRY_DB)))
         if _writer is None or not _writer.is_alive():
-            _writer = BoundedThread(target=_write_waiting, name="llm-wiki-telemetry")
+            _writer = BoundedThread(
+                target=_write_waiting, name="llm-wiki-telemetry", daemon=False
+            )
             _writer.start()
 
 

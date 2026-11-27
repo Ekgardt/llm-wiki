@@ -1263,7 +1263,7 @@ def _with_claimed_citations(document: object) -> object:
 
 @functools.lru_cache(maxsize=1)
 def _claim_only_fields() -> frozenset[str]:
-    schema = json.loads(ANSWER_SCHEMA.read_text(encoding="utf-8"))
+    schema: dict[str, Any] = _answer_schema()
     claim = set(schema["properties"]["claims"]["items"]["properties"])
     return frozenset(claim - set(schema["properties"]))
 
@@ -1290,7 +1290,7 @@ def _states_nothing(name: str, value: object) -> bool:
 
 @functools.lru_cache(maxsize=1)
 def _schema_version() -> str:
-    schema = json.loads(ANSWER_SCHEMA.read_text(encoding="utf-8"))
+    schema: dict[str, Any] = _answer_schema()
     return str(schema["properties"]["schema_version"]["const"])
 
 
