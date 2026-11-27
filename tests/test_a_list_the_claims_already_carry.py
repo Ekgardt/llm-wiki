@@ -90,6 +90,28 @@ def test_a_claim_field_with_content_beside_the_claims_is_still_refused():
         query_memory._validated_answer_document(stray)
 
 
+def test_an_answer_without_the_schema_version_gets_the_only_one_there_is():
+    # 88432d0a and ef9cf60a (task 337): cited claims, no `schema_version`.
+    answer = _document(status="answered", claims=[{"text": "It has four bays.", "citation_ids": ["E4"]}])
+    del answer["schema_version"]
+
+    assert query_memory._validated_answer_document(answer)["schema_version"] == "grounded-answer/v1"
+
+
+def test_claims_without_a_status_are_an_answer():
+    # ed4ddc30 (task 337): cited claims, no `status`; an abstention carries no claim.
+    answer = _document(claims=[{"text": "It has four bays.", "citation_ids": ["E4"]}])
+
+    assert query_memory._validated_answer_document(answer)["status"] == "answered"
+
+
+def test_no_claims_and_no_status_is_still_refused():
+    from evidence_resolver import EvidenceResolutionError
+
+    with pytest.raises(EvidenceResolutionError, match="schema validation failed"):
+        query_memory._validated_answer_document(_document(citations=[]))
+
+
 def test_a_list_that_was_given_is_left_for_the_gates():
     given = _document(
         status="answered",

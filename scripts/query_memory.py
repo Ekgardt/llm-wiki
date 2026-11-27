@@ -1274,8 +1274,8 @@ _EMPTY_VALUES: tuple[object, ...] = (None, [], "")
 def _without_empty_claim_fields(document: object) -> object:
     """A claim's field written empty beside the claims states nothing and is dropped.
 
-    Task 337's stand lost three correct refusals (`0862e8bf_abs` twice,
-    `29f2956b_abs`) because the model added a claim's `derivation: null` and
+    Task 337's stand lost three correct refusals, two of the hamster question and
+    one more, because the model added a claim's `derivation: null` and
     `inputs: []` at the top level. A field with content there is left for the
     schema to refuse.
     """
@@ -1288,10 +1288,34 @@ def _without_empty_claim_fields(document: object) -> object:
     return {name: value for name, value in document.items() if name not in stray}
 
 
+@functools.lru_cache(maxsize=1)
+def _schema_version() -> str:
+    schema = json.loads(ANSWER_SCHEMA.read_text(encoding="utf-8"))
+    return str(schema["properties"]["schema_version"]["const"])
+
+
+def _with_implied_header(document: object) -> object:
+    """A header the schema allows only one value for is filled when the model left it out.
+
+    `schema_version` is a constant, and a reply with claims can only be an answer:
+    an abstention carries none (`_require_abstention_shape`). Task 337's stand lost
+    four answers and the second look of `gpt4_2f8be40d` to a reply without one of
+    the two (`ed4ddc30`, `88432d0a`, `ef9cf60a`, `2a1811e2`). A reply with no
+    claims and no status is left for the schema to refuse: its status is unknown.
+    """
+    if not isinstance(document, dict):
+        return document
+    implied: dict[str, object] = {"schema_version": _schema_version()}
+    if document.get("claims"):
+        implied["status"] = "answered"
+    return {**implied, **document}
+
+
 def _validated_answer_document(document: object) -> dict:
     from evidence_resolver import EvidenceResolutionError
     from reliable_memory import SchemaValidationError, validate_schema
 
+    document = _with_implied_header(document)
     document = _with_claimed_citations(_without_empty_claim_fields(document))
     try:
         validate_schema(document, ANSWER_SCHEMA)
