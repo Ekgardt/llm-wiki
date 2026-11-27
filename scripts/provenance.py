@@ -7,7 +7,9 @@ it from here now, and the weight multiplies whichever score decides the order.
 """
 from __future__ import annotations
 
+import hashlib
 import re
+import threading
 
 # Higher weight = preferred in ranking (typed provenance).
 AUTHORITY_WEIGHTS: dict[str, float] = {
@@ -228,8 +230,36 @@ def _navigation(content: str) -> bool:
     return _link_led_list(content)
 
 
+# Whether a chunk is navigation, by the digest of its text. A chunk's text never
+# changes inside a generation, yet every search weighed about 1,460 candidates
+# again (measured 2026-11-25, 85 ms of a 690 ms search), and the lexical lane and
+# the fusion weighed the same chunk twice. An entry is a 16-byte key and a flag,
+# about 100 bytes, so the bound keeps some 40 searches' candidates in about 6 MB;
+# past it the oldest entry goes first. Searches run on several threads, so
+# eviction and insertion hold one lock.
+NAVIGATION_VERDICTS_KEPT = 65_536
+_NAVIGATION_VERDICTS: dict[bytes, bool] = {}
+_VERDICTS_LOCK = threading.Lock()
+
+
+def _known_navigation(content: str) -> bool:
+    key = hashlib.blake2b(content.encode("utf-8", "surrogatepass"), digest_size=16).digest()
+    verdict = _NAVIGATION_VERDICTS.get(key)
+    if verdict is None:
+        verdict = _navigation(content)
+        _remember_verdict(key, verdict)
+    return verdict
+
+
+def _remember_verdict(key: bytes, verdict: bool) -> None:
+    with _VERDICTS_LOCK:
+        if len(_NAVIGATION_VERDICTS) >= NAVIGATION_VERDICTS_KEPT:
+            _NAVIGATION_VERDICTS.pop(next(iter(_NAVIGATION_VERDICTS)), None)
+        _NAVIGATION_VERDICTS[key] = verdict
+
+
 def substance_weight(content: object) -> float:
     """1.0 for prose; NAVIGATION_WEIGHT for a link list or a bare heading; 1.0 when unknown."""
     if not isinstance(content, str) or not content.strip():
         return 1.0
-    return NAVIGATION_WEIGHT if _navigation(content) else 1.0
+    return NAVIGATION_WEIGHT if _known_navigation(content) else 1.0

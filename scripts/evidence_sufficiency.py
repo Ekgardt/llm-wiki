@@ -259,3 +259,20 @@ def coverage_note(measured: Sufficiency) -> str:
         "abstain only for a gap this coverage does not close.\n"
         "</evidence_coverage>\n"
     )
+
+
+def search_wider_hint(measured: Sufficiency) -> str:
+    """What the answering agent is told when the excerpts are weak, or nothing.
+
+    The memory does not conclude that it holds no answer: it hands over its best
+    excerpts, and below the score at which a refusal is read again the agent is
+    told the evidence is weak and where it fell short, so it can search wider.
+    """
+    if reads_again(measured):
+        return ""
+    missing = ", ".join(measured.missing) or "unmeasured"
+    return (
+        "These excerpts are weak evidence: no single one states the whole question "
+        f"(not stated: {missing}). Before concluding the memory holds no answer, search "
+        "wider: recall again with other words or without a date filter."
+    )

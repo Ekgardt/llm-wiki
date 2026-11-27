@@ -129,8 +129,24 @@ def prepare_environment(work: Path) -> tuple[Path, Path]:
     )
     (root / "knowledge/notes").mkdir(parents=True, exist_ok=True)
     (root / "knowledge/daily").mkdir(parents=True, exist_ok=True)
+    _share_the_installed_models(state)
     _leave_the_repository(root)
     return root, state
+
+
+def _share_the_installed_models(state: Path) -> None:
+    """The stand reads the checkout's verified models instead of searching without them.
+
+    The read path opens models under the state root only (`model_files.models_root`),
+    and a throwaway state root holds none, so every question of a stand ran without
+    vectors or the reranker and reported itself degraded.
+    """
+    installed = REPO / "cache" / "models"
+    shared = state / "cache" / "models"
+    if not installed.is_dir() or shared.exists():
+        return
+    shared.parent.mkdir(parents=True, exist_ok=True)
+    shared.symlink_to(installed, target_is_directory=True)
 
 
 def _adopt(root: Path, state: Path) -> None:
@@ -688,8 +704,16 @@ def _uncited_hypothesis(document: dict) -> str:
     return UNCITED + unverified
 
 
+def _claim_text(claim: Mapping[str, object]) -> str:
+    """The claim's words, followed by the figure code computed when they do not state it."""
+    text = str(claim.get("text", ""))
+    if claim.get("computed_stated") is not False:
+        return text
+    return f"{text} (computed from its inputs: {claim['computed']})"
+
+
 def hypothesis_of(document: dict, chosen: str = "refuse") -> str:
-    text = _joined(claim.get("text", "") for claim in document.get("claims") or [])
+    text = _joined(_claim_text(claim) for claim in document.get("claims") or [])
     if text or chosen != "answer":
         return text
     return _uncited_hypothesis(document)
@@ -742,8 +766,10 @@ def _compile_trace_metrics(context: object) -> dict[str, object]:
     }
 
 
-def _measured_compile(root: Path, snapshot: object, rows: list[dict], profile: str) -> dict:
-    """One extra compile, for its trace only. No provider call, no effect on the answer."""
+def _measured_compile(
+    root: Path, snapshot: Any, rows: list[Any], profile: str, question: dict[str, Any]
+) -> dict[str, object]:
+    """One extra compile of the reader's first context, for its trace only. No provider call."""
     from context_budget import ContextBudget
     from query_memory import QA_OUTPUT_RESERVE_BYTES, build_grounded_context
 
@@ -754,10 +780,20 @@ def _measured_compile(root: Path, snapshot: object, rows: list[dict], profile: s
             vault=root,
             profile=profile,
             budget=ContextBudget(None, _answer_budget(), QA_OUTPUT_RESERVE_BYTES, 512),
+            question=dated_question(question),
         )
     except Exception:  # noqa: BLE001 - a measurement never fails the question
         return {}
-    return _compile_trace_metrics(context)
+    return {**_compile_trace_metrics(context), **_context_sessions(question, context)}
+
+
+def _context_sessions(question: Mapping[str, object], context: Any) -> dict[str, int]:
+    """How many sessions, and how many labelled answer sessions, the reader's excerpts name."""
+    named = {item.session for item in context.evidence if item.session}
+    return {
+        "context_sessions": len(named),
+        "context_answer_sessions": len(named & _labelled_sessions(question)),
+    }
 
 
 def _answer_outcome(
@@ -919,7 +955,7 @@ def run_question(question: dict, work: Path) -> dict:
         # The rows `benchmark/fit_lane_score.py` refits the lane constants on.
         "lane_matrix": lane_matrix(question, rows),
         **_reranker_fields(rows),
-        **_measured_compile(root, snapshot, rows, profile),
+        **_measured_compile(root, snapshot, rows, profile, question),
         **build_info,
         **outcome,
         **metrics,

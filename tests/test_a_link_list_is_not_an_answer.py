@@ -80,3 +80,76 @@ def test_the_generation_search_weighs_a_link_list_down() -> None:
     prose_score = search_memory._generation_result(row(PROSE), "g")["score"]
 
     assert link_score < prose_score
+
+
+def test_a_chunk_is_judged_once_however_often_it_is_weighed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import provenance
+
+    judged: list[str] = []
+    real = provenance._navigation
+
+    def recorded(text: str) -> bool:
+        judged.append(text)
+        return bool(real(text))
+
+    monkeypatch.setattr(provenance, "_navigation", recorded)
+    monkeypatch.setattr(provenance, "_NAVIGATION_VERDICTS", {})
+    text = RELATED + "\n<!-- judged once -->"
+
+    weights = {provenance.substance_weight(text) for _ in range(3)}
+
+    assert weights == {provenance.NAVIGATION_WEIGHT}
+    assert judged == [text]
+
+
+def test_the_oldest_verdict_makes_room_past_the_bound(monkeypatch: pytest.MonkeyPatch) -> None:
+    import provenance
+
+    monkeypatch.setattr(provenance, "_NAVIGATION_VERDICTS", {})
+    monkeypatch.setattr(provenance, "NAVIGATION_VERDICTS_KEPT", 2)
+
+    for text in ("first prose line", "second prose line", "third prose line"):
+        provenance.substance_weight(text)
+
+    assert len(provenance._NAVIGATION_VERDICTS) == 2
+    assert list(provenance._NAVIGATION_VERDICTS) == [
+        _verdict_key("second prose line"),
+        _verdict_key("third prose line"),
+    ]
+
+
+def _verdict_key(text: str) -> bytes:
+    import hashlib
+
+    return hashlib.blake2b(text.encode("utf-8"), digest_size=16).digest()
+
+
+class _LockChecked(dict[bytes, bool]):
+    """A cache that fails when it is changed without the verdict lock held."""
+
+    def __setitem__(self, key: bytes, value: bool) -> None:
+        import provenance
+
+        assert provenance._VERDICTS_LOCK.locked()
+        super().__setitem__(key, value)
+
+    def pop(self, key: bytes, default: object = None) -> object:  # type: ignore[override]
+        import provenance
+
+        assert provenance._VERDICTS_LOCK.locked()
+        return super().pop(key, default)
+
+
+def test_a_full_cache_is_changed_only_under_its_lock(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Concurrent searches evict and insert; one unlocked change can break another's iteration."""
+    import provenance
+
+    monkeypatch.setattr(provenance, "_NAVIGATION_VERDICTS", _LockChecked())
+    monkeypatch.setattr(provenance, "NAVIGATION_VERDICTS_KEPT", 2)
+
+    for text in ("first prose line", "second prose line", "third prose line"):
+        provenance.substance_weight(text)
+
+    assert len(provenance._NAVIGATION_VERDICTS) == 2

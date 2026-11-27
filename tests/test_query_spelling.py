@@ -7,9 +7,12 @@ MRR@10 0.906 clean, 0.865 with one transposition, 0.901 with the corrections.
 
 from __future__ import annotations
 
+import os
 import sqlite3
 import sys
 from pathlib import Path
+
+import pytest
 
 SCRIPTS_DIR = Path(__file__).resolve().parent.parent / "scripts"
 if str(SCRIPTS_DIR) not in sys.path:
@@ -140,3 +143,65 @@ def test_a_russian_stem_keeps_its_root() -> None:
 
 def test_short_russian_words_and_latin_words_gain_no_stem() -> None:
     assert query_spelling.cyrillic_stems([HOUSE, CAT, "bookshelf", "API-" + NOTES]) == []
+
+
+def _compared_one_by_one(terms: list[str], word: str, bound: int) -> dict[str, int]:
+    distances = {term: query_spelling.edit_distance(word, term, bound) for term in terms}
+    return {term: distance for term, distance in distances.items() if distance <= bound}
+
+
+def test_the_pruned_walk_finds_every_term_a_full_comparison_finds() -> None:
+    """Skipping a prefix whose alignment already exceeds the bound loses no term."""
+    import random
+
+    generator = random.Random(11)
+    terms = sorted(
+        {"".join(generator.choices("abcde", k=generator.randint(3, 9))) for _ in range(3000)}
+    )
+
+    for word in ("abcdeab", "eeddcc", "aabbccdde", "bacedb"):
+        for bound in (1, 2):
+            expected = _compared_one_by_one(terms, word, bound)
+            assert query_spelling._within(terms, word, bound) == expected
+
+
+def test_a_file_artifact_reads_its_vocabulary_once_until_it_changes(tmp_path: Path) -> None:
+    path = tmp_path / "search.sqlite3"
+    connection = sqlite3.connect(path)
+    connection.executescript(search_memory._GENERATION_FTS_DDL)
+    connection.execute(
+        "INSERT INTO chunks(chunk_id, chunk_order, title, content, keys) "
+        "VALUES ('c0', 0, '', 'bookshelf', '')"
+    )
+    connection.commit()
+
+    first = query_spelling.vocabulary(connection)
+    assert query_spelling.vocabulary(connection) is first
+
+    connection.execute(
+        "INSERT INTO chunks(chunk_id, chunk_order, title, content, keys) "
+        "VALUES ('c1', 1, '', 'lantern', '')"
+    )
+    connection.commit()
+    os.utime(path, ns=(path.stat().st_atime_ns, path.stat().st_mtime_ns + 1_000_000))
+
+    assert "lantern" in query_spelling.vocabulary(connection).terms
+
+
+
+class _Forgetful(dict[object, object]):
+    """A cache another thread empties the moment anything is stored."""
+
+    def __setitem__(self, key: object, value: object) -> None:
+        super().__setitem__(key, value)
+        self.clear()
+
+
+def test_a_vocabulary_another_thread_evicts_is_still_returned(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    connection = sqlite3.connect(tmp_path / "search.sqlite3")
+    connection.executescript(search_memory._GENERATION_FTS_DDL)
+    monkeypatch.setattr(query_spelling, "_LOADED", _Forgetful())
+
+    assert query_spelling.vocabulary(connection).terms == ()

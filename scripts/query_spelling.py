@@ -9,10 +9,13 @@ comparison are in the form the index stores.
 """
 from __future__ import annotations
 
+import bisect
+import os
 import sqlite3
 import string
 import unicodedata
 from collections.abc import Sequence
+from dataclasses import dataclass
 
 # Edits allowed by word length, as in Lucene's fuzzy AUTO and MiniSearch's
 # fractional fuzziness: none below five letters, where one edit makes another
@@ -31,6 +34,8 @@ _QUOTES = "\u00ab\u00bb\u201c\u201d\u2018\u2019"
 _VOCABULARY = "temp.llm_wiki_vocabulary"
 _STEMMER = "temp.llm_wiki_stemmer"
 _STEMS = "temp.llm_wiki_stems"
+# Sorts after every letter a term can hold: the end of a prefix's range.
+_AFTER_EVERY_LETTER = "\U0010ffff"
 
 
 def allowed_edits(word: str) -> int:
@@ -101,21 +106,113 @@ def _create_vocabulary(connection: sqlite3.Connection) -> None:
     )
 
 
-def _nearest(connection: sqlite3.Connection, word: str, bound: int, tokenizer: str) -> list[str]:
-    _create_vocabulary(connection)
-    stem = _stemmed(connection, word, tokenizer)
-    rows = connection.execute(
-        f"SELECT term, doc FROM {_VOCABULARY} WHERE length(term) BETWEEN ? AND ?",
-        [len(stem) - bound, len(word) + bound],
-    ).fetchall()
-    scored = sorted(
-        (_distance(word, stem, str(term), bound), -int(doc), str(term)) for term, doc in rows
+@dataclass(frozen=True)
+class Vocabulary:
+    """An artifact's indexed terms, sorted so terms sharing a prefix share its alignment rows."""
+
+    terms: tuple[str, ...]
+    documents: dict[str, int]
+
+
+# The vocabulary of the artifact read last, keyed by its file and modification
+# time. A generation is immutable after activation and one is active at a time,
+# so one entry holds every search's vocabulary without reading it again.
+_LOADED: dict[tuple[str, int], Vocabulary] = {}
+
+
+def _artifact_identity(connection: sqlite3.Connection) -> tuple[str, int] | None:
+    path = next(
+        (str(row[2]) for row in connection.execute("PRAGMA database_list") if row[1] == "main"), ""
     )
-    return [term for distance, _, term in scored if distance <= bound][:CORRECTIONS_PER_WORD]
+    if not path or not os.path.exists(path):
+        return None
+    return path, os.stat(path).st_mtime_ns
 
 
-def _distance(word: str, stem: str, term: str, bound: int) -> int:
-    return min(edit_distance(word, term, bound), edit_distance(stem, term, bound))
+def _read_vocabulary(connection: sqlite3.Connection) -> Vocabulary:
+    _create_vocabulary(connection)
+    documents = {
+        str(term): int(doc)
+        for term, doc in connection.execute(f"SELECT term, doc FROM {_VOCABULARY}")
+    }
+    return Vocabulary(tuple(sorted(documents)), documents)
+
+
+def vocabulary(connection: sqlite3.Connection) -> Vocabulary:
+    """The artifact's vocabulary, read once per immutable file.
+
+    An in-memory artifact has no file to remember, so it is read each time.
+    """
+    identity = _artifact_identity(connection)
+    if identity is None:
+        return _read_vocabulary(connection)
+    loaded = _LOADED.get(identity)
+    if loaded is None:
+        loaded = _read_vocabulary(connection)
+        _LOADED.clear()
+        _LOADED[identity] = loaded
+    return loaded
+
+
+def _common_prefix(left: str, right: str) -> int:
+    shorter = min(len(left), len(right))
+    pairs = enumerate(zip(left[:shorter], right[:shorter], strict=True))
+    return next((index for index, (a, b) in pairs if a != b), shorter)
+
+
+def _extend(rows: list[list[int]], term: str, word: str, bound: int) -> int | None:
+    """Align the rest of `term` against `word`; the prefix length past which nothing can match."""
+    for i in range(len(rows), len(term) + 1):
+        before = rows[i - 2] if i > 1 else []
+        left_prev = term[i - 2] if i > 1 else ""
+        rows.append(_alignment_row(term[i - 1], left_prev, word, (before, rows[i - 1]), i))
+        if min(rows[i]) > bound:
+            return i
+    return None
+
+
+def _within(terms: Sequence[str], word: str, bound: int) -> dict[str, int]:
+    """Every term within `bound` edits of `word`, walking the sorted terms as a trie.
+
+    A prefix whose alignment row already exceeds the bound rules out every term
+    under it, so those are skipped by bisection instead of being compared.
+    """
+    found: dict[str, int] = {}
+    rows = [list(range(len(word) + 1))]
+    previous, index = "", 0
+    while index < len(terms):
+        term = terms[index]
+        del rows[_common_prefix(previous, term) + 1 :]
+        dead_end = _extend(rows, term, word, bound)
+        previous = term
+        if dead_end is not None:
+            index = bisect.bisect_left(terms, term[:dead_end] + _AFTER_EVERY_LETTER, index + 1)
+            continue
+        if rows[-1][-1] <= bound:
+            found[term] = rows[-1][-1]
+        index += 1
+    return found
+
+
+def _closest(left: dict[str, int], right: dict[str, int], bound: int) -> dict[str, int]:
+    return {
+        term: min(left.get(term, bound + 1), right.get(term, bound + 1))
+        for term in left.keys() | right.keys()
+    }
+
+
+def _nearest(connection: sqlite3.Connection, word: str, bound: int, tokenizer: str) -> list[str]:
+    stem = _stemmed(connection, word, tokenizer)
+    terms = vocabulary(connection)
+    distances = _closest(
+        _within(terms.terms, word, bound), _within(terms.terms, stem, bound), bound
+    )
+    scored = sorted(
+        (distance, -terms.documents[term], term)
+        for term, distance in distances.items()
+        if len(stem) - bound <= len(term) <= len(word) + bound
+    )
+    return [term for _, _, term in scored[:CORRECTIONS_PER_WORD]]
 
 
 def _cyrillic(word: str) -> bool:

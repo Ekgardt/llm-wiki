@@ -2732,7 +2732,7 @@ def test_unix_installer_trusts_smoke_exit_status(
         encoding="utf-8",
     )
     env = os.environ.copy()
-    env["LLM_WIKI_INSTALL_SMOKE_TIMEOUT_SECONDS"] = "5"
+    env["LLM_WIKI_INSTALL_SMOKE_TIMEOUT_SECONDS"] = str(_SMOKE_TIMEOUT_SECONDS)
 
     result = subprocess.run(
         [bash, str(runner)],

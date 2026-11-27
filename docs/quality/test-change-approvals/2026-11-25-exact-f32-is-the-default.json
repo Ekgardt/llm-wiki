@@ -1,0 +1,5 @@
+{"tests": ["test_no_usable_thread_count_leaves_the_engine_its_default"],
+ "kinds": ["assertions"],
+ "reason": "The owner's choice 'B + VINO etalon' (owner message 263016509/17943) named the exact f32 row of task 178's engine table, and owner message 263016509/18979 asks for f32 as the default of both models with the existing setting as the way to choose otherwise. The test pinned the old default (no precision hint); it now asks for the engine's own choice explicitly with LLMWIKI_INFERENCE_PRECISION=auto and still asserts that no thread count reaches the compiler. test_both_models_run_in_exact_f32_unless_told_auto asserts the new default.",
+ "recorded": "2026-11-25",
+ "expires": "2027-02-23"}

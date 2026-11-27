@@ -52,7 +52,7 @@ from collections.abc import Callable, Mapping
 from contextvars import ContextVar
 from dataclasses import asdict
 from pathlib import Path, PureWindowsPath
-from typing import NamedTuple
+from typing import Any, NamedTuple
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import bounded_thread
@@ -643,6 +643,11 @@ RECALL_FILTER_SCHEMA_FIELDS = {
         "maxLength": 10,
         "description": "Rank pages dated from this day first, YYYY-MM-DD",
     },
+    "until": {
+        "type": "string",
+        "maxLength": 10,
+        "description": "Rank pages dated up to this day, inclusive, first, YYYY-MM-DD",
+    },
     "as_of": {
         "type": "string",
         "maxLength": 10,
@@ -663,11 +668,12 @@ RECALL_FILTER_SCHEMA_FIELDS = {
 RECALL_FILTER_ARGUMENTS = {
     "project": "project",
     "since": "since",
+    "until": "until",
     "as_of": "as_of",
     "page_type": "type",
     "path_prefix": "path_prefix",
 }
-RECALL_DATE_FILTERS = ("since", "as_of")
+RECALL_DATE_FILTERS = ("since", "until", "as_of")
 
 TOOL_INPUT_SCHEMAS = {
     "recall": {
@@ -4226,72 +4232,65 @@ def _code_directory_error(resolved: Path) -> str | None:
     return None
 
 
+# Each description opens with when to call the tool, because an agent picks a
+# tool by that sentence; what it returns follows. Anthropic's tool guidance asks
+# for what a tool does, when to use it and its limits; Claude Code cuts a
+# description loaded with the session at 4,096 characters.
+TOOL_DESCRIPTIONS = {
+    "recall": (
+        "Call before answering anything that may depend on what the user or an earlier "
+        "session said, decided or did. Returns ranked, dated excerpts."
+    ),
+    "read_page": "Call when a recall hit is cut short: returns the whole page by slug.",
+    "wiki_overview": "Call once per session to see what the memory holds.",
+    "vault_status": (
+        "Call when memory seems stale or before compile: returns compile status and the "
+        "current daily-file backlog."
+    ),
+    "get_decisions": "Call before changing a design or contract: the decisions in force.",
+    "get_context": "Call to read several known pages at once, by slug.",
+    "check_contradiction": "Call before acting on a new claim: pages that may contradict it.",
+    "log_decision": "Call when the user makes or approves a durable decision, to record it.",
+    "compile": "Call when the user wants the daily-log backlog compiled into pages now.",
+    "find_dead_code": (
+        "Call before deleting a function or when asked what code is unused: functions "
+        "with no confirmed caller."
+    ),
+    "get_architecture": (
+        "Call before reading a repository's files: entry points, routes, hotspots, and "
+        "symbol, caller, callee and impact queries."
+    ),
+    "doctor": "Call when a memory tool fails or degrades: vault health, read-only unless repair.",
+}
+
+# What a client shows the agent about this server before any tool is listed;
+# Claude Code loads it with the session and cuts it at 4,096 characters.
+SERVER_INSTRUCTIONS = (
+    "llm-wiki is the user's long-term memory across sessions, projects and agents: "
+    "compiled knowledge pages, accepted decisions, captured sessions and an index of "
+    "their code repositories.\n"
+    "Use it when:\n"
+    "- the answer may depend on something said, decided or done in an earlier session "
+    "(a preference, past work, why something is the way it is): call recall first, then "
+    "read_page or get_context for whole pages;\n"
+    "- you are about to change a design, structure or contract: call get_decisions;\n"
+    "- the user makes or approves a durable decision: call log_decision;\n"
+    "- you need the structure of a code repository: call get_architecture or "
+    "find_dead_code.\n"
+    "Cite the paths and dates the excerpts carry. When excerpts disagree, say so and "
+    "prefer the later one unless a page marks it superseded. When recall finds nothing "
+    "relevant, say so instead of guessing. When a tool fails or answers degraded, call "
+    "doctor."
+)
+
+
 def _build_tool_definitions() -> list:
     """Build MCP tool definitions."""
     if not MCP_AVAILABLE:
         return []
-
     return [
-        _make_tool(
-            name="recall",
-            description="Search the knowledge vault. Returns ranked results with titles, paths, and the matching text. Use this to find relevant knowledge pages.",
-            inputSchema=TOOL_INPUT_SCHEMAS["recall"],
-        ),
-        _make_tool(
-            name="read_page",
-            description="Read a full knowledge page by its slug (filename without .md). Use this when you need the complete content of a specific page.",
-            inputSchema=TOOL_INPUT_SCHEMAS["read_page"],
-        ),
-        _make_tool(
-            name="wiki_overview",
-            description="Get vault statistics: page count, retrieval tier recommendation, vault root path. Call this first in any session.",
-            inputSchema=TOOL_INPUT_SCHEMAS["wiki_overview"],
-        ),
-        _make_tool(
-            name="vault_status",
-            description="Get compile status and current daily-file backlog.",
-            inputSchema=TOOL_INPUT_SCHEMAS["vault_status"],
-        ),
-        _make_tool(
-            name="get_decisions",
-            description="Find active architectural decisions in the vault. Optionally filter by query.",
-            inputSchema=TOOL_INPUT_SCHEMAS["get_decisions"],
-        ),
-        _make_tool(
-            name="get_context",
-            description="Get context for multiple pages at once. Batch operation for efficiency.",
-            inputSchema=TOOL_INPUT_SCHEMAS["get_context"],
-        ),
-        _make_tool(
-            name="check_contradiction",
-            description="Check if a claim contradicts existing knowledge. Returns potentially conflicting pages.",
-            inputSchema=TOOL_INPUT_SCHEMAS["check_contradiction"],
-        ),
-        _make_tool(
-            name="log_decision",
-            description="Log a new decision to the daily log. Triggers compile on next session.",
-            inputSchema=TOOL_INPUT_SCHEMAS["log_decision"],
-        ),
-        _make_tool(
-            name="compile",
-            description="Compile pending daily logs into knowledge pages within the operation deadline.",
-            inputSchema=TOOL_INPUT_SCHEMAS["compile"],
-        ),
-        _make_tool(
-            name="find_dead_code",
-            description="Find functions with zero confirmed incoming calls. Results are conservative candidates because static call graphs are incomplete.",
-            inputSchema=TOOL_INPUT_SCHEMAS["find_dead_code"],
-        ),
-        _make_tool(
-            name="get_architecture",
-            description="Summarize statically visible entry points, framework routes, incoming-caller hotspots, and code communities.",
-            inputSchema=TOOL_INPUT_SCHEMAS["get_architecture"],
-        ),
-        _make_tool(
-            name="doctor",
-            description="Check local vault health. Read-only unless repair is explicitly true.",
-            inputSchema=TOOL_INPUT_SCHEMAS["doctor"],
-        ),
+        _make_tool(name=name, description=description, inputSchema=TOOL_INPUT_SCHEMAS[name])
+        for name, description in TOOL_DESCRIPTIONS.items()
     ]
 
 
@@ -4301,7 +4300,7 @@ def _build_tool_definitions() -> list:
 ALWAYS_LOAD_META = {"anthropic/alwaysLoad": True}
 
 
-def _make_tool(**kwargs):
+def _make_tool(**kwargs: Any) -> Any:
     """Create a tool that loads with the session, with structured output when supported."""
     if MCP_STRUCTURED_OUTPUT_AVAILABLE:
         kwargs["outputSchema"] = envelope_schema()
@@ -5045,12 +5044,15 @@ def _grounded_answer_quality(data: dict) -> dict:
 
 
 def _grounded_abstention_quality(data) -> dict:
-    reason = data.get("reason") if isinstance(data, dict) else None
+    """A declined answer: its reason, and the hint to search wider when one came with it."""
+    if not isinstance(data, dict):
+        data = {}
+    hint = [str(data["hint"])] if data.get("hint") else []
     return {
         "coverage": 0.0,
         "confidence": 0.0,
         "partial": True,
-        "warnings": [str(reason or "Grounded QA abstained without a reason.")],
+        "warnings": [str(data.get("reason") or "Grounded QA abstained without a reason."), *hint],
     }
 
 
@@ -5869,7 +5871,14 @@ def _recall_filters(arguments: Mapping[str, object]) -> dict[str, str]:
     }
     for keyword in RECALL_DATE_FILTERS:
         _require_day(keyword, filters.get(keyword))
+    _require_ordered_days(filters.get("since"), filters.get("until"))
     return filters
+
+
+def _require_ordered_days(since: str | None, until: str | None) -> None:
+    """An inverted range holds no day, so it is a mistake to say, not an empty answer."""
+    if since and until and since > until:
+        raise ValueError("argument 'since' must not be later than 'until'")
 
 
 def _require_day(name: str, value: str | None) -> None:
@@ -6917,7 +6926,7 @@ def build_server():
     same envelope. A transport that built its own dispatch would be a second
     validation boundary, which is the defect `4494d8c` already cost us once.
     """
-    server = Server("llm-wiki")
+    server = Server("llm-wiki", instructions=SERVER_INSTRUCTIONS)
     _register_resources(server)
     _register_tools(server, _build_tool_definitions())
     return server

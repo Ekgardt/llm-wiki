@@ -100,9 +100,10 @@ on this vault below.
 - Not measured on a real vault: no stand in this worktree has a graph with edges, and the
   LongMemEval vault graph has none (`docs/research/2026-09-22-the-walk-has-nothing-to-walk.md`),
   so there the graph leg changes nothing but its own latency. Whether the graph helps or hurts
-  ranking on the owner's vault is open; the fusion weight is 0.5 against 2.0 lexical and
-  1.0 dense, so a graph-only candidate ranks low and the graph mostly lifts candidates the
-  other legs already found.
+  ranking on the owner's vault is open; the graph's fusion weight is 0.5 against 1.0
+  lexical and 2.0 dense (dense counts twice the lexical rank since option B,
+  `retrieval.BM25_WEIGHT` and `DENSE_WEIGHT`), so a graph-only candidate ranks low and the
+  graph mostly lifts candidates the other legs already found.
 - The graph leg's latency on a vault with edges is not measured.
 - A code question written only in words ("show the project structure") now keeps the
   curated-pages prior, so a source file ranks at the `doc` weight there. A question that

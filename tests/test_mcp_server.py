@@ -460,7 +460,8 @@ def _assert_unsupported_evidence_quality(quality) -> None:
 def _assert_vault_status_tool_description(tools) -> None:
     tool = next(item for item in tools if item.name == "vault_status")
     assert tool.description == (
-        "Get compile status and current daily-file backlog."
+        "Call when memory seems stale or before compile: returns compile status and the "
+        "current daily-file backlog."
     )
 
 
@@ -4883,7 +4884,7 @@ def test_run_server_closes_navigation_manager_in_finally(
     closed: list[float] = []
 
     class FakeServer:
-        def __init__(self, _name: str) -> None:
+        def __init__(self, _name: str, **_options: object) -> None:
             pass
 
         def create_initialization_options(self):

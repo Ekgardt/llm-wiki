@@ -175,7 +175,7 @@ integrated Tasks 1-29 branch, not the broader Task 17 target:
 
 | Tool | Current behavior |
 |---|---|
-| `recall` | Routes search through the retrieval planner. Result rows expose requested/effective mode, actual signals, generation, reranker fields, and fallback reason. The requested result limit is clamped to 1-20. Optional `project`, `type` (frontmatter type) and `path_prefix` (vault-relative) narrow a plain recall; every leg applies them before the candidate pool is cut. Optional `since` and `as_of` (days as YYYY-MM-DD) order it: pages inside the dates come first, and the best pages outside them fill the rest of the limit. A grounded recall refuses all five. |
+| `recall` | Routes search through the retrieval planner. Result rows expose requested/effective mode, actual signals, generation, reranker fields, and fallback reason. The requested result limit is clamped to 1-20. Optional `project`, `type` (frontmatter type) and `path_prefix` (vault-relative) narrow a plain recall; every leg applies them before the candidate pool is cut. Optional `since`, `until` (inclusive) and `as_of` (days as YYYY-MM-DD) order it: pages inside the dates come first, and the best pages outside them fill the rest of the limit; a `since` later than `until` is refused. A grounded recall refuses all six. |
 | `read_page` | Reads one bounded slug-only Markdown page and resolves cited daily/archive evidence with source hashes. A cited reference that does not resolve fails the page read closed; a `daily:` mention that is not a reference is listed as `not_an_evidence_reference` and the page is still returned. |
 | `wiki_overview` | Reports page count, recommended retrieval tier, and vault root. It does not yet provide per-component generation health. |
 | `vault_status` | Reports compile timestamp/status and changed-daily backlog only. |
@@ -812,8 +812,8 @@ on Windows) when no choice is recorded there, keep a choice that is, and
 do not load a model when it cannot write the file. `doctor` names the file
 when it holds anything but `0`.
 
-Both models run at the precision OpenVINO picks for the CPU (bf16 where the CPU
-has it); `LLMWIKI_INFERENCE_PRECISION=f32` keeps full precision. `OMP_NUM_THREADS`
+Both models run in exact f32; `LLMWIKI_INFERENCE_PRECISION=auto` lets OpenVINO
+pick a faster precision for the CPU (bf16 where the CPU has it). `OMP_NUM_THREADS`
 sets how many threads each model uses.
 Vectors live inside the active evidence generation
 (`cache/evidence-graph/generations/<id>/`, beside its search index), and

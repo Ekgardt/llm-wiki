@@ -2561,6 +2561,7 @@ def _filtered_hits(
         hits,
         project=filters.get("project"),
         since=filters.get("since"),
+        until=filters.get("until"),
         as_of=filters.get("as_of"),
         scope=filters.get("scope", "all"),
         page_type=filters.get("page_type"),
@@ -2672,6 +2673,7 @@ def _graph_rows_admitted(
         scope=filters.get("scope", "all"),
         project=filters.get("project"),
         since=filters.get("since"),
+        until=filters.get("until"),
         as_of=filters.get("as_of"),
         page_type=filters.get("page_type"),
         path_prefix=filters.get("path_prefix"),
@@ -2712,6 +2714,7 @@ def _neighbour_page_row(
         str(item["path"]),
         project=filters.get("project"),
         since=filters.get("since"),
+        until=filters.get("until"),
         as_of=filters.get("as_of"),
     )
     if page is None:
@@ -3020,6 +3023,7 @@ def _dense_hits_or_none(
         limit=filters["limit"],
         project=filters["project"],
         since=filters["since"],
+        until=filters.get("until"),
         as_of=filters["as_of"],
         page_type=filters.get("page_type"),
         path_prefix=filters.get("path_prefix"),
@@ -3050,6 +3054,7 @@ def _generation_lexical_hits(
         limit=filters["limit"],
         project=filters["project"],
         since=filters["since"],
+        until=filters.get("until"),
         as_of=filters["as_of"],
         page_type=filters.get("page_type"),
         path_prefix=filters.get("path_prefix"),
@@ -3989,6 +3994,7 @@ def retrieve(
     limit: int = 10,
     project: str | None = None,
     since: str | None = None,
+    until: str | None = None,
     as_of: str | None = None,
     lexical_backend: BackendFn | None = None,
     dense_backend: BackendFn | None = None,
@@ -4032,6 +4038,7 @@ def retrieve(
         "limit": backend_limit,
         "project": project,
         "since": since,
+        "until": until,
         "as_of": as_of,
         "page_type": page_type,
         "path_prefix": path_prefix,
@@ -4565,6 +4572,7 @@ class _SearchRun:
     wanted: tuple[str, ...]
     page_type: str | None = None
     path_prefix: str | None = None
+    until: str | None = None
     generation_ctx: dict[str, Any] = dataclass_field(
         default_factory=lambda: {
             "manifest": None,
@@ -4698,6 +4706,7 @@ class _SearchRun:
             limit=filters["limit"],
             project=filters["project"],
             since=filters["since"],
+            until=filters.get("until"),
             as_of=filters["as_of"],
             page_paths=self.page_paths,
             deadline=self.deadline,
@@ -4756,6 +4765,7 @@ class _SearchRun:
             limit=self.limit,
             project=self.project,
             since=self.since,
+            until=self.until,
             as_of=self.as_of,
             page_type=self.page_type,
             path_prefix=self.path_prefix,
@@ -4817,6 +4827,7 @@ def retrieve_via_search_memory(
     limit: int = 10,
     project: str | None = None,
     since: str | None = None,
+    until: str | None = None,
     as_of: str | None = None,
     # The two entry points disagreed until 2026-08-25: `search_memory.search`
     # asks for the semantic leg, this one did not, so a caller reaching the
@@ -4875,6 +4886,7 @@ def retrieve_via_search_memory(
         wanted,
         page_type=page_type,
         path_prefix=path_prefix,
+        until=until,
     )
     run.open()
     result = run.reported(run.run())
