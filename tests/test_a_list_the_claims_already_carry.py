@@ -65,6 +65,31 @@ def test_an_answer_without_its_list_gets_the_ids_its_claims_carry():
     assert validated["citations"] == [{"citation_id": "E4"}, {"citation_id": "E2"}]
 
 
+def test_an_abstention_with_empty_claim_fields_beside_it_is_an_abstention():
+    # The reply of 0862e8bf_abs (task 337): a correct refusal that also wrote a
+    # claim's `derivation: null` and `inputs: []` at the top level.
+    refusal = _document(
+        status="insufficient_evidence",
+        reason="The evidence never mentions a hamster.",
+        citations=[],
+        derivation=None,
+        inputs=[],
+    )
+
+    validated = query_memory._validated_answer_document(refusal)
+
+    assert "derivation" not in validated and "inputs" not in validated
+
+
+def test_a_claim_field_with_content_beside_the_claims_is_still_refused():
+    from evidence_resolver import EvidenceResolutionError
+
+    stray = _document(status="answered", claims=[], citations=[], derivation="sum")
+
+    with pytest.raises(EvidenceResolutionError, match="schema validation failed"):
+        query_memory._validated_answer_document(stray)
+
+
 def test_a_list_that_was_given_is_left_for_the_gates():
     given = _document(
         status="answered",

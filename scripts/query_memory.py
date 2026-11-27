@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import argparse
 import contextvars
+import functools
 import hashlib
 import json
 import math
@@ -1260,11 +1261,38 @@ def _with_claimed_citations(document: object) -> object:
     return {**document, "citations": [{"citation_id": name} for name in ids]}
 
 
+@functools.lru_cache(maxsize=1)
+def _claim_only_fields() -> frozenset[str]:
+    schema = json.loads(ANSWER_SCHEMA.read_text(encoding="utf-8"))
+    claim = set(schema["properties"]["claims"]["items"]["properties"])
+    return frozenset(claim - set(schema["properties"]))
+
+
+_EMPTY_VALUES: tuple[object, ...] = (None, [], "")
+
+
+def _without_empty_claim_fields(document: object) -> object:
+    """A claim's field written empty beside the claims states nothing and is dropped.
+
+    Task 337's stand lost three correct refusals (`0862e8bf_abs` twice,
+    `29f2956b_abs`) because the model added a claim's `derivation: null` and
+    `inputs: []` at the top level. A field with content there is left for the
+    schema to refuse.
+    """
+    if not isinstance(document, dict):
+        return document
+    stray = {
+        name for name in _claim_only_fields()
+        if name in document and document[name] in _EMPTY_VALUES
+    }
+    return {name: value for name, value in document.items() if name not in stray}
+
+
 def _validated_answer_document(document: object) -> dict:
     from evidence_resolver import EvidenceResolutionError
     from reliable_memory import SchemaValidationError, validate_schema
 
-    document = _with_claimed_citations(document)
+    document = _with_claimed_citations(_without_empty_claim_fields(document))
     try:
         validate_schema(document, ANSWER_SCHEMA)
     except SchemaValidationError as exc:

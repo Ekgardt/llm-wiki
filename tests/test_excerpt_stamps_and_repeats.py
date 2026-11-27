@@ -67,6 +67,37 @@ def test_a_restatement_that_corrects_a_figure_is_kept() -> None:
     assert repeated(passages) == set()
 
 
+# Long enough that one changed word leaves more than 80 % of its shingles held.
+TOLD = (
+    "I have been working at NovaTech as a backend developer for about four years and three"
+    " months now, mostly on the payment service, and my cat Luna sleeps under my desk"
+)
+
+
+def test_a_restatement_that_corrects_a_figure_written_in_words_is_kept() -> None:
+    passages = [("a", TOLD), ("a", TOLD.replace("four years", "five years"))]
+
+    assert repeated(passages) == set()
+
+
+def test_a_restatement_that_corrects_its_last_words_is_kept() -> None:
+    passages = [("a", TOLD), ("a", TOLD.replace("under my desk", "under my bed"))]
+
+    assert repeated(passages) == set()
+
+
+def test_a_restatement_that_corrects_a_name_is_kept() -> None:
+    passages = [("a", TOLD), ("a", TOLD.replace("Luna", "Lily"))]
+
+    assert repeated(passages) == set()
+
+
+def test_a_long_restatement_with_framing_around_it_is_a_repeat() -> None:
+    passages = [("a", TOLD + ". Which tool fits?"), ("a", "As I said before, " + TOLD)]
+
+    assert repeated(passages) == {1}
+
+
 BREADCRUMB_DAY = (
     b"# 2024-03-02\n\n"
     b"## [09:15:00] session_end | sess-a\n\n**user:** first\n\n"
